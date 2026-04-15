@@ -1,0 +1,24 @@
+{
+  "name": "octopus-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted AI assistant with human-like memory and auto-improvable skills",
+  "scripts": {
+    "install:octopus": "node scripts/install.mjs",
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "typecheck": "turbo typecheck",
+    "clean": "turbo clean"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.3"
+  },
+  "packageManager": "pnpm@10.8.0",
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

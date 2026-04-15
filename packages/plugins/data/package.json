@@ -1,0 +1,17 @@
+{
+  "name": "@octopus-ai/plugin-data",
+  "version": "1.0.0",
+  "description": "Data analysis plugin for Octopus AI",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@octopus-ai/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

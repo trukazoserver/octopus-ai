@@ -1,0 +1,25 @@
+node_modules
+dist
+.turbo
+*.tsbuildinfo
+.env
+.env.local
+*.log
+
+# User config (contains API keys)
+.octopus/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build artifacts
+packages/*/dist/
+packages/plugins/*/dist/

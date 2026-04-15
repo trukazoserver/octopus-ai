@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  octopus-ai:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "18789:18789"
+    volumes:
+      - ~/.octopus/data:/root/.octopus/data
+    restart: always
