@@ -1,0 +1,21 @@
+FROM node:22-alpine
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+RUN apk add --no-cache python3 make g++
+
+COPY . .
+
+RUN pnpm install
+
+RUN cd node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3 && npm run build-release || true
+
+RUN pnpm build
+
+ENV VITE_API_URL=ws://localhost:18789
+
+EXPOSE 5173
+
+CMD ["sh", "-c", "cd packages/web && npx vite --host 0.0.0.0 --port 5173"]

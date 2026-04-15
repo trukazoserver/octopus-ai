@@ -1,0 +1,8 @@
+node_modules
+.turbo
+dist
+.git
+*.md
+!docs
+nul
+*.log
