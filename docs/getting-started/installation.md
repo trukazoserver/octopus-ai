@@ -1,199 +1,386 @@
-# Instalación
+# Instalación de Octopus AI
 
 <p align="center">
   <img src="../../logo aplicacion.png" alt="Octopus AI" width="120" />
 </p>
 
-## Requisitos del Sistema
+Esta guía te ayudará a instalar Octopus AI paso a paso, sin importar tu nivel técnico.
 
-| Requisito | Versión Mínima | Propósito |
-|-----------|---------------|-----------|
-| **Node.js** | >= 22.0.0 | Runtime principal |
-| **pnpm** | >= 10.0.0 | Gestor de paquetes (monorepo) |
-| **Python** | >= 3.x | Compilación de módulos nativos (better-sqlite3) |
-| **Build Tools C++** | VS 2022 Build Tools (Win) / gcc (Linux) / Xcode CLT (Mac) | Bindings nativos |
-| **Git** | Cualquier versión | Control de versiones |
-| **RAM** | 4 GB mínimo | Compilación TypeScript (11 paquetes) |
-| **Disco** | 2 GB libres | Dependencias + build artifacts |
+---
 
-### Requisitos por Plataforma
+## 📋 Tabla de Contenidos
 
-#### Windows
+- [Requisitos del Sistema](#-requisitos-del-sistema)
+- [Preparación por Sistema Operativo](#-preparación-por-sistema-operativo)
+- [Método 1: Instalador Automático (Recomendado)](#-método-1-instalador-automático-recomendado)
+- [Método 2: Instalación Manual](#-método-2-instalación-manual)
+- [Método 3: Docker](#-método-3-despliegue-con-docker)
+- [Verificación Post-Instalación](#-verificación-post-instalación)
+- [Actualizar a una Nueva Versión](#-actualizar-a-una-nueva-versión)
+- [Desinstalación](#-desinstalación)
+- [Primeros Pasos](#-primeros-pasos-después-de-instalar)
 
-- **Visual Studio 2022 Build Tools** con workload "Desktop development with C++"
-  - Descarga: https://visualstudio.microsoft.com/visual-cpp-build-tools/
-  - O instala via winget: `winget install Microsoft.VisualStudio.2022.BuildTools`
-- **Python 3** (marcar "Add to PATH" durante instalación)
+---
 
-#### macOS
+## 🖥️ Requisitos del Sistema
+
+### Hardware
+
+| Componente | Mínimo | Recomendado |
+|---|---|---|
+| **Memoria RAM** | 4 GB | 8 GB (para modelos locales con Ollama) |
+| **Almacenamiento** | 2 GB libres | 5 GB (con modelos locales) |
+| **Procesador** | Cualquier CPU moderna | Multi-núcleo para compilación rápida |
+
+### Software
+
+| Requisito | Versión Mínima | Para qué sirve |
+|---|---|---|
+| **Node.js** | >= 22.0.0 | Entorno de ejecución principal |
+| **pnpm** | >= 10.0.0 | Gestor de paquetes del monorepo |
+| **Python** | >= 3.10 | Compilación de módulos nativos (node-gyp) |
+| **C++ Build Tools** | Ver abajo | Compilación de `better-sqlite3` (base de datos) |
+| **Git** | Cualquiera | Clonar el repositorio |
+
+> **¿No sabes qué es Node.js o pnpm?** No te preocupes. El instalador automático verifica e instala lo que falte.
+
+---
+
+## 📦 Preparación por Sistema Operativo
+
+Antes de instalar Octopus AI, necesitas tener Node.js, Python y las herramientas de compilación. A continuación, las instrucciones detalladas para cada sistema operativo.
+
+### Windows
+
+#### 1. Abrir PowerShell como Administrador
+
+1. Haz clic en el botón **Inicio** de Windows
+2. Escribe **PowerShell**
+3. Haz clic derecho sobre **Windows PowerShell**
+4. Selecciona **Ejecutar como administrador**
+
+> Todos los comandos que siguen debes pegarlos en esa ventana de PowerShell y presionar Enter.
+
+#### 2. Instalar Node.js
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+```
+
+Cierra y reabre la terminal después de instalar. Verifica con:
+```powershell
+node --version
+```
+Deberías ver algo como `v22.x.x`.
+
+#### 3. Instalar Python
+
+```powershell
+winget install Python.Python.3.12
+```
+
+Cierra y reabre la terminal. Verifica con:
+```powershell
+python --version
+```
+
+#### 4. Instalar Build Tools de C++
+
+Esto es necesario para que la base de datos SQLite funcione correctamente:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --force --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
+```
+
+> La descarga es de aproximadamente 2 GB y puede tardar varios minutos.
+
+#### 5. Instalar Git (si no lo tienes)
+
+```powershell
+winget install Git.Git
+```
+
+#### 6. Instalar pnpm
+
+```powershell
+npm install -g pnpm
+```
+
+---
+
+### macOS
+
+#### 1. Abrir la Terminal
+
+1. Presiona `Cmd + Espacio`
+2. Escribe **Terminal**
+3. Presiona Enter
+
+#### 2. Instalar Homebrew (gestor de paquetes)
+
+Si no tienes Homebrew, instálalo con:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+#### 3. Instalar Xcode Command Line Tools
 
 ```bash
 xcode-select --install
+```
+
+Se abrirá una ventana pidiendo confirmación. Haz clic en **Instalar**.
+
+#### 4. Instalar Node.js
+
+```bash
+brew install node@22
+```
+
+Verifica: `node --version` (debe mostrar v22.x.x o superior).
+
+#### 5. Instalar Python
+
+```bash
 brew install python3
 ```
 
-#### Linux (Debian/Ubuntu)
+#### 6. Instalar Git
 
 ```bash
+brew install git
+```
+
+#### 7. Instalar pnpm
+
+```bash
+npm install -g pnpm
+```
+
+---
+
+### Linux
+
+#### Debian / Ubuntu
+
+```bash
+# Actualizar paquetes
 sudo apt update
-sudo apt install -y build-essential python3
+
+# Instalar todo lo necesario
+sudo apt install -y build-essential python3 git curl
+
+# Instalar Node.js 22 (via NodeSource)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Instalar pnpm
+npm install -g pnpm
+
+# Verificar
+node --version   # v22.x
+python3 --version # Python 3.x
 ```
 
-## Método 1: Instalador Automático (Recomendado)
-
-El instalador verifica todos los requisitos, instala los faltantes y configura el proyecto:
+#### Fedora
 
 ```bash
-git clone https://github.com/your-org/octopus-ai.git
+# Instalar herramientas de compilación
+sudo dnf groupinstall -y "Development Tools"
+sudo dnf install -y python3 git
+
+# Instalar Node.js 22 (via NodeSource)
+curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
+sudo dnf install -y nodejs
+
+# Instalar pnpm
+npm install -g pnpm
+```
+
+#### Arch Linux
+
+```bash
+# Instalar todo desde los repositorios oficiales
+sudo pacman -S base-devel python git nodejs npm
+
+# Instalar pnpm
+npm install -g pnpm
+```
+
+---
+
+## 🚀 Método 1: Instalador Automático (Recomendado)
+
+La forma más fácil y segura. El instalador detecta lo que falta, lo instala y configura todo por ti.
+
+```bash
+# 1. Clonar el repositorio
+git clone https://github.com/trukazoserver/octopus-ai.git
 cd octopus-ai
-node scripts/install.mjs
+
+# 2. Ejecutar el instalador
+pnpm run install:octopus
 ```
 
-### Flujo del Instalador
+### ¿Qué hace el instalador paso a paso?
+
+El instalador ejecuta **7 pasos automáticamente**:
+
+| Paso | Acción | ¿Qué pasa si falla? |
+|---|---|---|
+| 1/7 | Verifica Node.js >= 22 | Te pide actualizar |
+| 2/7 | Verifica/instala pnpm | Lo instala con `npm install -g pnpm` |
+| 3/7 | Verifica Python | Te pregunta si quieres instalarlo automáticamente |
+| 4/7 | Verifica Build Tools C++ | Te pregunta si quieres instalarlas automáticamente |
+| 5/7 | `pnpm install` | Descarga todas las dependencias |
+| 5b | `pnpm rebuild better-sqlite3` | Compila la base de datos nativa para tu sistema |
+| 6/7 | `pnpm build` | Compila los 11 paquetes TypeScript |
+| 7/7 | Asistente de API Keys | Te pregunta por las claves de cada proveedor de IA |
+
+### Durante el paso 7 (Configuración inicial)
+
+El instalador te pedirá las API Keys de los proveedores que quieras usar:
 
 ```
-Paso 1/7: Verificando Node.js ✓ v22.x
-Paso 2/7: Verificando pnpm       ✓ v10.x
-Paso 3/7: Verificando Python     ✓ Python 3.x
-Paso 4/7: Build Tools (C++)      → ¿Instalar automáticamente? (S/n)
-Paso 5/7: pnpm install           → Instalando dependencias...
-Paso 5b:  better-sqlite3         → Recompilando bindings nativos...
-Paso 6/7: pnpm build             → Compilando 11 paquetes TypeScript...
-Paso 7/7: Configuración          → Asistente de API keys
+  Z.ai / ZhipuAI API Key (proveedor por defecto, Enter para saltar): ____
+  Anthropic API Key (Enter para saltar): ____
+  OpenAI API Key (Enter para saltar): ____
+  Google AI API Key (Enter para saltar): ____
+  DeepSeek API Key (Enter para saltar): ____
 ```
 
-### Auto-Instalación de Requisitos
+> Puedes pulsar Enter para saltar cualquiera. Luego puedes configurarlas con el comando `config set`.
 
-| Requisito | Windows | macOS | Linux |
-|-----------|---------|-------|-------|
-| **pnpm** | `npm install -g pnpm` | `npm install -g pnpm` | `npm install -g pnpm` |
-| **Python** | `winget install Python.Python.3.12` | `brew install python3` | `sudo apt install python3` |
-| **Build Tools** | `winget install Microsoft.VisualStudio.2022.BuildTools` (workload VCTools) | `xcode-select --install` | `sudo apt install build-essential` |
-| **better-sqlite3** | `pnpm rebuild better-sqlite3` | `pnpm rebuild better-sqlite3` | `pnpm rebuild better-sqlite3` |
+Al finalizar, el instalador crea:
+- **Directorio** `~/.octopus/` (en Windows: `C:\Users\TuUsuario\.octopus\`)
+- **Configuración** `~/.octopus/config.json`
+- **Base de datos** `~/.octopus/data/octopus.db`
 
-## Método 2: Instalación Manual
+---
 
-### 1. Clonar y entrar al directorio
+## 🛠️ Método 2: Instalación Manual
+
+Si prefieres tener control sobre cada paso o el instalador automático no funciona:
 
 ```bash
-git clone https://github.com/your-org/octopus-ai.git
+# 1. Clonar e inicializar
+git clone https://github.com/trukazoserver/octopus-ai.git
 cd octopus-ai
-```
 
-### 2. Instalar dependencias
-
-```bash
+# 2. Instalar dependencias
 pnpm install
-```
 
-### 3. Compilar bindings nativos
-
-```bash
+# 3. Recompilar bindings nativos (Importante)
 pnpm rebuild better-sqlite3
 ```
 
-Si falla con errores de `node-gyp`, verifica que Build Tools C++ esté instalado correctamente.
-
-### 4. Compilar TypeScript
+> Si este paso falla con errores de `node-gyp`, revisa que tengas Python y Build Tools C++ instalados (ver sección de preparación por SO).
 
 ```bash
+# 4. Compilar el monorepo (TypeScript)
 pnpm build
-```
 
-Esto compila 11 paquetes con Turborepo en paralelo (~15 segundos).
-
-### 5. Configurar
-
-```bash
+# 5. Configuración inicial
 node packages/cli/dist/index.js setup
 ```
 
-O manualmente:
+El comando `setup` lanzará un asistente interactivo para configurar tus API Keys.
+
+---
+
+## 🐳 Método 3: Despliegue con Docker
+
+Ideal para servidores o si no quieres instalar dependencias en tu máquina.
 
 ```bash
-node packages/cli/dist/index.js config set ai.providers.zhipu.apiKey "TU_API_KEY"
+# Construir e iniciar el contenedor en segundo plano
+docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-### 6. Verificar instalación
+### Variables de entorno
+
+Crea un archivo `.env` en la carpeta `docker/`:
+
+```env
+OCTOPUS_SERVER_PORT=18789
+OCTOPUS_AI_DEFAULT=zhipu/glm-5.1
+OCTOPUS_OPENAI_API_KEY=sk-tu-api-key
+```
+
+### Persistencia de datos
+
+El contenedor monta `~/.octopus/data` como volumen, así que tus datos se conservan entre reinicios.
+
+> Para instrucciones completas de Docker (instalación, configuración, actualización y solución de problemas), consulta la [Guía dedicada de Docker](./docker.md).
+
+---
+
+## ✅ Verificación Post-Instalación
+
+Ejecuta el diagnóstico para confirmar que todo funciona:
 
 ```bash
 node packages/cli/dist/index.js doctor
 ```
 
-## Método 3: Docker
+Deberías ver algo como:
 
-```bash
-docker compose -f docker/docker-compose.yml up -d
-```
-
-## Verificación Post-Instalación
-
-### Comando Doctor
-
-```bash
-node packages/cli/dist/index.js doctor
-```
-
-Resultado esperado:
-
-```
+```text
   ✓ Node.js:             v22.x (>= 22)
   ✓ pnpm:                v10.x
   ✓ Python:              Python 3.x
-  ✓ Build Tools (C++):   Visual Studio Build Tools detectado
+  ✓ Build Tools (C++):   OK
   ✓ better-sqlite3:      Bindings nativos OK
   ✓ Config File:         ~/.octopus/config.json
-  ✓ Config Valid:        Configuration is valid
-  ✓ Database:            SQLite database accessible
   ✓ API Keys:            Z.ai ✓
-  ✓ LLM Providers:       Available: zhipu
-  ✓ Disk Space:          Writable
-  ✓ Network:             Internet connectivity OK
 ```
 
-### Test Rápido
+Si algún elemento muestra ✗, el propio comando te indicará cómo solucionarlo.
+
+> Si tienes problemas, consulta la [Guía de Solución de Problemas](../advanced/troubleshooting.md).
+
+---
+
+## 🔄 Actualizar a una Nueva Versión
 
 ```bash
-node packages/cli/dist/index.js agent --message "Hola, responde en una frase" --stream
+cd octopus-ai
+git pull origin main
+pnpm install
+pnpm build
 ```
 
-## Solución de Problemas de Instalación
-
-### Error: "Could not locate the bindings file" (better-sqlite3)
-
-Build Tools C++ no instalados o no detectados.
-
-**Windows:**
+Si la actualización incluye cambios en la base de datos, ejecuta también:
 ```bash
-winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
-pnpm rebuild better-sqlite3
+node packages/cli/dist/index.js doctor
 ```
 
-**Linux:**
-```bash
-sudo apt install build-essential python3
-pnpm rebuild better-sqlite3
-```
+---
 
-### Error: "No AI providers available"
+## 🗑️ Desinstalación
 
-No se configuró ninguna API key:
+Para eliminar completamente Octopus AI de tu sistema:
 
 ```bash
-node packages/cli/dist/index.js config set ai.providers.zhipu.apiKey "TU_KEY"
+# 1. Eliminar el directorio del proyecto
+rm -rf octopus-ai
+
+# 2. Eliminar la configuración y datos
+# Windows:
+rmdir /s /q "%USERPROFILE%\.octopus"
+# macOS/Linux:
+rm -rf ~/.octopus
 ```
 
-### Error: "Node.js version mismatch"
+---
 
-Octopus AI requiere Node.js >= 22:
+## 🚀 Primeros Pasos Después de Instalar
 
-```bash
-node --version  # Debe ser v22.x o superior
-```
-
-Más soluciones en [Troubleshooting](../advanced/troubleshooting.md).
-
-## Siguiente Paso
-
-- [Inicio Rápido](./quick-start.md) — Tu primera conversación con Octopus AI
-- [Configuración](./configuration.md) — Configurar proveedores, memoria y skills
+1. **Verifica la instalación:** `node packages/cli/dist/index.js doctor`
+2. **Configura tu proveedor de IA:** [Guía de Configuración](./configuration.md)
+3. **Tu primera conversación:** [Inicio Rápido](./quick-start.md)
+4. **Explora las interfaces:**
+   - [Panel Web](./web-dashboard.md)
+   - [App de Escritorio](./desktop.md)
+   - [Docker](./docker.md)

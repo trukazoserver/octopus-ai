@@ -5,141 +5,185 @@
 <h1 align="center">Octopus AI</h1>
 
 <p align="center">
-  <strong>Asistente AI autoalojado con memoria humana, habilidades auto-mejorables y mensajería multicanal</strong>
+  <strong>Asistente de IA autoalojado con memoria humana, habilidades auto-mejorables y mensajería multicanal</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js" alt="Node.js >=22" />
-  <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/pnpm-10.8-F69220?logo=pnpm" alt="pnpm" />
-  <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License" />
+  <a href="https://github.com/trukazoserver/octopus-ai"><img src="https://img.shields.io/badge/GitHub-trukazoserver%2Foctopus--ai-181717?logo=github&style=flat-square" alt="GitHub" /></a>
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&style=flat-square" alt="Node.js >=22" />
+  <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&style=flat-square" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/pnpm-10.8-F69220?logo=pnpm&style=flat-square" alt="pnpm" />
+  <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="MIT License" />
 </p>
 
 ---
 
-## Características
+Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para correr en tu propia infraestructura. A diferencia de los chatbots tradicionales, Octopus cuenta con una memoria a largo plazo que evoluciona, capacidades de razonamiento profundo nativo y la habilidad de crear y mejorar sus propias herramientas (Skills).
 
-- **10 Proveedores de IA** — OpenAI, Anthropic, Google, Z.ai (ZhipuAI), DeepSeek, Mistral, xAI (Grok), Cohere, OpenRouter, Ollama (local)
-- **Razonamiento/Thinking** — Soporte nativo para chain-of-thought en todos los proveedores (OpenAI o-series, Anthropic budget_tokens, Google thinkingBudget, Z.ai thinking, DeepSeek reasoner, Mistral Magistral, xAI Grok)
-- **Memoria Humana** — Memoria a corto plazo (STM) y largo plazo (LTM) con consolidación automática, decaimiento temporal y grafo de asociaciones
-- **Skill Forge** — Motor de creación automática de habilidades con auto-mejora, evaluación de calidad y A/B testing
-- **Multi-Canal** — WhatsApp, Telegram, Discord, Slack, Microsoft Teams, Signal, WeChat, WebChat
-- **Sistema de Plugins** — Engine extensible con marketplace, MCP (Model Context Protocol) y comandos slash
-- **CLI + Desktop + Web** — Interfaz de línea de comandos, aplicación Electron y dashboard web
-- **Voz** — Text-to-Speech (ElevenLabs), Speech-to-Text (Whisper), wake word
-- **Seguridad** — Encriptación AES-256, sandboxing de comandos, RBAC
+## Tabla de Contenidos
 
-## Inicio Rápido
+- [Características Principales](#-características-principales)
+- [¿Qué puede hacer Octopus AI?](#-qué-puede-hacer-octopus-ai)
+- [Interfaces](#-interfaces)
+- [Inicio Rápido](#-inicio-rápido)
+- [Instalación con Docker](#-instalación-con-docker)
+- [Proveedores de IA Soportados](#-proveedores-de-ia-soportados)
+- [Estructura del Proyecto](#-estructura-del-proyecto-monorepo)
+- [Documentación](#-documentación)
+- [Contribución](#-contribución)
+- [Licencia](#-licencia)
+
+## ✨ Características Principales
+
+- 🧠 **Razonamiento Profundo (Thinking):** Soporte nativo para *chain-of-thought* en todos los proveedores (OpenAI o-series, Anthropic, Google, Z.ai, DeepSeek Reasoner).
+- 💾 **Memoria Humana Integrada:** Arquitectura de memoria a corto (STM) y largo plazo (LTM) con consolidación automática y prevención de decaimiento.
+- 🛠️ **Skill Forge:** Motor de creación de habilidades. El asistente puede escribir, evaluar, y auto-mejorar sus propios plugins en tiempo real.
+- 🌐 **Multi-Canal:** Conéctalo fácilmente con WhatsApp, Telegram, Discord, Slack, y Microsoft Teams.
+- 🔌 **Sistema de Plugins Extensible:** Soporte para MCP (Model Context Protocol), integraciones de terceros y ejecución de código en entornos seguros (sandbox).
+- 💻 **Interfaces Flexibles:** Úsalo desde la terminal (CLI), la aplicación de escritorio (Electron), o el panel web interactivo (React).
+- 🔒 **Privacidad y Seguridad:** Cifrado AES-256 local, RBAC (Control de Acceso basado en Roles) y total compatibilidad con LLMs locales como Ollama.
+
+## 🎯 ¿Qué puede hacer Octopus AI?
+
+Octopus AI no es solo un chatbot. Es un asistente inteligente que aprende de ti con cada interacción:
+
+| Caso de uso | Ejemplo |
+|---|---|
+| **Chat con memoria** | "Recuerda que soy alérgico a la lactosa" → Lo recordará en futuras conversaciones |
+| **Análisis de código** | "Revisa este archivo y dime si hay errores" → Analiza sintaxis, lógica y mejores prácticas |
+| **Escritura asistida** | "Ayúdame a redactar un email formal" → Genera, edita y mejora textos |
+| **Investigación** | "Resume los puntos clave de este tema" → Sintetiza información compleja |
+| **Automatización** | "Organiza mis notas por categoría" → Ejecuta tareas sobre archivos y datos |
+| **Gestión de archivos** | "Lee el archivo config.json y muéstrame los errores" → Opera con tu sistema de archivos |
+| **Multi-canal** | Pregunta lo mismo desde WhatsApp, Telegram o la web → Misma memoria, misma IA |
+
+## 🖥️ Interfaces
+
+Octopus AI ofrece tres formas de interactuar:
+
+### Línea de Comandos (CLI)
+La forma más directa. Abre tu terminal y chatea con el asistente con toda la potencia de la memoria y las skills.
+
+### Panel Web (Dashboard)
+Interfaz gráfica moderna en el navegador. Ideal para quienes prefieren no usar la terminal. Accede desde `http://localhost:5173`.
+
+### Aplicación de Escritorio (Electron)
+App nativa para Windows, macOS y Linux. Experiencia de escritorio completa con todas las funcionalidades.
+
+> Consulta las guías específicas: [Docker](docs/getting-started/docker.md), [Desktop](docs/getting-started/desktop.md), [Web Dashboard](docs/getting-started/web-dashboard.md)
+
+## 🚀 Inicio Rápido
+
+### Requisitos Previos
+
+| Requisito | Versión | Para qué sirve |
+|---|---|---|
+| [Node.js](https://nodejs.org/) | >= 22 | Entorno de ejecución principal |
+| [pnpm](https://pnpm.io/) | >= 10 | Gestor de paquetes |
+| Python 3.x | >= 3.10 | Compilación de dependencias nativas (SQLite) |
+| C++ Build Tools | — | Compilación de `better-sqlite3` |
+
+> **Hardware recomendado:** 4 GB RAM, 2 GB almacenamiento libre.
+
+### Instalación Automática (Recomendada)
 
 ```bash
-# Clonar repositorio
-git clone https://github.com/your-org/octopus-ai.git
+# 1. Clonar el repositorio
+git clone https://github.com/trukazoserver/octopus-ai.git
 cd octopus-ai
 
-# Ejecutar instalador automático
-node scripts/install.mjs
+# 2. Ejecutar el instalador
+pnpm run install:octopus
 ```
 
-El instalador verifica e instala automáticamente todos los requisitos:
-- Node.js >= 22
-- pnpm
-- Python (para módulos nativos)
-- Visual Studio Build Tools / gcc (para better-sqlite3)
-- Dependencias del proyecto
-- Compilación TypeScript
-- Asistente de configuración de API keys
+El instalador hace todo por ti:
+1. Verifica Node.js, pnpm y Python
+2. Instala Build Tools de C++ si faltan
+3. Instala todas las dependencias
+4. Compila `better-sqlite3` para tu sistema
+5. Construye el proyecto completo
+6. Te guía para configurar tus API Keys
 
-## Uso
+> Guía completa: [Instalación paso a paso](docs/getting-started/installation.md)
+
+### Uso Básico (CLI)
 
 ```bash
-# Chat interactivo
+# Iniciar un chat interactivo con memoria
 node packages/cli/dist/index.js chat
 
-# Enviar mensaje directo
-node packages/cli/dist/index.js agent --message "Hola, ¿qué puedes hacer?" --stream
+# Enviar un comando directo
+node packages/cli/dist/index.js agent --message "Resume los últimos cambios del proyecto" --stream
 
-# Diagnosticar instalación
-node packages/cli/dist/index.js doctor
-
-# Configurar
+# Configurar tu proveedor de IA (ej. Z.ai, el proveedor por defecto)
 node packages/cli/dist/index.js config set ai.providers.zhipu.apiKey "TU_KEY"
 ```
 
-## Proveedores de IA Soportados
+## 🐳 Instalación con Docker
 
-| Proveedor | Modelos | Razonamiento | Notas |
-|-----------|---------|-------------|-------|
-| **Z.ai (ZhipuAI)** | GLM-5.1, GLM-5, GLM-5-Turbo | `thinking: {type}` | Proveedor por defecto, 4 endpoints |
-| **OpenAI** | GPT-4.1, GPT-4o, o3, o4-mini | `reasoning: {effort}` | o-series con reasoning effort |
-| **Anthropic** | Claude Opus 4, Sonnet 4, Haiku 4.5 | `thinking: {budget_tokens}` | Thinking blocks con signature |
-| **Google** | Gemini 2.5 Pro/Flash, Gemini 3 | `thinkingConfig: {budget}` | thinkingBudget o thinkingLevel |
-| **DeepSeek** | DeepSeek Chat, Reasoner | Automático | Full CoT via reasoning_content |
-| **Mistral** | Mistral Large 3, Small 4, Codestral | `prompt_mode: "reasoning"` | Typed thinking blocks |
-| **xAI** | Grok 4, Grok 3 Mini | `reasoning_effort` | reasoning_content en respuesta |
-| **Cohere** | Command A, Command A Vision | N/A | reasoning_tokens en meta |
-| **OpenRouter** | Passthrough | Passthrough | Acceso unificado a modelos |
-| **Ollama** | Llama, CodeLlama, Mistral, Qwen | N/A | Ejecución local |
+Si prefieres usar Docker (ideal para servidores o si no quieres instalar dependencias):
 
-## Estructura del Proyecto
-
+```bash
+# Construir e iniciar
+docker compose -f docker/docker-compose.yml up -d --build
 ```
+
+> **Nota:** El Dockerfile actual necesita mejoras para producción. Consulta la [Guía completa de Docker](docs/getting-started/docker.md) para instrucciones detalladas incluyendo configuración, persistencia y solución de problemas.
+
+## 🤖 Proveedores de IA Soportados
+
+Octopus AI es agnóstico al modelo. Puedes usar y combinar:
+
+| Proveedor | Modelos Destacados | Soporte de Razonamiento |
+|-----------|--------------------|-------------------------|
+| **Z.ai (ZhipuAI)** | GLM-5.1, GLM-5-Turbo | Sí (`thinking: {type}`) |
+| **OpenAI** | GPT-4o, o3, o4-mini | Sí (`reasoning: {effort}`) |
+| **Anthropic** | Claude Opus 4, Sonnet 4 | Sí (`thinking: {budget_tokens}`) |
+| **Google** | Gemini 2.5 Pro/Flash | Sí (`thinkingConfig: {budget}`) |
+| **DeepSeek** | DeepSeek Reasoner, Chat | Automático (Full CoT) |
+| **Mistral / xAI** | Mistral Large 3, Grok 4 | Sí |
+| **Ollama (Local)** | Llama 3.x, Qwen, Mistral | Ejecución 100% privada sin conexión |
+
+> **Proveedor por defecto:** Z.ai/ZhipuAI con modo `coding-plan`. Puedes cambiarlo en cualquier momento desde la configuración.
+
+## 📂 Estructura del Proyecto (Monorepo)
+
+```text
 octopus-ai/
 ├── packages/
-│   ├── core/                 # SDK principal (config, memoria, IA, skills, tools)
-│   ├── cli/                  # CLI interactivo (Commander.js + Ink)
-│   ├── desktop/              # App desktop (Electron)
-│   ├── web/                  # Dashboard web (Vite + React)
-│   └── plugins/
-│       ├── productivity/     # Tareas, calendario, notas
-│       ├── coding/           # Code review, refactoring, debugging
-│       ├── research/         # Búsqueda web, papers, resúmenes
-│       ├── file-manager/     # Operaciones de archivos
-│       ├── sales/            # CRM, pipeline, follow-ups
-│       ├── customer-support/ # Tickets, respuestas, escalamiento
-│       └── data/             # SQL, gráficos, ETL
-├── scripts/
-│   └── install.mjs           # Instalador automático
-├── docs/                     # Documentación completa
-└── docker/                   # Configuración Docker
+│   ├── core/                 # SDK principal (Memoria, Agentes, Config)
+│   ├── cli/                  # Interfaz de terminal interactiva
+│   ├── desktop/              # App de escritorio (Electron)
+│   ├── web/                  # Panel de control / Dashboard (Vite + React)
+│   └── plugins/              # Plugins oficiales (Productividad, Código, etc.)
+├── docs/                     # Documentación arquitectónica y guías
+└── docker/                   # Archivos para despliegue en contenedores
 ```
 
-## Configuración
+## 📚 Documentación
 
-Archivo: `~/.octopus/config.json`
+### Empezando
+- [Instalación Completa](docs/getting-started/installation.md) — Requisitos, instalador automático, manual y Docker
+- [Inicio Rápido](docs/getting-started/quick-start.md) — Tu primera conversación con Octopus AI
+- [Configuración](docs/getting-started/configuration.md) — Proveedores de IA, memoria, skills, canales
+- [Guía de Docker](docs/getting-started/docker.md) — Instalación y despliegue con contenedores
+- [App de Escritorio](docs/getting-started/desktop.md) — Compilar y usar la app Electron
+- [Panel Web](docs/getting-started/web-dashboard.md) — Usar el dashboard desde el navegador
 
-```json
-{
-  "ai": {
-    "default": "zhipu/glm-5.1",
-    "fallback": "openai/gpt-4.1",
-    "thinking": "medium",
-    "providers": {
-      "zhipu": {
-        "apiKey": "tu-api-key",
-        "mode": "coding-plan",
-        "models": ["glm-5.1", "glm-5"]
-      }
-    }
-  }
-}
-```
+### Arquitectura
+- [Visión General](docs/architecture/overview.md) — Monorepo, módulos y flujo de datos
+- [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, decaimiento
+- [Motor de Habilidades (Skills)](docs/architecture/skills.md) — Creación automática, mejora, A/B testing
+- [Sistema de Plugins](docs/architecture/plugins.md) — Engine, MCP, marketplace
 
-Ver [Configuración Completa](docs/getting-started/configuration.md).
+### Referencia
+- [Comandos CLI](docs/api/cli.md) — Referencia completa de todos los comandos
+- [Solución de Problemas](docs/advanced/troubleshooting.md) — Errores comunes y soluciones
 
-## Documentación
+## 🤝 Contribución
 
-| Sección | Descripción |
-|---------|-------------|
-| [Instalación](docs/getting-started/installation.md) | Guía detallada de instalación y requisitos |
-| [Inicio Rápido](docs/getting-started/quick-start.md) | Primeros pasos con Octopus AI |
-| [Configuración](docs/getting-started/configuration.md) | Todas las opciones de configuración |
-| [Arquitectura](docs/architecture/overview.md) | Diseño del sistema y módulos |
-| [Memoria](docs/architecture/memory.md) | Sistema de memoria humana |
-| [Skills](docs/architecture/skills.md) | Motor de habilidades auto-mejorables |
-| [Plugins](docs/architecture/plugins.md) | Sistema de plugins y MCP |
-| [CLI](docs/api/cli.md) | Referencia de comandos CLI |
-| [Troubleshooting](docs/advanced/troubleshooting.md) | Solución de problemas |
+¡Las contribuciones son bienvenidas! Si deseas añadir un nuevo proveedor, mejorar la interfaz web o crear un plugin, por favor revisa nuestra guía de contribución (próximamente) o abre un *Issue* en [GitHub](https://github.com/trukazoserver/octopus-ai/issues).
 
-## Licencia
+## 📄 Licencia
 
-MIT
+Este proyecto está bajo la Licencia [MIT](LICENSE).
