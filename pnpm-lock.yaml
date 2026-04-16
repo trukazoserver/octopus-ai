@@ -145,6 +145,12 @@ importers:
       '@octopus-ai/core':
         specifier: workspace:*
         version: link:../core
+      react:
+        specifier: ^19.2.5
+        version: 19.2.5
+      react-dom:
+        specifier: ^19.1.0
+        version: 19.2.5(react@19.2.5)
     devDependencies:
       '@types/node':
         specifier: ^22.14.0
