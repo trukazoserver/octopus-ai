@@ -52,6 +52,8 @@ export function createStartCommand(): Command {
           host: system.config.server.host,
         });
 
+        server.setSystemContext(system);
+
         server.onMessage((clientId, message) => {
           void (async () => {
             try {

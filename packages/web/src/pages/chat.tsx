@@ -1,8 +1,19 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { apiGet, apiPut } from '../hooks/useApi.js';
 
 const WS_URL = `ws://${window.location.hostname}:18789`;
+
+interface StatusData {
+  provider?: string;
+  fallback?: string;
+  thinking?: string;
+  maxTokens?: number;
+  channels?: string[];
+  memoryEnabled?: boolean;
+  skillsEnabled?: boolean;
+}
 
 interface Message {
   id: string;
@@ -46,10 +57,15 @@ export const ChatPage: React.FC = () => {
   const [input, setInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [status, setStatus] = useState<StatusData | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingIdRef = useRef<string>('');
+
+  useEffect(() => {
+    apiGet<StatusData>('/api/status').then(setStatus).catch(() => {});
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -168,6 +184,12 @@ export const ChatPage: React.FC = () => {
         <span style={{ color: '#a0a0b0', fontSize: '0.8rem' }}>
           {isConnected ? 'Conectado' : 'Desconectado'} — ws://{window.location.hostname}:18789
         </span>
+        <div style={{ flex: 1 }} />
+        {status?.provider && (
+          <span style={{ fontSize: '0.75rem', padding: '3px 10px', borderRadius: '8px', background: 'rgba(83,52,131,0.2)', color: '#aaa' }}>
+            Modelo: {status.provider}
+          </span>
+        )}
       </div>
 
       {/* Messages */}
