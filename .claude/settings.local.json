@@ -1,0 +1,16 @@
+{
+	"permissions": {
+		"allow": [
+			"Bash(npm run *)",
+			"Bash(npm test *)",
+			"Bash(pnpm install *)",
+			"Bash(pnpm add *)",
+			"Bash(node packages/cli/dist/index.js --help)",
+			"Bash(npm start *)",
+			"Bash(npx tsc *)",
+			"Bash(node -e ' *)",
+			"Bash(node _fix_start.cjs)",
+			"Bash(pnpm --filter @octopus-ai/core build)"
+		]
+	}
+}

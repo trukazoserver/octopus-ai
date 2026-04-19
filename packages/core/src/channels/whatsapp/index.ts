@@ -1,106 +1,134 @@
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
-import { Channel, ChannelMessage } from '../types.js';
+import {
+	DisconnectReason,
+	makeWASocket,
+	useMultiFileAuthState,
+} from "@whiskeysockets/baileys";
+import type { Channel, ChannelMessage } from "../types.js";
 
 export class WhatsAppChannel implements Channel {
-    public readonly name = "WhatsApp";
-    public readonly type = "whatsapp";
-    private sock: ReturnType<typeof makeWASocket> | null = null;
-    private messageHandlers: Set<(msg: ChannelMessage) => void> = new Set();
-    private isConnected: boolean = false;
+	public readonly name = "WhatsApp";
+	public readonly type = "whatsapp";
+	private sock: ReturnType<typeof makeWASocket> | null = null;
+	private messageHandlers: Set<(msg: ChannelMessage) => void> = new Set();
+	private isConnected = false;
 
-    constructor(
-        public readonly id: string,
-        private authPath: string
-    ) {}
+	constructor(
+		public readonly id: string,
+		private authPath: string,
+	) {}
 
-    public async connect(): Promise<void> {
-        const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
+	public async connect(): Promise<void> {
+		const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
 
-        this.sock = makeWASocket({
-            auth: state,
-            printQRInTerminal: true
-        });
+		this.sock = makeWASocket({
+			auth: state,
+			printQRInTerminal: true,
+		});
 
-        this.sock.ev.on('creds.update', saveCreds);
+		this.sock.ev.on("creds.update", saveCreds);
 
-        this.sock.ev.on('connection.update', (update) => {
-            const { connection, lastDisconnect } = update;
-            if (connection === 'close') {
-                this.isConnected = false;
-                const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
-                if (shouldReconnect) {
-                    this.connect().catch(console.error);
-                }
-            } else if (connection === 'open') {
-                this.isConnected = true;
-            }
-        });
+		this.sock.ev.on("connection.update", (update) => {
+			const { connection, lastDisconnect } = update;
+			if (connection === "close") {
+				this.isConnected = false;
+				const shouldReconnect =
+					(
+						lastDisconnect?.error as unknown as {
+							output?: { statusCode?: number };
+						}
+					)?.output?.statusCode !== DisconnectReason.loggedOut;
+				if (shouldReconnect) {
+					this.connect().catch(console.error);
+				}
+			} else if (connection === "open") {
+				this.isConnected = true;
+			}
+		});
 
-        this.sock.ev.on('messages.upsert', (m) => {
-            if (m.type === 'notify') {
-                for (const msg of m.messages) {
-                    if (!msg.message) continue;
-                    
-                    const senderId = msg.key.remoteJid || 'unknown';
-                    const isGroup = senderId.endsWith('@g.us');
-                    const content = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-                    
-                    if (!content) continue;
+		this.sock.ev.on("messages.upsert", (m) => {
+			if (m.type === "notify") {
+				for (const msg of m.messages) {
+					if (!msg.message) continue;
 
-                    const channelMessage: ChannelMessage = {
-                        id: msg.key.id || String(Date.now()),
-                        channelId: this.id,
-                        senderId,
-                        senderName: msg.pushName || undefined,
-                        content,
-                        timestamp: new Date((msg.messageTimestamp as number) * 1000 || Date.now()),
-                        isGroup,
-                        metadata: {
-                            participant: msg.key.participant
-                        }
-                    };
+					const senderId = msg.key.remoteJid || "unknown";
+					const isGroup = senderId.endsWith("@g.us");
+					const content =
+						msg.message.conversation ||
+						msg.message.extendedTextMessage?.text ||
+						"";
 
-                    for (const handler of this.messageHandlers) {
-                        try {
-                            handler(channelMessage);
-                        } catch (error) {
-                            console.error(`Error in WhatsApp message handler for channel ${this.id}:`, error);
-                        }
-                    }
-                }
-            }
-        });
-    }
+					if (!content) continue;
 
-    public async disconnect(): Promise<void> {
-        if (this.sock) {
-            this.sock.end(undefined);
-            this.sock = null;
-        }
-        this.isConnected = false;
-    }
+					const channelMessage: ChannelMessage = {
+						id: msg.key.id || String(Date.now()),
+						channelId: this.id,
+						senderId,
+						senderName: msg.pushName || undefined,
+						content,
+						timestamp: new Date(
+							(msg.messageTimestamp as number) * 1000 || Date.now(),
+						),
+						isGroup,
+						metadata: {
+							participant: msg.key.participant,
+						},
+					};
 
-    public async send(to: string, content: string, options?: { replyTo?: string }): Promise<string> {
-        if (!this.sock) {
-            throw new Error("WhatsApp socket not initialized");
-        }
+					for (const handler of this.messageHandlers) {
+						try {
+							handler(channelMessage);
+						} catch (error) {
+							console.error(
+								`Error in WhatsApp message handler for channel ${this.id}:`,
+								error,
+							);
+						}
+					}
+				}
+			}
+		});
+	}
 
-        const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
-        const sentMsg = await this.sock.sendMessage(jid, { text: content }, {
-            quoted: options?.replyTo ? {
-                key: { id: options.replyTo, remoteJid: jid },
-                message: { conversation: '' }
-            } as any : undefined
-        });
+	public async disconnect(): Promise<void> {
+		if (this.sock) {
+			this.sock.end(undefined);
+			this.sock = null;
+		}
+		this.isConnected = false;
+	}
 
-        return sentMsg?.key?.id || String(Date.now());
-    }
+	public async send(
+		to: string,
+		content: string,
+		options?: { replyTo?: string },
+	): Promise<string> {
+		if (!this.sock) {
+			throw new Error("WhatsApp socket not initialized");
+		}
 
-    public onMessage(handler: (msg: ChannelMessage) => void): void {
-        this.messageHandlers.add(handler);
-    }
+		const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+		const sentMsg = await this.sock.sendMessage(
+			jid,
+			{ text: content },
+			{
+				quoted: options?.replyTo
+					? ({
+							key: { id: options.replyTo, remoteJid: jid },
+							message: { conversation: "" },
+							// biome-ignore lint/suspicious/noExplicitAny: <explanation>
+						} as any)
+					: undefined,
+			},
+		);
 
-    public async isHealthy(): Promise<boolean> {
-        return this.isConnected && this.sock !== null;
-    }
+		return sentMsg?.key?.id || String(Date.now());
+	}
+
+	public onMessage(handler: (msg: ChannelMessage) => void): void {
+		this.messageHandlers.add(handler);
+	}
+
+	public async isHealthy(): Promise<boolean> {
+		return this.isConnected && this.sock !== null;
+	}
 }

@@ -53,9 +53,12 @@ Octopus AI no es solo un chatbot. Es un asistente inteligente que aprende de ti 
 | **Análisis de código** | "Revisa este archivo y dime si hay errores" → Analiza sintaxis, lógica y mejores prácticas |
 | **Escritura asistida** | "Ayúdame a redactar un email formal" → Genera, edita y mejora textos |
 | **Investigación** | "Resume los puntos clave de este tema" → Sintetiza información compleja |
-| **Automatización** | "Organiza mis notas por categoría" → Ejecuta tareas sobre archivos y datos |
+| **Automatización** | "Organiza mis notas por categoría" → Ejecuta tareas programadas (Cron), flujos de automatización y Webhooks |
 | **Gestión de archivos** | "Lee el archivo config.json y muéstrame los errores" → Opera con tu sistema de archivos |
-| **Multi-canal** | Pregunta lo mismo desde WhatsApp, Telegram o la web → Misma memoria, misma IA |
+| **Multi-canal** | Pregunta lo mismo desde WhatsApp, Telegram, Discord o la web → Misma memoria, misma IA |
+| **Integración MCP** | Conecta con servidores Model Context Protocol (MCP) → Expande capacidades con herramientas externas |
+| **Generación de Voz** | Soporte de STT y TTS → Interactúa mediante voz y generación de audio |
+| **Ejecución de Código**| Ejecución en sandbox local → Prueba y ejecuta scripts de manera segura |
 
 ## 🖥️ Interfaces
 

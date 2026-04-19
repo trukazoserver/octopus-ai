@@ -133,7 +133,7 @@ export const SettingsPage: React.FC = () => {
 		try {
 			await apiPut(`/api/config/${key}`, value);
 			setMsg({ text: `✓ ${key} guardado`, ok: true });
-			
+
 			// Clear message after 3 seconds
 			setTimeout(() => {
 				setMsg(null);
@@ -148,9 +148,34 @@ export const SettingsPage: React.FC = () => {
 
 	if (loading)
 		return (
-			<div style={{ padding: 40, color: "#a1a1aa", display: "flex", justifyContent: "center", alignItems: "center", height: "100%" }}>
-				<div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "16px" }}>
-					<span className="dot-animation" style={{ width: "32px", height: "32px", borderRadius: "50%", background: "#6366f1", animation: "pulse 1.4s infinite ease-in-out" }} />
+			<div
+				style={{
+					padding: 40,
+					color: "#a1a1aa",
+					display: "flex",
+					justifyContent: "center",
+					alignItems: "center",
+					height: "100%",
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						flexDirection: "column",
+						alignItems: "center",
+						gap: "16px",
+					}}
+				>
+					<span
+						className="dot-animation"
+						style={{
+							width: "32px",
+							height: "32px",
+							borderRadius: "50%",
+							background: "#6366f1",
+							animation: "pulse 1.4s infinite ease-in-out",
+						}}
+					/>
 					<span>Cargando configuración...</span>
 				</div>
 			</div>
@@ -172,11 +197,26 @@ export const SettingsPage: React.FC = () => {
 				overflowY: "auto",
 				height: "100%",
 				width: "100%",
-				boxSizing: "border-box"
+				boxSizing: "border-box",
 			}}
 		>
-			<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "30px" }}>
-				<h2 style={{ margin: 0, fontSize: "1.8rem", fontWeight: 700, color: "#f4f4f5", letterSpacing: "-0.02em" }}>
+			<div
+				style={{
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "center",
+					marginBottom: "30px",
+				}}
+			>
+				<h2
+					style={{
+						margin: 0,
+						fontSize: "1.8rem",
+						fontWeight: 700,
+						color: "#f4f4f5",
+						letterSpacing: "-0.02em",
+					}}
+				>
 					Configuración General
 				</h2>
 			</div>
@@ -187,14 +227,16 @@ export const SettingsPage: React.FC = () => {
 						padding: "12px 16px",
 						borderRadius: "8px",
 						marginBottom: "20px",
-						background: msg.ok ? "rgba(16, 185, 129, 0.1)" : "rgba(239, 68, 68, 0.1)",
+						background: msg.ok
+							? "rgba(16, 185, 129, 0.1)"
+							: "rgba(239, 68, 68, 0.1)",
 						color: msg.ok ? "#10b981" : "#ef4444",
 						border: `1px solid ${msg.ok ? "rgba(16, 185, 129, 0.2)" : "rgba(239, 68, 68, 0.2)"}`,
 						fontSize: "0.9rem",
 						fontWeight: 500,
 						display: "flex",
 						alignItems: "center",
-						gap: "8px"
+						gap: "8px",
 					}}
 				>
 					{msg.text}
@@ -232,8 +274,12 @@ export const SettingsPage: React.FC = () => {
 									border: "1px solid #27272a",
 									transition: "border-color 0.2s",
 								}}
-								onMouseOver={(e) => e.currentTarget.style.borderColor = "#3f3f46"}
-								onMouseOut={(e) => e.currentTarget.style.borderColor = "#27272a"}
+								onMouseOver={(e) =>
+									(e.currentTarget.style.borderColor = "#3f3f46")
+								}
+								onMouseOut={(e) =>
+									(e.currentTarget.style.borderColor = "#27272a")
+								}
 							>
 								<div
 									style={{
@@ -243,10 +289,22 @@ export const SettingsPage: React.FC = () => {
 										marginBottom: "12px",
 									}}
 								>
-									<span style={{ fontWeight: 600, fontSize: "0.95rem", color: "#f4f4f5", display: "flex", alignItems: "center", gap: "8px" }}>
+									<span
+										style={{
+											fontWeight: 600,
+											fontSize: "0.95rem",
+											color: "#f4f4f5",
+											display: "flex",
+											alignItems: "center",
+											gap: "8px",
+										}}
+									>
 										<span>{p.icon}</span> {p.name}
 									</span>
-									<StatusBadge ok={hasKey} text={hasKey ? "Activo" : "No config."} />
+									<StatusBadge
+										ok={hasKey}
+										text={hasKey ? "Activo" : "No config."}
+									/>
 								</div>
 								{p.isLocal ? (
 									<Field
@@ -260,7 +318,9 @@ export const SettingsPage: React.FC = () => {
 											<input
 												type="password"
 												data-provider={p.key}
-												placeholder={hasKey ? "••••••••••••••••" : "Introduce tu API Key"}
+												placeholder={
+													hasKey ? "••••••••••••••••" : "Introduce tu API Key"
+												}
 												onKeyDown={(e) => {
 													if (e.key === "Enter") {
 														const v = (e.target as HTMLInputElement).value;
@@ -276,11 +336,14 @@ export const SettingsPage: React.FC = () => {
 													color: "#f4f4f5",
 													fontSize: "0.85rem",
 													outline: "none",
-													fontFamily: "ui-monospace, SFMono-Regular, Monaco, monospace",
+													fontFamily:
+														"ui-monospace, SFMono-Regular, Monaco, monospace",
 													transition: "border-color 0.2s",
 												}}
-												onFocus={(e) => e.target.style.borderColor = "#6366f1"}
-												onBlur={(e) => e.target.style.borderColor = "#3f3f46"}
+												onFocus={(e) =>
+													(e.target.style.borderColor = "#6366f1")
+												}
+												onBlur={(e) => (e.target.style.borderColor = "#3f3f46")}
 											/>
 											<button
 												onClick={() => {
@@ -301,8 +364,14 @@ export const SettingsPage: React.FC = () => {
 													cursor: "pointer",
 													transition: "all 0.2s",
 												}}
-												onMouseOver={(e) => { e.currentTarget.style.background = "#3f3f46"; e.currentTarget.style.color = "#fff"; }}
-												onMouseOut={(e) => { e.currentTarget.style.background = "#27272a"; e.currentTarget.style.color = "#e4e4e7"; }}
+												onMouseOver={(e) => {
+													e.currentTarget.style.background = "#3f3f46";
+													e.currentTarget.style.color = "#fff";
+												}}
+												onMouseOut={(e) => {
+													e.currentTarget.style.background = "#27272a";
+													e.currentTarget.style.color = "#e4e4e7";
+												}}
 											>
 												Guardar
 											</button>
@@ -336,13 +405,22 @@ export const SettingsPage: React.FC = () => {
 											fontWeight: 500,
 											display: "inline-flex",
 											alignItems: "center",
-											gap: "4px"
+											gap: "4px",
 										}}
 									>
 										Obtener API Key
-										<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-											<line x1="7" y1="17" x2="17" y2="7"></line>
-											<polyline points="7 7 17 7 17 17"></polyline>
+										<svg
+											width="12"
+											height="12"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="2"
+											strokeLinecap="round"
+											strokeLinejoin="round"
+										>
+											<line x1="7" y1="17" x2="17" y2="7" />
+											<polyline points="7 7 17 7 17 17" />
 										</svg>
 									</a>
 								</div>
@@ -352,7 +430,15 @@ export const SettingsPage: React.FC = () => {
 				</div>
 
 				<div
-					style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", background: "#09090b", padding: "20px", borderRadius: "12px", border: "1px solid #27272a" }}
+					style={{
+						display: "grid",
+						gridTemplateColumns: "1fr 1fr",
+						gap: "20px",
+						background: "#09090b",
+						padding: "20px",
+						borderRadius: "12px",
+						border: "1px solid #27272a",
+					}}
 				>
 					<Select
 						label="Modelo por Defecto"
@@ -398,18 +484,40 @@ export const SettingsPage: React.FC = () => {
 				</div>
 			</ConfigSection>
 
-			<ConfigSection title="Memoria Autónoma" icon="💭" description="Configura cómo Octopus recuerda tus conversaciones.">
-				<div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "12px", background: "#09090b", padding: "20px", borderRadius: "12px", border: "1px solid #27272a" }}>
+			<ConfigSection
+				title="Memoria Autónoma"
+				icon="💭"
+				description="Configura cómo Octopus recuerda tus conversaciones."
+			>
+				<div
+					style={{
+						display: "grid",
+						gridTemplateColumns: "1fr",
+						gap: "12px",
+						background: "#09090b",
+						padding: "20px",
+						borderRadius: "12px",
+						border: "1px solid #27272a",
+					}}
+				>
 					<Toggle
 						label="Habilitar Memoria Larga/Corta"
 						description="Octopus recordará contextos entre sesiones."
 						value={config.memory?.enabled ?? true}
 						onChange={(v) => save("memory.enabled", v)}
 					/>
-					
-					<div style={{ height: "1px", background: "#27272a", margin: "8px 0" }} />
-					
-					<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+
+					<div
+						style={{ height: "1px", background: "#27272a", margin: "8px 0" }}
+					/>
+
+					<div
+						style={{
+							display: "grid",
+							gridTemplateColumns: "1fr 1fr",
+							gap: "20px",
+						}}
+					>
 						{config.memory?.shortTerm && (
 							<Field
 								label="Tokens STM (Memoria Corta)"
@@ -449,8 +557,22 @@ export const SettingsPage: React.FC = () => {
 				</div>
 			</ConfigSection>
 
-			<ConfigSection title="Skills (Habilidades)" icon="⚡" description="Las herramientas y capacidades de Octopus.">
-				<div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "12px", background: "#09090b", padding: "20px", borderRadius: "12px", border: "1px solid #27272a" }}>
+			<ConfigSection
+				title="Skills (Habilidades)"
+				icon="⚡"
+				description="Las herramientas y capacidades de Octopus."
+			>
+				<div
+					style={{
+						display: "grid",
+						gridTemplateColumns: "1fr",
+						gap: "12px",
+						background: "#09090b",
+						padding: "20px",
+						borderRadius: "12px",
+						border: "1px solid #27272a",
+					}}
+				>
 					<Toggle
 						label="Habilitar Sistema de Skills"
 						value={config.skills?.enabled ?? true}
@@ -468,13 +590,20 @@ export const SettingsPage: React.FC = () => {
 						value={config.skills?.autoImprove ?? true}
 						onChange={(v) => save("skills.autoImprove", v)}
 					/>
-					
+
 					{config.skills?.registry?.builtinSkills && (
 						<div style={{ marginTop: "16px" }}>
-							<div style={{ fontSize: "0.85rem", color: "#a1a1aa", marginBottom: "8px", fontWeight: 500 }}>Skills Nativas Activas:</div>
 							<div
-								style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}
+								style={{
+									fontSize: "0.85rem",
+									color: "#a1a1aa",
+									marginBottom: "8px",
+									fontWeight: 500,
+								}}
 							>
+								Skills Nativas Activas:
+							</div>
+							<div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
 								{config.skills.registry.builtinSkills.map((s: string) => (
 									<span
 										key={s}
@@ -496,8 +625,10 @@ export const SettingsPage: React.FC = () => {
 					)}
 				</div>
 			</ConfigSection>
-			
-			<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+
+			<div
+				style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}
+			>
 				<ConfigSection
 					title="Servidor Local"
 					icon="🖥️"
@@ -530,7 +661,14 @@ export const SettingsPage: React.FC = () => {
 						onChange={(v) => save("security.sandboxCommands", v)}
 					/>
 					<div style={{ marginTop: "16px" }}>
-						<div style={{ fontSize: "0.85rem", color: "#a1a1aa", marginBottom: "8px", fontWeight: 500 }}>
+						<div
+							style={{
+								fontSize: "0.85rem",
+								color: "#a1a1aa",
+								marginBottom: "8px",
+								fontWeight: 500,
+							}}
+						>
 							Directorios Permitidos:
 						</div>
 						<div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -554,7 +692,7 @@ export const SettingsPage: React.FC = () => {
 					</div>
 				</ConfigSection>
 			</div>
-			
+
 			<br />
 			<br />
 		</div>

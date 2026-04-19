@@ -1,246 +1,290 @@
-import React, { useState, useEffect } from 'react';
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
+import { apiGet } from "../hooks/useApi.js";
 
-interface PluginInfo {
-  name: string;
-  version: string;
-  description: string;
-  author: string;
-  enabled: boolean;
-  tags: string[];
-  downloads: number;
-  rating: number;
-  hasUpdate: boolean;
-  latestVersion?: string;
+interface LoadedPlugin {
+	name: string;
+	version: string;
+	description: string;
 }
 
-type TabView = 'installed' | 'marketplace' | 'updates';
+interface DynamicTool {
+	name: string;
+	version: string;
+	description: string;
+	language: string;
+	type: string;
+	createdAt: string;
+}
 
 export const Plugins: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<TabView>('installed');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [plugins] = useState<PluginInfo[]>([
-    { name: 'Productivity', version: '1.2.0', description: 'Task management and workflows', author: 'OctopusTeam', enabled: true, tags: ['tasks', 'calendar'], downloads: 1540, rating: 4.5, hasUpdate: false },
-    { name: 'Coding', version: '2.0.1', description: 'Code generation, review, and refactoring', author: 'OctopusTeam', enabled: true, tags: ['code', 'dev'], downloads: 2310, rating: 4.8, hasUpdate: false },
-    { name: 'Research', version: '0.9.5', description: 'Web research and synthesis', author: 'Community', enabled: false, tags: ['search', 'web'], downloads: 890, rating: 4.2, hasUpdate: true, latestVersion: '1.0.0' },
-    { name: 'File Manager', version: '1.0.0', description: 'File operations and organization', author: 'OctopusTeam', enabled: false, tags: ['files'], downloads: 670, rating: 4.0, hasUpdate: false },
-    { name: 'Sales', version: '1.1.0', description: 'CRM, outreach, and pipeline management', author: 'Community', enabled: false, tags: ['sales', 'crm'], downloads: 340, rating: 3.8, hasUpdate: false },
-    { name: 'Customer Support', version: '0.8.0', description: 'Ticket triage and auto-responses', author: 'Community', enabled: false, tags: ['support', 'tickets'], downloads: 520, rating: 4.1, hasUpdate: true, latestVersion: '0.9.0' },
-    { name: 'Data Analysis', version: '1.0.2', description: 'SQL queries, dashboards, and analysis', author: 'ThirdParty', enabled: false, tags: ['data', 'sql'], downloads: 780, rating: 4.3, hasUpdate: false },
-  ]);
+	const [plugins, setPlugins] = useState<LoadedPlugin[]>([]);
+	const [dynamicTools, setDynamicTools] = useState<DynamicTool[]>([]);
+	const [loading, setLoading] = useState(true);
+	const [searchQuery, setSearchQuery] = useState("");
+	const [activeTab, setActiveTab] = useState<"plugins" | "tools">("plugins");
 
-  const [marketplacePlugins] = useState<PluginInfo[]>([
-    { name: 'Email Automation', version: '1.3.0', description: 'Automate email workflows and responses', author: 'OctopusTeam', enabled: false, tags: ['email', 'automation'], downloads: 3400, rating: 4.6, hasUpdate: false },
-    { name: 'Image Generator', version: '0.5.0', description: 'Generate images from text descriptions', author: 'Community', enabled: false, tags: ['image', 'ai'], downloads: 2100, rating: 4.4, hasUpdate: false },
-    { name: 'Database Admin', version: '2.1.0', description: 'Database management and monitoring', author: 'ThirdParty', enabled: false, tags: ['database', 'admin'], downloads: 1800, rating: 4.7, hasUpdate: false },
-    { name: 'Social Media', version: '1.0.0', description: 'Social media posting and analytics', author: 'Community', enabled: false, tags: ['social', 'marketing'], downloads: 950, rating: 3.9, hasUpdate: false },
-    { name: 'Documentation', version: '1.2.0', description: 'Auto-generate documentation from code', author: 'OctopusTeam', enabled: false, tags: ['docs', 'code'], downloads: 1200, rating: 4.5, hasUpdate: false },
-  ]);
+	const loadData = useCallback(async () => {
+		setLoading(true);
+		try {
+			const [pluginsData, toolsData] = await Promise.all([
+				apiGet<{ loaded: LoadedPlugin[] }>("/api/plugins"),
+				apiGet<{ tools: DynamicTool[] }>("/api/code/tools"),
+			]);
+			setPlugins(pluginsData.loaded ?? []);
+			setDynamicTools(toolsData.tools ?? []);
+		} catch {
+			// Server not available
+		} finally {
+			setLoading(false);
+		}
+	}, []);
 
-  const filteredPlugins = (list: PluginInfo[]) => {
-    if (!searchQuery) return list;
-    const q = searchQuery.toLowerCase();
-    return list.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q) ||
-        p.tags.some((t) => t.includes(q)),
-    );
-  };
+	useEffect(() => {
+		loadData();
+	}, [loadData]);
 
-  const tabStyle = (tab: TabView) => ({
-    padding: '10px 20px',
-    cursor: 'pointer',
-    backgroundColor: activeTab === tab ? '#3498db' : 'transparent',
-    color: activeTab === tab ? '#fff' : '#666',
-    border: 'none',
-    borderBottom: activeTab === tab ? '3px solid #3498db' : '3px solid transparent',
-    fontWeight: activeTab === tab ? 'bold' : 'normal',
-    fontSize: '14px',
-  });
+	const filteredPlugins = plugins.filter((p) => {
+		if (!searchQuery) return true;
+		const q = searchQuery.toLowerCase();
+		return (
+			p.name.toLowerCase().includes(q) ||
+			p.description.toLowerCase().includes(q)
+		);
+	});
 
-  const updateCount = plugins.filter((p) => p.hasUpdate).length;
+	const filteredTools = dynamicTools.filter((t) => {
+		if (!searchQuery) return true;
+		const q = searchQuery.toLowerCase();
+		return (
+			t.name.toLowerCase().includes(q) ||
+			t.description.toLowerCase().includes(q)
+		);
+	});
 
-  return (
-    <div style={{ padding: '20px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        <div>
-          <h2 style={{ margin: 0 }}>Plugin Manager</h2>
-          <p style={{ color: '#666', margin: '5px 0 0 0' }}>Extend Octopus AI with plugins from the marketplace.</p>
-        </div>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <input
-            type="text"
-            placeholder="Search plugins..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            style={{
-              padding: '8px 12px',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              fontSize: '14px',
-              width: '250px',
-            }}
-          />
-        </div>
-      </div>
+	return (
+		<div
+			style={{
+				padding: "24px",
+				backgroundColor: "#0f1117",
+				color: "#e4e4e7",
+				height: "100%",
+				fontFamily: "Inter, system-ui, sans-serif",
+				overflowY: "auto",
+			}}
+		>
+			<div
+				style={{
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "center",
+					marginBottom: "24px",
+				}}
+			>
+				<div>
+					<h2 style={{ margin: "0 0 4px 0", fontSize: "20px" }}>
+						Skills & Tools
+					</h2>
+					<p style={{ color: "#71717a", margin: 0, fontSize: "13px" }}>
+						Manage plugins and dynamically created tools
+					</p>
+				</div>
+				<input
+					type="text"
+					placeholder="Search..."
+					value={searchQuery}
+					onChange={(e) => setSearchQuery(e.target.value)}
+					style={{
+						padding: "8px 12px",
+						borderRadius: "8px",
+						border: "1px solid #27272a",
+						backgroundColor: "#18181b",
+						color: "#e4e4e7",
+						fontSize: "13px",
+						width: "250px",
+						outline: "none",
+					}}
+				/>
+			</div>
 
-      <div style={{ display: 'flex', gap: '5px', borderBottom: '1px solid #eee', marginBottom: '20px' }}>
-        <button style={tabStyle('installed')} onClick={() => setActiveTab('installed')}>
-          Installed ({plugins.length})
-        </button>
-        <button style={tabStyle('marketplace')} onClick={() => setActiveTab('marketplace')}>
-          Marketplace
-        </button>
-        <button style={tabStyle('updates')} onClick={() => setActiveTab('updates')}>
-          Updates {updateCount > 0 && `(${updateCount})`}
-        </button>
-      </div>
+			<div
+				style={{
+					display: "flex",
+					gap: "8px",
+					marginBottom: "20px",
+					borderBottom: "1px solid #27272a",
+					paddingBottom: "12px",
+				}}
+			>
+				<button
+					type="button"
+					onClick={() => setActiveTab("plugins")}
+					style={{
+						padding: "8px 16px",
+						borderRadius: "8px",
+						fontSize: "13px",
+						border: "none",
+						cursor: "pointer",
+						backgroundColor:
+							activeTab === "plugins" ? "#3b82f6" : "transparent",
+						color: activeTab === "plugins" ? "#fff" : "#71717a",
+					}}
+				>
+					Plugins ({plugins.length})
+				</button>
+				<button
+					type="button"
+					onClick={() => setActiveTab("tools")}
+					style={{
+						padding: "8px 16px",
+						borderRadius: "8px",
+						fontSize: "13px",
+						border: "none",
+						cursor: "pointer",
+						backgroundColor: activeTab === "tools" ? "#3b82f6" : "transparent",
+						color: activeTab === "tools" ? "#fff" : "#71717a",
+					}}
+				>
+					Dynamic Tools ({dynamicTools.length})
+				</button>
+				<button
+					type="button"
+					onClick={loadData}
+					disabled={loading}
+					style={{
+						padding: "8px 16px",
+						borderRadius: "8px",
+						fontSize: "13px",
+						border: "none",
+						cursor: "pointer",
+						backgroundColor: "#27272a",
+						color: "#a1a1aa",
+						marginLeft: "auto",
+					}}
+				>
+					{loading ? "Loading..." : "Refresh"}
+				</button>
+			</div>
 
-      {activeTab === 'installed' && (
-        <PluginTable
-          plugins={filteredPlugins(plugins)}
-          showInstall={false}
-          onToggle={(name) => {}}
-        />
-      )}
+			{activeTab === "plugins" && (
+				<div style={{ display: "grid", gap: "8px" }}>
+					{filteredPlugins.length > 0 ? (
+						filteredPlugins.map((plugin) => (
+							<div
+								key={plugin.name}
+								style={{
+									padding: "16px",
+									backgroundColor: "#18181b",
+									borderRadius: "8px",
+									border: "1px solid #27272a",
+									display: "flex",
+									justifyContent: "space-between",
+									alignItems: "center",
+								}}
+							>
+								<div>
+									<div style={{ fontWeight: 600, fontSize: "14px" }}>
+										{plugin.name}
+									</div>
+									<div style={{ color: "#71717a", fontSize: "12px" }}>
+										{plugin.description}
+									</div>
+								</div>
+								<span style={{ fontSize: "12px", color: "#52525b" }}>
+									v{plugin.version}
+								</span>
+							</div>
+						))
+					) : (
+						<p
+							style={{ color: "#52525b", textAlign: "center", padding: "40px" }}
+						>
+							{loading
+								? "Loading..."
+								: "No plugins loaded. Start the server to load plugins."}
+						</p>
+					)}
+				</div>
+			)}
 
-      {activeTab === 'marketplace' && (
-        <PluginTable
-          plugins={filteredPlugins(marketplacePlugins)}
-          showInstall={true}
-          onInstall={(name) => {}}
-        />
-      )}
-
-      {activeTab === 'updates' && (
-        <div>
-          {plugins.filter((p) => p.hasUpdate).length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
-              <p>All plugins are up to date</p>
-            </div>
-          ) : (
-            <PluginTable
-              plugins={plugins.filter((p) => p.hasUpdate)}
-              showInstall={false}
-              showUpdate={true}
-              onUpdate={(name) => {}}
-            />
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-
-interface PluginTableProps {
-  plugins: PluginInfo[];
-  showInstall?: boolean;
-  showUpdate?: boolean;
-  onToggle?: (name: string) => void;
-  onInstall?: (name: string) => void;
-  onUpdate?: (name: string) => void;
-}
-
-const PluginTable: React.FC<PluginTableProps> = ({ plugins, showInstall, showUpdate, onToggle, onInstall, onUpdate }) => {
-  return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', backgroundColor: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderRadius: '8px', overflow: 'hidden' }}>
-      <thead style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #eee' }}>
-        <tr>
-          <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px' }}>Plugin</th>
-          <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px' }}>Version</th>
-          <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px' }}>Author</th>
-          <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px' }}>Downloads</th>
-          <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px' }}>Rating</th>
-          <th style={{ padding: '12px', textAlign: 'right', fontWeight: '600', fontSize: '13px' }}>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {plugins.map((plugin) => (
-          <tr key={plugin.name} style={{ borderBottom: '1px solid #eee' }}>
-            <td style={{ padding: '12px' }}>
-              <div style={{ fontWeight: '500' }}>{plugin.name}</div>
-              <div style={{ color: '#888', fontSize: '12px' }}>{plugin.description}</div>
-              <div style={{ marginTop: '4px' }}>
-                {plugin.tags.map((tag) => (
-                  <span key={tag} style={{
-                    display: 'inline-block',
-                    padding: '2px 8px',
-                    backgroundColor: '#e8f4fd',
-                    color: '#3498db',
-                    borderRadius: '12px',
-                    fontSize: '11px',
-                    marginRight: '4px',
-                  }}>
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            </td>
-            <td style={{ padding: '12px', color: '#666', fontSize: '13px' }}>
-              v{plugin.version}
-              {showUpdate && plugin.latestVersion && (
-                <span style={{ color: '#e67e22', fontSize: '11px', marginLeft: '5px' }}>
-                  → v{plugin.latestVersion}
-                </span>
-              )}
-            </td>
-            <td style={{ padding: '12px', color: '#666', fontSize: '13px' }}>{plugin.author}</td>
-            <td style={{ padding: '12px', color: '#666', fontSize: '13px' }}>{plugin.downloads.toLocaleString()}</td>
-            <td style={{ padding: '12px', fontSize: '13px' }}>{'⭐'.repeat(Math.round(plugin.rating))} {plugin.rating}</td>
-            <td style={{ padding: '12px', textAlign: 'right' }}>
-              {showInstall ? (
-                <button
-                  onClick={() => onInstall?.(plugin.name)}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: '4px',
-                    border: '1px solid #3498db',
-                    backgroundColor: '#3498db',
-                    color: '#fff',
-                    cursor: 'pointer',
-                    fontWeight: '500',
-                    fontSize: '12px',
-                  }}
-                >
-                  Install
-                </button>
-              ) : showUpdate ? (
-                <button
-                  onClick={() => onUpdate?.(plugin.name)}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: '4px',
-                    border: '1px solid #e67e22',
-                    backgroundColor: '#e67e22',
-                    color: '#fff',
-                    cursor: 'pointer',
-                    fontWeight: '500',
-                    fontSize: '12px',
-                  }}
-                >
-                  Update
-                </button>
-              ) : (
-                <button
-                  onClick={() => onToggle?.(plugin.name)}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: '4px',
-                    border: `1px solid ${plugin.enabled ? '#e74c3c' : '#2ecc71'}`,
-                    backgroundColor: 'transparent',
-                    color: plugin.enabled ? '#e74c3c' : '#2ecc71',
-                    cursor: 'pointer',
-                    fontWeight: '500',
-                    fontSize: '12px',
-                  }}
-                >
-                  {plugin.enabled ? 'Disable' : 'Enable'}
-                </button>
-              )}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+			{activeTab === "tools" && (
+				<div style={{ display: "grid", gap: "8px" }}>
+					{filteredTools.length > 0 ? (
+						filteredTools.map((tool) => (
+							<div
+								key={tool.name}
+								style={{
+									padding: "16px",
+									backgroundColor: "#18181b",
+									borderRadius: "8px",
+									border: "1px solid #27272a",
+								}}
+							>
+								<div
+									style={{
+										display: "flex",
+										justifyContent: "space-between",
+										alignItems: "center",
+										marginBottom: "8px",
+									}}
+								>
+									<span style={{ fontWeight: 600, fontSize: "14px" }}>
+										{tool.name}
+									</span>
+									<div style={{ display: "flex", gap: "8px" }}>
+										<span
+											style={{
+												fontSize: "11px",
+												padding: "2px 8px",
+												borderRadius: "4px",
+												backgroundColor: "#1e1b4b",
+												color: "#a78bfa",
+											}}
+										>
+											{tool.language}
+										</span>
+										<span
+											style={{
+												fontSize: "11px",
+												padding: "2px 8px",
+												borderRadius: "4px",
+												backgroundColor: "#1a2e05",
+												color: "#84cc16",
+											}}
+										>
+											v{tool.version}
+										</span>
+									</div>
+								</div>
+								<div style={{ color: "#71717a", fontSize: "12px" }}>
+									{tool.description}
+								</div>
+								<div
+									style={{
+										color: "#3f3f46",
+										fontSize: "11px",
+										marginTop: "4px",
+									}}
+								>
+									Created:{" "}
+									{tool.createdAt
+										? new Date(tool.createdAt).toLocaleDateString()
+										: "Unknown"}
+								</div>
+							</div>
+						))
+					) : (
+						<div style={{ textAlign: "center", padding: "40px" }}>
+							<p style={{ color: "#52525b", margin: "0 0 12px 0" }}>
+								No dynamic tools created yet.
+							</p>
+							<p style={{ color: "#3f3f46", fontSize: "13px", margin: 0 }}>
+								Ask Octopus AI to create a tool and it will appear here.
+							</p>
+						</div>
+					)}
+				</div>
+			)}
+		</div>
+	);
 };

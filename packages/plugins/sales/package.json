@@ -1,17 +1,19 @@
 {
-  "name": "@octopus-ai/plugin-sales",
-  "version": "1.0.0",
-  "description": "Sales plugin for Octopus AI",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "type": "module",
-  "scripts": {
-    "build": "tsc"
-  },
-  "dependencies": {
-    "@octopus-ai/core": "workspace:*"
-  },
-  "devDependencies": {
-    "typescript": "^5.0.0"
-  }
+	"name": "@octopus-ai/plugin-sales",
+	"version": "1.0.0",
+	"description": "Sales plugin for Octopus AI",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"type": "module",
+	"scripts": {
+		"build": "tsc",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"@octopus-ai/core": "workspace:*"
+	},
+	"devDependencies": {
+		"typescript": "^5.0.0",
+		"vitest": "^3.1.1"
+	}
 }

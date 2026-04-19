@@ -20,7 +20,10 @@ Asistente AI autoalojado con memoria humana, habilidades auto-mejorables y mensa
 - [Visión General](./architecture/overview.md) — Monorepo, módulos y flujo de datos
 - [Sistema de Memoria](./architecture/memory.md) — STM, LTM, consolidación, decaimiento
 - [Skill Forge](./architecture/skills.md) — Creación automática, mejora, A/B testing
-- [Sistema de Plugins](./architecture/plugins.md) — Engine, MCP, marketplace
+- [Sistema de Plugins y MCP](./architecture/plugins.md) — Engine, Model Context Protocol, marketplace
+- Tareas y Automatizaciones — Ejecución programada, Cron y Webhooks
+- Canales de Comunicación — WhatsApp, Telegram, Discord, Slack
+- Voz y Audio — Sistemas STT, TTS y Wake-words
 
 ## Referencia
 

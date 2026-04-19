@@ -20,6 +20,7 @@ export const ConfigSection: React.FC<{
 			}}
 		>
 			<button
+				type="button"
 				onClick={() => setOpen(!open)}
 				style={{
 					width: "100%",
@@ -60,7 +61,14 @@ export const ConfigSection: React.FC<{
 			{open && (
 				<div style={{ padding: "20px" }}>
 					{description && (
-						<p style={{ margin: "0 0 16px", color: "#a1a1aa", fontSize: "0.85rem", lineHeight: "1.5" }}>
+						<p
+							style={{
+								margin: "0 0 16px",
+								color: "#a1a1aa",
+								fontSize: "0.85rem",
+								lineHeight: "1.5",
+							}}
+						>
 							{description}
 						</p>
 					)}
@@ -82,13 +90,19 @@ export const Toggle: React.FC<{
 			display: "flex",
 			alignItems: "center",
 			justifyContent: "space-between",
+			flexWrap: "wrap",
+			gap: "12px",
 			padding: "10px 0",
 		}}
 	>
 		<div>
-			<div style={{ fontSize: "0.95rem", color: "#f4f4f5", fontWeight: 500 }}>{label}</div>
+			<div style={{ fontSize: "0.95rem", color: "#f4f4f5", fontWeight: 500 }}>
+				{label}
+			</div>
 			{description && (
-				<div style={{ fontSize: "0.8rem", color: "#71717a", marginTop: "4px" }}>{description}</div>
+				<div style={{ fontSize: "0.8rem", color: "#71717a", marginTop: "4px" }}>
+					{description}
+				</div>
 			)}
 		</div>
 		<div
@@ -127,47 +141,59 @@ export const Field: React.FC<{
 	type?: string;
 	placeholder?: string;
 	description?: string;
-}> = ({ label, value, onChange, type = "text", placeholder, description }) => (
-	<div style={{ marginBottom: "16px" }}>
-		<label
-			style={{
-				display: "block",
-				fontSize: "0.85rem",
-				color: "#a1a1aa",
-				marginBottom: "6px",
-				fontWeight: 500,
-			}}
-		>
-			{label}
-		</label>
-		{description && (
-			<div style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: "8px" }}>
-				{description}
-			</div>
-		)}
-		<input
-			type={type}
-			value={value}
-			onChange={(e) => onChange(e.target.value)}
-			placeholder={placeholder}
-			style={{
-				width: "100%",
-				padding: "10px 14px",
-				borderRadius: "8px",
-				border: "1px solid #3f3f46",
-				background: "#09090b",
-				color: "#f4f4f5",
-				fontSize: "0.95rem",
-				outline: "none",
-				fontFamily: type === "password" ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" : "inherit",
-				transition: "border-color 0.2s",
-				boxSizing: "border-box",
-			}}
-			onFocus={(e) => e.target.style.borderColor = "#6366f1"}
-			onBlur={(e) => e.target.style.borderColor = "#3f3f46"}
-		/>
-	</div>
-);
+}> = ({ label, value, onChange, type = "text", placeholder, description }) => {
+	const fieldId = `field-${label.toLowerCase().replace(/\s+/g, "-")}`;
+	return (
+		<div style={{ marginBottom: "16px" }}>
+			<label
+				htmlFor={fieldId}
+				style={{
+					display: "block",
+					fontSize: "0.85rem",
+					color: "#a1a1aa",
+					marginBottom: "6px",
+					fontWeight: 500,
+				}}
+			>
+				{label}
+			</label>
+			{description && (
+				<div
+					style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: "8px" }}
+				>
+					{description}
+				</div>
+			)}
+			<input
+				id={fieldId}
+				name={fieldId}
+				type={type}
+				value={value}
+				onChange={(e) => onChange(e.target.value)}
+				placeholder={placeholder}
+				autoComplete="off"
+				style={{
+					width: "100%",
+					padding: "10px 14px",
+					borderRadius: "8px",
+					border: "1px solid #3f3f46",
+					background: "#09090b",
+					color: "#f4f4f5",
+					fontSize: "0.95rem",
+					outline: "none",
+					fontFamily:
+						type === "password"
+							? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+							: "inherit",
+					transition: "border-color 0.2s",
+					boxSizing: "border-box",
+				}}
+				onFocus={(e) => (e.target.style.borderColor = "#6366f1")}
+				onBlur={(e) => (e.target.style.borderColor = "#3f3f46")}
+			/>
+		</div>
+	);
+};
 
 export const Select: React.FC<{
 	label: string;
@@ -175,55 +201,64 @@ export const Select: React.FC<{
 	options: string[];
 	onChange: (v: string) => void;
 	description?: string;
-}> = ({ label, value, options, onChange, description }) => (
-	<div style={{ marginBottom: "16px" }}>
-		<label
-			style={{
-				display: "block",
-				fontSize: "0.85rem",
-				color: "#a1a1aa",
-				marginBottom: "6px",
-				fontWeight: 500,
-			}}
-		>
-			{label}
-		</label>
-		{description && (
-			<div style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: "8px" }}>
-				{description}
-			</div>
-		)}
-		<select
-			value={value}
-			onChange={(e) => onChange(e.target.value)}
-			style={{
-				width: "100%",
-				padding: "10px 14px",
-				borderRadius: "8px",
-				border: "1px solid #3f3f46",
-				background: "#09090b",
-				color: "#f4f4f5",
-				fontSize: "0.95rem",
-				outline: "none",
-				cursor: "pointer",
-				appearance: "none",
-				backgroundImage: "url(\"data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e\")",
-				backgroundRepeat: "no-repeat",
-				backgroundPosition: "right 12px center",
-				backgroundSize: "16px",
-				boxSizing: "border-box",
-			}}
-			onFocus={(e) => e.target.style.borderColor = "#6366f1"}
-			onBlur={(e) => e.target.style.borderColor = "#3f3f46"}
-		>
-			{options.map((opt) => (
-				<option key={opt} value={opt}>
-					{opt}
-				</option>
-			))}
-		</select>
-	</div>
-);
+}> = ({ label, value, options, onChange, description }) => {
+	const selectId = `select-${label.toLowerCase().replace(/\s+/g, "-")}`;
+	return (
+		<div style={{ marginBottom: "16px" }}>
+			<label
+				htmlFor={selectId}
+				style={{
+					display: "block",
+					fontSize: "0.85rem",
+					color: "#a1a1aa",
+					marginBottom: "6px",
+					fontWeight: 500,
+				}}
+			>
+				{label}
+			</label>
+			{description && (
+				<div
+					style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: "8px" }}
+				>
+					{description}
+				</div>
+			)}
+			<select
+				id={selectId}
+				name={selectId}
+				value={value}
+				onChange={(e) => onChange(e.target.value)}
+				style={{
+					width: "100%",
+					padding: "10px 14px",
+					borderRadius: "8px",
+					border: "1px solid #3f3f46",
+					background: "#09090b",
+					color: "#f4f4f5",
+					fontSize: "0.95rem",
+					outline: "none",
+					cursor: "pointer",
+					appearance: "none",
+					backgroundImage:
+						"url(\"data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e\")",
+					backgroundRepeat: "no-repeat",
+					backgroundPosition: "right 12px center",
+					backgroundSize: "16px",
+					boxSizing: "border-box",
+				}}
+				onFocus={(e) => (e.target.style.borderColor = "#6366f1")}
+				onBlur={(e) => (e.target.style.borderColor = "#3f3f46")}
+			>
+				{options.map((opt) => (
+					<option key={opt} value={opt}>
+						{opt}
+					</option>
+				))}
+			</select>
+		</div>
+	);
+};
 
 export const SaveButton: React.FC<{
 	onClick: () => void;

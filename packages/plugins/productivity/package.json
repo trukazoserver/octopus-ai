@@ -1,12 +1,12 @@
 {
-  "name": "@octopus-ai/plugin-productivity",
-  "version": "0.1.0",
-  "main": "dist/index.js",
-  "type": "module",
-  "scripts": {
-    "build": "tsc"
-  },
-  "dependencies": {
-    "@octopus-ai/core": "workspace:*"
-  }
+	"name": "@octopus-ai/plugin-productivity",
+	"version": "0.1.0",
+	"main": "dist/index.js",
+	"type": "module",
+	"scripts": {
+		"build": "tsc"
+	},
+	"dependencies": {
+		"@octopus-ai/core": "workspace:*"
+	}
 }

@@ -1,182 +1,239 @@
 import type React from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { ToastContainer } from "../components/ui/Toast.js";
+import { AgentsPage } from "../pages/agents.js";
+import { AutomationsPage } from "../pages/automations.js";
+import { ChannelsPage } from "../pages/channels/Channels.js";
 import { ChatPage } from "../pages/chat.js";
+import { CodePage } from "../pages/code.js";
+import { DashboardPage } from "../pages/dashboard/Dashboard.js";
+import { MediaLibraryPage } from "../pages/media-library.js";
 import { MemoryPage } from "../pages/memory.js";
 import { SettingsPage } from "../pages/settings.js";
 import { SkillsPage } from "../pages/skills.js";
+import { TasksPage } from "../pages/tasks.js";
+import { VariablesPage } from "../pages/variables.js";
+import "./app.css";
+
+type TabId =
+	| "dashboard"
+	| "chat"
+	| "channels"
+	| "variables"
+	| "media"
+	| "code"
+	| "memory"
+	| "skills"
+	| "agents"
+	| "tasks"
+	| "automations"
+	| "settings";
+
+interface NavGroup {
+	label: string;
+	items: Array<{ id: TabId; icon: string; label: string }>;
+}
+
+const NAV_GROUPS: NavGroup[] = [
+	{
+		label: "Principal",
+		items: [
+			{ id: "dashboard", icon: "🎛️", label: "Centro de Control" },
+			{ id: "chat", icon: "💬", label: "Chat" },
+		],
+	},
+	{
+		label: "Comunicación",
+		items: [{ id: "channels", icon: "📡", label: "Canales" }],
+	},
+	{
+		label: "Work",
+		items: [
+			{ id: "agents", icon: "🤖", label: "Agentes" },
+			{ id: "tasks", icon: "✅", label: "Tareas" },
+			{ id: "automations", icon: "⚡", label: "Automatizaciones" },
+			{ id: "code", icon: "💻", label: "Código & Tools" },
+		],
+	},
+	{
+		label: "Data",
+		items: [
+			{ id: "memory", icon: "🧠", label: "Base de Memoria" },
+			{ id: "skills", icon: "⚡", label: "Habilidades" },
+		],
+	},
+	{
+		label: "Config",
+		items: [
+			{ id: "media", icon: "📁", label: "Medios" },
+			{ id: "variables", icon: "🔐", label: "Variables" },
+			{ id: "settings", icon: "⚙️", label: "Configuración" },
+		],
+	},
+];
 
 export const App: React.FC = () => {
-	const [activeTab, setActiveTab] = useState("chat");
+	const [activeTab, setActiveTab] = useState<TabId>(() => {
+		try {
+			const stored = localStorage.getItem("octopus-active-tab");
+			if (stored && NAV_GROUPS.some((group) => group.items.some((item) => item.id === stored))) {
+				return stored as TabId;
+			}
+		} catch {
+			// ignore storage failures
+		}
+		return "dashboard";
+	});
+	const [menuOpen, setMenuOpen] = useState(false);
+	const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+		new Set(),
+	);
+
+	const selectTab = (tab: TabId) => {
+		setActiveTab(tab);
+		setMenuOpen(false);
+	};
+
+	const toggleGroup = (label: string) => {
+		setCollapsedGroups((prev) => {
+			const next = new Set(prev);
+			if (next.has(label)) next.delete(label);
+			else next.add(label);
+			return next;
+		});
+	};
+
+	useEffect(() => {
+		try {
+			localStorage.setItem("octopus-active-tab", activeTab);
+		} catch {
+			// ignore storage failures
+		}
+	}, [activeTab]);
+
+	const renderPage = () => {
+		switch (activeTab) {
+			case "dashboard":
+				return <DashboardPage onNavigate={(tab) => selectTab(tab as TabId)} />;
+			case "channels":
+				return <ChannelsPage />;
+			case "chat":
+				return <ChatPage />;
+			case "code":
+				return <CodePage />;
+			case "memory":
+				return <MemoryPage />;
+			case "skills":
+				return <SkillsPage />;
+			case "agents":
+				return <AgentsPage />;
+			case "tasks":
+				return <TasksPage />;
+			case "automations":
+				return <AutomationsPage />;
+			case "media":
+				return <MediaLibraryPage />;
+			case "variables":
+				return <VariablesPage />;
+			case "settings":
+				return <SettingsPage />;
+			default:
+				return <DashboardPage onNavigate={(tab) => selectTab(tab as TabId)} />;
+		}
+	};
 
 	return (
-		<div
-			style={{
-				display: "flex",
-				height: "100vh",
-				background: "#09090b",
-				color: "#fafafa",
-				fontFamily: '"Inter", -apple-system, sans-serif'
-			}}
-		>
-			{/* Sidebar */}
-			<div
-				style={{
-					width: "280px",
-					background: "#18181b",
-					borderRight: "1px solid #27272a",
-					display: "flex",
-					flexDirection: "column",
-				}}
-			>
-				<div
-					style={{
-						padding: "24px 20px",
-						display: "flex",
-						alignItems: "center",
-						gap: "14px",
-					}}
+		<div className="app-shell">
+			<header className="app-mobile-header">
+				<button
+					type="button"
+					className="app-icon-button"
+					onClick={() => setMenuOpen((o) => !o)}
+					aria-label="Abrir navegación"
 				>
-					<div
-						style={{
-							width: "40px",
-							height: "40px",
-							borderRadius: "12px",
-							background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-							display: "flex",
-							alignItems: "center",
-							justifyContent: "center",
-							fontSize: "20px",
-							boxShadow: "0 4px 12px rgba(99, 102, 241, 0.3)",
-						}}
-					>
-						🐙
-					</div>
+					☰
+				</button>
+				<div className="app-mobile-brand">
+					<div className="app-logo">🐙</div>
 					<div>
-						<div style={{ fontSize: "1.2rem", fontWeight: 700, color: "#f4f4f5", letterSpacing: "-0.02em" }}>
-							Octopus AI
-						</div>
-						<div style={{ fontSize: "0.75rem", color: "#a1a1aa", fontWeight: 500 }}>
-							Workspace v0.1.0
-						</div>
+						<div className="app-brand-title">Octopus AI</div>
+						<div className="app-brand-subtitle">Workspace v0.1.0</div>
+					</div>
+				</div>
+			</header>
+
+			{menuOpen && (
+				<button
+					type="button"
+					className="app-overlay"
+					onClick={() => setMenuOpen(false)}
+					aria-label="Cerrar navegación"
+				/>
+			)}
+
+			<aside className={`app-sidebar${menuOpen ? " is-open" : ""}`}>
+				<div className="app-sidebar-header">
+					<div className="app-logo">🐙</div>
+					<div>
+						<div className="app-brand-title">Octopus AI</div>
+						<div className="app-brand-subtitle">Workspace v0.1.0</div>
 					</div>
 				</div>
 
-				<div style={{ padding: "0 16px", marginBottom: "16px" }}>
-					<button
-						onClick={() => setActiveTab("chat")}
-						style={{
-							width: "100%",
-							padding: "12px 16px",
-							background: "#27272a",
-							border: "1px solid #3f3f46",
-							borderRadius: "8px",
-							color: "#f4f4f5",
-							fontWeight: 500,
-							display: "flex",
-							alignItems: "center",
-							gap: "8px",
-							cursor: "pointer",
-							transition: "all 0.2s",
-						}}
-						onMouseOver={(e) => (e.currentTarget.style.background = "#3f3f46")}
-						onMouseOut={(e) => (e.currentTarget.style.background = "#27272a")}
-					>
-						<span style={{ fontSize: "1.2rem" }}>+</span> Nuevo Chat
-					</button>
-				</div>
-
-				<nav
-					style={{
-						display: "flex",
-						flexDirection: "column",
-						padding: "0 12px",
-						gap: "4px",
-						flex: 1,
-					}}
-				>
-					<div style={{ padding: "12px 12px 4px", fontSize: "0.7rem", textTransform: "uppercase", color: "#71717a", fontWeight: 600, letterSpacing: "0.05em" }}>
-						Menú Principal
-					</div>
-					{[
-						{ id: "chat", icon: "💬", label: "Conversación" },
-						{ id: "memory", icon: "🧠", label: "Base de Memoria" },
-						{ id: "skills", icon: "⚡", label: "Habilidades (Skills)" },
-						{ id: "settings", icon: "⚙️", label: "Configuración" },
-					].map((item) => (
-						<button
-							key={item.id}
-							onClick={() => setActiveTab(item.id)}
-							style={{
-								padding: "10px 14px",
-								textAlign: "left",
-								border: "none",
-								borderRadius: "8px",
-								background:
-									activeTab === item.id
-										? "rgba(99, 102, 241, 0.15)"
-										: "transparent",
-								color: activeTab === item.id ? "#818cf8" : "#a1a1aa",
-								cursor: "pointer",
-								fontSize: "0.9rem",
-								display: "flex",
-								alignItems: "center",
-								gap: "12px",
-								transition: "all 0.2s",
-								fontWeight: activeTab === item.id ? 600 : 400,
-							}}
-							onMouseOver={(e) => {
-								if (activeTab !== item.id) {
-									e.currentTarget.style.background = "#27272a";
-									e.currentTarget.style.color = "#e4e4e7";
-								}
-							}}
-							onMouseOut={(e) => {
-								if (activeTab !== item.id) {
-									e.currentTarget.style.background = "transparent";
-									e.currentTarget.style.color = "#a1a1aa";
-								}
-							}}
-						>
-							<span style={{ fontSize: "1.2rem", filter: activeTab !== item.id ? "grayscale(100%) opacity(70%)" : "none" }}>{item.icon}</span>
-							{item.label}
-						</button>
+				<nav className="app-nav">
+					{NAV_GROUPS.map((group) => (
+						<div key={group.label} className="app-nav-group">
+							<button
+								type="button"
+								className="app-nav-group-title"
+								onClick={() => toggleGroup(group.label)}
+							>
+								<span>{group.label}</span>
+								<span className="app-nav-group-toggle">
+									{collapsedGroups.has(group.label) ? "▶" : "▼"}
+								</span>
+							</button>
+							{!collapsedGroups.has(group.label) && (
+								<div className="app-nav-group-items">
+									{group.items.map((item) => (
+										<button
+											key={item.id}
+											type="button"
+											onClick={() => selectTab(item.id)}
+											className={`app-nav-item${activeTab === item.id ? " is-active" : ""}`}
+										>
+											<span className="app-nav-icon" aria-hidden="true">
+												{item.icon}
+											</span>
+											<span>{item.label}</span>
+										</button>
+									))}
+								</div>
+							)}
+						</div>
 					))}
 				</nav>
 
-				<div
-					style={{
-						padding: "20px",
-						borderTop: "1px solid #27272a",
-						display: "flex",
-						alignItems: "center",
-						gap: "12px",
-					}}
-				>
-					<div style={{ width: "32px", height: "32px", borderRadius: "50%", background: "#3f3f46", display: "flex", alignItems: "center", justifyContent: "center" }}>
-						👤
-					</div>
-					<div style={{ flex: 1 }}>
-						<div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#e4e4e7" }}>Usuario Local</div>
-						<div style={{ fontSize: "0.75rem", color: "#71717a" }}>Auto-hospedado</div>
+				<div className="app-user-card">
+					<div className="app-user-avatar">👤</div>
+					<div>
+						<div className="app-user-name">Usuario Local</div>
+						<div className="app-user-role">Auto-hospedado</div>
 					</div>
 				</div>
-			</div>
+			</aside>
 
-			{/* Main Content */}
-			<div
-				style={{
-					flex: 1,
-					display: "flex",
-					flexDirection: "column",
-					overflow: "hidden",
-					background: "#09090b",
-				}}
-			>
-				{activeTab === "chat" && <ChatPage />}
-				{activeTab === "memory" && <MemoryPage />}
-				{activeTab === "skills" && <SkillsPage />}
-				{activeTab === "settings" && <SettingsPage />}
-			</div>
+			<main className="app-main">
+				<div
+					className="animate-fade-in"
+					key={activeTab}
+					style={{ height: "100%", display: "flex", flexDirection: "column" }}
+				>
+					{renderPage()}
+				</div>
+			</main>
+
+			<ToastContainer />
 		</div>
 	);
 };

@@ -1,12 +1,12 @@
 export type {
-  MemoryType,
-  MemoryItem,
-  RetrieveOptions,
-  ConsolidationResult,
-  MemoryContext,
-  ScoredMemory,
-  VectorSearchResult,
-  EmbeddingFunction,
+	MemoryType,
+	MemoryItem,
+	RetrieveOptions,
+	ConsolidationResult,
+	MemoryContext,
+	ScoredMemory,
+	VectorSearchResult,
+	EmbeddingFunction,
 } from "./types.js";
 
 export { ShortTermMemory } from "./stm.js";
