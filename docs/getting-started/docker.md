@@ -4,282 +4,173 @@
   <img src="../../logo aplicacion.png" alt="Octopus AI" width="100" />
 </p>
 
-Guía completa para ejecutar Octopus AI en contenedores Docker.
+Guía actualizada para ejecutar Octopus AI en contenedores usando el `Dockerfile` y `docker-compose.yml` incluidos en el repositorio.
 
 ---
 
-## 📋 Tabla de Contenidos
+## Qué Despliega la Configuración Actual
 
-- [¿Qué es Docker?](#-qué-es-docker)
-- [Instalación de Docker](#-instalación-de-docker)
-- [Configuración](#-configuración)
-- [Comandos Básicos](#-comandos-básicos)
-- [Persistencia de Datos](#-persistencia-de-datos)
-- [Acceso a la Interfaz Web](#-acceso-a-la-interfaz-web)
-- [Variables de Entorno](#-variables-de-entorno)
-- [Actualizar el Contenedor](#-actualizar-el-contenedor)
-- [Solución de Problemas](#-solución-de-problemas)
+El despliegue Docker del repositorio está orientado a operación continua y arranca un único servicio `octopus` con:
+
+- imagen multi-stage basada en Node.js 22
+- puerto `3000` para HTTP y healthcheck
+- volumen persistente en `/data`
+- workspace montado en `/data/workspace`
+- plantillas iniciales `SOUL.md` y `HEARTBEAT.md`
 
 ---
 
-## 🐳 ¿Qué es Docker?
+## Requisitos
 
-Docker es una herramienta que te permite ejecutar aplicaciones dentro de "contenedores" — entornos aislados que ya tienen todo lo necesario para funcionar. Piensa en ello como una máquina virtual más ligera.
+- Docker Desktop o Docker Engine reciente
+- Docker Compose v2
 
-**Ventajas de usar Docker con Octopus AI:**
-- No necesitas instalar Node.js, Python ni Build Tools en tu máquina
-- Funciona igual en Windows, macOS y Linux
-- Ideal para servidores y despliegues en producción
-- Fácil de actualizar y mantener
-
----
-
-## 📥 Instalación de Docker
-
-### Windows
-
-1. Descarga [Docker Desktop para Windows](https://www.docker.com/products/docker-desktop/)
-2. Ejecuta el instalador
-3. Reinicia tu equipo si te lo pide
-4. Verifica que funciona abriendo PowerShell:
-   ```powershell
-   docker --version
-   docker compose version
-   ```
-
-> **Requisito:** Windows 10/11 Pro, Enterprise o Education con WSL 2 habilitado.
-
-### macOS
-
-1. Descarga [Docker Desktop para Mac](https://www.docker.com/products/docker-desktop/)
-2. Arrastra Docker a la carpeta Aplicaciones
-3. Abre Docker desde Aplicaciones
-4. Verifica en Terminal:
-   ```bash
-   docker --version
-   docker compose version
-   ```
-
-### Linux (Debian/Ubuntu)
+Verificación rápida:
 
 ```bash
-# Instalar Docker
-sudo apt update
-sudo apt install -y docker.io docker-compose-plugin
-
-# Agregar tu usuario al grupo docker (para no usar sudo)
-sudo usermod -aG docker $USER
-
-# Cerrar sesión y volver a entrar, luego verificar:
 docker --version
 docker compose version
 ```
 
 ---
 
-## ⚙️ Configuración
-
-### 1. Clonar el repositorio
+## Arranque Rápido
 
 ```bash
 git clone https://github.com/trukazoserver/octopus-ai.git
 cd octopus-ai
-```
-
-### 2. Crear archivo de variables de entorno
-
-Crea un archivo llamado `.env` dentro de la carpeta `docker/`:
-
-```bash
-# docker/.env
-OCTOPUS_SERVER_PORT=18789
-OCTOPUS_AI_DEFAULT=zhipu/glm-5.1
-
-# Configura al menos una API Key
-OCTOPUS_OPENAI_API_KEY=sk-tu-api-key-aqui
-# OCTOPUS_ANTHROPIC_API_KEY=sk-ant-...
-# OCTOPUS_ZHIPU_API_KEY=tu-key-zhipu
-```
-
-### 3. Construir e iniciar
-
-```bash
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-### Nota importante sobre el Dockerfile actual
+Después del arranque:
 
-El `Dockerfile` incluido realiza `pnpm install` y copia el código fuente, pero **no ejecuta `pnpm build`** antes del CMD. Esto significa que necesitas construir el proyecto primero o modificar el Dockerfile.
-
-**Opción A: Construir localmente primero**
-
-```bash
-pnpm install
-pnpm build
-docker compose -f docker/docker-compose.yml up -d --build
-```
-
-**Opción B: Modificar el Dockerfile** para incluir el paso de build
-
-Edita `docker/Dockerfile` y añade `RUN pnpm build` antes del CMD:
-
-```dockerfile
-FROM node:22-alpine
-
-WORKDIR /app
-
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-COPY pnpm-workspace.yaml package.json ./
-COPY packages ./packages
-
-RUN pnpm install
-RUN pnpm build
-
-COPY . .
-
-CMD ["node", "packages/cli/dist/index.js", "start"]
-```
-
-> El CMD original usa `pnpm start` pero ese script no existe en el `package.json` raíz. Se recomienda usar `node packages/cli/dist/index.js start` directamente.
+- API y healthcheck: `http://localhost:3000`
+- healthcheck simple: `http://localhost:3000/health`
 
 ---
 
-## 📋 Comandos Básicos
+## Variables de Entorno
 
-| Acción | Comando |
-|---|---|
-| **Iniciar** | `docker compose -f docker/docker-compose.yml up -d` |
-| **Detener** | `docker compose -f docker/docker-compose.yml down` |
-| **Ver logs** | `docker compose -f docker/docker-compose.yml logs -f` |
-| **Reiniciar** | `docker compose -f docker/docker-compose.yml restart` |
-| **Ver estado** | `docker compose -f docker/docker-compose.yml ps` |
-| **Reconstruir** | `docker compose -f docker/docker-compose.yml up -d --build` |
+Crea un archivo `.env` junto al `docker-compose.yml` dentro de `docker/` o exporta estas variables antes de levantar el stack:
 
-> **Tip:** Si estás dentro de la carpeta `docker/`, puedes usar simplemente `docker compose up -d` sin el flag `-f`.
+```env
+ZHIPU_API_KEY=tu-key-zhipu
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+# GOOGLE_API_KEY=tu-key-google
+# DEEPSEEK_API_KEY=tu-key-deepseek
+
+# Tokens de canales
+# TELEGRAM_BOT_TOKEN=123456:ABCDEF
+# DISCORD_BOT_TOKEN=...
+# SLACK_BOT_TOKEN=...
+```
+
+El `docker-compose.yml` tambien exporta variables de proceso útiles para el contenedor, como `OCTOPUS_DATA_DIR`, `OCTOPUS_DB_PATH` y `OCTOPUS_LOG_LEVEL`.
 
 ---
 
-## 💾 Persistencia de Datos
+## Persistencia de Datos
 
-El `docker-compose.yml` monta un volumen para que tus datos sobrevivan entre reinicios:
+La configuración incluida monta:
 
 ```yaml
 volumes:
-  - ~/.octopus/data:/root/.octopus/data
+  - octopus-data:/data
+  - ./workspace:/data/workspace
 ```
 
-Esto significa que:
-- La **base de datos** SQLite se guarda en `~/.octopus/data/` de tu máquina
-- Las **conversaciones y memoria** se conservan al detener el contenedor
-- Al actualizar el contenedor, tus datos no se pierden
+Esto deja persistidos:
 
-### Rutas según sistema operativo
+- base de datos en `/data/db/octopus.db`
+- skills y artefactos del sistema en `/data/skills`
+- logs en `/data/logs`
+- archivos operativos del workspace en `/data/workspace`
 
-| SO | Ruta en tu máquina |
-|---|---|
-| **Windows** | `C:\Users\TuUsuario\.octopus\data` |
-| **macOS** | `~/.octopus/data` |
-| **Linux** | `~/.octopus/data` |
+En el primer arranque se copian plantillas base como `SOUL.md` y `HEARTBEAT.md` al workspace del contenedor.
 
 ---
 
-## 🌐 Acceso a la Interfaz Web
+## Comandos Comunes
 
-Una vez que el contenedor esté corriendo, accede a:
+| Acción | Comando |
+|---|---|
+| Iniciar | `docker compose -f docker/docker-compose.yml up -d` |
+| Reconstruir | `docker compose -f docker/docker-compose.yml up -d --build` |
+| Ver logs | `docker compose -f docker/docker-compose.yml logs -f` |
+| Ver estado | `docker compose -f docker/docker-compose.yml ps` |
+| Detener | `docker compose -f docker/docker-compose.yml down` |
 
-- **Servidor API:** `http://localhost:18789`
-- **Dashboard Web:** Depende de la configuración. Si también inicias el frontend, estará en `http://localhost:5173`
+---
 
-Para iniciar el panel web junto con el contenedor:
+## Dashboard Web
+
+El contenedor actual expone el backend HTTP/health. El dashboard React se usa normalmente aparte durante desarrollo con:
 
 ```bash
-# En otra terminal, con el proyecto clonado localmente
 pnpm dev
 ```
 
----
-
-## 🔧 Variables de Entorno
-
-Todas las variables de entorno que puedes configurar en el archivo `.env`:
-
-| Variable | Equivalente en config.json | Descripción |
-|---|---|---|
-| `OCTOPUS_SERVER_PORT` | `server.port` | Puerto del servidor (defecto: 18789) |
-| `OCTOPUS_AI_DEFAULT` | `ai.default` | Modelo por defecto (defecto: `zhipu/glm-5.1`) |
-| `OCTOPUS_OPENAI_API_KEY` | `ai.providers.openai.apiKey` | API Key de OpenAI |
-| `OCTOPUS_ANTHROPIC_API_KEY` | `ai.providers.anthropic.apiKey` | API Key de Anthropic |
-| `OCTOPUS_LOCAL_BASE_URL` | `ai.providers.local.baseUrl` | URL de Ollama local |
-| `OCTOPUS_STORAGE_PATH` | `storage.path` | Ruta de la base de datos |
+Si deseas servir tambien la UI desde la misma imagen, necesitas incluir `packages/web/dist` en la imagen runtime o usar un contenedor adicional para frontend.
 
 ---
 
-## 🔄 Actualizar el Contenedor
+## Healthcheck y Observabilidad
+
+La imagen incorpora:
+
+- `curl` para el healthcheck interno
+- `tini` como init process
+- healthcheck contra `http://localhost:3000/health`
+
+Para inspección manual:
 
 ```bash
-cd octopus-ai
+docker compose -f docker/docker-compose.yml logs -f
+curl http://localhost:3000/health
+```
 
-# 1. Obtener la última versión del código
+---
+
+## Actualizar el Despliegue
+
+```bash
 git pull origin main
-
-# 2. Reconstruir y reiniciar el contenedor
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-Tus datos se conservan gracias al volumen montado.
+El volumen `octopus-data` conserva la base de datos y el estado persistente entre recreaciones del contenedor.
 
 ---
 
-## 🔧 Solución de Problemas
+## Problemas Comunes
 
-### El contenedor no inicia
+### El contenedor no arranca
 
 ```bash
-# Ver los logs para ver qué falla
 docker compose -f docker/docker-compose.yml logs
 ```
 
-### Error: "pnpm start" falla
+### El healthcheck falla
 
-El `package.json` raíz no tiene un script `start`. Modifica el CMD del Dockerfile como se explica en la sección [Configuración](#-configuración).
+Comprueba que el contenedor esté exponiendo el puerto `3000` y que no haya otro proceso ocupándolo en tu host.
 
-### Error: "Cannot find module"
+### No hay proveedores disponibles
 
-El proyecto no se compiló dentro del contenedor. Añade `RUN pnpm build` al Dockerfile.
-
-### Error: "No AI providers available"
-
-No configuraste ninguna API Key. Añade al menos una en el archivo `.env`:
+Configura al menos una API key válida en `docker/.env`, por ejemplo:
 
 ```env
-OCTOPUS_ZHIPU_API_KEY=tu-key-aqui
+ZHIPU_API_KEY=tu-key-zhipu
 ```
 
-### No puedo acceder desde el navegador
+### Necesitas sandbox aislado dentro del asistente
 
-Verifica que el puerto 18789 no esté siendo usado por otra aplicación:
-
-```bash
-# Linux/macOS
-lsof -i :18789
-
-# Windows
-netstat -ano | findstr :18789
-```
-
-### Permisos en Linux
-
-Si tienes errores de permisos con el volumen:
-
-```bash
-sudo chown -R $USER:$USER ~/.octopus
-```
+La tool `sandbox_execute` depende de Docker disponible para el runtime donde se ejecute Octopus. Si la usas fuera del contenedor principal, instala Docker Desktop/Engine en esa máquina.
 
 ---
 
 ## Siguientes Pasos
 
-- ➡️ [Inicio Rápido](./quick-start.md) — Tu primera conversación
-- ⚙️ [Configuración](./configuration.md) — Ajustar modelos y memoria
-- 🔧 [Solución de Problemas General](../advanced/troubleshooting.md)
+- [Inicio Rápido](./quick-start.md) — Primer uso del asistente
+- [Configuración](./configuration.md) — Modelos, memoria y canales
+- [API HTTP y WebSocket](../api/http.md) — Endpoints del backend

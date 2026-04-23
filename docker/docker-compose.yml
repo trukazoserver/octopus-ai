@@ -1,37 +1,53 @@
+# =============================================================================
+# Octopus AI — Production Docker Compose
+# =============================================================================
+
 services:
-  octopus-ai:
+  octopus:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    container_name: octopus-ai
+    restart: unless-stopped
     ports:
-      - "18789:18789"
+      - "3000:3000"     # HTTP API / Health
     volumes:
-      - octopus-data:/root/.octopus/data
-    env_file:
-      - .env
-    restart: always
+      - octopus-data:/data               # Persistent database + skills
+      - ./workspace:/data/workspace       # SOUL.md, HEARTBEAT.md, etc.
+    environment:
+      NODE_ENV: production
+      OCTOPUS_DATA_DIR: /data
+      OCTOPUS_DB_PATH: /data/db/octopus.db
+      OCTOPUS_LOG_LEVEL: info
+      OCTOPUS_DAEMON_MODE: "true"
+      # --- AI Provider Keys (set in .env file) ---
+      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # --- Channel Tokens ---
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:18789/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       start_period: 15s
       retries: 3
-
-  web:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.web
-    ports:
-      - "80:80"
-    depends_on:
-      octopus-ai:
-        condition: service_healthy
-    restart: always
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   octopus-data:
+    name: octopus-ai-data

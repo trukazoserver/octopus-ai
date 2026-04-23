@@ -3,6 +3,8 @@ import {
 	MessageType,
 	TelegramChannel,
 	TransportServer,
+	mediaContext,
+	InputFile,
 } from "@octopus-ai/core";
 import type { ChannelMessage } from "@octopus-ai/core";
 import chalk from "chalk";
@@ -18,7 +20,7 @@ function escapeHtml(text: string): string {
 }
 
 function markdownToTelegramHtml(md: string): string {
-	let html = md;
+	let html = md.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "");
 	html = html.replace(
 		/```(\w*)\n([\s\S]*?)```/g,
 		(_m, _lang: string, code: string) =>
@@ -39,7 +41,7 @@ function markdownToTelegramHtml(md: string): string {
 	html = html.replace(/^&gt;\s?(.+)$/gm, "<i>$1</i>");
 	html = html.replace(/^[\-\*]{3,}$/gm, "──────────");
 	html = html.replace(/\n{3,}/g, "\n\n");
-	return html;
+	return html.trim();
 }
 
 function splitTelegramMessage(text: string, maxLen: number): string[] {
@@ -60,11 +62,25 @@ function splitTelegramMessage(text: string, maxLen: number): string[] {
 	return parts;
 }
 
+function stripToolMarkers(text: string): string {
+	let clean = text.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "");
+	return clean
+		.replace(/^\n?[⚙️⚠️]+ .+ (?:completed|error:.*)\n?$/gm, "")
+		.replace(/^\n?<!-- tool:[^>]+ -->\n?$/gm, "")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
 type TelegramBotLike = {
 	bot: {
 		api: {
-			sendMessage: (...args: unknown[]) => Promise<{ message_id: number }>;
-			editMessageText: (...args: unknown[]) => Promise<unknown>;
+			sendMessage: (...args: any[]) => Promise<{ message_id: number }>;
+			editMessageText: (...args: any[]) => Promise<unknown>;
+			sendChatAction: (chat_id: string, action: string) => Promise<unknown>;
+			sendPhoto: (chat_id: string, file: any, options?: any) => Promise<unknown>;
+			sendAudio: (chat_id: string, file: any, options?: any) => Promise<unknown>;
+			sendVideo: (chat_id: string, file: any, options?: any) => Promise<unknown>;
+			sendDocument: (chat_id: string, file: any, options?: any) => Promise<unknown>;
 		};
 	};
 };
@@ -94,6 +110,8 @@ export function createStartCommand(): Command {
 			process.on("SIGTERM", () => shutdown("SIGTERM"));
 			try {
 				system = await bootstrap();
+				await system.automationRunner.initialize();
+				
 				const enabledChannels: string[] = [];
 				const channels = system.config.channels;
 				const channelManager = new ChannelManager(system.connectionManager);
@@ -192,6 +210,18 @@ export function createStartCommand(): Command {
 							msg.content,
 							msg.channelId,
 						)) {
+							const statusMatch = chunk.match(/^\0STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?\0$/);
+							if (statusMatch) {
+								if (channel?.type === "telegram") {
+									const tgBot = (channel as unknown as TelegramBotLike).bot;
+									let action = "typing";
+									if (statusMatch[2]?.includes("image")) action = "upload_photo";
+									else if (statusMatch[2]?.includes("voice") || statusMatch[2]?.includes("audio")) action = "record_voice";
+									
+									tgBot.api.sendChatAction(msg.senderId, action).catch(() => {});
+								}
+								continue;
+							}
 							accumulated += chunk;
 							if (
 								channel?.type === "telegram" &&
@@ -246,9 +276,33 @@ export function createStartCommand(): Command {
 							},
 						);
 						// Final formatted response
-						if (channel?.type === "telegram") {
-							const tgBot = (channel as unknown as TelegramBotLike).bot;
-							const parts = splitTelegramMessage(accumulated, 4096);
+					if (channel?.type === "telegram") {
+						const tgBot = (channel as unknown as TelegramBotLike).bot;
+						accumulated = stripToolMarkers(accumulated);
+						
+						const mediaUrls: { url: string; alt: string; buffer?: Buffer; mimeType?: string }[] = [];
+						if (accumulated.includes("/api/media/file/")) {
+								const imgRegex = /!\[([^\]]*)\]\((https?:\/\/[^\s)]+|\/api\/media\/file\/[^\s)]+)\)/g;
+								let match;
+								while ((match = imgRegex.exec(accumulated)) !== null) {
+									mediaUrls.push({ alt: match[1], url: match[2] });
+								}
+								accumulated = accumulated.replace(imgRegex, "").trim();
+
+								for (const media of mediaUrls) {
+									if (!media.url.startsWith("/api/media/file/")) continue;
+									try {
+										const resolved = await mediaContext.resolve(media.url);
+										media.buffer = resolved.buffer;
+										media.mimeType = resolved.mimeType;
+									} catch (err) {
+										console.warn(`Could not resolve media url: ${media.url}`);
+									}
+								}
+							}
+
+							if (accumulated.length > 0) {
+								const parts = splitTelegramMessage(accumulated, 4096);
 							for (let i = 0; i < parts.length; i++) {
 								const part = parts[i];
 								if (!part) continue;
@@ -282,6 +336,23 @@ export function createStartCommand(): Command {
 									} catch {}
 								}
 							}
+							}
+
+							for (const media of mediaUrls) {
+								if (!media.buffer) continue;
+								const inputFile = new InputFile(media.buffer);
+								try {
+									if (media.mimeType?.startsWith("audio/")) {
+										await tgBot.api.sendAudio(msg.senderId, inputFile, { caption: media.alt });
+									} else if (media.mimeType?.startsWith("video/")) {
+										await tgBot.api.sendVideo(msg.senderId, inputFile, { caption: media.alt });
+									} else {
+										await tgBot.api.sendPhoto(msg.senderId, inputFile, { caption: media.alt });
+									}
+								} catch (err) {
+									console.error("Error sending media to telegram", err);
+								}
+							}
 						} else {
 							await channelManager.send(
 								msg.channelId,
@@ -294,6 +365,9 @@ export function createStartCommand(): Command {
 						console.error("Error processing channel message:", err);
 					} finally {
 						if (typingInterval) clearInterval(typingInterval);
+						try {
+							targetAgent.runConsolidation().catch((e) => console.error("LTM consolidation error:", e));
+						} catch {}
 					}
 				});
 
@@ -316,6 +390,10 @@ export function createStartCommand(): Command {
 					envVarManager: system.envVarManager,
 					mcpManager: system.mcpManager,
 					embedFn: system.embedFn,
+					userProfileManager: system.userProfileManager,
+					agentRuntime: system.agentRuntime,
+					toolRegistry: system.toolRegistry,
+					dailyMemory: system.dailyMemory,
 				});
 				server.onMessage((clientId, message) => {
 					let conversationId: string | undefined;
@@ -390,7 +468,7 @@ export function createStartCommand(): Command {
 								);
 								for await (const chunk of stream) {
 									const statusMatch = chunk.match(
-										/^\0STATUS:(\w+)(?::([\w-]+))?\0$/,
+										/^\0STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?\0$/,
 									);
 									if (statusMatch) {
 										server.send(clientId, {
@@ -400,6 +478,7 @@ export function createStartCommand(): Command {
 											payload: {
 												agentStatus: statusMatch[1],
 												toolName: statusMatch[2] || null,
+												uiIconB64: statusMatch[3] || null,
 												conversationId,
 											},
 											timestamp: Date.now(),
@@ -448,6 +527,10 @@ export function createStartCommand(): Command {
 									timestamp: Date.now(),
 								});
 							}
+							
+							try {
+								targetAgent.runConsolidation().catch((e) => console.error("LTM consolidation error (web):", e));
+							} catch {}
 						} catch (err) {
 							const errorMessage =
 								err instanceof Error ? err.message : "Failed to process message";

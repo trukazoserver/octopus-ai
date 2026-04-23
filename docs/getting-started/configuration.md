@@ -359,6 +359,11 @@ La configuración de memoria controla cómo el agente retiene, olvida y asocia i
 | **Recuperación** | `retrieval.maxResults` | Máximos recuerdos por búsqueda | `10` |
 | **Recuperación** | `retrieval.minRelevance` | Relevancia mínima para incluir | `0.6` |
 
+El runtime actual añade dos capas persistentes gestionadas automáticamente por el core:
+
+- **Resumen diario global** para mantener continuidad dentro del mismo día
+- **Perfil de usuario** para recordar idioma, preferencias, estilo y expertise
+
 > Más detalles sobre la arquitectura: [Sistema de Memoria](../architecture/memory.md)
 
 ---
@@ -600,35 +605,48 @@ node packages/cli/dist/index.js config set server.host "0.0.0.0"
 
 ## 🔐 Variables de Entorno
 
-Puedes sobrescribir cualquier valor del JSON con variables de entorno. Útil para Docker o CI/CD.
+El cargador de configuración soporta interpolación de variables dentro de `config.json` mediante el formato `${NOMBRE_DE_VARIABLE}`. Además, algunos subsistemas leen variables de proceso directas, como `OCTOPUS_LOG_LEVEL`.
 
-| Variable de Entorno | Equivalente JSON | Ejemplo |
-|---|---|---|
-| `OCTOPUS_SERVER_PORT` | `server.port` | `18789` |
-| `OCTOPUS_AI_DEFAULT` | `ai.default` | `zhipu/glm-5.1` |
-| `OCTOPUS_OPENAI_API_KEY` | `ai.providers.openai.apiKey` | `sk-...` |
-| `OCTOPUS_ANTHROPIC_API_KEY` | `ai.providers.anthropic.apiKey` | `sk-ant-...` |
-| `OCTOPUS_LOCAL_BASE_URL` | `ai.providers.local.baseUrl` | `http://localhost:11434` |
-| `OCTOPUS_STORAGE_PATH` | `storage.path` | `~/.octopus/data/octopus.db` |
+Ejemplo de `config.json` con interpolación:
+
+```json
+{
+  "ai": {
+    "providers": {
+      "openai": {
+        "apiKey": "${OPENAI_API_KEY}"
+      }
+    }
+  },
+  "storage": {
+    "path": "${OCTOPUS_DB_PATH}"
+  }
+}
+```
 
 **Ejemplo en Linux/macOS:**
 ```bash
-export OCTOPUS_OPENAI_API_KEY="sk-..."
+export OPENAI_API_KEY="sk-..."
+export OCTOPUS_DB_PATH="$HOME/.octopus/data/octopus.db"
 node packages/cli/dist/index.js chat
 ```
 
 **Ejemplo en Windows (PowerShell):**
 ```powershell
-$env:OCTOPUS_OPENAI_API_KEY = "sk-..."
+$env:OPENAI_API_KEY = "sk-..."
+$env:OCTOPUS_DB_PATH = "$HOME/.octopus/data/octopus.db"
 node packages/cli/dist/index.js chat
 ```
 
 **Ejemplo en Docker (.env):**
 ```env
-OCTOPUS_SERVER_PORT=18789
-OCTOPUS_AI_DEFAULT=openai/gpt-4o
-OCTOPUS_OPENAI_API_KEY=sk-...
+ZHIPU_API_KEY=tu-key-zhipu
+OPENAI_API_KEY=sk-...
+OCTOPUS_DB_PATH=/data/db/octopus.db
+OCTOPUS_LOG_LEVEL=info
 ```
+
+En el `docker-compose.yml` del proyecto también se exponen variables frecuentes para proveedores y canales, como `ZHIPU_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` y `TELEGRAM_BOT_TOKEN`.
 
 ---
 

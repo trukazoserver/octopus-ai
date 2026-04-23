@@ -10,4 +10,7 @@ export type {
 	CodeExecutionResult,
 	CodeExecutorConfig,
 } from "./code-executor.js";
-export { createMediaTools } from "./media.js";
+export { createMediaTools, mediaContext } from "./media.js";
+export { createAutomationTools } from "./automation.js";
+export { createTeamTools } from "./team.js";
+export { createSandboxTools } from "./sandbox-tool.js";

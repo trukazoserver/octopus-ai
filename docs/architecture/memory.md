@@ -4,7 +4,7 @@
   <img src="../../logo aplicacion.png" alt="Octopus AI" width="80" />
 </p>
 
-Octopus AI implementa un sistema de memoria inspirado en la memoria humana, con memoria a corto plazo (STM) y memoria a largo plazo (LTM).
+Octopus AI implementa un sistema de memoria inspirado en la memoria humana, con memoria a corto plazo (STM), memoria a largo plazo (LTM), resumen diario global y perfil persistente del usuario.
 
 ---
 
@@ -12,12 +12,14 @@ Octopus AI implementa un sistema de memoria inspirado en la memoria humana, con 
 
 A diferencia de los chatbots tradicionales que "olvidan" todo al cerrar la conversación, Octopus AI recuerda información importante de forma permanente. Esto se logra mediante una arquitectura de dos capas:
 
-```
+```text
 Mensaje del usuario
         ↓
-   Memoria a Corto Plazo (STM) ← Contexto activo de la conversación
+   Memoria a Corto Plazo (STM) ← Conversación activa
+        ├── Resumen diario global ← Actividad reciente del día
+        ├── Perfil del usuario ← Preferencias, idioma, expertise
         ↓ (consolidación automática)
-   Memoria a Largo Plazo (LTM) ← Base de datos permanente
+   Memoria a Largo Plazo (LTM) ← Hechos, eventos y procedimientos
         ↓ (recuperación)
    Contexto enriquecido para la IA → Respuesta personalizada
 ```
@@ -55,6 +57,13 @@ La LTM es el almacenamiento permanente donde se guardan los recuerdos importante
 | **Semántica** | Hechos y conocimientos del usuario | "María trabaja como diseñadora" |
 | **Asociativa** | Relaciones entre recuerdos | "María → trabaja en → Proyecto X → usa React" |
 
+### Capas adicionales del runtime actual
+
+| Capa | Descripción | Archivo |
+|---|---|---|
+| **Resumen diario global** | Comprime los mensajes recientes del día en una narrativa breve reutilizable por el runtime | `daily.ts` |
+| **Perfil de usuario** | Aprende estilo de comunicación, idioma preferido, expertise, decisiones y patrones de trabajo | `user-profile.ts` |
+
 ### Parámetros
 
 | Parámetro | Valor por defecto | Descripción |
@@ -69,6 +78,8 @@ El sistema usa SQLite con la extensión VSS (Vector Similarity Search) para bús
 - Buscar recuerdos por **significado**, no solo por palabras exactas
 - Encontrar información relacionada aunque se exprese de forma diferente
 - Operar completamente en local, sin depender de servicios externos
+
+Adicionalmente, el core exporta `FTSSearchEngine`, un componente basado en SQLite FTS5 para despliegues que necesiten complementar la búsqueda vectorial con coincidencias exactas de texto.
 
 ---
 
@@ -166,6 +177,12 @@ Cuando la IA necesita recordar algo, usa un sistema de puntuación ponderada:
 | `maxResults` | `10` | Máximo recuerdos recuperados por consulta |
 | `maxTokens` | `2000` | Máximo tokens de recuerdos inyectados en el contexto |
 
+En el runtime actual, la recuperación de memorias se combina además con:
+
+- **Resumen diario global** para mantener continuidad dentro del mismo día
+- **Perfil del usuario** para ajustar idioma, tono, preferencias y expertise conocidos
+- **Contexto STM filtrado por conversación/canal** para no mezclar historiales activos distintos
+
 ---
 
 ## Cómo Afecta la Memoria al Usuario Final
@@ -176,12 +193,19 @@ Cuando la IA necesita recordar algo, usa un sistema de puntuación ponderada:
 - Proyectos y temas que discutes frecuentemente
 - Instrucciones que repites (ej: "siempre responde en español")
 - Contexto de conversaciones anteriores
+- Tu estilo de comunicación e idioma preferido
+- Resumen operativo de lo ocurrido durante el día
 
 ### Lo que la IA NO recuerda
 
 - Mensajes triviales ("hola", "gracias")
 - Información por debajo del umbral de importancia (`0.5`)
 - Recuerdos que han decaído completamente (>365 días sin acceso)
+
+### Dónde inspeccionarlo
+
+- CLI: `memory stats`, `memory search`, `memory consolidate`
+- Dashboard/API: STM, resumen diario, perfil del usuario y memorias recientes
 
 ### Gestionar la memoria manualmente
 

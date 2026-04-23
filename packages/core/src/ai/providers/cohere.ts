@@ -61,6 +61,7 @@ export class CohereProvider extends BaseLLMProvider {
 				Authorization: `Bearer ${this.config.apiKey}`,
 			},
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -146,6 +147,7 @@ export class CohereProvider extends BaseLLMProvider {
 				Authorization: `Bearer ${this.config.apiKey}`,
 			},
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -169,15 +171,23 @@ export class CohereProvider extends BaseLLMProvider {
 			for (const line of lines) {
 				const trimmed = line.trim();
 				if (!trimmed) continue;
+				let event: any;
 				try {
-					const event = JSON.parse(trimmed);
-					if (
-						event.type === "content-delta" &&
-						event.delta?.message?.content?.text
-					) {
-						yield { content: event.delta.message.content.text };
-					}
-				} catch {}
+					event = JSON.parse(trimmed);
+				} catch {
+					continue; // ignore malformed chunks
+				}
+
+				if (event.error) {
+					throw new Error(event.error.message || JSON.stringify(event.error));
+				}
+
+				if (
+					event.type === "content-delta" &&
+					event.delta?.message?.content?.text
+				) {
+					yield { content: event.delta.message.content.text };
+				}
 			}
 		}
 	}

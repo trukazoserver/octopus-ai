@@ -1,71 +1,92 @@
+# =============================================================================
+# Octopus AI — Production Dockerfile
+# Multi-stage build for optimized container size and security
+# =============================================================================
+
+# Stage 1: Build
+# Install all dependencies, compile TypeScript, prune dev dependencies
 FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@10.8.0 --activate
+# Install build tools for native deps (better-sqlite3)
+RUN apk add --no-cache python3 make g++ git
 
-RUN apk add --no-cache python3 make g++
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+# Copy workspace config
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json tsconfig.json turbo.json ./
+
+# Copy all package.json files first (for better layer caching)
 COPY packages/core/package.json packages/core/
 COPY packages/cli/package.json packages/cli/
-COPY packages/plugins/coding/package.json packages/plugins/coding/
-COPY packages/plugins/customer-support/package.json packages/plugins/customer-support/
-COPY packages/plugins/data/package.json packages/plugins/data/
-COPY packages/plugins/document-gen/package.json packages/plugins/document-gen/
-COPY packages/plugins/file-manager/package.json packages/plugins/file-manager/
-COPY packages/plugins/productivity/package.json packages/plugins/productivity/
-COPY packages/plugins/research/package.json packages/plugins/research/
-COPY packages/plugins/sales/package.json packages/plugins/sales/
+COPY packages/web/package.json packages/web/
 
+# Install dependencies
 RUN pnpm install --frozen-lockfile
 
-COPY tsconfig.base.json ./
-COPY packages/core/ packages/core/
-COPY packages/cli/ packages/cli/
-COPY packages/plugins/ packages/plugins/
+# Copy source code
+COPY packages/ packages/
 
-RUN pnpm build
+# Build everything
+RUN pnpm run build
 
+# Prune dev dependencies
 RUN pnpm prune --prod
 
+# =============================================================================
+# Stage 2: Runtime
+# Minimal image with only production dependencies
+# =============================================================================
 FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
-RUN apk add --no-cache python3
+# Install runtime-only native dependencies
+RUN apk add --no-cache tini curl
 
-RUN corepack enable && corepack prepare pnpm@10.8.0 --activate
+# Create non-root user
+RUN addgroup -g 1001 octopus && \
+    adduser -D -u 1001 -G octopus octopus
 
+# Copy production files from builder
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/core/dist ./packages/core/dist
-COPY --from=builder /app/packages/core/package.json ./packages/core/package.json
+COPY --from=builder /app/packages/core/package.json ./packages/core/
 COPY --from=builder /app/packages/cli/dist ./packages/cli/dist
-COPY --from=builder /app/packages/cli/package.json ./packages/cli/package.json
-COPY --from=builder /app/packages/plugins/coding/dist ./packages/plugins/coding/dist
-COPY --from=builder /app/packages/plugins/coding/package.json ./packages/plugins/coding/package.json
-COPY --from=builder /app/packages/plugins/customer-support/dist ./packages/plugins/customer-support/dist
-COPY --from=builder /app/packages/plugins/customer-support/package.json ./packages/plugins/customer-support/package.json
-COPY --from=builder /app/packages/plugins/data/dist ./packages/plugins/data/dist
-COPY --from=builder /app/packages/plugins/data/package.json ./packages/plugins/data/package.json
-COPY --from=builder /app/packages/plugins/document-gen/dist ./packages/plugins/document-gen/dist
-COPY --from=builder /app/packages/plugins/document-gen/package.json ./packages/plugins/document-gen/package.json
-COPY --from=builder /app/packages/plugins/file-manager/dist ./packages/plugins/file-manager/dist
-COPY --from=builder /app/packages/plugins/file-manager/package.json ./packages/plugins/file-manager/package.json
-COPY --from=builder /app/packages/plugins/productivity/dist ./packages/plugins/productivity/dist
-COPY --from=builder /app/packages/plugins/productivity/package.json ./packages/plugins/productivity/package.json
-COPY --from=builder /app/packages/plugins/research/dist ./packages/plugins/research/dist
-COPY --from=builder /app/packages/plugins/research/package.json ./packages/plugins/research/package.json
-COPY --from=builder /app/packages/plugins/sales/dist ./packages/plugins/sales/dist
-COPY --from=builder /app/packages/plugins/sales/package.json ./packages/plugins/sales/package.json
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY --from=builder /app/packages/cli/package.json ./packages/cli/
+COPY --from=builder /app/packages/core/node_modules ./packages/core/node_modules
+COPY --from=builder /app/package.json ./
 
-RUN mkdir -p /root/.octopus/data /root/.octopus/skills /root/.octopus/plugins
+# Create data directories
+RUN mkdir -p /data/db /data/skills /data/logs /data/workspace && \
+    chown -R octopus:octopus /data
 
-EXPOSE 18789
+# Copy SOUL.md templates
+COPY --chown=octopus:octopus docker/templates/ /data/workspace/
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:18789/api/health || exit 1
+# Switch to non-root user
+USER octopus
 
-CMD ["sh", "-c", "node packages/cli/dist/index.js config set server.host '0.0.0.0' && node packages/cli/dist/index.js start"]
+# Environment
+ENV NODE_ENV=production
+ENV OCTOPUS_DATA_DIR=/data
+ENV OCTOPUS_DB_PATH=/data/db/octopus.db
+ENV OCTOPUS_LOG_LEVEL=info
+ENV OCTOPUS_DAEMON_MODE=true
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Expose ports
+# 3000 = HTTP API / Health
+# 5173 = Web Dashboard (if included)
+EXPOSE 3000
+
+# Use tini as init
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start in daemon mode
+CMD ["node", "packages/cli/dist/index.js", "daemon"]

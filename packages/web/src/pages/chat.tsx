@@ -34,6 +34,7 @@ interface WsPayload {
 	conversationId?: string;
 	agentStatus?: string;
 	toolName?: string;
+	uiIconB64?: string;
 }
 
 interface WsMessage {
@@ -141,6 +142,8 @@ marked.use({ renderer: mediaRenderer });
 function renderMarkdown(text: string): string {
 	try {
 		let processed = text;
+		// Strip think tags so they aren't displayed in the text bubble
+		processed = processed.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
 		// Detect bare media URLs and convert to embeddable media
 		processed = processed.replace(
 			/(?:^|\n)\s*(https?:\/\/[^\s<>"']+\/(?:api\/media\/file\/)?[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|svg|mp3|wav|ogg|m4a|mp4|webm)|\/api\/media\/file\/[^\s<>"']+)/gi,
@@ -243,6 +246,7 @@ export const ChatPage: React.FC = () => {
 		"idle" | "thinking" | "tool" | "code" | "responding"
 	>("idle");
 	const [agentToolName, setAgentToolName] = useState<string | null>(null);
+	const [agentToolIcon, setAgentToolIcon] = useState<string | null>(null);
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
 	const [editingTitle, setEditingTitle] = useState("");
 	const [mediaPreviewSrc, setMediaPreviewSrc] = useState<string | null>(null);
@@ -597,6 +601,7 @@ export const ChatPage: React.FC = () => {
 					setIsStreaming(false);
 					setAgentStatus("idle");
 					setAgentToolName(null);
+					setAgentToolIcon(null);
 					pendingIdRef.current = "";
 					loadConversations();
 					inputRef.current?.focus();
@@ -610,6 +615,8 @@ export const ChatPage: React.FC = () => {
 							agentStatus as "thinking" | "tool" | "code" | "responding",
 						);
 						setAgentToolName(msg.payload?.toolName || null);
+						const iconB64 = msg.payload?.uiIconB64;
+						setAgentToolIcon(iconB64 ? atob(iconB64) : null);
 					}
 				} else if (msg.type === "error") {
 					const errMsg = msg.payload?.error || "Error desconocido";
@@ -1618,36 +1625,23 @@ export const ChatPage: React.FC = () => {
 											</>
 										) : agentStatus === "tool" ? (
 											<>
-												{agentToolName?.includes("search") ? (
-													<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" strokeWidth="2" style={{ animation: "pulse 2s infinite ease-in-out" }}>
-														<circle cx="11" cy="11" r="8" />
-														<line x1="21" y1="21" x2="16.65" y2="16.65" />
-													</svg>
-												) : agentToolName?.includes("file") || agentToolName === "manage_workspace" ? (
-													<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2" style={{ animation: "pulse 2s infinite ease-in-out" }}>
-														<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-														<polyline points="14 2 14 8 20 8" />
-														<line x1="16" y1="13" x2="8" y2="13" />
-														<line x1="16" y1="17" x2="8" y2="17" />
-														<polyline points="10 9 9 9 8 9" />
-													</svg>
-												) : agentToolName?.includes("image") || agentToolName?.includes("nano-banana") ? (
-													<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ec4899" strokeWidth="2" style={{ animation: "pulse 2s infinite ease-in-out" }}>
-														<rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-														<circle cx="8.5" cy="8.5" r="1.5" />
-														<polyline points="21 15 16 10 5 21" />
-													</svg>
+												{agentToolIcon ? (
+													<span
+														style={{ display: "flex", width: 18, height: 18, color: "#f59e0b" }}
+														// biome-ignore lint/security/noDangerouslySetInnerHtml: controlled server SVG
+														dangerouslySetInnerHTML={{ __html: agentToolIcon }}
+													/>
 												) : (
 													<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" style={{ animation: "spin 1.5s linear infinite" }}>
-														<path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" style={{ animation: "pulse 2s infinite ease-in-out", transformOrigin: "center" }} />
+														<path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
 													</svg>
 												)}
-												<span style={{ fontSize: "0.85rem", color: agentToolName?.includes("search") ? "#0ea5e9" : agentToolName?.includes("file") || agentToolName === "manage_workspace" ? "#8b5cf6" : agentToolName?.includes("image") || agentToolName?.includes("nano-banana") ? "#ec4899" : "#f59e0b", fontWeight: 600 }}>
-													{agentToolName?.includes("search") ? "Buscando en configuración/archivos..." : agentToolName?.includes("file") || agentToolName === "manage_workspace" ? "Creando/editando archivo..." : agentToolName?.includes("image") || agentToolName?.includes("nano-banana") ? "Procesando imagen (Nano Banana)..." : "Ejecutando herramienta..."}
+												<span style={{ fontSize: "0.85rem", color: "#f59e0b", fontWeight: 600 }}>
+													{agentToolName ? agentToolName.replace(/_/g, " ") : "Ejecutando herramienta..."}
 												</span>
 												<div style={{ display: "flex", gap: "3px", marginLeft: "4px" }}>
 													{[0, 1, 2].map((i) => (
-														<div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: agentToolName?.includes("search") ? "#0ea5e9" : agentToolName?.includes("file") || agentToolName === "manage_workspace" ? "#8b5cf6" : agentToolName?.includes("image") || agentToolName?.includes("nano-banana") ? "#ec4899" : "#f59e0b", opacity: 0.5, animation: "pulse 1s infinite ease-in-out", animationDelay: `${i * 0.2}s` }} />
+														<div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#f59e0b", opacity: 0.5, animation: "pulse 1s infinite ease-in-out", animationDelay: `${i * 0.2}s` }} />
 													))}
 												</div>
 											</>

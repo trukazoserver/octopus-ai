@@ -13,6 +13,8 @@ import {
 	EnvVarManager,
 	LLMRouter,
 	LongTermMemory,
+	GlobalDailyMemory,
+	UserProfileManager,
 	MCPManager,
 	MemoryConsolidator,
 	MemoryRetrieval,
@@ -30,9 +32,16 @@ import {
 	createDatabaseAdapter,
 	createFileSystemTools,
 	createMediaTools,
+	createAutomationTools,
+	createTeamTools,
+	createSandboxTools,
 	createShellTool,
 	createVectorStore,
 	expandTildePath,
+	AutomationRunner,
+	BrowserTool,
+	Scheduler,
+	createLogger,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
@@ -49,6 +58,8 @@ export interface OctopusSystem {
 	router: LLMRouter;
 	stm: ShortTermMemory;
 	ltm: LongTermMemory;
+	dailyMemory: GlobalDailyMemory;
+	userProfileManager: UserProfileManager;
 	memoryRetrieval: MemoryRetrieval;
 	memoryConsolidator: MemoryConsolidator;
 	skillRegistry: SkillRegistry;
@@ -68,16 +79,41 @@ export interface OctopusSystem {
 	envVarManager: EnvVarManager;
 	taskManager: TaskManager;
 	automationManager: AutomationManager;
+	automationRunner: AutomationRunner;
+	systemScheduler: Scheduler;
 	mcpManager: MCPManager;
 	embedFn: EmbeddingFunction;
 	shutdown: () => Promise<void>;
 }
 
-const embedFn: EmbeddingFunction = async (_text: string) => {
+const embedFn: EmbeddingFunction = async (text: string) => {
 	const dim = 384;
-	const vec = Array.from({ length: dim }, () => Math.random() * 2 - 1);
+	const vec = new Array(dim).fill(0);
+	
+	const cleanText = text.toLowerCase().replace(/[^\w\s]/g, "");
+	const words = cleanText.split(/\s+/).filter((w) => w.length > 0);
+	
+	if (words.length === 0) {
+		return vec;
+	}
+
+	for (let i = 0; i < words.length; i++) {
+		const word = words[i];
+		let hash = 0;
+		for (let j = 0; j < word.length; j++) {
+			hash = (hash << 5) - hash + word.charCodeAt(j);
+			hash |= 0; // Convert to 32bit integer
+		}
+		
+		const idx = Math.abs(hash) % dim;
+		vec[idx] += 1;
+	}
+	
 	const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-	return vec.map((v) => v / norm);
+	if (norm > 0) {
+		return vec.map((v) => v / norm);
+	}
+	return vec;
 };
 
 export async function bootstrap(options?: {
@@ -149,6 +185,19 @@ export async function bootstrap(options?: {
 	});
 	await router.initialize();
 
+	const dailyMemory = new GlobalDailyMemory(db, router, tokenCounter, {
+		maxTokens: 1500,
+		triggerMessageCount: 10,
+	});
+	await dailyMemory.initialize();
+
+	const userProfileManager = new UserProfileManager(db, router, {
+		minTurnsForUpdate: 5,
+		maxDecisions: 50,
+		maxWorkflows: 20
+	});
+	await userProfileManager.initialize();
+
 	const skillRegistry = new SkillRegistry(db, embedFn);
 	const skillLoader = new SkillLoader(skillRegistry, embedFn, {
 		maxTokenBudget: config.skills.loading.maxTokenBudget,
@@ -217,6 +266,73 @@ export async function bootstrap(options?: {
 
 	const mediaTools = createMediaTools();
 	for (const tool of mediaTools) {
+		toolRegistry.register(tool);
+	}
+
+	const automationTools = createAutomationTools(automationManager);
+	for (const tool of automationTools) {
+		toolRegistry.register(tool);
+	}
+
+	const teamTools = createTeamTools(async (task, role) => {
+		const workerStm = new ShortTermMemory({
+			maxTokens: config.memory?.shortTerm?.maxTokens ?? 16000,
+			scratchPadSize: config.memory?.shortTerm?.scratchPadSize ?? 10,
+			autoEviction: config.memory?.shortTerm?.autoEviction ?? true,
+			tokenCounter: new TokenCounter(),
+		});
+		
+		const workerRuntime = new AgentRuntime(
+			{ 
+				...agentConfig, 
+				id: `worker-${Date.now()}`, 
+				name: `Worker (${role})`, 
+				systemPrompt: `You are a specialist worker deployed by Octopus Manager. Your role is: ${role}. Solve the task directly and report back concisely. Respond ONLY with the final result, no small talk.` 
+			},
+			router,
+			workerStm,
+			memoryRetrieval,
+			memoryConsolidator,
+			skillLoader
+		);
+		workerRuntime.setToolSystem(toolRegistry, toolExecutor);
+		
+		return await workerRuntime.processMessage(task, "system_worker");
+	});
+	
+	for (const tool of teamTools) {
+		toolRegistry.register(tool);
+	}
+
+
+	// Browser tools (auto-detect Chrome/Edge/Brave)
+	const browserPaths = [
+		"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+		"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+		"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+		"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+		"/usr/bin/google-chrome",
+		"/usr/bin/chromium-browser",
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+	];
+	let detectedBrowserPath: string | null = null;
+	for (const p of browserPaths) {
+		if (existsSync(p)) {
+			detectedBrowserPath = p;
+			break;
+		}
+	}
+	if (detectedBrowserPath) {
+		const browserTool = new BrowserTool({ executablePath: detectedBrowserPath });
+		for (const tool of browserTool.createTools()) {
+			toolRegistry.register(tool);
+		}
+		console.log(`  ✓ Browser tools enabled (${detectedBrowserPath.split(/[/\\]/).pop()})`);
+	}
+
+	// Sandbox tools (Docker-based isolated execution)
+	const sandboxTools = createSandboxTools();
+	for (const tool of sandboxTools) {
 		toolRegistry.register(tool);
 	}
 
@@ -305,6 +421,7 @@ export async function bootstrap(options?: {
 					let handlerFn:
 						| ((
 								params: Record<string, unknown>,
+								context?: any
 						  ) => Promise<{
 								success: boolean;
 								output?: string;
@@ -316,7 +433,7 @@ export async function bootstrap(options?: {
 						name: toolName,
 						description: toolDesc,
 						parameters: toolParams,
-						handler: async (params: Record<string, unknown>) => {
+						handler: async (params: Record<string, unknown>, context) => {
 							if (!handlerFn) {
 								try {
 									const mod = await import(pathToFileURL(codePath).href);
@@ -330,7 +447,7 @@ export async function bootstrap(options?: {
 								}
 							}
 							try {
-								const result = await handlerFn?.(params);
+								const result = await handlerFn?.(params, context);
 								return {
 									success: result?.success ?? true,
 									output: result?.output ?? "",
@@ -377,12 +494,15 @@ You can:
 - Execute code in JavaScript, TypeScript, Python, and Bash using the execute_code tool
 - Create new reusable tools using the create_tool tool
 - Read, write, and manage files using filesystem tools and manage_workspace
-- Read, write, and manage files using filesystem tools and manage_workspace
+- Browse and search the media library using list_media
 - Manage environment variables using the manage_env tool
 - Run shell commands using run_command
 - Install packages using install_package
 - Save images, audio, and video to the media library using save_media
 - Remember information across conversations via your memory system
+- Schedule recurring automated tasks using schedule_task (cron expressions)
+- List all scheduled automations using list_tasks
+- Delegate complex sub-tasks to a specialist worker agent using delegate_task
 
 IMPORTANT - Tool Usage Guidelines:
 1. When calling execute_code, you MUST provide BOTH "code" (the source code) AND "language" (one of: javascript, typescript, python, bash).
@@ -391,13 +511,33 @@ IMPORTANT - Tool Usage Guidelines:
 4. When generating images, audio, or video: first generate the file using execute_code, then save it with save_media, and finally include the returned URL in your response using markdown: ![description](url)
 5. When managing API keys or environment variables, ALWAYS use manage_env. NEVER try shell commands like export/set and NEVER write .env files manually.
 6. If a tool already returns a saved media URL, use that URL directly and DO NOT call save_media again.
+7. To find previously generated media, use the list_media tool. NEVER use manage_workspace to search for media files — media is stored in a separate library, not the workspace.
 
-IMPORTANT - Media Generation:
+IMPORTANT - Media Handling:
+- Media files (images, audio, video) are stored in the Octopus media library, NOT in the workspace filesystem.
+- To find a previously generated image, use list_media (optionally with search/type filters).
+- Media URLs from your previous messages in the conversation history (like /api/media/file/...) are always valid and can be reused directly.
 - When you generate an image, audio, or video file, ALWAYS use the save_media tool to save it to the library.
-- When using execute_code for media generation, write the media to a file first and use the generated artifact. NEVER print large base64 blobs to stdout.
 - The save_media tool requires: "data" (base64-encoded file content), "filename" (with extension), and "mimetype" (e.g. image/png).
 - After saving, include the media in your response using markdown image/audio syntax.
 - Example flow: execute_code to generate image -> save_media to store it -> respond with ![description](/api/media/file/xxx.png)
+
+IMPORTANT - Autonomy & Delegation:
+- When the user asks you to do something periodically (e.g. "every morning", "cada hora", "todos los domingos"), create an automation using schedule_task with the appropriate cron expression.
+- When a request is extremely complex and involves multiple independent sub-problems (e.g. "research X AND write code for Y AND create a document for Z"), use delegate_task to assign isolated sub-tasks to specialist worker agents. Each worker runs independently with its own context. This prevents your memory from overflowing and speeds up execution.
+- You are the Manager. Workers report back to you. Synthesize their results into a coherent final answer for the user.
+
+IMPORTANT - Browser Automation:
+- You have browser tools: browser_navigate, browser_screenshot, browser_click, browser_type, browser_eval, browser_read_page.
+- Use these to visit websites, fill forms, scrape content, and interact with web applications on behalf of the user.
+- Typical flow: browser_navigate to a URL -> browser_read_page to extract text -> process the content.
+- You can also take screenshots with browser_screenshot and interact with page elements.
+
+IMPORTANT - Sandbox Execution:
+- Use sandbox_execute to run potentially dangerous or untrusted code in an isolated Docker container.
+- The container has no network access, limited memory, and is destroyed after execution.
+- Use this when the user asks you to run code you generated, test scripts, or execute commands that could affect the system.
+- If Docker is not installed, inform the user they need Docker Desktop for sandbox features.
 
 Be proactive: if a task could benefit from code execution, use your tools.
 Always be concise, helpful, and thorough.`,
@@ -414,6 +554,8 @@ Always be concise, helpful, and thorough.`,
 		skillLoader,
 	);
 	agentRuntime.setToolSystem(toolRegistry, toolExecutor);
+	agentRuntime.setDailyMemory(dailyMemory);
+	agentRuntime.setUserProfileManager(userProfileManager);
 	await agentRuntime.initialize();
 
 	const mainAgentRecord: AgentRecord = {
@@ -472,12 +614,64 @@ Always be concise, helpful, and thorough.`,
 
 	const skillMarketplace = new SkillMarketplace(skillRegistry, embedFn);
 
+	const automationRunner = new AutomationRunner(automationManager, async (actionType, actionConfig) => {
+		if (actionType === "agent_prompt") {
+			const prompt = String(actionConfig.prompt) || "Tick";
+			console.log(`[CronRunner] Spawning background prompt to Agent: ${prompt}`);
+			// Start background turn by bypassing human input requirements.
+			const systemTurn = {
+				role: "user" as const,
+				content: `[SYSTEM TRIGGER] ${prompt}`,
+				timestamp: new Date()
+			};
+			agentRuntime.stm.add(systemTurn);
+			const context = await memoryRetrieval.retrieveForContext(systemTurn.content);
+			
+			const stream = agentRuntime.processMessageStream(systemTurn.content, "system_cron");
+			for await (const _chunk of stream) {
+				// Fire and forget
+			}
+		}
+	});
+
+	const systemScheduler = new Scheduler();
+	const bootstrapLogger = createLogger("bootstrap");
+	systemScheduler.schedule("daily-memory-dump", "0 0 * * *", async () => {
+		try {
+			bootstrapLogger.info("Executing End-of-Day Global Memory Flush...");
+			const todayStr = new Date().toISOString().split("T")[0];
+			const dump = await dailyMemory.dumpAndClear(todayStr);
+			if (dump) {
+				const fullContent = `Daily Digest:\n${dump}`;
+				const embedding = await embedFn(fullContent);
+				const memoryItem = {
+					id: `daily_${todayStr}`,
+					type: "episodic" as const,
+					content: fullContent,
+					embedding,
+					importance: 0.9,
+					accessCount: 0,
+					lastAccessed: new Date(),
+					createdAt: new Date(),
+					associations: [],
+					source: { channelId: "system_cron", conversationId: `daily_${todayStr}` },
+					metadata: { type: "daily_summary", date: todayStr }
+				};
+				await ltm.store(memoryItem);
+			}
+		} catch (err) {
+			bootstrapLogger.error(`Error during End-of-Day LTM sync: ${err}`);
+		}
+	});
+
 	return {
 		config,
 		db,
 		router,
 		stm,
 		ltm,
+		dailyMemory,
+		userProfileManager,
 		memoryRetrieval,
 		memoryConsolidator,
 		skillRegistry,
@@ -495,11 +689,14 @@ Always be concise, helpful, and thorough.`,
 		agentMessageBus,
 		taskManager,
 		automationManager,
+		automationRunner,
+		systemScheduler,
 		envVarManager,
 		mcpManager,
 		toolExecutor,
 		embedFn,
 		shutdown: async () => {
+			systemScheduler.cancel("daily-memory-dump");
 			await mcpManager.shutdown();
 			connectionManager.shutdown();
 			await db.close();

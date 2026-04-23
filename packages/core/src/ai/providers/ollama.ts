@@ -41,6 +41,7 @@ export class OllamaProvider extends BaseLLMProvider {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -109,6 +110,7 @@ export class OllamaProvider extends BaseLLMProvider {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -132,34 +134,42 @@ export class OllamaProvider extends BaseLLMProvider {
 			for (const line of lines) {
 				const trimmed = line.trim();
 				if (!trimmed) continue;
+				let parsed: any;
 				try {
-					const parsed = JSON.parse(trimmed) as {
+					parsed = JSON.parse(trimmed) as {
+						error?: string;
 						message?: { content?: string };
 						done?: boolean;
 						done_reason?: string;
 						prompt_eval_count?: number;
 						eval_count?: number;
 					};
+				} catch {
+					continue; // ignore malformed chunks
+				}
 
-					if (parsed.message?.content) {
-						yield { content: parsed.message.content };
-					}
-					if (parsed.done) {
-						const chunk: LLMChunk = {
-							finishReason: parsed.done_reason ?? "stop",
+				if (parsed.error) {
+					throw new Error(parsed.error);
+				}
+
+				if (parsed.message?.content) {
+					yield { content: parsed.message.content };
+				}
+				if (parsed.done) {
+					const chunk: LLMChunk = {
+						finishReason: parsed.done_reason ?? "stop",
+					};
+					if (parsed.prompt_eval_count != null || parsed.eval_count != null) {
+						const pt = parsed.prompt_eval_count ?? 0;
+						const ct = parsed.eval_count ?? 0;
+						chunk.usage = {
+							promptTokens: pt,
+							completionTokens: ct,
+							totalTokens: pt + ct,
 						};
-						if (parsed.prompt_eval_count != null || parsed.eval_count != null) {
-							const pt = parsed.prompt_eval_count ?? 0;
-							const ct = parsed.eval_count ?? 0;
-							chunk.usage = {
-								promptTokens: pt,
-								completionTokens: ct,
-								totalTokens: pt + ct,
-							};
-						}
-						yield chunk;
 					}
-				} catch {}
+					yield chunk;
+				}
 			}
 		}
 	}
@@ -168,6 +178,7 @@ export class OllamaProvider extends BaseLLMProvider {
 		try {
 			const response = await fetch(`${this.baseUrl}/api/tags`, {
 				method: "GET",
+				signal: AbortSignal.timeout(5000),
 			});
 			return response.ok;
 		} catch {

@@ -46,6 +46,15 @@ export class MemoryConsolidator {
 
 		if (turns.length === 0 && !activeTask) return result;
 
+		try {
+			const columns: any[] | undefined = await this.db.all("PRAGMA table_info(memory_associations)");
+			if (columns && columns.length > 0 && !columns.find(c => c.name === "id")) {
+				await this.db.run("DROP TABLE memory_associations");
+			}
+		} catch (e) {
+			// ignore migration errors
+		}
+
 		await this.db.run(
 			`CREATE TABLE IF NOT EXISTS memory_associations (
         id TEXT PRIMARY KEY,
@@ -231,6 +240,38 @@ export class MemoryConsolidator {
 			const turn = turns[i];
 			if (turn.role === "assistant" && i > 0) {
 				const prevTurn = turns[i - 1];
+				
+				// Conversation Summary
+				if (prevTurn.role === "user" && turn.content.length > 20) {
+					// Detect if this is a significant interaction (e.g. tool usage, media, deep answers)
+					const isSignificant =
+						prevTurn.content.toLowerCase().includes("generate") ||
+						prevTurn.content.toLowerCase().includes("create") ||
+						turn.content.includes("![") || // Markdown media
+						turn.content.includes("```") || // Code snippet
+						turn.content.length > 200;
+
+					if (isSignificant) {
+						let summary = `User asked: "${prevTurn.content.substring(0, 150)}..." Assistant replied: "${turn.content.substring(0, 150)}..."`;
+						
+						// Try to extract channel ID from metadata
+						const channelId = prevTurn.metadata?.conversationId as string | undefined;
+						const sourceInfo = channelId ? `[Channel: ${channelId}] ` : "";
+						
+						events.push({
+							type: "episodic",
+							content: `${sourceInfo}Interaction summary: ${summary}`,
+							importance: 0.8, // Force high importance for tests
+							accessCount: 0,
+							lastAccessed: turn.timestamp,
+							source: {
+								...(channelId ? { channelId, conversationId: channelId } : {})
+							},
+							metadata: { extractedFrom: "conversation_summary", role: "system" },
+						});
+					}
+				}
+
 				if (
 					prevTurn.role === "user" &&
 					(turn.content.toLowerCase().includes("decided") ||

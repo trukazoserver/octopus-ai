@@ -4,113 +4,109 @@
   <img src="../../logo aplicacion.png" alt="Octopus AI" width="100" />
 </p>
 
-Octopus AI es un monorepo pnpm con Turborepo, compuesto por 11 paquetes TypeScript.
+Octopus AI es un monorepo pnpm con Turborepo que agrupa el runtime del agente, las interfaces de usuario, la capa HTTP/WebSocket y el despliegue Docker alrededor de un mismo core TypeScript.
 
 ## Estructura de Paquetes
 
-```
+```text
 octopus-ai/
 ├── packages/
-│   ├── core/                    # SDK principal
+│   ├── core/
 │   │   └── src/
-│   │       ├── ai/              # Router LLM + 10 proveedores
-│   │       ├── agent/           # Runtime, planificador, coordinador
-│   │       ├── config/          # Schema TypeBox, loader, defaults
-│   │       ├── connection/      # Proxy, retry, circuit breaker, health
-│   │       ├── memory/          # STM, LTM, retrieval, consolidación
+│   │       ├── ai/              # Router LLM, proveedores, tokenizer
+│   │       ├── agent/           # Runtime, reflection, heartbeat, daemon
+│   │       ├── channels/        # Integraciones de mensajería
+│   │       ├── config/          # Loader, schema, defaults, env manager, SOUL parser
+│   │       ├── memory/          # STM, LTM, consolidación, daily memory, perfil
 │   │       ├── plugins/         # Engine, registry, marketplace, MCP
-│   │       ├── skills/          # Registry, forge, improver, evaluator
-│   │       ├── storage/         # SQLite (better-sqlite3) + migraciones
-│   │       ├── tools/           # Registry, executor, filesystem, shell
-│   │       ├── transport/       # HTTP + WebSocket server/client
-│   │       ├── utils/           # Logger, crypto, helpers, benchmark
+│   │       ├── skills/          # Registry, loader, forge, improver, evaluator
+│   │       ├── storage/         # SQLite y adaptadores de base de datos
+│   │       ├── tasks/           # Tareas, cron, automations, webhooks
+│   │       ├── team/            # Delegación y permisos multi-agente
+│   │       ├── tools/           # Registry, executor, browser, sandbox, media
+│   │       ├── transport/       # HTTP + WebSocket + API administrativa
+│   │       ├── utils/           # Logger, métricas, crypto, helpers
 │   │       └── voice/           # TTS, STT, wake word
-│   ├── cli/                     # CLI interactivo (Commander.js + Ink)
+│   ├── cli/                     # CLI interactivo y bootstrap del sistema
 │   ├── desktop/                 # App desktop (Electron)
 │   ├── web/                     # Dashboard web (Vite + React)
-│   └── plugins/                 # 7 plugins integrados
-│       ├── productivity/        # Tareas, calendario, notas
-│       ├── coding/              # Code review, refactoring, debugging
-│       ├── research/            # Búsqueda, papers, resúmenes
-│       ├── file-manager/        # Operaciones de archivos
-│       ├── sales/               # CRM, pipeline, follow-ups
-│       ├── customer-support/    # Tickets, respuestas, escalamiento
-│       └── data/                # SQL, gráficos, ETL
-├── scripts/
-│   └── install.mjs              # Instalador automático
-└── docs/                        # Documentación
+│   └── plugins/                 # Plugins oficiales
+├── docs/                        # Guías y referencia
+└── docker/                      # Dockerfile, compose y plantillas de despliegue
 ```
 
 ## Módulos Core
 
-| Módulo | Archivos | Descripción |
-|--------|----------|-------------|
-| `ai` | `router.ts`, `types.ts`, `tokenizer.ts`, `providers/*.ts` | Router LLM con 10 proveedores, failover automático, reasoning/thinking |
-| `agent` | `runtime.ts`, `planner.ts`, `coordinator.ts` | Runtime de agente, planificación de tareas, coordinación multi-agente |
-| `config` | `schema.ts`, `loader.ts`, `validator.ts`, `defaults.ts` | Schema TypeBox validado, loader con env vars, defaults inteligentes |
-| `connection` | `manager.ts`, `network.ts`, `retry.ts`, `circuit-breaker.ts` | Detección de proxy, reintentos con backoff, circuit breaker, health check |
-| `memory` | `stm.ts`, `ltm.ts`, `retrieval.ts`, `consolidator.ts`, `factory.ts` | Memoria a corto/largo plazo, recuperación ponderada, consolidación automática |
-| `plugins` | `engine.ts`, `registry.ts`, `marketplace.ts`, `mcp/client.ts` | Engine de plugins, registry, marketplace, cliente MCP |
-| `skills` | `registry.ts`, `forge.ts`, `improver.ts`, `evaluator.ts`, `loader.ts` | Registry de skills, creación automática, mejora continua, A/B testing |
-| `storage` | `database.ts`, `sqlite.ts`, `migrations/` | Adaptador SQLite con better-sqlite3, migraciones versionadas |
-| `tools` | `registry.ts`, `executor.ts`, `filesystem.ts`, `shell.ts`, `browser.ts` | Registry de herramientas, ejecutor con sandboxing, automatización browser |
-| `transport` | `server.ts`, `client.ts`, `protocol.ts` | Servidor HTTP + WebSocket, cliente, protocolo de mensajes |
-| `utils` | `logger.ts`, `helpers.ts`, `crypto.ts`, `benchmark.ts`, `security.ts` | Logging estructurado, encriptación AES-256, hashing bcrypt, benchmarks |
+| Módulo | Archivos principales | Descripción |
+|---|---|---|
+| `ai` | `router.ts`, `providers/*.ts` | Router con múltiples proveedores, razonamiento y cambio dinámico de provider/modelo |
+| `agent` | `runtime.ts`, `reflection.ts`, `heartbeat.ts`, `daemon.ts` | Ejecución conversacional, autoevaluación, trabajo proactivo y operación continua |
+| `memory` | `stm.ts`, `ltm.ts`, `consolidator.ts`, `daily.ts`, `user-profile.ts` | Contexto activo, memoria persistente, resumen diario y perfil del usuario |
+| `skills` | `loader.ts`, `forge.ts`, `improver.ts`, `evaluator.ts` | Carga progresiva, creación y mejora continua de skills |
+| `tools` | `registry.ts`, `executor.ts`, `browser.ts`, `sandbox-tool.ts`, `media.ts` | Catálogo de tools del agente, ejecución, browser automation, sandbox y media |
+| `tasks` | `manager.ts`, `automation-manager.ts`, `cron-runner.ts`, `webhooks.ts` | Tareas del workspace, automatizaciones y disparadores programados |
+| `team` | `delegation.ts`, `permissions.ts` | Delegación a workers especializados y control de permisos |
+| `transport` | `server.ts`, `client.ts`, `protocol.ts` | API HTTP/WebSocket, streaming, gestión de media y endpoints del dashboard |
+| `channels` | `telegram/`, `manager.ts` | Canales de mensajería externos con memoria compartida |
+| `config` | `loader.ts`, `defaults.ts`, `schema.ts`, `env-manager.ts` | Configuración persistente, validación y variables gestionadas |
+| `storage` | `database.ts`, `sqlite.ts`, `migrations/` | Persistencia local del sistema |
 
-## Proveedores de IA
+## Flujo Principal
 
-Cada proveedor extiende `BaseLLMProvider` con `chat()` y `chatStream()`:
-
-| Proveedor | Clase | Razonamiento | Parámetro |
-|-----------|-------|-------------|-----------|
-| OpenAI | `OpenAIProvider` | o-series: `reasoning.effort` + `summary` | `providers/openai.ts` |
-| Anthropic | `AnthropicProvider` | `thinking.type` + `budget_tokens` | `providers/anthropic.ts` |
-| Google | `GoogleProvider` | `thinkingConfig.thinkingBudget` | `providers/google.ts` |
-| Z.ai | `ZhipuProvider` | `thinking.type` (enabled/disabled) | `providers/zhipu.ts` |
-| DeepSeek | `OpenAICompatibleProvider` | Automático (deepseek-reasoner) | `providers/openai-compatible.ts` |
-| Mistral | `OpenAICompatibleProvider` | `prompt_mode: "reasoning"` | `providers/openai-compatible.ts` |
-| xAI | `OpenAICompatibleProvider` | `reasoning_effort: "low"\|"high"` | `providers/openai-compatible.ts` |
-| Cohere | `CohereProvider` | reasoning_tokens en meta | `providers/cohere.ts` |
-| OpenRouter | `OpenAICompatibleProvider` | Passthrough | `providers/openai-compatible.ts` |
-| Ollama | `OllamaProvider` | N/A (local) | `providers/ollama.ts` |
-
-## Flujo de Datos
-
+```text
+Entrada del usuario o trigger del sistema
+                ↓
+        Canal / WebSocket / API HTTP
+                ↓
+            AgentRuntime
+                ├── User Profile + Daily Memory
+                ├── Memory Retrieval (STM + LTM)
+                ├── Skill Loader
+                ├── LLM Router
+                └── Tool Executor
+                       ├── filesystem / shell / code
+                       ├── browser / media
+                       ├── sandbox / delegation
+                       └── automations
+                ↓
+         Respuesta y eventos de estado
+                ↓
+   Consolidación + perfil + resumen diario
+                ↓
+            Persistencia en SQLite
 ```
-Entrada del Usuario
-       ↓
-  Canal (CLI/WebSocket/Discord/...)
-       ↓
-  Agent Runtime
-       ├── Memory Retrieval (STM + LTM) → Contexto relevante
-       ├── Skill Loader → Carga skills relevantes (progressive loading)
-       ├── LLM Router → Selecciona proveedor (default → fallback)
-       │       ↓
-       │   AI Provider (ej: Z.ai GLM-5.1)
-       │       ├── Reasoning/Thinking (si habilitado)
-       │       ├── Tool Calls (si solicita herramientas)
-       │       └── Response
-       ↓
-  Memory Consolidation (STM → LTM)
-       ├── Extrae hechos (facts)
-       ├── Extrae eventos (events)
-       ├── Extrae procedimientos (procedures)
-       └── Construye asociaciones (knowledge graph)
-       ↓
-  Respuesta → Canal → Usuario
-```
+
+## Servicios Autónomos
+
+| Servicio | Qué hace |
+|---|---|
+| `HeartbeatDaemon` | Evalúa una checklist periódica con el LLM y decide si actuar o permanecer en silencio |
+| `AutomationRunner` | Registra jobs cron persistidos y lanza prompts del agente sin intervención humana |
+| `ReflectionEngine` | Revisa tareas complejas y detecta patrones reutilizables para skills |
+| `OctopusDaemon` | Coordina heartbeat, automatizaciones, canales y health checks como proceso de larga vida |
+
+## Capa HTTP/WebSocket
+
+El servidor de transporte expone la API usada por el dashboard y por integraciones locales:
+
+- salud y estado del sistema
+- configuración y memoria
+- skills, tools dinámicas y ejecución de código
+- conversaciones, agentes, tareas y automatizaciones
+- variables de entorno, MCP, canales y biblioteca multimedia
+
+Referencia completa: [API HTTP y WebSocket](../api/http.md)
 
 ## Tecnologías
 
 | Tecnología | Uso |
-|-----------|-----|
-| TypeScript 5.8 | Lenguaje principal, strict mode |
-| Node.js 22 | Runtime (ESM) |
+|---|---|
+| TypeScript 5.8 | Lenguaje principal |
+| Node.js 22 | Runtime |
 | pnpm 10 + Turborepo | Monorepo y build |
-| better-sqlite3 | Base de datos SQLite (bindings nativos C++) |
-| TypeBox | Schema de configuración validado en runtime |
-| Commander.js | CLI framework |
-| Ink (React) | TUI del CLI |
+| SQLite | Persistencia local |
+| Commander.js | CLI |
+| Ink | Interfaz TUI del CLI |
 | Vite + React | Dashboard web |
 | Electron | App desktop |
-| Vitest | Testing (130 tests) |
+| Vitest | Testing |

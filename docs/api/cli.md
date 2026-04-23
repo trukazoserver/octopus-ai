@@ -37,7 +37,7 @@ node packages/cli/dist/index.js setup
 
 ### `start`
 
-Inicia el servidor de Octopus AI.
+Inicia el backend HTTP/WebSocket de Octopus AI, registra los canales habilitados y expone la API usada por el panel web.
 
 ```bash
 node packages/cli/dist/index.js start [opciones]
@@ -45,21 +45,27 @@ node packages/cli/dist/index.js start [opciones]
 
 | Opción | Descripción |
 |---|---|
-| `--port <puerto>` | Puerto del servidor (sobrescribe config) |
-| `--host <host>` | Host de escucha |
-| `--transport <tipo>` | Tipo de transporte: `auto`, `stdio`, `sse`, `streamable-http` |
+| `--channel <name>` | Inicia solo un canal específico además del servidor |
 
 **Ejemplos:**
 ```bash
-# Iniciar en el puerto por defecto (18789)
+# Iniciar con la configuración actual
 node packages/cli/dist/index.js start
 
-# Iniciar en un puerto específico
-node packages/cli/dist/index.js start --port 8080
+# Iniciar solo Telegram además de la API
+node packages/cli/dist/index.js start --channel telegram
 
-# Accesible desde otros dispositivos en la red
-node packages/cli/dist/index.js start --host 0.0.0.0 --port 18789
+# Cambiar puerto y host desde la configuración antes de arrancar
+node packages/cli/dist/index.js config set server.port 3000
+node packages/cli/dist/index.js config set server.host "0.0.0.0"
+node packages/cli/dist/index.js start
 ```
+
+**Expone además:**
+
+- `GET /health` y `GET /api/health`
+- API administrativa para memoria, skills, tools, tareas, agentes y canales
+- streaming WebSocket usado por el dashboard
 
 ---
 
@@ -249,6 +255,8 @@ node packages/cli/dist/index.js memory search "proyecto web"
 node packages/cli/dist/index.js memory consolidate
 ```
 
+> El resumen diario global y el perfil persistente del usuario se inspeccionan desde el dashboard o la [API HTTP](./http.md).
+
 ---
 
 ### `skills`
@@ -419,5 +427,6 @@ node packages/cli/dist/index.js agent -m "El deploy se ha completado exitosament
 ## Siguientes Pasos
 
 - ⚙️ [Configuración](../getting-started/configuration.md) — Ajustar todos los parámetros
+- 🌐 [API HTTP y WebSocket](./http.md) — Operar el backend desde integraciones o el dashboard
 - 🚀 [Inicio Rápido](../getting-started/quick-start.md) — Primeros pasos
 - 🔧 [Solución de Problemas](../advanced/troubleshooting.md) — Errores comunes

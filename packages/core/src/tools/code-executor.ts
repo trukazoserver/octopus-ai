@@ -289,6 +289,7 @@ export class CodeExecutor {
 			name: "execute_code",
 			description:
 				"Execute code in JavaScript, TypeScript, Python, or Bash. Returns stdout, stderr, and any generated artifacts. Use this to run calculations, process data, test code snippets, or perform any computational task.",
+			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>`,
 			parameters: {
 				code: {
 					type: "string",
@@ -354,6 +355,7 @@ export class CodeExecutor {
 			name: "install_package",
 			description:
 				"Install an npm or pip package to extend available capabilities. Use 'npm' for Node.js packages or 'pip' for Python packages.",
+			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`,
 			parameters: {
 				package: {
 					type: "string",
@@ -412,6 +414,7 @@ export class CodeExecutor {
 			name: "create_tool",
 			description:
 				"Create a new tool/plugin that can be used by Octopus AI. Provide a name, description, the code implementation, and the tool will be saved and registered for future use. The code should export a default function that receives params and returns a result.",
+			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>`,
 			parameters: {
 				name: {
 					type: "string",
@@ -423,6 +426,10 @@ export class CodeExecutor {
 					type: "string",
 					description: "What the tool does",
 					required: true,
+				},
+				uiIcon: {
+					type: "string",
+					description: "An SVG markup string for the tool's icon. Should include CSS animation (e.g. style='animation: pulse 2s infinite ease-in-out') to make it look dynamic.",
 				},
 				code: {
 					type: "string",
@@ -478,10 +485,13 @@ export class CodeExecutor {
 				const codePath = path.join(toolDir, `index.${ext}`);
 				await writeFile(codePath, code, "utf-8");
 
+				const uiIcon = params.uiIcon ? String(params.uiIcon) : undefined;
+
 				const manifest = {
 					name,
 					version: "1.0.0",
 					description,
+					uiIcon,
 					language,
 					type: "dynamic-tool",
 					parameters: JSON.parse(parametersSchema),
@@ -509,6 +519,7 @@ export class CodeExecutor {
 			name: "manage_workspace",
 			description:
 				"Manage the workspace directory. List, read, write, or delete files in the Octopus AI workspace. Use this to organize project files, save outputs, and manage artifacts.",
+			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`,
 			parameters: {
 				action: {
 					type: "string",

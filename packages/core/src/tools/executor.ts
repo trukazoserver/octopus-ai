@@ -1,7 +1,8 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolDefinition, ToolResult } from "./registry.js";
+import type { ToolDefinition, ToolResult, ToolContext } from "./registry.js";
 import type { ToolRegistry } from "./registry.js";
+import { mediaContext } from "./media.js";
 
 export class ToolExecutor {
 	private registry: ToolRegistry;
@@ -83,7 +84,10 @@ export class ToolExecutor {
 		}
 
 		try {
-			const result = await tool.handler(params);
+			const context: ToolContext = {
+				media: mediaContext
+			};
+			const result = await tool.handler(params, context);
 			return result;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);

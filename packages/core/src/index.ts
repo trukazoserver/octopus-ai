@@ -34,7 +34,7 @@ export type {
 	ProviderInfo,
 } from "./ai/index.js";
 
-export { AgentRuntime, TaskPlanner, AgentCoordinator } from "./agent/index.js";
+export { AgentRuntime, TaskPlanner, AgentCoordinator, ReflectionEngine, HeartbeatDaemon, OctopusDaemon } from "./agent/index.js";
 export type {
 	AgentConfig,
 	TaskState,
@@ -42,6 +42,15 @@ export type {
 	TaskDescription,
 	TaskResult,
 	AgentMessage,
+	ReflectionConfig,
+	ReflectionResult,
+	TaskEvaluation,
+	HeartbeatConfig,
+	HeartbeatItem,
+	HeartbeatResult,
+	HeartbeatAction,
+	DaemonConfig,
+	DaemonStatus,
 } from "./agent/index.js";
 
 export {
@@ -74,6 +83,9 @@ export {
 	MemoryConsolidator,
 	SqliteVectorStore,
 	createVectorStore,
+	FTSSearchEngine,
+	UserProfileManager,
+	GlobalDailyMemory,
 } from "./memory/index.js";
 export type {
 	MemoryType,
@@ -84,6 +96,13 @@ export type {
 	ScoredMemory,
 	VectorSearchResult,
 	EmbeddingFunction,
+	FTSSearchConfig,
+	FTSResult,
+	UserProfile,
+	UserModelingConfig,
+	UserDecision,
+	WorkflowPattern,
+	GlobalDailyMemoryConfig,
 } from "./memory/index.js";
 
 export {
@@ -116,6 +135,10 @@ export {
 	CodeExecutor,
 	createCodeTools,
 	createMediaTools,
+	mediaContext,
+	createAutomationTools,
+	createTeamTools,
+	createSandboxTools,
 } from "./tools/index.js";
 export type {
 	ToolDefinition,
@@ -162,6 +185,19 @@ export { Scheduler } from "./tasks/cron.js";
 export { WebhookServer } from "./tasks/webhooks.js";
 
 export { PermissionManager } from "./team/permissions.js";
+export { DelegationManager } from "./team/delegation.js";
+export type { DelegationConfig, DelegationTask, DelegationPlan } from "./team/delegation.js";
+
+export { MetricsCollector } from "./utils/metrics.js";
+export type {
+	MetricEvent,
+	MetricsDashboard,
+	ToolMetricsSummary,
+	LLMMetricsSummary,
+} from "./utils/metrics.js";
+
+export { SoulParser } from "./config/soul-parser.js";
+export type { SoulConfig, HeartbeatChecklist } from "./config/soul-parser.js";
 
 export {
 	createLogger,
@@ -203,6 +239,7 @@ export type {
 	Automation,
 	CreateAutomationInput,
 } from "./tasks/automation-manager.js";
+export { AutomationRunner } from "./tasks/cron-runner.js";
 
 export { EnvVarManager } from "./config/env-manager.js";
 export type { EnvVar } from "./config/env-manager.js";
@@ -213,3 +250,5 @@ export type { MCPManagedServer } from "./plugins/mcp/manager.js";
 export { ChannelManager } from "./channels/manager.js";
 export { TelegramChannel } from "./channels/telegram/index.js";
 export type { Channel, ChannelMessage } from "./channels/types.js";
+
+export { InputFile } from "grammy";

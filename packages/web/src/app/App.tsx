@@ -5,7 +5,7 @@ import { AgentsPage } from "../pages/agents.js";
 import { AutomationsPage } from "../pages/automations.js";
 import { ChannelsPage } from "../pages/channels/Channels.js";
 import { ChatPage } from "../pages/chat.js";
-import { CodePage } from "../pages/code.js";
+import { ToolsPage } from "../pages/tools.js";
 import { DashboardPage } from "../pages/dashboard/Dashboard.js";
 import { MediaLibraryPage } from "../pages/media-library.js";
 import { MemoryPage } from "../pages/memory.js";
@@ -52,7 +52,7 @@ const NAV_GROUPS: NavGroup[] = [
 			{ id: "agents", icon: "🤖", label: "Agentes" },
 			{ id: "tasks", icon: "✅", label: "Tareas" },
 			{ id: "automations", icon: "⚡", label: "Automatizaciones" },
-			{ id: "code", icon: "💻", label: "Código & Tools" },
+			{ id: "code", icon: "🔧", label: "Herramientas" },
 		],
 	},
 	{
@@ -120,7 +120,7 @@ export const App: React.FC = () => {
 			case "chat":
 				return <ChatPage />;
 			case "code":
-				return <CodePage />;
+				return <ToolsPage />;
 			case "memory":
 				return <MemoryPage />;
 			case "skills":

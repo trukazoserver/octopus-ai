@@ -1,6 +1,14 @@
 import fs from "node:fs";
-import puppeteer from "puppeteer-core";
+import vanillaPuppeteer from "puppeteer-core";
+import { addExtra } from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { ToolDefinition, ToolResult } from "./registry.js";
+
+// biome-ignore lint/suspicious/noExplicitAny: Bypassing type mismatch between puppeteer-extra and new puppeteer-core versions
+const puppeteer = addExtra(vanillaPuppeteer as any);
+puppeteer.use(StealthPlugin());
+
+const BROWSER_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
 
 export class BrowserTool {
 	private config: { executablePath: string };
@@ -31,8 +39,18 @@ export class BrowserTool {
 			this.browser = await puppeteer.launch({
 				executablePath: this.config.executablePath,
 				headless: true,
+				args: [
+					'--no-sandbox',
+					'--disable-setuid-sandbox',
+					'--disable-blink-features=AutomationControlled'
+				]
 			});
 			this.page = await this.browser.newPage();
+			// Additional stealth techniques
+			await this.page.setBypassCSP(true);
+			
+			// Optional: Set a common user agent
+			await this.page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 		} catch (error) {
 			this.browser = null;
 			this.page = null;
@@ -53,6 +71,7 @@ export class BrowserTool {
 			{
 				name: "browser_navigate",
 				description: "Navigate the browser to a specific URL",
+				uiIcon: BROWSER_SVG,
 				parameters: {
 					url: {
 						type: "string",
@@ -91,6 +110,7 @@ export class BrowserTool {
 				name: "browser_screenshot",
 				description:
 					"Take a screenshot of the current page and return it as base64",
+				uiIcon: BROWSER_SVG,
 				parameters: {},
 				handler: async (): Promise<ToolResult> => {
 					try {
@@ -114,6 +134,7 @@ export class BrowserTool {
 			{
 				name: "browser_click",
 				description: "Click an element on the page using a CSS selector",
+				uiIcon: BROWSER_SVG,
 				parameters: {
 					selector: {
 						type: "string",
@@ -155,6 +176,7 @@ export class BrowserTool {
 			{
 				name: "browser_type",
 				description: "Type text into an input element using a CSS selector",
+				uiIcon: BROWSER_SVG,
 				parameters: {
 					selector: {
 						type: "string",
@@ -201,6 +223,7 @@ export class BrowserTool {
 			{
 				name: "browser_eval",
 				description: "Execute JavaScript code within the context of the page",
+				uiIcon: BROWSER_SVG,
 				parameters: {
 					script: {
 						type: "string",
@@ -235,6 +258,43 @@ export class BrowserTool {
 							success: false,
 							output: "",
 							error: error instanceof Error ? error.message : String(error),
+						};
+					}
+				},
+			},
+			{
+				name: "browser_read_page",
+				description:
+					"Extract the visible text content from the current browser page. Useful for reading articles, examining search results, or scraping data from websites.",
+				uiIcon: BROWSER_SVG,
+				parameters: {},
+				handler: async (): Promise<ToolResult> => {
+					try {
+						await this.init();
+						const text = await this.page.evaluate(`
+							(() => {
+								const clone = document.body.cloneNode(true);
+								for (const el of clone.querySelectorAll('script, style, noscript, svg, img')) {
+									el.remove();
+								}
+								return (clone.innerText || '')
+									.replace(/\\n{3,}/g, '\\n\\n')
+									.trim()
+									.slice(0, 15000);
+							})()
+						`);
+						const title = await this.page.title();
+						const url = this.page.url();
+						return {
+							success: true,
+							output: `Page: ${title}\nURL: ${url}\n\n${text || "(empty page)"}`,
+						};
+					} catch (error) {
+						return {
+							success: false,
+							output: "",
+							error:
+								error instanceof Error ? error.message : String(error),
 						};
 					}
 				},

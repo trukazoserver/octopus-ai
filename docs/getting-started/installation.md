@@ -303,14 +303,16 @@ docker compose -f docker/docker-compose.yml up -d --build
 Crea un archivo `.env` en la carpeta `docker/`:
 
 ```env
-OCTOPUS_SERVER_PORT=18789
-OCTOPUS_AI_DEFAULT=zhipu/glm-5.1
-OCTOPUS_OPENAI_API_KEY=sk-tu-api-key
+ZHIPU_API_KEY=tu-key-zhipu
+# OPENAI_API_KEY=sk-tu-api-key
+# ANTHROPIC_API_KEY=sk-ant-...
+# GOOGLE_API_KEY=tu-key-google
+# TELEGRAM_BOT_TOKEN=123456:ABCDEF
 ```
 
 ### Persistencia de datos
 
-El contenedor monta `~/.octopus/data` como volumen, así que tus datos se conservan entre reinicios.
+El despliegue actual usa un volumen persistente para `/data` y un bind mount para el workspace del contenedor, así que la base de datos, skills, logs y plantillas operativas sobreviven entre reinicios.
 
 > Para instrucciones completas de Docker (instalación, configuración, actualización y solución de problemas), consulta la [Guía dedicada de Docker](./docker.md).
 

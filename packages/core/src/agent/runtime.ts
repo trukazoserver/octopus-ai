@@ -7,9 +7,11 @@ import type {
 	LLMToolCall,
 } from "../ai/types.js";
 import type { MemoryConsolidator } from "../memory/consolidator.js";
+import type { GlobalDailyMemory } from "../memory/daily.js";
 import type { MemoryRetrieval } from "../memory/retrieval.js";
 import type { ShortTermMemory } from "../memory/stm.js";
 import type { ConsolidationResult, MemoryContext } from "../memory/types.js";
+import type { UserProfileManager } from "../memory/user-profile.js";
 import type { SkillLoader } from "../skills/loader.js";
 import type { LoadedSkill } from "../skills/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
@@ -17,7 +19,7 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
 import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
 
-const MAX_TOOL_ITERATIONS = 15;
+const MAX_TOOL_ITERATIONS = 30;
 
 export class AgentRuntime {
 	private config: AgentConfig;
@@ -28,6 +30,8 @@ export class AgentRuntime {
 	private skillLoader: SkillLoader;
 	private toolRegistry?: ToolRegistry;
 	private toolExecutor?: ToolExecutor;
+	private dailyMemory?: GlobalDailyMemory;
+	private userProfileManager?: UserProfileManager;
 
 	constructor(
 		config: AgentConfig,
@@ -48,6 +52,14 @@ export class AgentRuntime {
 	setToolSystem(registry: ToolRegistry, executor: ToolExecutor): void {
 		this.toolRegistry = registry;
 		this.toolExecutor = executor;
+	}
+
+	setDailyMemory(dailyMemory: GlobalDailyMemory): void {
+		this.dailyMemory = dailyMemory;
+	}
+
+	setUserProfileManager(manager: UserProfileManager): void {
+		this.userProfileManager = manager;
 	}
 
 	async initialize(): Promise<void> {
@@ -80,7 +92,7 @@ export class AgentRuntime {
 			keywords: message.split(/\s+/).filter((w) => w.length > 3),
 		});
 
-		const context = this.buildContext(memories, skills, message);
+		const context = await this.buildContext(memories, skills, message, channelId);
 		const tools = this.getAvailableTools();
 
 		const response = await this.executeWithTools(context, tools);
@@ -93,7 +105,15 @@ export class AgentRuntime {
 		};
 		this.stm.add(assistantTurn);
 
+		if (this.userProfileManager) {
+			this.userProfileManager.updateFromConversation("owner", [userTurn, assistantTurn])
+				.catch(err => console.error("Failed to update user profile:", err));
+		}
+
 		this.updateActiveTask(response.content);
+
+		this.dailyMemory?.addMessage(message, "user", channelId || "system").catch(() => {});
+		this.dailyMemory?.addMessage(response.content, "assistant", channelId || "system").catch(() => {});
 
 		return response.content;
 	}
@@ -121,7 +141,7 @@ export class AgentRuntime {
 			keywords: message.split(/\s+/).filter((w) => w.length > 3),
 		});
 
-		const context = this.buildContext(memories, skills, message);
+		const context = await this.buildContext(memories, skills, message, channelId);
 		const tools = this.getAvailableTools();
 
 		const messages = [...context];
@@ -147,11 +167,22 @@ export class AgentRuntime {
 				function: { name: string; arguments: string };
 			}> = [];
 			let hasContent = false;
+			let isThinking = false;
 
 			try {
 				yield "\x00STATUS:thinking\x00";
 				for await (const chunk of this.llmRouter.chatStream(request)) {
+					if (chunk.thinking) {
+						if (!isThinking) {
+							isThinking = true;
+						}
+						// Do not yield thinking text to stream
+					}
+					
 					if (chunk.content) {
+						if (isThinking) {
+							isThinking = false;
+						}
 						chunkContent += chunk.content;
 						fullResponse += chunk.content;
 						hasContent = true;
@@ -189,6 +220,13 @@ export class AgentRuntime {
 				(tc) => tc.function.name.length > 0,
 			);
 
+			if (!hasContent && validToolCalls.length === 0) {
+				const warnMsg = "\n\n⚠️ The AI model returned an empty response. This may be due to a content filter, context length limit, or an API error.";
+				fullResponse += warnMsg;
+				yield warnMsg;
+				break;
+			}
+
 			if (
 				validToolCalls.length === 0 ||
 				!this.toolExecutor ||
@@ -207,9 +245,12 @@ export class AgentRuntime {
 				const isCodeTool =
 					toolCall.function.name === "execute_code" ||
 					toolCall.function.name === "run_shell";
-				yield isCodeTool
-					? `\x00STATUS:code:${toolCall.function.name}\x00`
-					: `\x00STATUS:tool:${toolCall.function.name}\x00`;
+				const toolDef = this.toolRegistry?.get(toolCall.function.name);
+				const uiIconB64 = toolDef?.uiIcon
+					? Buffer.from(toolDef.uiIcon).toString("base64")
+					: "";
+				const statusType = isCodeTool ? "code" : "tool";
+				yield `\x00STATUS:${statusType}:${toolCall.function.name}:${uiIconB64}\x00`;
 
 				let params: Record<string, unknown>;
 				try {
@@ -227,13 +268,12 @@ export class AgentRuntime {
 					? (typeof toolResult.output === "string" ? toolResult.output : JSON.stringify(toolResult.output, null, 2))
 					: `Error: ${toolResult.error ?? "Unknown error"}`;
 
-				// Yield tool result summary to user
-				const toolMarker = toolResult.success
-					? `⚙️ ${toolCall.function.name} completed`
-					: `⚠️ ${toolCall.function.name} error: ${toolResult.error ?? "Unknown"}`;
-				yield `
-${toolMarker}
-`;
+				// Emit tool-done status (intercepted by frontend, not shown as text)
+				if (toolResult.success) {
+					yield `\x00STATUS:tool_done:${toolCall.function.name}:\x00`;
+				} else {
+					yield `\x00STATUS:tool_error:${toolCall.function.name}:\x00`;
+				}
 
 				fullResponse += `
 <!-- tool:${toolCall.function.name}:${toolResult.success ? "ok" : "error"} -->
@@ -249,6 +289,13 @@ ${toolMarker}
 			fullResponse += "\n\n";
 		}
 
+		// If we exhausted all iterations, warn the user
+		if (iterations >= MAX_TOOL_ITERATIONS) {
+			const limitMsg = "\n\n⚠️ He alcanzado el límite máximo de herramientas en una sola respuesta (30 iteraciones). Puedo continuar si me lo pides.";
+			fullResponse += limitMsg;
+			yield limitMsg;
+		}
+
 		const assistantTurn: ConversationTurn = {
 			role: "assistant",
 			content: fullResponse,
@@ -256,6 +303,15 @@ ${toolMarker}
 			metadata: channelId ? { conversationId: channelId } : undefined,
 		};
 		this.stm.add(assistantTurn);
+		
+		if (this.userProfileManager) {
+			this.userProfileManager.updateFromConversation("owner", [userTurn, assistantTurn])
+				.catch(err => console.error("Failed to update user profile:", err));
+		}
+
+		this.dailyMemory?.addMessage(message, "user", channelId || "system").catch(() => {});
+		this.dailyMemory?.addMessage(fullResponse, "assistant", channelId || "system").catch(() => {});
+		
 		this.updateActiveTask(fullResponse);
 	}
 
@@ -296,7 +352,7 @@ ${toolMarker}
 				};
 				messages.push(assistantMessage);
 
-				for (const toolCall of response.toolCalls) {
+				const toolPromises = response.toolCalls.map(async (toolCall) => {
 					let params: Record<string, unknown>;
 					try {
 						params = JSON.parse(toolCall.function.arguments);
@@ -304,7 +360,7 @@ ${toolMarker}
 						params = {};
 					}
 
-					const toolResult: ToolResult = await this.toolExecutor.execute(
+					const toolResult: ToolResult = await this.toolExecutor!.execute(
 						toolCall.function.name,
 						params,
 					);
@@ -313,15 +369,27 @@ ${toolMarker}
 						? toolResult.output
 						: `Error: ${toolResult.error ?? "Unknown error"}`;
 
-					toolCallsExecuted.push({
+					return {
+						toolCallId: toolCall.id,
 						name: toolCall.function.name,
-						result: resultContent.slice(0, 2000),
+						resultContent: resultContent.slice(0, 8000),
+						executedName: toolCall.function.name,
+						executedResult: resultContent.slice(0, 2000),
+					};
+				});
+
+				const toolResults = await Promise.all(toolPromises);
+
+				for (const res of toolResults) {
+					toolCallsExecuted.push({
+						name: res.executedName,
+						result: res.executedResult,
 					});
 
 					messages.push({
 						role: "tool",
-						content: resultContent.slice(0, 8000),
-						toolCallId: toolCall.id,
+						content: res.resultContent,
+						toolCallId: res.toolCallId,
 					});
 				}
 			} else {
@@ -340,14 +408,45 @@ ${toolMarker}
 		return this.toolRegistry.toLLMTools();
 	}
 
-	private buildContext(
+	private async buildContext(
 		memories: MemoryContext,
 		skills: LoadedSkill[],
 		userMessage: string,
-	): LLMMessage[] {
+		channelId?: string,
+	): Promise<LLMMessage[]> {
 		const messages: LLMMessage[] = [];
+		const contextParts: string[] = [];
 
 		let systemContent = this.config.systemPrompt;
+		
+		if (this.userProfileManager) {
+			try {
+				const profile = await this.userProfileManager.getProfile("owner");
+				let profileStr = `### User Profile (Preferences & Context)\n`;
+				profileStr += `- Communication Style: ${profile.communicationStyle}\n`;
+				if (Object.keys(profile.preferences).length > 0) {
+					profileStr += `- Preferences: ${Object.entries(profile.preferences).map(([k, v]) => `${k}=${v}`).join(", ")}\n`;
+				}
+				if (profile.traits.length > 0) {
+					profileStr += `- Traits: ${profile.traits.join(", ")}\n`;
+				}
+				const topExpertise = Object.entries(profile.expertiseAreas)
+					.filter(([, v]) => v > 0.5)
+					.map(([k]) => k);
+				if (topExpertise.length > 0) {
+					profileStr += `- Known User Expertise: ${topExpertise.join(", ")}\n`;
+				}
+				contextParts.push(profileStr);
+			} catch (e) {
+				console.error("Failed to load user profile for context:", e);
+			}
+		}
+
+		if (this.dailyMemory) {
+			const dailyContext = await this.dailyMemory.getCurrentContext();
+			systemContent += `\n\n${dailyContext}`;
+		}
+
 		if (skills.length > 0) {
 			const skillInstructions = skills.map((s) => s.content).join("\n\n");
 			systemContent += `\n\n# Relevant Skills\n${skillInstructions}`;
@@ -359,22 +458,53 @@ ${toolMarker}
 				.map((t) => `- ${t.name}: ${t.description}`)
 				.join("\n");
 			systemContent += `\n\n# Available Tools\nYou have access to the following tools. Use them when needed to help the user:\n${toolNames}`;
+			systemContent += "\n\nCRITICAL RULE: Do NOT use tools or hallucinate past tasks for simple greetings (e.g. 'hola') or casual conversation. Only use tools if the *latest* user request explicitly requires it.";
+			systemContent += "\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
+		}
+		
+		systemContent += `\n\nCRITICAL SYSTEM INSTRUCTION:
+- You have access to a persistent Long-Term Memory (LTM) system.
+- NEVER claim that you do not have memory or that "each conversation starts fresh".
+- If no memories are provided in the context below, simply state that you don't have relevant information.`;
+
+		if (contextParts.length > 0) {
+			systemContent += `\n\n${contextParts.join("\n\n")}`;
 		}
 
 		messages.push({ role: "system", content: systemContent });
 
 		if (memories.memories.length > 0) {
 			const memoryFacts = memories.memories
-				.map((m) => m.item.content)
-				.join("; ");
+				.map((m) => {
+					let sourceStr = "";
+					const sourceChannel = m.item.source?.channelId;
+					if (sourceChannel) {
+						sourceStr = `[Channel: ${sourceChannel}] `;
+					} else if (m.item.source?.conversationId) {
+						sourceStr = `[Conversation: ${m.item.source.conversationId}] `;
+					}
+					
+					const timeMs = Date.now() - m.item.createdAt.getTime();
+					const hours = Math.round(timeMs / (1000 * 60 * 60));
+					const timeStr = hours > 24 
+						? `[${Math.round(hours/24)} days ago] ` 
+						: hours > 0 ? `[${hours} hours ago] ` : "[Recently] ";
+
+					return `- ${sourceStr}${timeStr}${m.item.content}`;
+				})
+				.join("\n");
 			messages.push({
 				role: "system",
-				content: `Relevant context: ${memoryFacts}`,
+				content: `Relevant memories from long-term storage:\n${memoryFacts}`,
 			});
 		}
 
 		const stmTurns = this.stm.getContext();
-		const recentTurns = stmTurns.slice(-20);
+		let conversationTurns = stmTurns;
+		if (channelId) {
+			conversationTurns = stmTurns.filter(t => !t.metadata?.conversationId || t.metadata.conversationId === channelId);
+		}
+		const recentTurns = conversationTurns.slice(-20);
 		for (const turn of recentTurns) {
 			if (turn.role === "user" || turn.role === "assistant") {
 				messages.push({ role: turn.role, content: turn.content });

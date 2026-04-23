@@ -64,6 +64,7 @@ export class GoogleProvider extends BaseLLMProvider {
 				Authorization: `Bearer ${this.apiKey}`,
 			},
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -164,6 +165,7 @@ export class GoogleProvider extends BaseLLMProvider {
 				Authorization: `Bearer ${this.apiKey}`,
 			},
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -192,24 +194,40 @@ export class GoogleProvider extends BaseLLMProvider {
 					if (!trimmed.startsWith("data: ")) continue;
 					const payload = trimmed.slice(6);
 					if (payload === "[DONE]") return;
+					let parsed: any;
 					try {
-						const parsed = JSON.parse(payload) as {
-							choices: Array<{
-								delta: {
-									content?: string;
-									reasoning_content?: string;
-								};
-								finish_reason: string | null;
-							}>;
-						};
-						const delta = parsed.choices[0];
-						if (!delta) continue;
-						if (delta.delta.content) yield { content: delta.delta.content };
-						if (delta.delta.reasoning_content)
-							yield { thinking: delta.delta.reasoning_content };
-						if (delta.finish_reason)
-							yield { finishReason: delta.finish_reason };
-					} catch {}
+						parsed = JSON.parse(payload);
+					} catch {
+						continue; // ignore malformed chunks
+					}
+					if (parsed.error) {
+						throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+					}
+					const delta = parsed.choices?.[0];
+					if (!delta) continue;
+					const chunk: LLMChunk = {};
+					if (delta.delta?.content) chunk.content = delta.delta.content;
+					if (delta.delta?.reasoning_content)
+						chunk.thinking = delta.delta.reasoning_content;
+					if (delta.delta?.tool_calls) {
+						const tc = delta.delta.tool_calls[0];
+						if (tc) {
+							chunk.toolCalls = {
+								id: tc.id ?? "",
+								type: "function",
+								function: {
+									name: tc.function?.name ?? "",
+									arguments: tc.function?.arguments ?? "",
+								},
+							};
+						}
+					}
+					if (delta.finish_reason)
+						chunk.finishReason = delta.finish_reason;
+					
+					if (Object.keys(chunk).length > 0) {
+						yield chunk;
+					}
 				}
 			}
 		}

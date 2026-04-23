@@ -26,8 +26,9 @@ El panel web es una interfaz gráfica para Octopus AI que se ejecuta en tu naveg
 
 **Características:**
 - Interfaz de chat con mensajes en tiempo real (streaming)
-- Gestión visual de la memoria (ver qué recuerda la IA)
-- Configuración desde la interfaz
+- Centro de control con estado del sistema
+- Gestión visual de memoria, skills, tareas y automatizaciones
+- Herramientas, variables, media y configuración desde la interfaz
 - Diseño responsive (funciona en móviles y tablets)
 
 ---
@@ -86,8 +87,19 @@ Envía mensajes al asistente y recibe respuestas con streaming. La interfaz mues
 Visualiza y gestiona lo que Octopus AI recuerda:
 - **Memoria a corto plazo:** Lo que la IA tiene en contexto ahora
 - **Memoria a largo plazo:** Hechos, eventos y procedimientos almacenados
+- **Resumen diario:** Actividad consolidada del día en curso
+- **Perfil de usuario:** Idioma, estilo, preferencias y expertise detectados
 - **Búsqueda:** Busca entre los recuerdos de la IA
 - **Estadísticas:** Cuántos recuerdos tiene, tipo, antigüedad
+
+### Workspace Operativo
+
+La UI actual tambien incluye vistas específicas para:
+
+- agentes y conversaciones
+- tareas y automatizaciones
+- herramientas y ejecución de código
+- variables gestionadas y biblioteca multimedia
 
 ### Configuración
 
@@ -100,6 +112,7 @@ Monitorea el estado de:
 - Canales de mensajería conectados
 - Uso de memoria y base de datos
 - Conectividad de red
+- Disponibilidad de tools y automatizaciones
 
 ---
 

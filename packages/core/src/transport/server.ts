@@ -354,6 +354,62 @@ export class TransportServer {
 					return;
 				}
 
+				if (req.method === "GET" && pathname === "/api/tools/registered") {
+					this.handleGetRegisteredTools(res);
+					return;
+				}
+				if (
+					req.method === "DELETE" &&
+					/^\/api\/tools\/dynamic\/[^/]+$/.test(pathname)
+				) {
+					const toolName = decodeURIComponent(pathname.split("/").pop() ?? "");
+					void this.handleDeleteDynamicTool(res, toolName);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/skills/create") {
+					void this.handleCreateSkill(req, res);
+					return;
+				}
+				if (
+					req.method === "PUT" &&
+					/^\/api\/skills\/[^/]+$/.test(pathname) &&
+					!pathname.includes("/toggle")
+				) {
+					const skillName = decodeURIComponent(pathname.split("/").pop() ?? "");
+					void this.handleUpdateSkill(req, res, skillName);
+					return;
+				}
+				if (
+					req.method === "DELETE" &&
+					/^\/api\/skills\/[^/]+$/.test(pathname)
+				) {
+					const skillName = decodeURIComponent(pathname.split("/").pop() ?? "");
+					void this.handleDeleteSkill(res, skillName);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/memory/stm") {
+					this.handleGetSTM(res);
+					return;
+				}
+				if (req.method === "GET" && pathname === "/api/memory/daily") {
+					void this.handleGetDailyMemory(res);
+					return;
+				}
+				if (req.method === "GET" && pathname === "/api/memory/profile") {
+					void this.handleGetUserProfile(res);
+					return;
+				}
+				if (req.method === "PUT" && pathname === "/api/memory/profile") {
+					void this.handleUpdateUserProfile(req, res);
+					return;
+				}
+				if (req.method === "GET" && pathname === "/api/memory/ltm/recent") {
+					void this.handleGetRecentLTM(res, url);
+					return;
+				}
+
 				if (req.method === "GET" && pathname.startsWith("/api/workspace/")) {
 					const wsPath = pathname.slice("/api/workspace/".length);
 					this.handleWorkspaceGet(res, wsPath);
@@ -1093,6 +1149,271 @@ export class TransportServer {
 			}
 
 			jsonRes(res, 200, { tools });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private handleGetRegisteredTools(res: ServerResponse): void {
+		try {
+			const registered: { name: string; description: string; paramCount: number }[] = [];
+			if (this.system?.toolRegistry?.list) {
+				const tools = this.system.toolRegistry.list();
+				for (const t of tools) {
+					registered.push({
+						name: t.name,
+						description: t.description,
+						paramCount: Object.keys(t.parameters ?? {}).length,
+					});
+				}
+			}
+			jsonRes(res, 200, { tools: registered });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleDeleteDynamicTool(
+		res: ServerResponse,
+		toolName: string,
+	): Promise<void> {
+		try {
+			const dir = join(homedir(), ".octopus", "tools", toolName);
+			if (!existsSync(dir)) {
+				jsonRes(res, 404, { error: `Tool '${toolName}' not found` });
+				return;
+			}
+			// Remove directory recursively
+			const { rmSync } = await import("node:fs");
+			rmSync(dir, { recursive: true, force: true });
+			// Unregister from runtime if possible
+			if (this.system?.toolRegistry?.unregister) {
+				this.system.toolRegistry.unregister(toolName);
+			}
+			jsonRes(res, 200, { ok: true, message: `Tool '${toolName}' deleted` });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleCreateSkill(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const body = await readBody(req);
+			const parsed = JSON.parse(body) as {
+				name: string;
+				description: string;
+				content: string;
+				domain?: string;
+			};
+			if (!parsed.name || !parsed.content) {
+				jsonRes(res, 400, { error: "Missing 'name' or 'content'" });
+				return;
+			}
+			if (this.system?.skillRegistry?.store) {
+				await this.system.skillRegistry.store({
+					name: parsed.name,
+					description: parsed.description ?? "",
+					content: parsed.content,
+					domain: parsed.domain ?? "general",
+					version: 1,
+					successRate: 1,
+					usageCount: 0,
+					createdAt: new Date(),
+					updatedAt: new Date(),
+				});
+				jsonRes(res, 200, { ok: true, message: `Skill '${parsed.name}' created` });
+			} else {
+				jsonRes(res, 503, { error: "Skill registry not available" });
+			}
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleUpdateSkill(
+		req: IncomingMessage,
+		res: ServerResponse,
+		skillName: string,
+	): Promise<void> {
+		try {
+			const body = await readBody(req);
+			const parsed = JSON.parse(body) as {
+				description?: string;
+				content?: string;
+				domain?: string;
+			};
+			if (this.system?.skillRegistry?.store) {
+				const existing = (await this.system.skillRegistry.list()).find(
+					(s: { name: string }) => s.name === skillName,
+				);
+				if (!existing) {
+					jsonRes(res, 404, { error: `Skill '${skillName}' not found` });
+					return;
+				}
+				await this.system.skillRegistry.store({
+					...existing,
+					...(parsed.description !== undefined ? { description: parsed.description } : {}),
+					...(parsed.content !== undefined ? { content: parsed.content } : {}),
+					...(parsed.domain !== undefined ? { domain: parsed.domain } : {}),
+					updatedAt: new Date(),
+				});
+				jsonRes(res, 200, { ok: true, message: `Skill '${skillName}' updated` });
+			} else {
+				jsonRes(res, 503, { error: "Skill registry not available" });
+			}
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleDeleteSkill(
+		res: ServerResponse,
+		skillName: string,
+	): Promise<void> {
+		try {
+			if (this.system?.skillRegistry?.delete) {
+				await this.system.skillRegistry.delete(skillName);
+				jsonRes(res, 200, { ok: true, message: `Skill '${skillName}' deleted` });
+			} else if (this.system?.db) {
+				await this.system.db.run(
+					"DELETE FROM skills WHERE name = ?",
+					[skillName],
+				);
+				jsonRes(res, 200, { ok: true, message: `Skill '${skillName}' deleted` });
+			} else {
+				jsonRes(res, 503, { error: "Skill deletion not available" });
+			}
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private handleGetSTM(res: ServerResponse): void {
+		try {
+			if (this.system?.agentRuntime?.stm) {
+				const turns = this.system.agentRuntime.stm.getContext();
+				const recentTurns = turns.slice(-30).map(
+					(t: { role: string; content: string; timestamp: Date; metadata?: Record<string, unknown> }) => ({
+						role: t.role,
+						content: t.content.length > 500 ? `${t.content.substring(0, 500)}...` : t.content,
+						timestamp: t.timestamp?.toISOString?.() ?? null,
+						channel: t.metadata?.conversationId ?? null,
+					}),
+				);
+				jsonRes(res, 200, { turns: recentTurns, total: turns.length });
+			} else {
+				jsonRes(res, 200, { turns: [], total: 0 });
+			}
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetDailyMemory(res: ServerResponse): Promise<void> {
+		try {
+			if (this.system?.dailyMemory) {
+				const ctx = await this.system.dailyMemory.getCurrentContext();
+				const structured = await this.system.dailyMemory.getStructuredData?.();
+				const messageCount = (await this.system.dailyMemory.getMessageCount?.()) ?? 0;
+				jsonRes(res, 200, {
+					context: ctx,
+					structured: structured ?? null,
+					messageCount,
+					date: new Date().toISOString().split("T")[0],
+				});
+			} else {
+				jsonRes(res, 200, { context: "", structured: null, messageCount: 0, date: new Date().toISOString().split("T")[0] });
+			}
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetUserProfile(res: ServerResponse): Promise<void> {
+		try {
+			if (this.system?.userProfileManager) {
+				const profile = await this.system.userProfileManager.getProfile("owner");
+				jsonRes(res, 200, { profile });
+			} else {
+				jsonRes(res, 200, { profile: null });
+			}
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleUpdateUserProfile(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const body = await readBody(req);
+			const parsed = JSON.parse(body) as {
+				displayName?: string;
+				preferences?: Record<string, string>;
+				communicationStyle?: string;
+				preferredLanguage?: string;
+			};
+			if (this.system?.userProfileManager) {
+				const profile = await this.system.userProfileManager.getProfile("owner");
+				if (parsed.displayName !== undefined) profile.displayName = parsed.displayName;
+				if (parsed.communicationStyle) profile.communicationStyle = parsed.communicationStyle;
+				if (parsed.preferredLanguage) profile.preferredLanguage = parsed.preferredLanguage;
+				if (parsed.preferences) {
+					for (const [k, v] of Object.entries(parsed.preferences)) {
+						profile.preferences[k] = v;
+					}
+				}
+				profile.updatedAt = new Date().toISOString();
+				// Force save via private method workaround - re-store
+				await this.system.userProfileManager.updateManual?.(profile);
+				jsonRes(res, 200, { ok: true, profile });
+			} else {
+				jsonRes(res, 503, { error: "User profile manager not available" });
+			}
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetRecentLTM(
+		res: ServerResponse,
+		url: URL,
+	): Promise<void> {
+		try {
+			const limit = Number.parseInt(url.searchParams.get("limit") ?? "20", 10);
+			if (this.system?.db) {
+				const rows = await this.system.db.all(
+					"SELECT * FROM memories ORDER BY created_at DESC LIMIT ?",
+					[limit],
+				);
+				jsonRes(res, 200, { memories: rows ?? [] });
+			} else {
+				jsonRes(res, 200, { memories: [] });
+			}
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),

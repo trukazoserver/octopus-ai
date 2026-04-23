@@ -402,4 +402,82 @@ export class LLMRouter {
 	getUsage(): UsageStats {
 		return { ...this.usage, byProvider: { ...this.usage.byProvider } };
 	}
+
+	// --- Live Model Switching ---
+
+	/**
+	 * Switch the default provider at runtime (no restart needed).
+	 * Returns true if the provider exists and is available.
+	 */
+	switchProvider(providerName: string): boolean {
+		if (!this.providers.has(providerName)) {
+			logger.warn(`Cannot switch to provider '${providerName}' — not available`);
+			return false;
+		}
+		const previousDefault = this.config.default;
+		this.config.default = providerName;
+		logger.info(`Default provider switched: ${previousDefault} → ${providerName}`);
+		return true;
+	}
+
+	/**
+	 * Switch the default model at runtime.
+	 * Use "provider/model" format or just "model" for current default provider.
+	 */
+	setDefaultModel(model: string): void {
+		(this.config as unknown as Record<string, unknown>).defaultModel = model;
+		logger.info(`Default model set to: ${model}`);
+	}
+
+	/**
+	 * Get current active provider and model info.
+	 */
+	getActiveConfig(): { defaultProvider: string; availableProviders: string[]; fallback: string | undefined } {
+		return {
+			defaultProvider: this.config.default,
+			availableProviders: Array.from(this.providers.keys()),
+			fallback: this.config.fallback,
+		};
+	}
+
+	/**
+	 * Hot-add a new provider at runtime (e.g., user adds API key mid-session).
+	 */
+	async addProviderFromConfig(name: string, config: ProviderConfig): Promise<boolean> {
+		const registryEntry = PROVIDER_REGISTRY[name];
+		if (!registryEntry) {
+			logger.warn(`Unknown provider: ${name}`);
+			return false;
+		}
+
+		try {
+			const provider = registryEntry.factory(config);
+			const available = await provider.isAvailable();
+			if (available) {
+				this.providers.set(name, provider);
+				logger.info(`Provider '${name}' hot-added successfully`);
+				return true;
+			}
+			logger.warn(`Provider '${name}' configured but not available`);
+			return false;
+		} catch (err) {
+			logger.error(`Failed to hot-add provider '${name}': ${String(err)}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Remove a provider at runtime.
+	 */
+	removeProvider(name: string): boolean {
+		if (name === this.config.default) {
+			logger.warn(`Cannot remove default provider '${name}'`);
+			return false;
+		}
+		const removed = this.providers.delete(name);
+		if (removed) {
+			logger.info(`Provider '${name}' removed`);
+		}
+		return removed;
+	}
 }

@@ -1,4 +1,5 @@
 import type { ConversationTurn } from "../agent/types.js";
+import { TokenCounter } from "../ai/tokenizer.js";
 import type { LongTermMemory } from "./ltm.js";
 import type { ShortTermMemory } from "./stm.js";
 import type {
@@ -9,6 +10,8 @@ import type {
 } from "./types.js";
 
 export class MemoryRetrieval {
+	private tokenCounter = new TokenCounter();
+	
 	constructor(
 		private ltm: LongTermMemory,
 		private stm: ShortTermMemory,
@@ -53,7 +56,7 @@ export class MemoryRetrieval {
 		let totalTokens = 0;
 		const truncated: ScoredMemory[] = [];
 		for (const sm of deduped) {
-			const tokens = Math.ceil(sm.item.content.length / 4);
+			const tokens = this.tokenCounter.countTokens(sm.item.content);
 			if (totalTokens + tokens > this.config.maxTokens) break;
 			totalTokens += tokens;
 			truncated.push(sm);

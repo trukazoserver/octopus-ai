@@ -44,6 +44,57 @@ function normalizeBase64Data(data: string): string {
 	return match?.[1] ?? data;
 }
 
+export const mediaContext = {
+	save: async (buffer: Buffer, mimeType: string, description?: string) => {
+		const id = randomUUID();
+		const ext = MIME_EXTENSIONS[mimeType] || extname(`file.${mimeType.split("/")[1] || "png"}`) || ".png";
+		const filename = `${id}${ext}`;
+		const filePath = join(MEDIA_DIR, filename);
+		ensureMediaDir();
+
+		writeFileSync(filePath, buffer);
+
+		const items = loadMediaMeta();
+		const item = {
+			id,
+			filename,
+			mimetype: mimeType,
+			size: buffer.length,
+			createdAt: new Date().toISOString(),
+			description,
+		};
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		(items as any[]).push(item);
+		saveMediaMeta(items);
+
+		return {
+			...item,
+			url: `/api/media/file/${filename}`
+		};
+	},
+	resolve: async (urlStr: string) => {
+		let filename = "";
+		if (urlStr.startsWith("/api/media/file/")) {
+			filename = urlStr.slice("/api/media/file/".length);
+		} else {
+			filename = urlStr;
+		}
+		const filePath = join(MEDIA_DIR, filename);
+		if (!existsSync(filePath)) {
+			throw new Error(`Media not found: ${urlStr}`);
+		}
+		const buffer = readFileSync(filePath);
+		
+		const items = loadMediaMeta() as any[];
+		const item = items.find(i => i.filename === filename || i.id === filename || urlStr.includes(i.id));
+		
+		return {
+			buffer,
+			mimeType: item ? item.mimetype : "application/octet-stream"
+		};
+	}
+};
+
 export function createMediaTools(): ToolDefinition[] {
 	return [
 		{
@@ -132,6 +183,81 @@ export function createMediaTools(): ToolDefinition[] {
 						success: false,
 						output: "",
 						error: `Failed to save media: ${err instanceof Error ? err.message : String(err)}`,
+					};
+				}
+			},
+		},
+		{
+			name: "list_media",
+			description:
+				"List all saved media files in the Octopus AI media library. " +
+				"Use this to find previously generated or uploaded images, audio, and video files. " +
+				"Returns a list of media items with their URLs, filenames, types, and descriptions. " +
+				"You can optionally filter by type (image, audio, video) or search by description/filename.",
+			parameters: {
+				type: {
+					type: "string",
+					description:
+						"Filter by media type prefix: 'image', 'audio', 'video', or leave empty for all",
+				},
+				search: {
+					type: "string",
+					description:
+						"Search term to filter by filename or description (case-insensitive)",
+				},
+				limit: {
+					type: "number",
+					description: "Maximum number of results to return (default 20)",
+				},
+			},
+			handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+				try {
+					const items = loadMediaMeta() as any[];
+					let filtered = items;
+
+					const typeFilter = params.type ? String(params.type).toLowerCase() : "";
+					if (typeFilter) {
+						filtered = filtered.filter(
+							(i) => i.mimetype && i.mimetype.startsWith(typeFilter),
+						);
+					}
+
+					const search = params.search ? String(params.search).toLowerCase() : "";
+					if (search) {
+						filtered = filtered.filter(
+							(i) =>
+								(i.filename && i.filename.toLowerCase().includes(search)) ||
+								(i.description && i.description.toLowerCase().includes(search)),
+						);
+					}
+
+					const limit = params.limit ? Number(params.limit) : 20;
+					const result = filtered.slice(-limit).reverse();
+
+					if (result.length === 0) {
+						return {
+							success: true,
+							output: "No media files found matching your criteria.",
+						};
+					}
+
+					const listing = result
+						.map((i) => {
+							const ext = MIME_EXTENSIONS[i.mimetype] || "";
+							const url = `/api/media/file/${i.id}${ext}`;
+							return `- ${i.description || i.filename || i.id}\n  URL: ${url}\n  Type: ${i.mimetype} | Size: ${i.size} bytes | Created: ${i.createdAt}`;
+						})
+						.join("\n");
+
+					return {
+						success: true,
+						output: `Found ${result.length} media file(s):\n${listing}\n\nTo use any of these in your response, use markdown: ![description](URL)`,
+					};
+				} catch (err) {
+					return {
+						success: false,
+						output: "",
+						error: `Failed to list media: ${err instanceof Error ? err.message : String(err)}`,
 					};
 				}
 			},

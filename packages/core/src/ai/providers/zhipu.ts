@@ -67,7 +67,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 			method: "POST",
 			headers: this.getHeaders(),
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(120000),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -162,7 +162,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 			method: "POST",
 			headers: this.getHeaders(),
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(120000),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -191,49 +191,41 @@ export class ZhipuProvider extends BaseLLMProvider {
 					if (!trimmed.startsWith("data: ")) continue;
 					const payload = trimmed.slice(6);
 					if (payload === "[DONE]") return;
+					let parsed: any;
 					try {
-						const parsed = JSON.parse(payload) as {
-							choices: Array<{
-								delta: {
-									content?: string;
-									reasoning_content?: string;
-									tool_calls?: Array<{
-										index: number;
-										id?: string;
-										type?: string;
-										function?: { name?: string; arguments?: string };
-									}>;
-								};
-								finish_reason: string | null;
-							}>;
-						};
-						const delta = parsed.choices[0];
-						if (!delta) continue;
-						const chunk: LLMChunk = {};
-						if (delta.delta.content) {
-							chunk.content = delta.delta.content;
+						parsed = JSON.parse(payload);
+					} catch {
+						continue; // ignore malformed chunks
+					}
+					if (parsed.error) {
+						throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+					}
+					const delta = parsed.choices?.[0];
+					if (!delta) continue;
+					const chunk: LLMChunk = {};
+					if (delta.delta?.content) {
+						chunk.content = delta.delta.content;
+					}
+					if (delta.delta?.reasoning_content) {
+						chunk.thinking = delta.delta.reasoning_content;
+					}
+					if (delta.delta?.tool_calls) {
+						const tc = delta.delta.tool_calls[0];
+						if (tc) {
+							chunk.toolCalls = {
+								id: tc.id ?? "",
+								type: "function",
+								function: {
+									name: tc.function?.name ?? "",
+									arguments: tc.function?.arguments ?? "",
+								},
+							};
 						}
-						if (delta.delta.reasoning_content) {
-							chunk.thinking = delta.delta.reasoning_content;
-						}
-						if (delta.delta.tool_calls) {
-							const tc = delta.delta.tool_calls[0];
-							if (tc) {
-								chunk.toolCalls = {
-									id: tc.id ?? "",
-									type: "function",
-									function: {
-										name: tc.function?.name ?? "",
-										arguments: tc.function?.arguments ?? "",
-									},
-								};
-							}
-						}
-						if (delta.finish_reason) {
-							chunk.finishReason = delta.finish_reason;
-						}
-						yield chunk;
-					} catch {}
+					}
+					if (delta.finish_reason) {
+						chunk.finishReason = delta.finish_reason;
+					}
+					yield chunk;
 				}
 			}
 		}

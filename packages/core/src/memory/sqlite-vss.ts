@@ -47,6 +47,17 @@ export class SqliteVectorStore extends VectorStore {
 			"CREATE INDEX IF NOT EXISTS idx_memory_items_importance ON memory_items(importance)",
 		);
 
+		// Migrations
+		try {
+			await this.db.run("ALTER TABLE memory_items ADD COLUMN associations TEXT NOT NULL DEFAULT '[]'");
+		} catch {}
+		try {
+			await this.db.run("ALTER TABLE memory_items ADD COLUMN source TEXT NOT NULL DEFAULT '{}'");
+		} catch {}
+		try {
+			await this.db.run("ALTER TABLE memory_items ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'");
+		} catch {}
+
 		this.initialized = true;
 	}
 

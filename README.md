@@ -5,7 +5,7 @@
 <h1 align="center">Octopus AI</h1>
 
 <p align="center">
-  <strong>Asistente de IA autoalojado con memoria humana, habilidades auto-mejorables y mensajería multicanal</strong>
+  <strong>Asistente de IA autoalojado con memoria persistente, automatizaciones autónomas y mensajería multicanal</strong>
 </p>
 
 <p align="center">
@@ -35,13 +35,13 @@ Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para c
 
 ## ✨ Características Principales
 
-- 🧠 **Razonamiento Profundo (Thinking):** Soporte nativo para *chain-of-thought* en todos los proveedores (OpenAI o-series, Anthropic, Google, Z.ai, DeepSeek Reasoner).
-- 💾 **Memoria Humana Integrada:** Arquitectura de memoria a corto (STM) y largo plazo (LTM) con consolidación automática y prevención de decaimiento.
-- 🛠️ **Skill Forge:** Motor de creación de habilidades. El asistente puede escribir, evaluar, y auto-mejorar sus propios plugins en tiempo real.
-- 🌐 **Multi-Canal:** Conéctalo fácilmente con WhatsApp, Telegram, Discord, Slack, y Microsoft Teams.
-- 🔌 **Sistema de Plugins Extensible:** Soporte para MCP (Model Context Protocol), integraciones de terceros y ejecución de código en entornos seguros (sandbox).
-- 💻 **Interfaces Flexibles:** Úsalo desde la terminal (CLI), la aplicación de escritorio (Electron), o el panel web interactivo (React).
-- 🔒 **Privacidad y Seguridad:** Cifrado AES-256 local, RBAC (Control de Acceso basado en Roles) y total compatibilidad con LLMs locales como Ollama.
+- 🧠 **Razonamiento Profundo (Thinking):** Soporte nativo para *chain-of-thought* en proveedores como OpenAI o-series, Anthropic, Google, Z.ai y DeepSeek Reasoner.
+- 💾 **Memoria Contextual Persistente:** STM + LTM con consolidación automática, resumen diario global y perfil de usuario que se actualiza conversación a conversación.
+- 🤖 **Automatización Autónoma:** Tareas programadas por cron, heartbeat proactivo evaluado por LLM y runtime listo para ejecución continua en segundo plano.
+- 🛠️ **Sistema de Tools Extensible:** Filesystem, shell, browser automation, media, sandbox Docker, delegación multi-agente y tools dinámicas creadas en tiempo real.
+- 🌐 **Multi-Canal:** Integra el mismo agente con Telegram, Discord, Slack, Teams, webchat y otros canales manteniendo memoria compartida.
+- 💻 **Interfaces Flexibles:** CLI, API HTTP/WebSocket, dashboard web en React y aplicación de escritorio con la misma base de runtime.
+- 🔒 **Privacidad y Seguridad:** Compatibilidad con modelos locales, ejecución aislada para tareas sensibles y control fino del entorno de trabajo.
 
 ## 🎯 ¿Qué puede hacer Octopus AI?
 
@@ -53,12 +53,13 @@ Octopus AI no es solo un chatbot. Es un asistente inteligente que aprende de ti 
 | **Análisis de código** | "Revisa este archivo y dime si hay errores" → Analiza sintaxis, lógica y mejores prácticas |
 | **Escritura asistida** | "Ayúdame a redactar un email formal" → Genera, edita y mejora textos |
 | **Investigación** | "Resume los puntos clave de este tema" → Sintetiza información compleja |
-| **Automatización** | "Organiza mis notas por categoría" → Ejecuta tareas programadas (Cron), flujos de automatización y Webhooks |
+| **Automatización** | "Cada mañana revisa mis tareas y genera un resumen" → Programa cron jobs, ejecuta prompts en segundo plano y mantiene seguimiento diario |
 | **Gestión de archivos** | "Lee el archivo config.json y muéstrame los errores" → Opera con tu sistema de archivos |
 | **Multi-canal** | Pregunta lo mismo desde WhatsApp, Telegram, Discord o la web → Misma memoria, misma IA |
 | **Integración MCP** | Conecta con servidores Model Context Protocol (MCP) → Expande capacidades con herramientas externas |
 | **Generación de Voz** | Soporte de STT y TTS → Interactúa mediante voz y generación de audio |
 | **Ejecución de Código**| Ejecución en sandbox local → Prueba y ejecuta scripts de manera segura |
+| **Delegación** | "Investiga esto y luego redacta una propuesta" → Divide subtareas complejas en workers especializados y sintetiza el resultado |
 
 ## 🖥️ Interfaces
 
@@ -68,7 +69,7 @@ Octopus AI ofrece tres formas de interactuar:
 La forma más directa. Abre tu terminal y chatea con el asistente con toda la potencia de la memoria y las skills.
 
 ### Panel Web (Dashboard)
-Interfaz gráfica moderna en el navegador. Ideal para quienes prefieren no usar la terminal. Accede desde `http://localhost:5173`.
+Interfaz gráfica moderna en el navegador. Ideal para quienes prefieren no usar la terminal. Incluye chat, memoria, skills, tareas, automatizaciones, herramientas, variables y biblioteca multimedia. En desarrollo accede desde `http://localhost:5173`.
 
 ### Aplicación de Escritorio (Electron)
 App nativa para Windows, macOS y Linux. Experiencia de escritorio completa con todas las funcionalidades.
@@ -112,11 +113,17 @@ El instalador hace todo por ti:
 ### Uso Básico (CLI)
 
 ```bash
+# Iniciar el backend HTTP/WebSocket local
+node packages/cli/dist/index.js start
+
 # Iniciar un chat interactivo con memoria
 node packages/cli/dist/index.js chat
 
 # Enviar un comando directo
 node packages/cli/dist/index.js agent --message "Resume los últimos cambios del proyecto" --stream
+
+# Buscar recuerdos previos
+node packages/cli/dist/index.js memory search "proyecto"
 
 # Configurar tu proveedor de IA (ej. Z.ai, el proveedor por defecto)
 node packages/cli/dist/index.js config set ai.providers.zhipu.apiKey "TU_KEY"
@@ -131,7 +138,9 @@ Si prefieres usar Docker (ideal para servidores o si no quieres instalar depende
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-> **Nota:** El Dockerfile actual necesita mejoras para producción. Consulta la [Guía completa de Docker](docs/getting-started/docker.md) para instrucciones detalladas incluyendo configuración, persistencia y solución de problemas.
+El despliegue incluido levanta un servicio `octopus`, expone la API y el *healthcheck* en `http://localhost:3000`, persiste datos en `/data` y aprovisiona plantillas base (`SOUL.md` y `HEARTBEAT.md`) en el workspace del contenedor.
+
+> Guía completa: [Docker](docs/getting-started/docker.md)
 
 ## 🤖 Proveedores de IA Soportados
 
@@ -176,16 +185,18 @@ octopus-ai/
 ### Arquitectura
 - [Visión General](docs/architecture/overview.md) — Monorepo, módulos y flujo de datos
 - [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, decaimiento
+- [Agente Autónomo y Automatizaciones](docs/architecture/automation.md) — Daemon, heartbeat, cron, delegación y sandbox
 - [Motor de Habilidades (Skills)](docs/architecture/skills.md) — Creación automática, mejora, A/B testing
 - [Sistema de Plugins](docs/architecture/plugins.md) — Engine, MCP, marketplace
 
 ### Referencia
 - [Comandos CLI](docs/api/cli.md) — Referencia completa de todos los comandos
+- [API HTTP y WebSocket](docs/api/http.md) — Endpoints para configuración, memoria, skills, tools, tareas y canales
 - [Solución de Problemas](docs/advanced/troubleshooting.md) — Errores comunes y soluciones
 
 ## 🤝 Contribución
 
-¡Las contribuciones son bienvenidas! Si deseas añadir un nuevo proveedor, mejorar la interfaz web o crear un plugin, por favor revisa nuestra guía de contribución (próximamente) o abre un *Issue* en [GitHub](https://github.com/trukazoserver/octopus-ai/issues).
+Las contribuciones son bienvenidas. Si deseas añadir un nuevo proveedor, mejorar la interfaz web o crear una tool/plugin, revisa [CONTRIBUTING.md](CONTRIBUTING.md) o abre un *Issue* en [GitHub](https://github.com/trukazoserver/octopus-ai/issues).
 
 ## 📄 Licencia
 

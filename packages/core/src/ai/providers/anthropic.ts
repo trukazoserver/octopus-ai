@@ -145,6 +145,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -248,6 +249,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(600000),
 		});
 
 		if (!response.ok) {
@@ -275,74 +277,65 @@ export class AnthropicProvider extends BaseLLMProvider {
 					if (!trimmed.startsWith("data: ")) continue;
 					const payload = trimmed.slice(6);
 
+					let event: any;
 					try {
-						const event = JSON.parse(payload) as {
-							type: string;
-							delta?: {
-								text?: string;
-								thinking?: string;
-								stop_reason?: string;
-								partial_json?: string;
-							};
-							content_block?: {
-								type: string;
-								id?: string;
-								name?: string;
-								thinking?: string;
-							};
-							index?: number;
-							message?: {
-								usage: { input_tokens: number; output_tokens: number };
-							};
-						};
+						event = JSON.parse(payload);
+					} catch {
+						continue; // ignore malformed chunks
+					}
 
-						if (event.type === "content_block_delta" && event.delta?.text) {
-							yield { content: event.delta.text };
-						} else if (
-							event.type === "content_block_delta" &&
-							event.delta?.thinking
-						) {
-							yield { thinking: event.delta.thinking };
-						} else if (
-							event.type === "tool_use_chunk" &&
-							event.delta?.partial_json
-						) {
-							yield {
-								toolCalls: {
-									function: { name: "", arguments: event.delta.partial_json },
+					if (event.type === "error" && event.error) {
+						throw new Error(event.error.message || JSON.stringify(event.error));
+					}
+
+					if (event.type === "content_block_delta" && event.delta?.text) {
+						yield { content: event.delta.text };
+					} else if (
+						event.type === "content_block_delta" &&
+						event.delta?.thinking
+					) {
+						yield { thinking: event.delta.thinking };
+					} else if (
+						(event.type === "content_block_delta" && event.delta?.type === "input_json_delta") ||
+						(event.type === "tool_use_chunk" && event.delta?.partial_json)
+					) {
+						yield {
+							toolCalls: {
+								id: "", // anthropic only sends id at block_start
+								type: "function",
+								function: { name: "", arguments: event.delta.partial_json || event.delta.partial_json || "" },
+							},
+						};
+					} else if (
+						event.type === "content_block_start" &&
+						event.content_block?.type === "tool_use"
+					) {
+						yield {
+							toolCalls: {
+								id: event.content_block.id ?? "",
+								type: "function",
+								function: {
+									name: event.content_block.name ?? "",
+									arguments: "",
 								},
-							};
-						} else if (
-							event.type === "content_block_start" &&
-							event.content_block?.type === "tool_use"
-						) {
-							yield {
-								toolCalls: {
-									id: event.content_block.id ?? "",
-									type: "function",
-									function: {
-										name: event.content_block.name ?? "",
-										arguments: "",
-									},
-								},
-							};
-						} else if (
-							event.type === "message_delta" &&
-							event.delta?.stop_reason
-						) {
-							yield { finishReason: event.delta.stop_reason };
-						} else if (event.type === "message_start" && event.message?.usage) {
-							yield {
-								usage: {
-									promptTokens: event.message.usage.input_tokens,
-									completionTokens: event.message.usage.output_tokens,
-									totalTokens:
-										event.message.usage.input_tokens +
-										event.message.usage.output_tokens,
-								},
-							};
-						}
-					} catch {}
+							},
+						};
+					} else if (
+						event.type === "message_delta" &&
+						event.delta?.stop_reason
+					) {
+						yield { finishReason: event.delta.stop_reason };
+					} else if (event.type === "message_start" && event.message?.usage) {
+						yield {
+							usage: {
+								promptTokens: event.message.usage.input_tokens,
+								completionTokens: event.message.usage.output_tokens,
+								totalTokens:
+									event.message.usage.input_tokens +
+									event.message.usage.output_tokens,
+							},
+						};
+					}
 				}
 			}
 		}

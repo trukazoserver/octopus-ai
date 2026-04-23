@@ -1,13 +1,42 @@
 import type { LLMTool } from "../ai/types.js";
 
+export interface ToolContext {
+	media: {
+		/**
+		 * Guarda un archivo multimedia localmente de forma segura y estructurada.
+		 */
+		save: (
+			buffer: Buffer,
+			mimeType: string,
+			description?: string,
+		) => Promise<{
+			id: string;
+			url: string;
+			filename: string;
+			size: number;
+			mimetype: string;
+		}>;
+		/**
+		 * Resuelve un archivo local o URL nativa de Octopus, y devuelve su Buffer.
+		 */
+		resolve: (
+			url: string,
+		) => Promise<{ buffer: Buffer; mimeType: string }>;
+	};
+}
+
 export interface ToolDefinition {
 	name: string;
 	description: string;
+	uiIcon?: string;
 	parameters: Record<
 		string,
 		{ type: string; description: string; required?: boolean }
 	>;
-	handler: (params: Record<string, unknown>) => Promise<ToolResult>;
+	handler: (
+		params: Record<string, unknown>,
+		context: ToolContext,
+	) => Promise<ToolResult>;
 }
 
 export interface ToolResult {

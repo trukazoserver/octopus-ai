@@ -159,10 +159,10 @@ Luego abre tu navegador en **http://localhost:5173**
 
 El panel web ofrece:
 - Chat en tiempo real con streaming
-- Visualización de la memoria (hechos, eventos, procedimientos)
-- Gestión de skills
-- Configuración visual
-- Estado del sistema
+- Base de memoria con STM, LTM, resumen diario y perfil del usuario
+- Gestión de skills, agentes, tareas y automatizaciones
+- Herramientas, variables, media y configuración visual
+- Estado del sistema y conectividad
 
 > Guía completa: [Panel Web](./web-dashboard.md)
 
@@ -219,6 +219,8 @@ La consolidación (paso de STM a LTM) ocurre automáticamente cuando:
 - Se completa una tarea
 - Hay un periodo de inactividad (30 minutos)
 - Lo fuerzas manualmente con `memory consolidate`
+
+Adicionalmente, el runtime actual mantiene un resumen global del día y un perfil persistente del usuario para personalizar mejor futuras respuestas.
 
 > Más detalles: [Sistema de Memoria](../architecture/memory.md)
 
