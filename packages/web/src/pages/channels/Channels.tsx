@@ -47,9 +47,9 @@ export const ChannelsPage: React.FC = () => {
 	const [testingChannel, setTestingChannel] = useState<string | null>(null);
 
 	const handleToggle = async (name: string) => {
+		const wasEnabled = channels.find((c) => c.name === name)?.enabled;
 		await toggleChannel(name);
-		const ch = channels.find((c) => c.name === name);
-		showToast("success", `${name} ${ch?.enabled ? "desactivado" : "activado"}`);
+		showToast("success", `${name} ${wasEnabled ? "desactivado" : "activado"}`);
 	};
 
 	const handleTest = async (name: string) => {
@@ -73,6 +73,11 @@ export const ChannelsPage: React.FC = () => {
 	// Separate active and inactive channels
 	const activeChannels = channels.filter((c) => c.enabled);
 	const inactiveChannels = channels.filter((c) => !c.enabled);
+	const channelGridStyle: React.CSSProperties = {
+		display: "grid",
+		gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+		gap: "16px",
+	};
 
 	return (
 		<div className="page-shell">
@@ -112,11 +117,7 @@ export const ChannelsPage: React.FC = () => {
 
 			{loading ? (
 				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
-						gap: "16px",
-					}}
+					style={channelGridStyle}
 				>
 					{Array.from({ length: 3 }).map((_, i) => (
 						<div
@@ -128,6 +129,26 @@ export const ChannelsPage: React.FC = () => {
 				</div>
 			) : (
 				<>
+					{channels.length === 0 && (
+						<div
+							style={{
+								padding: "48px 20px",
+								borderRadius: "16px",
+								border: "1px dashed #3f3f46",
+								background: "rgba(24,24,27,0.5)",
+								textAlign: "center",
+								color: "#a1a1aa",
+							}}
+						>
+							<div style={{ fontSize: "2rem", marginBottom: 10 }}>📡</div>
+							<div style={{ fontWeight: 700, color: "#f4f4f5", marginBottom: 6 }}>
+								No hay canales registrados
+							</div>
+							<div style={{ fontSize: "0.85rem" }}>
+								Recarga o revisa la configuración del servidor de canales.
+							</div>
+						</div>
+					)}
 					{/* Active channels */}
 					{activeChannels.length > 0 && (
 						<div style={{ marginBottom: "32px" }}>
@@ -143,13 +164,7 @@ export const ChannelsPage: React.FC = () => {
 							>
 								Canales activos
 							</h2>
-							<div
-								style={{
-									display: "grid",
-									gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
-									gap: "16px",
-								}}
-							>
+							<div style={channelGridStyle}>
 								{activeChannels.map((channel) => (
 									<ChannelCard
 										key={channel.name}
@@ -158,10 +173,10 @@ export const ChannelsPage: React.FC = () => {
 										onTest={handleTest}
 										testing={testingChannel === channel.name}
 									>
-										{renderChannelConfig(
-											channel.type,
-											channel.enabled,
-											channel.config,
+						{renderChannelConfig(
+							channel.type,
+							true,
+							channel.config,
 											(cfg) => handleSaveConfig(channel.name, cfg),
 										)}
 									</ChannelCard>
@@ -186,11 +201,7 @@ export const ChannelsPage: React.FC = () => {
 								Canales disponibles
 							</h2>
 							<div
-								style={{
-									display: "grid",
-									gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-									gap: "16px",
-								}}
+								style={channelGridStyle}
 							>
 								{inactiveChannels.map((channel) => (
 									<ChannelCard
@@ -199,7 +210,14 @@ export const ChannelsPage: React.FC = () => {
 										onToggle={handleToggle}
 										onTest={handleTest}
 										testing={testingChannel === channel.name}
-									/>
+									>
+										{renderChannelConfig(
+											channel.type,
+											channel.enabled,
+											channel.config,
+											(cfg) => handleSaveConfig(channel.name, cfg),
+										)}
+									</ChannelCard>
 								))}
 							</div>
 						</div>

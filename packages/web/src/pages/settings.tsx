@@ -1,4 +1,5 @@
 import type React from "react";
+import { getMascotById, getMascotOptions } from "@octopus-ai/core/mascots/index";
 import { useEffect, useState } from "react";
 import {
 	ConfigSection,
@@ -22,6 +23,21 @@ interface ConfigData {
 		thinking?: string;
 		maxTokens?: number;
 		providers?: Record<string, ProviderConfig>;
+	};
+	browser?: {
+		headless?: boolean;
+		provider?: "embedded" | "brightdata" | "decodo" | "auto";
+		brightDataEnabled?: boolean;
+		brightDataWsUrl?: string;
+		decodoEnabled?: boolean;
+		decodoProxyUrl?: string;
+		solveCaptchas?: boolean;
+		autoFallbackOnBlock?: boolean;
+		blockFallbackProvider?: "brightdata" | "decodo" | "embedded";
+		confirmBlockWithVision?: boolean;
+	};
+	mascots?: {
+		defaultId?: string;
 	};
 	channels?: Record<string, { enabled: boolean }>;
 	memory?: {
@@ -48,6 +64,13 @@ interface ConfigData {
 		encryptionKey?: string;
 		allowedPaths?: string[];
 		sandboxCommands?: boolean;
+	};
+	tools?: {
+		disabled?: string[];
+		iterationLimit?: {
+			enabled?: boolean;
+			maxIterations?: number;
+		};
 	};
 }
 
@@ -111,6 +134,33 @@ const PROVIDERS = [
 	},
 ];
 
+const MASCOT_OPTIONS = getMascotOptions();
+
+function setConfigValue(
+	config: ConfigData,
+	keyPath: string,
+	value: unknown,
+): ConfigData {
+	const result = { ...config } as Record<string, unknown>;
+	const keys = keyPath.split(".");
+	let current = result;
+
+	for (let i = 0; i < keys.length - 1; i++) {
+		const key = keys[i];
+		const existing = current[key];
+		const next =
+			existing && typeof existing === "object" && !Array.isArray(existing)
+				? { ...(existing as Record<string, unknown>) }
+				: {};
+		current[key] = next;
+		current = next;
+	}
+
+	const lastKey = keys[keys.length - 1];
+	if (lastKey) current[lastKey] = value;
+	return result as ConfigData;
+}
+
 export const SettingsPage: React.FC = () => {
 	const [config, setConfig] = useState<ConfigData>({});
 	const [loading, setLoading] = useState(true);
@@ -130,6 +180,7 @@ export const SettingsPage: React.FC = () => {
 
 	const save = async (key: string, value: unknown) => {
 		setMsg(null);
+		setConfig((current) => setConfigValue(current, key, value));
 		try {
 			await apiPut(`/api/config/${key}`, value);
 			setMsg({ text: `✓ ${key} guardado`, ok: true });
@@ -182,6 +233,10 @@ export const SettingsPage: React.FC = () => {
 		);
 
 	const ai = config.ai ?? {};
+	const browser = config.browser ?? {};
+	const selectedMascot = getMascotById(config.mascots?.defaultId);
+	const tools = config.tools ?? {};
+	const toolIterationLimit = tools.iterationLimit ?? {};
 	const providers = ai.providers ?? {};
 	const allModels: string[] = [];
 	for (const [, p] of Object.entries(providers)) {
@@ -242,6 +297,153 @@ export const SettingsPage: React.FC = () => {
 					{msg.text}
 				</div>
 			)}
+
+			<ConfigSection
+				title="Mascota"
+				icon="🐙"
+				description="Elige la mascota y personalidad que acompaña a Octopus en CLI, web y escritorio."
+				defaultOpen={true}
+			>
+				<div style={{ display: "grid", gridTemplateColumns: "180px 1fr", gap: "20px", alignItems: "center", background: "#09090b", padding: "16px", borderRadius: "12px", border: "1px solid #27272a" }}>
+					<div style={{ display: "flex", justifyContent: "center" }}>
+						<img
+							src={selectedMascot.assetPath}
+							alt={`${selectedMascot.animal} ${selectedMascot.nombre}`}
+							style={{ width: "140px", height: "140px", objectFit: "contain", imageRendering: "pixelated" }}
+						/>
+					</div>
+					<div>
+						<Select
+							label="Mascota activa"
+							value={selectedMascot.id}
+							options={MASCOT_OPTIONS.map((item) => item.id)}
+							onChange={(v) => save("mascots.defaultId", v)}
+							description="La selección se guarda en la configuración global del servidor local."
+						/>
+						<div style={{ color: "#f4f4f5", fontWeight: 700, marginBottom: "6px" }}>
+							{selectedMascot.nombre} · {selectedMascot.animal}
+						</div>
+						<div style={{ color: "#f97316", fontSize: "0.9rem", marginBottom: "8px" }}>
+							{selectedMascot.tagline}
+						</div>
+						<p style={{ color: "#a1a1aa", lineHeight: 1.6, margin: "0 0 8px" }}>
+							{selectedMascot.personalidad}
+						</p>
+						<p style={{ color: "#71717a", lineHeight: 1.6, margin: 0 }}>
+							{selectedMascot.historia}
+						</p>
+					</div>
+				</div>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Navegador Web"
+				icon="🌐"
+				description="Ajustes del motor de navegación y evasión de bloqueos."
+				defaultOpen={false}
+			>
+				<div style={{ display: "grid", gap: "20px" }}>
+					<div style={{ background: "#09090b", padding: "16px", borderRadius: "12px", border: "1px solid #27272a" }}>
+						<Select
+							label="Proveedor de Navegador"
+							value={browser.provider ?? "auto"}
+							options={["embedded", "brightdata", "decodo", "auto"]}
+							onChange={(v) => save("browser.provider", v)}
+							description="embedded: Playwright local | brightdata: CDP remoto | decodo: Playwright local con proxy residencial | auto: usa el navegador disponible"
+						/>
+						<Toggle
+							label="Bright Data Habilitado"
+							value={browser.brightDataEnabled ?? true}
+							onChange={(v) => save("browser.brightDataEnabled", v)}
+							description="Permite usar Bright Data como proveedor principal o como destino de fallback"
+						/>
+						<Field
+							label="Bright Data WS URL"
+							value={browser.brightDataWsUrl ?? ""}
+							onChange={(v) => save("browser.brightDataWsUrl", v)}
+							placeholder="wss://brd-customer-...:password@brd.superproxy.io:9222"
+							description="Opcional. Déjalo vacío para usar la variable gestionada BRIGHTDATA_WS_URL. Solo valores ws:// o wss:// son válidos."
+						/>
+						<Toggle
+							label="Decodo Habilitado"
+							value={browser.decodoEnabled ?? true}
+							onChange={(v) => save("browser.decodoEnabled", v)}
+							description="Permite usar Decodo como proxy residencial para Playwright, fallback ante bloqueos y captchas con IP matching"
+						/>
+						<Field
+							label="Decodo Proxy URL"
+							value={browser.decodoProxyUrl ?? ""}
+							onChange={(v) => save("browser.decodoProxyUrl", v)}
+							placeholder="http://user:password@gate.decodo.com:7000"
+							description="Opcional. Déjalo vacío para usar variables gestionadas DECODO_PROXY_URL o DECODO_PROXY_USERNAME/DECODO_PROXY_PASSWORD."
+						/>
+					</div>
+
+					<div style={{ background: "#09090b", padding: "16px", borderRadius: "12px", border: "1px solid #27272a" }}>
+						<Toggle
+							label="Modo Headless"
+							value={browser.headless ?? false}
+							onChange={(v) => save("browser.headless", v)}
+							description="Ejecutar el navegador local oculto en segundo plano"
+						/>
+						<Toggle
+							label="Resolver Captchas Automáticamente"
+							value={browser.solveCaptchas ?? true}
+							onChange={(v) => save("browser.solveCaptchas", v)}
+							description="Intentar resolver reCAPTCHA/hCaptcha antes de considerar la web bloqueada"
+						/>
+						<Toggle
+							label="Fallback Automático ante Bloqueo"
+							value={browser.autoFallbackOnBlock ?? true}
+							onChange={(v) => save("browser.autoFallbackOnBlock", v)}
+							description="Si está activo, migra al proveedor elegido al detectar DataDome, Cloudflare u otro bloqueo"
+						/>
+						<Select
+							label="Proveedor de Fallback"
+							value={browser.blockFallbackProvider ?? "decodo"}
+							options={["decodo", "brightdata", "embedded"]}
+							onChange={(v) => save("browser.blockFallbackProvider", v)}
+							description="Destino usado cuando el fallback automático está activo. Decodo usa proxy residencial local; Bright Data requiere WS URL; embedded usa el navegador local detectado."
+						/>
+						<Toggle
+							label="Confirmar Bloqueo con Visión"
+							value={browser.confirmBlockWithVision ?? true}
+							onChange={(v) => save("browser.confirmBlockWithVision", v)}
+							description="Tomar captura de pantalla y usar Z.ai Vision para confirmar si realmente hay un bloqueo"
+						/>
+					</div>
+				</div>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Herramientas e Iteraciones"
+				icon="🛠️"
+				description="Controla el límite global de ciclos en los que Octopus puede pedir herramientas antes de responder."
+				defaultOpen={false}
+			>
+				<div style={{ background: "#09090b", padding: "20px", borderRadius: "12px", border: "1px solid #27272a" }}>
+					<Toggle
+						label="Activar Límite de Iteraciones"
+						value={toolIterationLimit.enabled ?? true}
+						onChange={(v) => save("tools.iterationLimit.enabled", v)}
+						description="Si está activo, el agente se detiene al llegar al máximo configurado de iteraciones con herramientas."
+					/>
+					{(toolIterationLimit.enabled ?? true) && (
+						<Field
+							label="Máximo de Iteraciones"
+							value={toolIterationLimit.maxIterations ?? 18}
+							type="number"
+							description="Número máximo de ciclos de razonamiento con herramientas por respuesta. Debe ser 1 o mayor."
+							onChange={(v) =>
+								save(
+									"tools.iterationLimit.maxIterations",
+									Math.max(1, Number.parseInt(v, 10) || 18),
+								)
+							}
+						/>
+					)}
+				</div>
+			</ConfigSection>
 
 			<ConfigSection
 				title="Modelos y Proveedores AI"
@@ -314,19 +516,26 @@ export const SettingsPage: React.FC = () => {
 									/>
 								) : (
 									<div style={{ marginBottom: "12px" }}>
-										<div style={{ display: "flex", gap: "8px" }}>
+										<form
+											onSubmit={(e) => {
+												e.preventDefault();
+												const formData = new FormData(e.currentTarget);
+												const value = String(
+													formData.get(`provider-${p.key}-api-key`) ?? "",
+												).trim();
+												if (value) void save(`ai.providers.${p.key}.apiKey`, value);
+											}}
+											style={{ display: "flex", gap: "8px" }}
+										>
 											<input
+												id={`provider-${p.key}-api-key`}
+												name={`provider-${p.key}-api-key`}
 												type="password"
 												data-provider={p.key}
+												autoComplete="off"
 												placeholder={
 													hasKey ? "••••••••••••••••" : "Introduce tu API Key"
 												}
-												onKeyDown={(e) => {
-													if (e.key === "Enter") {
-														const v = (e.target as HTMLInputElement).value;
-														if (v) save(`ai.providers.${p.key}.apiKey`, v);
-													}
-												}}
 												style={{
 													flex: 1,
 													padding: "8px 12px",
@@ -346,14 +555,8 @@ export const SettingsPage: React.FC = () => {
 												onBlur={(e) => (e.target.style.borderColor = "#3f3f46")}
 											/>
 											<button
-												onClick={() => {
-													const inp = document.querySelector(
-														`[data-provider="${p.key}"]`,
-													) as HTMLInputElement;
-													if (inp?.value)
-														save(`ai.providers.${p.key}.apiKey`, inp.value);
-												}}
-												style={{
+												type="submit"
+											style={{
 													padding: "8px 14px",
 													borderRadius: "8px",
 													border: "none",
@@ -375,7 +578,7 @@ export const SettingsPage: React.FC = () => {
 											>
 												Guardar
 											</button>
-										</div>
+										</form>
 									</div>
 								)}
 								{p.hasMode && (

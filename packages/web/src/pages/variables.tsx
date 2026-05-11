@@ -18,6 +18,7 @@ export const VariablesPage: React.FC = () => {
 	const [newDesc, setNewDesc] = useState("");
 	const [saving, setSaving] = useState(false);
 	const [showValue, setShowValue] = useState<Set<string>>(new Set());
+	const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
 	const load = useCallback(async () => {
 		try {
@@ -35,15 +36,27 @@ export const VariablesPage: React.FC = () => {
 	}, [load]);
 
 	const handleSave = async () => {
-		if (!newKey.trim() || !newValue.trim()) return;
+		const normalizedKey = newKey.trim().toUpperCase();
+		if (!normalizedKey || !newValue.trim()) {
+			showToast("error", "Nombre y valor son obligatorios");
+			return;
+		}
+		if (!/^[A-Z0-9_]+$/.test(normalizedKey)) {
+			showToast("error", "Usa solo mayúsculas, números y guiones bajos en el nombre");
+			return;
+		}
+		if (vars.some((v) => v.key === normalizedKey)) {
+			showToast("error", `La variable ${normalizedKey} ya existe`);
+			return;
+		}
 		setSaving(true);
 		try {
 			await apiPost("/api/env", {
-				key: newKey.trim(),
+				key: normalizedKey,
 				value: newValue.trim(),
 				description: newDesc.trim() || undefined,
 			});
-			showToast("success", `Variable ${newKey.trim()} guardada`);
+			showToast("success", `Variable ${normalizedKey} guardada`);
 			setNewKey("");
 			setNewValue("");
 			setNewDesc("");
@@ -62,6 +75,7 @@ export const VariablesPage: React.FC = () => {
 		try {
 			await apiDelete(`/api/env/${encodeURIComponent(key)}`);
 			showToast("success", `Variable ${key} eliminada`);
+			setDeleteConfirm(null);
 			await load();
 		} catch (err) {
 			showToast(
@@ -75,7 +89,16 @@ export const VariablesPage: React.FC = () => {
 		setShowValue((prev) => {
 			const next = new Set(prev);
 			if (next.has(key)) next.delete(key);
-			else next.add(key);
+			else {
+				next.add(key);
+				setTimeout(() => {
+					setShowValue((current) => {
+						const updated = new Set(current);
+						updated.delete(key);
+						return updated;
+					});
+				}, 10000);
+			}
 			return next;
 		});
 	};
@@ -128,16 +151,18 @@ export const VariablesPage: React.FC = () => {
 						marginBottom: "12px",
 					}}
 				>
-					<input
-						id="env-new-key"
-						name="key"
-						type="text"
-						value={newKey}
-						onChange={(e) => setNewKey(e.target.value)}
-						placeholder="Nombre (ej: OPENAI_API_KEY)"
-						autoComplete="off"
-						style={{
-							flex: "1 1 200px",
+					<label style={{ flex: "1 1 200px", minWidth: 0 }}>
+						<span style={fieldLabelStyle}>Nombre</span>
+						<input
+							id="env-new-key"
+							name="key"
+							type="text"
+							value={newKey}
+							onChange={(e) => setNewKey(e.target.value.toUpperCase())}
+							placeholder="OPENAI_API_KEY"
+							autoComplete="off"
+							style={{
+								width: "100%",
 							padding: "10px 14px",
 							borderRadius: "10px",
 							border: "1px solid #3f3f46",
@@ -149,24 +174,27 @@ export const VariablesPage: React.FC = () => {
 								"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 							boxSizing: "border-box",
 							minWidth: 0,
-						}}
-						onFocus={(e) => {
-							e.target.style.borderColor = "#6366f1";
-						}}
-						onBlur={(e) => {
-							e.target.style.borderColor = "#3f3f46";
-						}}
-					/>
-					<input
-						id="env-new-value"
-						name="value"
-						type="password"
-						value={newValue}
-						onChange={(e) => setNewValue(e.target.value)}
-						placeholder="Valor"
-						autoComplete="off"
-						style={{
-							flex: "2 1 300px",
+							}}
+							onFocus={(e) => {
+								e.target.style.borderColor = "#6366f1";
+							}}
+							onBlur={(e) => {
+								e.target.style.borderColor = "#3f3f46";
+							}}
+						/>
+					</label>
+					<label style={{ flex: "2 1 300px", minWidth: 0 }}>
+						<span style={fieldLabelStyle}>Valor secreto</span>
+						<input
+							id="env-new-value"
+							name="value"
+							type="password"
+							value={newValue}
+							onChange={(e) => setNewValue(e.target.value)}
+							placeholder="Valor"
+							autoComplete="off"
+							style={{
+								width: "100%",
 							padding: "10px 14px",
 							borderRadius: "10px",
 							border: "1px solid #3f3f46",
@@ -178,17 +206,20 @@ export const VariablesPage: React.FC = () => {
 								"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 							boxSizing: "border-box",
 							minWidth: 0,
-						}}
-						onFocus={(e) => {
-							e.target.style.borderColor = "#6366f1";
-						}}
-						onBlur={(e) => {
-							e.target.style.borderColor = "#3f3f46";
-						}}
-					/>
+							}}
+							onFocus={(e) => {
+								e.target.style.borderColor = "#6366f1";
+							}}
+							onBlur={(e) => {
+								e.target.style.borderColor = "#3f3f46";
+							}}
+						/>
+					</label>
 				</div>
-				<div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-					<input
+				<div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap" }}>
+					<label style={{ flex: 1, minWidth: 220 }}>
+						<span style={fieldLabelStyle}>Descripción opcional</span>
+						<input
 						id="env-new-desc"
 						name="description"
 						type="text"
@@ -197,7 +228,7 @@ export const VariablesPage: React.FC = () => {
 						placeholder="Descripción (opcional)"
 						autoComplete="off"
 						style={{
-							flex: 1,
+							width: "100%",
 							padding: "8px 14px",
 							borderRadius: "10px",
 							border: "1px solid #3f3f46",
@@ -213,7 +244,8 @@ export const VariablesPage: React.FC = () => {
 						onBlur={(e) => {
 							e.target.style.borderColor = "#3f3f46";
 						}}
-					/>
+						/>
+					</label>
 					<button
 						type="button"
 						onClick={handleSave}
@@ -368,7 +400,10 @@ export const VariablesPage: React.FC = () => {
 							</button>
 							<button
 								type="button"
-								onClick={() => handleDelete(v.key)}
+								onClick={() => {
+									if (deleteConfirm === v.key) void handleDelete(v.key);
+									else setDeleteConfirm(v.key);
+								}}
 								style={{
 									padding: "6px 12px",
 									borderRadius: "8px",
@@ -382,12 +417,41 @@ export const VariablesPage: React.FC = () => {
 									whiteSpace: "nowrap",
 								}}
 							>
-								Eliminar
+								{deleteConfirm === v.key ? "Confirmar" : "Eliminar"}
 							</button>
+							{deleteConfirm === v.key && (
+								<button
+									type="button"
+									onClick={() => setDeleteConfirm(null)}
+									style={{
+										padding: "6px 12px",
+										borderRadius: "8px",
+										border: "1px solid #3f3f46",
+										background: "#27272a",
+										color: "#a1a1aa",
+										fontSize: "0.75rem",
+										cursor: "pointer",
+										fontFamily: "inherit",
+										whiteSpace: "nowrap",
+									}}
+								>
+									Cancelar
+								</button>
+							)}
 						</div>
 					))}
 				</div>
 			)}
 		</div>
 	);
+};
+
+const fieldLabelStyle: React.CSSProperties = {
+	display: "block",
+	fontSize: "0.72rem",
+	fontWeight: 700,
+	color: "#a1a1aa",
+	letterSpacing: "0.04em",
+	textTransform: "uppercase",
+	marginBottom: "6px",
 };

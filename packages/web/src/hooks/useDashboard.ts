@@ -5,11 +5,14 @@ export interface DashboardStats {
 	agents: number;
 	tools: number;
 	mcp: number;
+	tasks: number;
+	runningTasks: number;
 	conversations: number;
 	memories: number;
 	provider: string;
 	thinking: string;
 	channels: string[];
+	status: "online" | "degraded";
 }
 
 export interface ActivityItem {
@@ -27,12 +30,14 @@ export function useDashboard() {
 
 	const loadStats = useCallback(async () => {
 		try {
-			const [agents, mcp, memoryRaw, convs, statusRaw] = await Promise.all([
+			const [agents, mcp, memoryRaw, convs, statusRaw, toolsRaw, taskStatsRaw] = await Promise.all([
 				apiGet<unknown[]>("/api/agents").catch(() => []),
 				apiGet<unknown[]>("/api/mcp/servers").catch(() => []),
 				apiGet<Record<string, unknown>>("/api/memory/stats").catch(() => ({})),
 				apiGet<unknown[]>("/api/conversations").catch(() => []),
 				apiGet<Record<string, unknown>>("/api/status").catch(() => ({})),
+				apiGet<unknown[]>("/api/tools").catch(() => []),
+				apiGet<Record<string, number>>("/api/tasks/stats").catch(() => ({})),
 			]);
 
 			const memory = memoryRaw as {
@@ -43,19 +48,31 @@ export function useDashboard() {
 				provider?: string;
 				thinking?: string;
 				channels?: string[];
+				ok?: boolean;
+			};
+			const taskStats = taskStatsRaw as {
+				total?: number;
+				running?: number;
 			};
 
 			setStats({
 				agents: agents.length,
-				tools: 10 + mcp.length * 3,
+				tools: Array.isArray(toolsRaw)
+					? toolsRaw.length
+					: Array.isArray((toolsRaw as { items?: unknown[] }).items)
+						? ((toolsRaw as { items: unknown[] }).items.length)
+						: 0,
 				mcp: mcp.length,
+				tasks: taskStats.total ?? 0,
+				runningTasks: taskStats.running ?? 0,
 				conversations: convs.length,
 				memories: memory.shortTerm
 					? (memory.shortTerm.count ?? 0)
-					: (memory.longTerm?.maxItems ?? 0),
+					: 0,
 				provider: status.provider ?? "N/A",
 				thinking: status.thinking ?? "none",
 				channels: status.channels ?? [],
+				status: status.ok === false ? "degraded" : "online",
 			});
 
 			const items: ActivityItem[] = [];
@@ -82,18 +99,14 @@ export function useDashboard() {
 						});
 					});
 			}
-			if (Array.isArray(agents)) {
-				(agents as Array<{ id: string; name: string; description?: string }>)
-					.slice(0, 3)
-					.forEach((a) => {
-						items.push({
-							id: a.id,
-							type: "agent",
-							title: a.name,
-							description: a.description,
-							timestamp: Date.now(),
-						});
-					});
+			if (items.length === 0) {
+				items.push({
+					id: "system-ready",
+					type: "system",
+					title: "Workspace listo",
+					description: "Crea una conversación, agente o automatización para ver actividad real aquí.",
+					timestamp: Date.now(),
+				});
 			}
 			items.sort((a, b) => b.timestamp - a.timestamp);
 			setActivity(items);

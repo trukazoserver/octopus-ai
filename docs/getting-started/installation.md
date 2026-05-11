@@ -38,8 +38,8 @@ Esta guía te ayudará a instalar Octopus AI paso a paso, sin importar tu nivel 
 |---|---|---|
 | **Node.js** | >= 22.0.0 | Entorno de ejecución principal |
 | **pnpm** | >= 10.0.0 | Gestor de paquetes del monorepo |
-| **Python** | >= 3.10 | Compilación de módulos nativos (node-gyp) |
-| **C++ Build Tools** | Ver abajo | Compilación de `better-sqlite3` (base de datos) |
+| **Python** | >= 3.10 | Recomendado para herramientas auxiliares y ejecución de scripts |
+| **C++ Build Tools** | Ver abajo | Opcional para dependencias nativas de terceros; SQLite usa `sql.js` WASM |
 | **Git** | Cualquiera | Clonar el repositorio |
 
 > **¿No sabes qué es Node.js o pnpm?** No te preocupes. El instalador automático verifica e instala lo que falte.
@@ -48,7 +48,7 @@ Esta guía te ayudará a instalar Octopus AI paso a paso, sin importar tu nivel 
 
 ## 📦 Preparación por Sistema Operativo
 
-Antes de instalar Octopus AI, necesitas tener Node.js, Python y las herramientas de compilación. A continuación, las instrucciones detalladas para cada sistema operativo.
+Antes de instalar Octopus AI necesitas Node.js, pnpm y Git. Python y Build Tools son recomendables para algunas tools o dependencias opcionales, pero la base de datos actual usa `sql.js` WASM y no requiere compilar `better-sqlite3`.
 
 ### Windows
 
@@ -84,9 +84,9 @@ Cierra y reabre la terminal. Verifica con:
 python --version
 ```
 
-#### 4. Instalar Build Tools de C++
+#### 4. Instalar Build Tools de C++ (opcional)
 
-Esto es necesario para que la base de datos SQLite funcione correctamente:
+Esto solo es necesario si agregas dependencias nativas que usen `node-gyp`:
 
 ```powershell
 winget install Microsoft.VisualStudio.2022.BuildTools --force --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
@@ -231,10 +231,9 @@ El instalador ejecuta **7 pasos automáticamente**:
 |---|---|---|
 | 1/7 | Verifica Node.js >= 22 | Te pide actualizar |
 | 2/7 | Verifica/instala pnpm | Lo instala con `npm install -g pnpm` |
-| 3/7 | Verifica Python | Te pregunta si quieres instalarlo automáticamente |
-| 4/7 | Verifica Build Tools C++ | Te pregunta si quieres instalarlas automáticamente |
+| 3/7 | Verifica Python | Lo recomienda para tools auxiliares |
+| 4/7 | Verifica Build Tools C++ | Lo marca como opcional salvo dependencias nativas |
 | 5/7 | `pnpm install` | Descarga todas las dependencias |
-| 5b | `pnpm rebuild better-sqlite3` | Compila la base de datos nativa para tu sistema |
 | 6/7 | `pnpm build` | Compila los 11 paquetes TypeScript |
 | 7/7 | Asistente de API Keys | Te pregunta por las claves de cada proveedor de IA |
 
@@ -271,17 +270,10 @@ cd octopus-ai
 # 2. Instalar dependencias
 pnpm install
 
-# 3. Recompilar bindings nativos (Importante)
-pnpm rebuild better-sqlite3
-```
-
-> Si este paso falla con errores de `node-gyp`, revisa que tengas Python y Build Tools C++ instalados (ver sección de preparación por SO).
-
-```bash
-# 4. Compilar el monorepo (TypeScript)
+# 3. Compilar el monorepo (TypeScript)
 pnpm build
 
-# 5. Configuración inicial
+# 4. Configuración inicial
 node packages/cli/dist/index.js setup
 ```
 
@@ -332,8 +324,8 @@ Deberías ver algo como:
   ✓ Node.js:             v22.x (>= 22)
   ✓ pnpm:                v10.x
   ✓ Python:              Python 3.x
-  ✓ Build Tools (C++):   OK
-  ✓ better-sqlite3:      Bindings nativos OK
+  ✓ Build Tools (C++, opcional): OK
+  ✓ Database:            OK
   ✓ Config File:         ~/.octopus/config.json
   ✓ API Keys:            Z.ai ✓
 ```

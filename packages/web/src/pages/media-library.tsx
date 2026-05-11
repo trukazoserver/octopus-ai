@@ -35,15 +35,19 @@ function isAudio(mime: string): boolean {
 export const MediaLibraryPage: React.FC = () => {
 	const [items, setItems] = useState<MediaItem[]>([]);
 	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const [preview, setPreview] = useState<string | null>(null);
+	const [typeFilter, setTypeFilter] = useState<"all" | "image" | "video" | "audio" | "document">("all");
+	const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
 	const load = useCallback(async () => {
+		setError(null);
 		try {
 			const data = await apiGet<MediaItem[]>("/api/media");
 			setItems(Array.isArray(data) ? data : []);
-		} catch {
-			setItems([]);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Error al cargar medios");
 		} finally {
 			setLoading(false);
 		}
@@ -77,9 +81,15 @@ export const MediaLibraryPage: React.FC = () => {
 	};
 
 	const handleDelete = async (id: string, filename: string) => {
+		if (deleteConfirm !== id) {
+			setDeleteConfirm(id);
+			return;
+		}
 		try {
 			await apiDelete(`/api/media/${id}`);
 			showToast("success", `${filename} eliminado`);
+			setDeleteConfirm(null);
+			setPreview((current) => (current === id ? null : current));
 			await load();
 		} catch (err) {
 			showToast("error", "Error al eliminar");
@@ -87,6 +97,13 @@ export const MediaLibraryPage: React.FC = () => {
 	};
 
 	const mediaUrl = (id: string) => `${API_BASE}/api/media/file/${id}`;
+	const filteredItems = items.filter((item) => {
+		if (typeFilter === "all") return true;
+		if (typeFilter === "image") return isImage(item.mimetype);
+		if (typeFilter === "video") return isVideo(item.mimetype);
+		if (typeFilter === "audio") return isAudio(item.mimetype);
+		return !isImage(item.mimetype) && !isVideo(item.mimetype) && !isAudio(item.mimetype);
+	});
 
 	return (
 		<div className="page-shell">
@@ -136,6 +153,8 @@ export const MediaLibraryPage: React.FC = () => {
 				>
 					{uploading ? "Subiendo..." : "↑ Subir archivo"}
 					<input
+						id="media-upload"
+						name="mediaUpload"
 						type="file"
 						multiple
 						onChange={handleUpload}
@@ -146,7 +165,37 @@ export const MediaLibraryPage: React.FC = () => {
 				</label>
 			</div>
 
-			{loading ? (
+			{!loading && !error && items.length > 0 && (
+				<div className="toolbar-wrap" style={{ marginBottom: "18px" }}>
+					{(["all", "image", "video", "audio", "document"] as const).map((filter) => (
+						<button
+							key={filter}
+							type="button"
+							onClick={() => setTypeFilter(filter)}
+							style={{
+								padding: "8px 12px",
+								borderRadius: "999px",
+								border: `1px solid ${typeFilter === filter ? "#6366f1" : "#27272a"}`,
+								background: typeFilter === filter ? "rgba(99,102,241,0.16)" : "#18181b",
+								color: typeFilter === filter ? "#a5b4fc" : "#a1a1aa",
+								fontSize: "0.8rem",
+								fontWeight: 700,
+								cursor: "pointer",
+							}}
+						>
+							{filter === "all" ? "Todos" : filter === "image" ? "Imágenes" : filter === "video" ? "Videos" : filter === "audio" ? "Audio" : "Documentos"}
+						</button>
+					))}
+				</div>
+			)}
+
+			{error ? (
+				<div style={{ padding: "32px", borderRadius: "16px", border: "1px solid rgba(239,68,68,0.25)", background: "rgba(239,68,68,0.08)", color: "#fca5a5", textAlign: "center" }}>
+					<div style={{ fontWeight: 700, marginBottom: 8 }}>No se pudo cargar la biblioteca</div>
+					<div style={{ fontSize: "0.85rem", marginBottom: 14 }}>{error}</div>
+					<button type="button" onClick={load} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #ef4444", background: "transparent", color: "#fca5a5", cursor: "pointer" }}>Reintentar</button>
+				</div>
+			) : loading ? (
 				<div
 					style={{
 						display: "grid",
@@ -181,9 +230,17 @@ export const MediaLibraryPage: React.FC = () => {
 					>
 						Sin archivos multimedia
 					</div>
-					<div style={{ fontSize: "0.85rem" }}>
-						Los archivos que el agente genere aparecerán aquí
+					<div style={{ fontSize: "0.85rem", marginBottom: "16px" }}>
+						Los archivos que el agente genere aparecerán aquí. También puedes subir tus propios recursos.
 					</div>
+					<label style={{ display: "inline-flex", padding: "10px 18px", borderRadius: "10px", background: "#6366f1", color: "#fff", cursor: "pointer", fontWeight: 700 }}>
+						Subir primer archivo
+						<input id="media-empty-upload" name="mediaUpload" type="file" multiple onChange={handleUpload} accept="image/*,video/*,audio/*,.pdf,.json,.csv,.txt" style={{ display: "none" }} />
+					</label>
+				</div>
+			) : filteredItems.length === 0 ? (
+				<div style={{ padding: "48px 20px", borderRadius: "16px", border: "1px dashed #27272a", textAlign: "center", color: "#a1a1aa" }}>
+					No hay archivos para este filtro.
 				</div>
 			) : (
 				<div
@@ -193,10 +250,12 @@ export const MediaLibraryPage: React.FC = () => {
 						gap: "16px",
 					}}
 				>
-					{items.map((item) => (
+					{filteredItems.map((item) => (
 						<div
 							key={item.id}
 							className="hover-lift"
+							role="button"
+							tabIndex={0}
 							style={{
 								borderRadius: "14px",
 								background: "rgba(24,24,27,0.6)",
@@ -206,6 +265,9 @@ export const MediaLibraryPage: React.FC = () => {
 								cursor: "pointer",
 							}}
 							onClick={() => setPreview(item.id)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter" || e.key === " ") setPreview(item.id);
+							}}
 						>
 							<div
 								style={{
@@ -317,7 +379,7 @@ export const MediaLibraryPage: React.FC = () => {
 										<audio
 											src={mediaUrl(item.id)}
 											controls
-											style={{ width: "400px" }}
+										style={{ width: "min(400px, 88vw)" }}
 										/>
 									) : (
 										<div style={{ padding: "40px", color: "#a1a1aa" }}>
@@ -350,10 +412,7 @@ export const MediaLibraryPage: React.FC = () => {
 										</span>
 										<button
 											type="button"
-											onClick={() => {
-												handleDelete(item.id, item.filename);
-												setPreview(null);
-											}}
+											onClick={() => void handleDelete(item.id, item.filename)}
 											style={{
 												padding: "4px 12px",
 												borderRadius: "6px",
@@ -364,8 +423,10 @@ export const MediaLibraryPage: React.FC = () => {
 												cursor: "pointer",
 											}}
 										>
-											Eliminar
+											{deleteConfirm === item.id ? "Confirmar" : "Eliminar"}
 										</button>
+										<a href={mediaUrl(item.id)} download={item.filename} style={{ padding: "4px 12px", borderRadius: "6px", border: "1px solid #3f3f46", color: "#a5b4fc", fontSize: "0.75rem", textDecoration: "none" }}>Descargar</a>
+										<button type="button" onClick={() => void navigator.clipboard?.writeText(mediaUrl(item.id)).then(() => showToast("success", "URL copiada"))} style={{ padding: "4px 12px", borderRadius: "6px", border: "1px solid #3f3f46", background: "#18181b", color: "#a1a1aa", fontSize: "0.75rem", cursor: "pointer" }}>Copiar URL</button>
 									</div>
 								</div>
 							);

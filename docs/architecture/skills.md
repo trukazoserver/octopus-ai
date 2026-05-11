@@ -26,6 +26,7 @@ Lo especial de Octopus AI es que **puede crear nuevas skills por sí mismo** cua
 5. Carga     → Se carga según la tarea (lazy loading)
 6. Uso       → Se ejecuta y se registran métricas de éxito/fracaso
 7. Mejora    → Se auto-mejora si la tasa de éxito baja
+8. Aprendizaje → Las experiencias exitosas o fallidas alimentan nuevas instrucciones y antipatrones
 ```
 
 ### Detalle de cada fase
@@ -39,6 +40,7 @@ Lo especial de Octopus AI es que **puede crear nuevas skills por sí mismo** cua
 | **Carga** | Se carga de forma perezosa (lazy) solo cuando la tarea es relevante |
 | **Uso** | Se ejecuta y se registran métricas: tasa de éxito, valoración del usuario |
 | **Mejora** | Si la tasa de éxito baja del 70%, se activa la mejora automática |
+| **Aprendizaje** | `LearningEngine` registra qué skills se cargaron y actualiza métricas con el resultado real de la experiencia |
 
 ---
 
@@ -151,6 +153,12 @@ Los cambios mayores en skills se someten a pruebas A/B antes de ser aceptados:
 4. La versión ganadora reemplaza a la perdedora
 
 Esto asegura que las "mejoras" realmente mejoren el resultado y no lo empeoren.
+
+## Relación con LearningEngine
+
+El motor de aprendizaje registra experiencias completas de trabajo. Cuando una skill participa en una experiencia, se guarda un `SkillUsage` con éxito, razón de éxito o razón de fallo. Esas métricas alimentan `SkillImprover` y, si se repiten varias experiencias similares exitosas, `SkillForge` puede crear una skill candidata nueva.
+
+Los umbrales son conservadores para evitar que Octopus convierta una casualidad en regla permanente: por defecto necesita alta confianza y varias experiencias similares antes de crear una skill.
 
 ---
 

@@ -26,6 +26,7 @@ packages/
 │       ├── ai/        # Proveedores de LLM (OpenAI, Anthropic, etc.)
 │       ├── channels/  # Integraciones de mensajería
 │       ├── config/    # Configuración y SOUL.md parser
+│       ├── learning/  # Experiencias, insights y feedback de auto-mejora
 │       ├── memory/    # STM, LTM, FTS5, user profiling
 │       ├── plugins/   # Engine, MCP, marketplace
 │       ├── skills/    # SkillForge, Improver, A/B testing
@@ -45,6 +46,7 @@ packages/
 ### 🔥 Alta Prioridad
 - **Nuevos canales de mensajería** — Signal, Matrix, iMessage
 - **Skills builtin** — Nuevas habilidades pre-construidas
+- **LearningEngine** — Mejores heurísticas de éxito/fallo, ranking de insights y feedback humano
 - **Tests** — Mejorar la cobertura de pruebas
 - **Documentación** — Guías, tutoriales, traducciones
 
@@ -102,6 +104,12 @@ refactor(agent): extract reflection engine
 ### Nuevo Skill Builtin
 1. Crear `packages/core/src/skills/builtin/mi-skill.md`
 2. Seguir el formato de skills existentes
+
+### Nueva Señal de Aprendizaje
+1. Extender tipos en `packages/core/src/learning/types.ts`
+2. Agregar extracción o ranking en `packages/core/src/learning/engine.ts`
+3. Añadir pruebas en `packages/core/src/__tests__/learning-engine.test.ts`
+4. Actualizar [Motor de Aprendizaje](docs/architecture/learning.md)
 
 ## 🧪 Testing
 

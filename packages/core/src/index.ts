@@ -8,6 +8,20 @@ export {
 export type { OctopusConfig, ValidationResult } from "./config/index.js";
 
 export {
+	DEFAULT_MASCOT_ID,
+	MASCOT_IDS,
+	MASCOT_PROFILES,
+	getMascotById,
+	getMascotOptions,
+} from "./mascots/index.js";
+export type {
+	MascotId,
+	MascotProfile,
+	MascotSpecialty,
+	MascotTone,
+} from "./mascots/index.js";
+
+export {
 	LLMRouter,
 	getProviderRegistry,
 	TokenCounter,
@@ -34,9 +48,17 @@ export type {
 	ProviderInfo,
 } from "./ai/index.js";
 
-export { AgentRuntime, TaskPlanner, AgentCoordinator, ReflectionEngine, HeartbeatDaemon, OctopusDaemon } from "./agent/index.js";
+export {
+	AgentRuntime,
+	TaskPlanner,
+	AgentCoordinator,
+	ReflectionEngine,
+	HeartbeatDaemon,
+	OctopusDaemon,
+} from "./agent/index.js";
 export type {
 	AgentConfig,
+	ToolIterationLimitConfig,
 	TaskState,
 	ConversationTurn,
 	TaskDescription,
@@ -125,6 +147,19 @@ export type {
 	SkillMarketplaceConfig,
 } from "./skills/index.js";
 
+export { LearningEngine } from "./learning/index.js";
+export type {
+	ExperienceRecord,
+	ExperienceRecordInput,
+	ExperienceSkillTrace,
+	ExperienceStatus,
+	ExperienceToolTrace,
+	LearningEngineConfig,
+	LearningFeedbackInput,
+	LearningInsight,
+	LearningInsightType,
+} from "./learning/index.js";
+
 export {
 	ToolRegistry,
 	ToolExecutor,
@@ -186,7 +221,11 @@ export { WebhookServer } from "./tasks/webhooks.js";
 
 export { PermissionManager } from "./team/permissions.js";
 export { DelegationManager } from "./team/delegation.js";
-export type { DelegationConfig, DelegationTask, DelegationPlan } from "./team/delegation.js";
+export type {
+	DelegationConfig,
+	DelegationTask,
+	DelegationPlan,
+} from "./team/delegation.js";
 
 export { MetricsCollector } from "./utils/metrics.js";
 export type {
@@ -246,6 +285,7 @@ export type { EnvVar } from "./config/env-manager.js";
 
 export { MCPManager } from "./plugins/mcp/manager.js";
 export type { MCPManagedServer } from "./plugins/mcp/manager.js";
+export { getZaiMCPConfigs } from "./plugins/mcp/zai-servers.js";
 
 export { ChannelManager } from "./channels/manager.js";
 export { TelegramChannel } from "./channels/telegram/index.js";

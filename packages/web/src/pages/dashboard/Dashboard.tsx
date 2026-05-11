@@ -64,6 +64,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 					onViewAgents={() => onNavigate?.("agents")}
 					onViewSettings={() => onNavigate?.("settings")}
 					onViewChannels={() => onNavigate?.("channels")}
+					onViewTasks={() => onNavigate?.("tasks")}
+					onViewTools={() => onNavigate?.("code")}
+					onViewVariables={() => onNavigate?.("variables")}
 				/>
 			</div>
 

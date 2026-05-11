@@ -33,7 +33,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({
 	};
 
 	return (
-		<div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+		<form onSubmit={(e) => { e.preventDefault(); handleSave(); }} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
 			<div>
 				<label
 					htmlFor="discord-bot-token"
@@ -82,9 +82,8 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({
 					Obtenlo en Discord Developer Portal → Bot → Token
 				</div>
 			</div>
-			<button
-				type="button"
-				onClick={handleSave}
+				<button
+					type="submit"
 				disabled={!token.trim() || saving || !enabled}
 				style={{
 					padding: "8px 16px",
@@ -104,6 +103,6 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({
 			>
 				{saving ? "Guardando..." : "Guardar Token"}
 			</button>
-		</div>
+		</form>
 	);
 };

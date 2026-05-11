@@ -84,6 +84,7 @@ Esto deja persistidos:
 
 - base de datos en `/data/db/octopus.db`
 - skills y artefactos del sistema en `/data/skills`
+- experiencias y aprendizajes continuos en la misma base SQLite
 - logs en `/data/logs`
 - archivos operativos del workspace en `/data/workspace`
 
@@ -172,5 +173,5 @@ La tool `sandbox_execute` depende de Docker disponible para el runtime donde se 
 ## Siguientes Pasos
 
 - [Inicio Rápido](./quick-start.md) — Primer uso del asistente
-- [Configuración](./configuration.md) — Modelos, memoria y canales
+- [Configuración](./configuration.md) — Modelos, memoria, aprendizaje y canales
 - [API HTTP y WebSocket](../api/http.md) — Endpoints del backend

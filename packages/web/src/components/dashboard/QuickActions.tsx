@@ -13,6 +13,9 @@ interface QuickActionsProps {
 	onViewAgents: () => void;
 	onViewSettings: () => void;
 	onViewChannels: () => void;
+	onViewTasks: () => void;
+	onViewTools: () => void;
+	onViewVariables: () => void;
 }
 
 export const QuickActions: React.FC<QuickActionsProps> = ({
@@ -20,6 +23,9 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
 	onViewAgents,
 	onViewSettings,
 	onViewChannels,
+	onViewTasks,
+	onViewTools,
+	onViewVariables,
 }) => {
 	const actions: QuickAction[] = [
 		{
@@ -42,6 +48,27 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
 			description: "Configura canales de comunicación",
 			onClick: onViewChannels,
 			color: "#3b82f6",
+		},
+		{
+			icon: "✅",
+			label: "Tareas",
+			description: "Planifica trabajo para agentes",
+			onClick: onViewTasks,
+			color: "#38bdf8",
+		},
+		{
+			icon: "🔧",
+			label: "Herramientas",
+			description: "Revisa inventario y MCP",
+			onClick: onViewTools,
+			color: "#a78bfa",
+		},
+		{
+			icon: "🔐",
+			label: "Variables",
+			description: "Gestiona secretos y API keys",
+			onClick: onViewVariables,
+			color: "#fb7185",
 		},
 		{
 			icon: "⚙️",

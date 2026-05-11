@@ -22,6 +22,26 @@ import type {
 } from "./types.js";
 
 const logger = createLogger("llm-router");
+const DEFAULT_PROVIDER_RETRIES = 2;
+const DEFAULT_PROVIDER_RETRY_BASE_DELAY_MS = 1500;
+
+function getPositiveIntEnv(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (!raw) return fallback;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableProviderError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /fetch failed|network|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR|socket|terminated/i.test(
+		message,
+	);
+}
 
 const PROVIDER_REGISTRY: Record<
 	string,
@@ -233,6 +253,14 @@ export class LLMRouter {
 		totalCost: 0,
 		byProvider: {},
 	};
+	private providerRetries = getPositiveIntEnv(
+		"OCTOPUS_PROVIDER_RETRIES",
+		DEFAULT_PROVIDER_RETRIES,
+	);
+	private providerRetryBaseDelayMs = getPositiveIntEnv(
+		"OCTOPUS_PROVIDER_RETRY_BASE_DELAY_MS",
+		DEFAULT_PROVIDER_RETRY_BASE_DELAY_MS,
+	);
 
 	constructor(config: LLMRouterConfig) {
 		this.config = config;
@@ -283,6 +311,10 @@ export class LLMRouter {
 		modelName: string;
 		providerName: string;
 	} {
+		if (model === "default" && this.config.default !== "default") {
+			return this.resolveProvider(this.config.default);
+		}
+
 		const slashIndex = model.indexOf("/");
 		if (slashIndex === -1) {
 			for (const [providerName, provider] of this.providers) {
@@ -291,15 +323,18 @@ export class LLMRouter {
 					return { provider, modelName: model, providerName };
 				}
 			}
-			const defaultProvider = this.providers.get(this.config.default);
+			const defaultProviderName = this.config.default.includes("/")
+				? this.config.default.slice(0, this.config.default.indexOf("/"))
+				: this.config.default;
+			const defaultProvider = this.providers.get(defaultProviderName);
 			if (!defaultProvider)
 				throw new Error(
-					`Default provider "${this.config.default}" not available`,
+					`Default provider "${defaultProviderName}" not available`,
 				);
 			return {
 				provider: defaultProvider,
 				modelName: model,
-				providerName: this.config.default,
+				providerName: defaultProviderName,
 			};
 		}
 
@@ -315,18 +350,30 @@ export class LLMRouter {
 		return { provider, modelName, providerName };
 	}
 
-	private trackUsage(
-		provider: string,
-		usage: { promptTokens: number; completionTokens: number },
-	): void {
-		const tokens = usage.promptTokens + usage.completionTokens;
-		this.usage.totalTokens += tokens;
-
+	private ensureUsageProvider(provider: string): void {
 		if (!this.usage.byProvider[provider]) {
 			this.usage.byProvider[provider] = { tokens: 0, cost: 0, requests: 0 };
 		}
-		this.usage.byProvider[provider].tokens += tokens;
+	}
+
+	private trackRequest(provider: string): void {
+		this.ensureUsageProvider(provider);
 		this.usage.byProvider[provider].requests += 1;
+	}
+
+	private trackUsage(
+		provider: string,
+		usage: {
+			promptTokens: number;
+			completionTokens: number;
+			totalTokens?: number;
+		},
+	): void {
+		const tokens =
+			usage.totalTokens ?? usage.promptTokens + usage.completionTokens;
+		this.usage.totalTokens += tokens;
+		this.ensureUsageProvider(provider);
+		this.usage.byProvider[provider].tokens += tokens;
 	}
 
 	private injectReasoning(request: LLMRequest): LLMRequest {
@@ -342,27 +389,100 @@ export class LLMRouter {
 		};
 	}
 
+	/**
+	 * Map of text-only model → vision model, per provider.
+	 * When a request contains images via direct API, we transparently upgrade the model.
+	 * NOTE: zhipu (Coding Plan) is NOT listed here — vision is handled via Z.AI MCP Server.
+	 */
+	private static readonly VISION_MODEL_MAP: Record<string, Record<string, string>> = {
+		// openai, anthropic, google etc. can be added here if needed
+	};
+
+	/**
+	 * Returns true if any message in the request has image content parts.
+	 */
+	private hasVisionContent(request: LLMRequest): boolean {
+		return request.messages.some((msg) => {
+			if (!Array.isArray(msg.content)) return false;
+			return (msg.content as Array<{ type: string }>).some(
+				(part) => part.type === "image_url",
+			);
+		});
+	}
+
+	/**
+	 * If the request contains images and the current model is text-only,
+	 * upgrade to the vision-capable equivalent for this provider.
+	 */
+	private applyVisionRouting(
+		request: LLMRequest,
+		providerName: string,
+	): LLMRequest {
+		if (!this.hasVisionContent(request)) return request;
+		const visionMap = LLMRouter.VISION_MODEL_MAP[providerName];
+		if (!visionMap) return request;
+		const visionModel = visionMap[request.model];
+		if (!visionModel) return request;
+		logger.info(
+			`Vision routing: upgrading model ${request.model} → ${visionModel} for ${providerName}`,
+		);
+		return { ...request, model: visionModel };
+	}
+
 	async chat(request: LLMRequest): Promise<LLMResponse> {
 		const enriched = this.injectReasoning(request);
 		const { provider, modelName, providerName } = this.resolveProvider(
 			enriched.model,
 		);
-		const resolvedRequest = { ...enriched, model: modelName };
+		const visionRouted = this.applyVisionRouting(
+			{ ...enriched, model: modelName },
+			providerName,
+		);
+		const resolvedRequest = visionRouted;
 
 		try {
-			const response = await provider.chat(resolvedRequest);
-			this.trackUsage(providerName, response.usage);
-			return response;
+			for (let attempt = 0; ; attempt++) {
+				try {
+					this.trackRequest(providerName);
+					const response = await provider.chat(resolvedRequest);
+					this.trackUsage(providerName, response.usage);
+					return response;
+				} catch (error) {
+					if (
+						attempt < this.providerRetries &&
+						isRetryableProviderError(error)
+					) {
+						const delay = this.providerRetryBaseDelayMs * 2 ** attempt;
+						logger.warn(
+							`Provider '${providerName}' transient failure; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries})`,
+						);
+						await sleep(delay);
+						continue;
+					}
+					throw error;
+				}
+			}
 		} catch (error) {
 			if (this.config.fallback) {
-				const fallbackProvider = this.providers.get(this.config.fallback);
-				if (fallbackProvider) {
+				try {
+					const {
+						provider: fallbackProvider,
+						modelName: fallbackModelName,
+						providerName: fallbackProviderName,
+					} = this.resolveProvider(this.config.fallback);
 					logger.warn(
-						`Provider '${providerName}' failed, falling back to '${this.config.fallback}'`,
+						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}'`,
 					);
-					const fallbackResponse = await fallbackProvider.chat(resolvedRequest);
-					this.trackUsage(this.config.fallback, fallbackResponse.usage);
+					const fallbackResolved = this.applyVisionRouting(
+						{ ...enriched, model: fallbackModelName },
+						fallbackProviderName,
+					);
+					this.trackRequest(fallbackProviderName);
+					const fallbackResponse = await fallbackProvider.chat(fallbackResolved);
+					this.trackUsage(fallbackProviderName, fallbackResponse.usage);
 					return fallbackResponse;
+				} catch {
+					// Surface the original provider error when fallback is unavailable.
 				}
 			}
 			throw error;
@@ -374,25 +494,64 @@ export class LLMRouter {
 		const { provider, modelName, providerName } = this.resolveProvider(
 			enriched.model,
 		);
-		const resolvedRequest = { ...enriched, model: modelName };
+		const visionRouted = this.applyVisionRouting(
+			{ ...enriched, model: modelName },
+			providerName,
+		);
+		const resolvedRequest = visionRouted;
+		let primaryYieldedAnyChunk = false;
 
 		try {
-			const stream = provider.chatStream(resolvedRequest);
-			for await (const chunk of stream) {
-				yield chunk;
-			}
-		} catch (error) {
-			if (this.config.fallback) {
-				const fallbackProvider = this.providers.get(this.config.fallback);
-				if (fallbackProvider) {
-					logger.warn(
-						`Provider '${providerName}' failed, falling back to '${this.config.fallback}'`,
-					);
-					const fallbackStream = fallbackProvider.chatStream(resolvedRequest);
-					for await (const chunk of fallbackStream) {
+			for (let attempt = 0; ; attempt++) {
+				try {
+					this.trackRequest(providerName);
+					const stream = provider.chatStream(resolvedRequest);
+					for await (const chunk of stream) {
+						primaryYieldedAnyChunk = true;
+						if (chunk.usage) this.trackUsage(providerName, chunk.usage);
 						yield chunk;
 					}
 					return;
+				} catch (error) {
+					if (
+						!primaryYieldedAnyChunk &&
+						attempt < this.providerRetries &&
+						isRetryableProviderError(error)
+					) {
+						const delay = this.providerRetryBaseDelayMs * 2 ** attempt;
+						logger.warn(
+							`Provider '${providerName}' stream failed before output; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries})`,
+						);
+						await sleep(delay);
+						continue;
+					}
+					throw error;
+				}
+			}
+		} catch (error) {
+			if (this.config.fallback && !primaryYieldedAnyChunk) {
+				try {
+					const {
+						provider: fallbackProvider,
+						modelName: fallbackModelName,
+						providerName: fallbackProviderName,
+					} = this.resolveProvider(this.config.fallback);
+					logger.warn(
+						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}'`,
+					);
+					const fallbackResolved = this.applyVisionRouting(
+						{ ...enriched, model: fallbackModelName },
+						fallbackProviderName,
+					);
+					this.trackRequest(fallbackProviderName);
+					const fallbackStream = fallbackProvider.chatStream(fallbackResolved);
+					for await (const chunk of fallbackStream) {
+						if (chunk.usage) this.trackUsage(fallbackProviderName, chunk.usage);
+						yield chunk;
+					}
+					return;
+				} catch {
+					// Surface the original provider error when fallback is unavailable.
 				}
 			}
 			throw error;

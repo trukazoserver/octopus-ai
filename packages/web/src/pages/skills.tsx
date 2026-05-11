@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPut } from "../hooks/useApi.js";
+import { apiDelete, apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 type TabId = "builtin" | "generated" | "create";
 
@@ -38,6 +38,7 @@ export const SkillsPage: React.FC = () => {
 	const [editing, setEditing] = useState<DbSkill | null>(null);
 	const [editContent, setEditContent] = useState("");
 	const [editDesc, setEditDesc] = useState("");
+	const [confirmDeleteName, setConfirmDeleteName] = useState<string | null>(null);
 
 	const loadSkills = useCallback(async () => {
 		setLoading(true);
@@ -71,10 +72,15 @@ export const SkillsPage: React.FC = () => {
 	};
 
 	const handleDelete = async (name: string) => {
-		if (!confirm(`¿Eliminar la habilidad "${name}"?`)) return;
+		if (!name) return;
+		if (confirmDeleteName !== name) {
+			setConfirmDeleteName(name);
+			return;
+		}
 		try {
 			await apiDelete(`/api/skills/${encodeURIComponent(name)}`);
 			setMsg(`✓ Habilidad '${name}' eliminada`);
+			setConfirmDeleteName(null);
 			loadSkills();
 		} catch (e) {
 			setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
@@ -90,7 +96,7 @@ export const SkillsPage: React.FC = () => {
 	const handleSaveEdit = async () => {
 		if (!editing?.name) return;
 		try {
-			await apiPut(`/api/skills/${encodeURIComponent(editing.name)}`, {
+			await apiPutJson(`/api/skills/${encodeURIComponent(editing.name)}`, {
 				description: editDesc, content: editContent,
 			});
 			setMsg(`✓ Habilidad '${editing.name}' actualizada`);
@@ -103,9 +109,18 @@ export const SkillsPage: React.FC = () => {
 
 	const tabs: { id: TabId; label: string; icon: string }[] = [
 		{ id: "builtin", label: "Incluidas", icon: "📦" },
-		{ id: "generated", label: "Auto-generadas", icon: "🤖" },
+		{ id: "generated", label: "Personalizadas", icon: "🤖" },
 		{ id: "create", label: "Crear Nueva", icon: "➕" },
 	];
+
+	useEffect(() => {
+		if (!editing) return undefined;
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") setEditing(null);
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [editing]);
 
 	const S = {
 		section: { padding: "16px", backgroundColor: "#18181b", borderRadius: "10px", border: "1px solid #27272a", marginBottom: "12px" } as React.CSSProperties,
@@ -121,11 +136,11 @@ export const SkillsPage: React.FC = () => {
 				<div>
 					<h2 style={{ margin: "0 0 4px 0", fontSize: "20px", fontWeight: 700 }}>⚡ Habilidades</h2>
 					<p style={{ color: "#71717a", margin: 0, fontSize: "13px" }}>
-						{skills?.builtinSkills?.length ?? 0} incluidas · {skills?.dbSkills?.length ?? 0} auto-generadas
+						{skills?.builtinSkills?.length ?? 0} incluidas · {skills?.dbSkills?.length ?? 0} personalizadas
 						{skills?.enabled ? " · Activas" : " · Desactivadas"}
 					</p>
 				</div>
-				<div style={{ display: "flex", gap: "6px" }}>
+				<div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
 					{tabs.map((t) => (
 						<button key={t.id} type="button" onClick={() => setActiveTab(t.id)} style={{
 							padding: "7px 14px", borderRadius: "8px", border: "none", cursor: "pointer", fontSize: "13px", fontWeight: 500,
@@ -150,13 +165,13 @@ export const SkillsPage: React.FC = () => {
 
 			{/* Edit Modal */}
 			{editing && (
-				<div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-					<div style={{ ...S.section, width: "90%", maxWidth: 600, maxHeight: "80vh", overflowY: "auto" }}>
+				<div role="dialog" aria-modal="true" aria-label={`Editar habilidad ${editing.name ?? ""}`} onClick={() => setEditing(null)} style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+					<div onClick={(e) => e.stopPropagation()} style={{ ...S.section, width: "90%", maxWidth: 600, maxHeight: "80vh", overflowY: "auto" }}>
 						<h3 style={{ margin: "0 0 12px", fontSize: "16px" }}>✏️ Editar: {editing.name}</h3>
 						<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Descripción</label>
-						<input type="text" value={editDesc} onChange={(e) => setEditDesc(e.target.value)} style={{ ...S.input, marginBottom: 12 }} />
+						<input id="skill-edit-description" name="description" type="text" value={editDesc} onChange={(e) => setEditDesc(e.target.value)} style={{ ...S.input, marginBottom: 12 }} />
 						<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Contenido / Instrucciones</label>
-						<textarea value={editContent} onChange={(e) => setEditContent(e.target.value)} style={S.textarea} />
+						<textarea id="skill-edit-content" name="content" value={editContent} onChange={(e) => setEditContent(e.target.value)} style={S.textarea} />
 						<div style={{ marginTop: 12, display: "flex", gap: 8 }}>
 							<button type="button" onClick={handleSaveEdit} style={{ padding: "10px 24px", borderRadius: 8, border: "none", backgroundColor: "#22c55e", color: "#fff", cursor: "pointer", fontWeight: 600, fontSize: "14px" }}>
 								Guardar
@@ -171,6 +186,11 @@ export const SkillsPage: React.FC = () => {
 
 			{activeTab === "builtin" && (
 				<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10 }}>
+					{(skills?.builtinSkills ?? []).length === 0 && (
+						<div style={{ ...S.section, textAlign: "center", color: "#71717a", gridColumn: "1 / -1" }}>
+							No hay habilidades incluidas registradas.
+						</div>
+					)}
 					{(skills?.builtinSkills ?? []).map((name) => (
 						<div key={name} style={{ ...S.section, marginBottom: 0 }}>
 							<div style={{ fontWeight: 600, fontSize: "0.9rem", color: "#e0e0e0", marginBottom: 4 }}>📦 {name}</div>
@@ -183,8 +203,10 @@ export const SkillsPage: React.FC = () => {
 			{activeTab === "generated" && (
 				<div>
 					{(skills?.dbSkills ?? []).length === 0 ? (
-						<div style={{ ...S.section, textAlign: "center", color: "#525252", padding: "40px" }}>
-							No hay habilidades auto-generadas. El agente las creará automáticamente o puedes crear una manualmente.
+						<div style={{ ...S.section, textAlign: "center", color: "#a1a1aa", padding: "40px" }}>
+							<div style={{ fontSize: "2rem", marginBottom: 8 }}>⚡</div>
+							<div style={{ color: "#f4f4f5", fontWeight: 700, marginBottom: 6 }}>No hay habilidades personalizadas</div>
+							Crea una habilidad manual o deja que el agente genere nuevas capacidades con el uso.
 						</div>
 					) : (
 						(skills?.dbSkills ?? []).map((skill, i) => (
@@ -211,8 +233,13 @@ export const SkillsPage: React.FC = () => {
 									<button type="button" onClick={() => handleDelete(skill.name ?? "")} style={{
 										padding: "5px 12px", borderRadius: 6, border: "1px solid #ef444444", background: "transparent", color: "#ef4444", cursor: "pointer", fontSize: "12px",
 									}}>
-										Eliminar
+										{confirmDeleteName === skill.name ? "Confirmar" : "Eliminar"}
 									</button>
+									{confirmDeleteName === skill.name && (
+										<button type="button" onClick={() => setConfirmDeleteName(null)} style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #27272a", background: "transparent", color: "#a1a1aa", cursor: "pointer", fontSize: "12px" }}>
+											Cancelar
+										</button>
+									)}
 								</div>
 							</div>
 						))
@@ -226,19 +253,19 @@ export const SkillsPage: React.FC = () => {
 					<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px", marginBottom: "12px" }}>
 						<div>
 							<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Nombre</label>
-							<input type="text" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="analisis-datos" style={S.input} />
+							<input id="skill-new-name" name="name" type="text" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="analisis-datos" style={S.input} />
 						</div>
 						<div>
 							<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Dominio</label>
-							<input type="text" value={newDomain} onChange={(e) => setNewDomain(e.target.value)} placeholder="general" style={S.input} />
+							<input id="skill-new-domain" name="domain" type="text" value={newDomain} onChange={(e) => setNewDomain(e.target.value)} placeholder="general" style={S.input} />
 						</div>
 					</div>
 					<div style={{ marginBottom: "12px" }}>
 						<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Descripción</label>
-						<input type="text" value={newDesc} onChange={(e) => setNewDesc(e.target.value)} placeholder="Qué hace esta habilidad..." style={S.input} />
+						<input id="skill-new-description" name="description" type="text" value={newDesc} onChange={(e) => setNewDesc(e.target.value)} placeholder="Qué hace esta habilidad..." style={S.input} />
 					</div>
 					<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Instrucciones / Contenido</label>
-					<textarea value={newContent} onChange={(e) => setNewContent(e.target.value)}
+					<textarea id="skill-new-content" name="content" value={newContent} onChange={(e) => setNewContent(e.target.value)}
 						placeholder="Cuando el usuario pida análisis de datos, sigue estos pasos:&#10;1. Identifica la fuente de datos&#10;2. Aplica las transformaciones necesarias&#10;3. Presenta resultados con gráficos si es posible"
 						style={S.textarea} />
 					<div style={{ marginTop: "12px" }}>

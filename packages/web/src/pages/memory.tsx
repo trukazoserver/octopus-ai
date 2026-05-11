@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost, apiPut } from "../hooks/useApi.js";
+import { apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 type TabId = "overview" | "stm" | "ltm" | "daily" | "profile";
 
@@ -37,6 +37,7 @@ export const MemoryPage: React.FC = () => {
 	const [searchQuery, setSearchQuery] = useState("");
 	const [searchResults, setSearchResults] = useState<LTMItem[]>([]);
 	const [searching, setSearching] = useState(false);
+	const [searchPerformed, setSearchPerformed] = useState(false);
 
 	// Daily
 	const [dailyContext, setDailyContext] = useState("");
@@ -83,6 +84,7 @@ export const MemoryPage: React.FC = () => {
 
 	const handleSearch = async () => {
 		if (!searchQuery.trim()) return;
+		setSearchPerformed(true);
 		setSearching(true);
 		try {
 			const r = await apiGet<{ results: LTMItem[] }>(`/api/memory/search?q=${encodeURIComponent(searchQuery)}`);
@@ -102,7 +104,7 @@ export const MemoryPage: React.FC = () => {
 
 	const handleSaveName = async () => {
 		try {
-			await apiPut("/api/memory/profile", { displayName: tempName });
+			await apiPutJson("/api/memory/profile", { displayName: tempName });
 			setMsg("✓ Nombre actualizado");
 			setEditingName(false);
 			loadTab("profile");
@@ -128,7 +130,7 @@ export const MemoryPage: React.FC = () => {
 	return (
 		<div className="page-shell page-shell--xl" style={{ padding: "24px", overflowY: "auto", height: "100%" }}>
 			<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px", flexWrap: "wrap", gap: "12px" }}>
-				<h2 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>🧠 Memoria</h2>
+				<h2 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>🧠 Base de Memoria</h2>
 				<div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
 					{tabs.map((t) => (
 						<button key={t.id} type="button" onClick={() => loadTab(t.id)} style={{
@@ -163,14 +165,14 @@ export const MemoryPage: React.FC = () => {
 						<StatCard icon="🔍" title="Resultados Max" value={stats?.retrieval?.maxResults ?? "—"} />
 						<StatCard icon="📊" title="Relevancia Min" value={stats?.retrieval?.minRelevance ?? "—"} />
 					</div>
-					<button type="button" onClick={handleConsolidate} disabled={consolidating} style={{
+					<button type="button" onClick={handleConsolidate} disabled={consolidating || !stats?.enabled} style={{
 						padding: "10px 20px", borderRadius: 8, border: "none",
-						background: consolidating ? "#333" : "#7c3aed", color: consolidating ? "#666" : "#fff",
-						cursor: consolidating ? "not-allowed" : "pointer", fontWeight: 600,
+						background: consolidating || !stats?.enabled ? "#333" : "#7c3aed", color: consolidating || !stats?.enabled ? "#666" : "#fff",
+						cursor: consolidating || !stats?.enabled ? "not-allowed" : "pointer", fontWeight: 600,
 					}}>
 						{consolidating ? "Consolidando..." : "🔄 Consolidar ahora"}
 					</button>
-					<span style={{ fontSize: "0.78rem", color: "#666", marginLeft: 10 }}>Transfiere recuerdos corto → largo plazo</span>
+					<span style={{ fontSize: "0.78rem", color: "#666", marginLeft: 10 }}>{stats?.enabled ? "Transfiere recuerdos corto → largo plazo" : "Activa la memoria en Configuración para consolidar"}</span>
 				</>
 			)}
 
@@ -203,8 +205,8 @@ export const MemoryPage: React.FC = () => {
 				<>
 					<div style={{ ...S.section }}>
 						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>🔍 Buscar en Memoria</h3>
-						<div style={{ display: "flex", gap: 8 }}>
-							<input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
+						<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+							<input id="memory-search" name="memorySearch" type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
 								onKeyDown={(e) => e.key === "Enter" && handleSearch()} placeholder="Buscar recuerdos..." style={S.input} />
 							<button type="button" onClick={handleSearch} disabled={searching} style={{
 								padding: "10px 20px", borderRadius: 8, border: "none", background: "#7c3aed", color: "#fff", cursor: "pointer", fontWeight: 600,
@@ -214,6 +216,9 @@ export const MemoryPage: React.FC = () => {
 						</div>
 						{searchResults.length > 0 && (
 							<div style={{ marginTop: 12 }}>
+								<div style={{ color: "#71717a", fontSize: "0.78rem", marginBottom: 8 }}>
+									{searchResults.length} resultado(s) para "{searchQuery}"
+								</div>
 								{searchResults.map((r, i) => (
 									<div key={`sr-${i}`} style={{ padding: 10, borderRadius: 6, background: "#0f1117", marginBottom: 6, borderLeft: "3px solid #7c3aed" }}>
 										<div style={{ fontSize: "0.75rem", color: "#525252", marginBottom: 2 }}>
@@ -222,6 +227,11 @@ export const MemoryPage: React.FC = () => {
 										<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>{typeof r.content === "string" ? r.content : JSON.stringify(r.content ?? r)}</div>
 									</div>
 								))}
+							</div>
+						)}
+						{searchPerformed && !searching && searchResults.length === 0 && (
+							<div style={{ marginTop: 12, padding: 14, borderRadius: 8, background: "#0f1117", color: "#71717a", border: "1px dashed #27272a" }}>
+								Sin resultados para "{searchQuery}".
 							</div>
 						)}
 					</div>
@@ -331,7 +341,7 @@ export const MemoryPage: React.FC = () => {
 								<div style={{ flex: 1 }}>
 									{editingName ? (
 										<div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-											<input type="text" value={tempName} onChange={(e) => setTempName(e.target.value)} style={{ ...S.input, maxWidth: 200 }} />
+											<input id="memory-profile-name" name="displayName" type="text" value={tempName} onChange={(e) => setTempName(e.target.value)} style={{ ...S.input, maxWidth: 200 }} />
 											<button type="button" onClick={handleSaveName} style={{ padding: "6px 14px", borderRadius: 6, border: "none", background: "#22c55e", color: "#fff", cursor: "pointer", fontSize: 12 }}>✓</button>
 											<button type="button" onClick={() => setEditingName(false)} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid #27272a", background: "transparent", color: "#a1a1aa", cursor: "pointer", fontSize: 12 }}>✗</button>
 										</div>

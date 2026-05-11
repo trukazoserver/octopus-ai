@@ -1,7 +1,11 @@
 export interface MCPServerConfig {
-	command: string;
+	type?: "stdio" | "streamable-http" | "http";
+	url?: string;
+	headers?: Record<string, string>;
+	command?: string;
 	args: string[];
 	env?: Record<string, string>;
+	enabled?: boolean;
 }
 
 export interface SlashCommand {

@@ -1,9 +1,13 @@
 import type { ConnectionManager } from "../connection/manager.js";
-import type { Channel, ChannelMessage } from "./types.js";
+import type {
+	Channel,
+	ChannelMessage,
+	ChannelMessageHandler,
+} from "./types.js";
 
 export class ChannelManager {
 	private channels: Map<string, Channel>;
-	private messageHandlers: Set<(msg: ChannelMessage) => void>;
+	private messageHandlers: Set<ChannelMessageHandler>;
 
 	constructor(private connectionManager: ConnectionManager) {
 		this.channels = new Map();
@@ -16,14 +20,14 @@ export class ChannelManager {
 
 		channel.onMessage((msg: ChannelMessage) => {
 			for (const handler of this.messageHandlers) {
-				try {
-					handler(msg);
-				} catch (error) {
-					console.error(
-						`Error in message handler for channel ${channel.id}:`,
-						error,
-					);
-				}
+				void Promise.resolve()
+					.then(() => handler(msg))
+					.catch((error) => {
+						console.error(
+							`Error in message handler for channel ${channel.id}:`,
+							error,
+						);
+					});
 			}
 		});
 
@@ -68,7 +72,7 @@ export class ChannelManager {
 		}
 	}
 
-	public onMessage(handler: (msg: ChannelMessage) => void): void {
+	public onMessage(handler: ChannelMessageHandler): void {
 		this.messageHandlers.add(handler);
 	}
 

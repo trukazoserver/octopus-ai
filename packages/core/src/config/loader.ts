@@ -21,7 +21,7 @@ export class ConfigLoader {
 			return defaults;
 		}
 
-		const raw = readFileSync(this.configPath, "utf-8");
+		const raw = readFileSync(this.configPath, "utf-8").replace(/^\uFEFF/, "");
 		const parsed = JSON.parse(raw) as Record<string, unknown>;
 		const resolved = this.resolveEnvVars(parsed);
 		const merged = this.deepMerge(

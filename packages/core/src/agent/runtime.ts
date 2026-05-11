@@ -1,11 +1,17 @@
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import type { LLMRouter } from "../ai/router.js";
 import type {
+	ContentPart,
 	LLMMessage,
 	LLMRequest,
 	LLMResponse,
 	LLMTool,
 	LLMToolCall,
 } from "../ai/types.js";
+import type { LearningEngine, LearningInsight } from "../learning/index.js";
+import type { ExperienceSkillTrace, ExperienceToolTrace } from "../learning/types.js";
 import type { MemoryConsolidator } from "../memory/consolidator.js";
 import type { GlobalDailyMemory } from "../memory/daily.js";
 import type { MemoryRetrieval } from "../memory/retrieval.js";
@@ -14,12 +20,57 @@ import type { ConsolidationResult, MemoryContext } from "../memory/types.js";
 import type { UserProfileManager } from "../memory/user-profile.js";
 import type { SkillLoader } from "../skills/loader.js";
 import type { LoadedSkill } from "../skills/types.js";
-import type { ToolExecutor } from "../tools/executor.js";
+import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
 import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
 
-const MAX_TOOL_ITERATIONS = 30;
+const DEFAULT_MAX_TOOL_ITERATIONS = 18;
+const MAX_REPEATED_TOOL_SIGNATURES = 2;
+const MAX_TOOL_RESULT_CONTEXT_CHARS = 12000;
+const MAX_TOOL_RESULT_STORED_CHARS = 2000;
+const TOOL_IMAGE_RE = /\[IMG:(data:image\/[a-zA-Z0-9-]+;base64,[^\]]+)\]/;
+const MEDIA_FILE_RE = /\/api\/media\/file\/([^\s)\]]+)/g;
+
+type ObjectiveKind = "product_media" | "generic";
+
+interface EvidenceLedger {
+	objectiveKind: ObjectiveKind;
+	requestedImageCount?: number;
+	imageUrls: string[];
+	mediaUrls: string[];
+	searchScreenshotUrls: string[];
+	productScreenshotUrls: string[];
+	productUrl?: string;
+	searchUrl?: string;
+	blockers: string[];
+	usefulResults: number;
+	consecutiveErrors: number;
+	toolHistory: Array<{
+		name: string;
+		success: boolean;
+		useful: boolean;
+		summary: string;
+	}>;
+}
+
+type ToolDecision =
+	| { action: "execute" }
+	| { action: "skip"; reason: string }
+	| { action: "stop"; reason: string };
+
+export function requiresZaiVisionToolForModel(model?: string): boolean {
+	const normalized = (model ?? "").trim().toLowerCase();
+	if (!normalized) return false;
+	const slashIndex = normalized.indexOf("/");
+	if (slashIndex === -1) return normalized.startsWith("glm-");
+	const provider = normalized.slice(0, slashIndex);
+	const modelName = normalized.slice(slashIndex + 1);
+	return (
+		(provider === "zhipu" || provider === "zai" || provider === "z-ai") &&
+		modelName.startsWith("glm-")
+	);
+}
 
 export class AgentRuntime {
 	private config: AgentConfig;
@@ -32,6 +83,7 @@ export class AgentRuntime {
 	private toolExecutor?: ToolExecutor;
 	private dailyMemory?: GlobalDailyMemory;
 	private userProfileManager?: UserProfileManager;
+	private learningEngine?: LearningEngine;
 
 	constructor(
 		config: AgentConfig,
@@ -62,6 +114,646 @@ export class AgentRuntime {
 		this.userProfileManager = manager;
 	}
 
+	setLearningEngine(engine: LearningEngine): void {
+		this.learningEngine = engine;
+	}
+
+	setToolIterationLimit(toolIterationLimit: AgentConfig["toolIterationLimit"]): void {
+		this.config = { ...this.config, toolIterationLimit };
+	}
+
+	private toSkillTrace(skills: LoadedSkill[]): ExperienceSkillTrace[] {
+		return skills.map((loaded) => ({
+			id: loaded.skill.id,
+			name: loaded.skill.name,
+			level: loaded.level,
+		}));
+	}
+
+	private async getRelevantLearning(message: string): Promise<LearningInsight[]> {
+		if (!this.learningEngine) return [];
+		try {
+			return await this.learningEngine.retrieveRelevant(message);
+		} catch {
+			return [];
+		}
+	}
+
+	private recordLearningExperience(input: {
+		userRequest: string;
+		finalResponse: string;
+		channelId?: string;
+		startedAt: number;
+		toolsUsed?: ExperienceToolTrace[];
+		skillsUsed?: ExperienceSkillTrace[];
+		metadata?: Record<string, unknown>;
+	}): void {
+		if (!this.learningEngine) return;
+		this.learningEngine.recordExperience({
+			agentId: this.config.id,
+			conversationId: input.channelId,
+			channelId: input.channelId,
+			userRequest: input.userRequest,
+			finalResponse: input.finalResponse,
+			toolsUsed: input.toolsUsed,
+			skillsUsed: input.skillsUsed,
+			durationMs: Date.now() - input.startedAt,
+			metadata: input.metadata,
+		}).catch((err) => console.error("Learning experience record failed:", err));
+	}
+
+	private shouldUseZaiVisionToolsForImages(): boolean {
+		return requiresZaiVisionToolForModel(this.config.model);
+	}
+
+	private getToolExecutionContext(): ToolExecutionContext {
+		return {
+			model: this.config.model,
+			usesZaiVisionToolForImages: this.shouldUseZaiVisionToolsForImages(),
+		};
+	}
+
+	private getToolIterationLimit(): { enabled: boolean; maxIterations: number } {
+		const configuredMax = this.config.toolIterationLimit?.maxIterations;
+		const maxIterations = typeof configuredMax === "number" && Number.isFinite(configuredMax)
+			? Math.max(1, Math.trunc(configuredMax))
+			: DEFAULT_MAX_TOOL_ITERATIONS;
+
+		return {
+			enabled: this.config.toolIterationLimit?.enabled ?? true,
+			maxIterations,
+		};
+	}
+
+	private hasToolIterationsRemaining(iterations: number): boolean {
+		const limit = this.getToolIterationLimit();
+		return !limit.enabled || iterations < limit.maxIterations;
+	}
+
+	private getRemainingToolIterations(iterations: number): number | null {
+		const limit = this.getToolIterationLimit();
+		if (!limit.enabled) return null;
+		return Math.max(0, limit.maxIterations - iterations);
+	}
+
+	private hasReachedToolIterationLimit(iterations: number): boolean {
+		const limit = this.getToolIterationLimit();
+		return limit.enabled && iterations >= limit.maxIterations;
+	}
+
+	private getLocalMediaPathsFromContent(content: string): string[] {
+		const localPaths = new Set<string>();
+		MEDIA_FILE_RE.lastIndex = 0;
+		for (const match of content.matchAll(MEDIA_FILE_RE)) {
+			const rawFilename = match[1]?.split(/[?#]/)[0];
+			if (!rawFilename) continue;
+			let filename = rawFilename;
+			try {
+				filename = decodeURIComponent(rawFilename);
+			} catch {
+				/* use raw filename */
+			}
+			localPaths.add(path.join(os.homedir(), ".octopus", "media", filename));
+		}
+		return Array.from(localPaths);
+	}
+
+	private guessImageMime(filePath: string): string {
+		switch (path.extname(filePath).toLowerCase()) {
+			case ".jpg":
+			case ".jpeg":
+				return "image/jpeg";
+			case ".webp":
+				return "image/webp";
+			case ".gif":
+				return "image/gif";
+			case ".svg":
+				return "image/svg+xml";
+			default:
+				return "image/png";
+		}
+	}
+
+	private toImageContentParts(content: string): ContentPart[] {
+		const parts: ContentPart[] = [{ type: "text", text: content }];
+		for (const localPath of this.getLocalMediaPathsFromContent(content)) {
+			try {
+				if (!fs.existsSync(localPath)) continue;
+				const mimeType = this.guessImageMime(localPath);
+				if (!mimeType.startsWith("image/")) continue;
+				const data = fs.readFileSync(localPath).toString("base64");
+				parts.push({
+					type: "image_url",
+					image_url: { url: `data:${mimeType};base64,${data}` },
+				});
+			} catch {
+				/* ignore unreadable media */
+			}
+		}
+		return parts;
+	}
+
+	private appendZaiVisionHint(content: string, localPaths: string[]): string {
+		if (localPaths.length === 0) return content;
+		const quotedPaths = localPaths.map((p) => JSON.stringify(p)).join(", ");
+		return `${content}\n\n[ZAI VISION REQUIRED] This image must be inspected with a Z.AI Vision MCP tool because the active model is Z.ai GLM. Use the available vision tool schema with one of these local screenshot paths (${quotedPaths}) before deciding the next browser action.`;
+	}
+
+	private stripInlineImageData(content: string): string {
+		return content.replace(
+			TOOL_IMAGE_RE,
+			"[Image data omitted: screenshot is available via the saved media URL/local path above.]",
+		);
+	}
+
+	private compactToolResultForContext(content: string): string {
+		const stripped = this.stripInlineImageData(content).trim();
+		if (stripped.length <= MAX_TOOL_RESULT_CONTEXT_CHARS) return stripped;
+		return `${stripped.slice(0, MAX_TOOL_RESULT_CONTEXT_CHARS)}\n...[tool result truncated to keep memory bounded]`;
+	}
+
+	private formatToolResultForModel(resultContent: string): string | ContentPart[] {
+		const imgMatch = resultContent.match(TOOL_IMAGE_RE);
+		if (!imgMatch) return this.compactToolResultForContext(resultContent);
+
+		const textContent = this.compactToolResultForContext(
+			resultContent.replace(imgMatch[0], ""),
+		);
+		if (this.shouldUseZaiVisionToolsForImages()) {
+			return this.appendZaiVisionHint(
+				textContent || "Image data.",
+				this.getLocalMediaPathsFromContent(resultContent),
+			);
+		}
+
+		return `${textContent || "Image data."}\n[Image data omitted: screenshot is available via the saved media URL/local path above.]`;
+	}
+
+	private sanitizeActivityDetail(content: string): string {
+		const cleaned = content
+			.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
+			.replace(/<!--\s*tool:[\s\S]*?-->/gi, "")
+			.replace(/!\[[^\]]*\]\([^)]+\)/g, "")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!cleaned) return "";
+		return cleaned.length > 220 ? `${cleaned.slice(0, 217).trimEnd()}...` : cleaned;
+	}
+
+	private describeToolActivity(
+		toolName: string,
+		params: Record<string, unknown>,
+		modelMessage: string,
+	): string {
+		const modelDetail = this.sanitizeActivityDetail(modelMessage);
+		if (modelDetail) return modelDetail;
+
+		const text = typeof params.text === "string" ? params.text : typeof params.value === "string" ? params.value : undefined;
+		const selector =
+			typeof params.selector === "string" ? params.selector : undefined;
+		const url = typeof params.url === "string" ? params.url : undefined;
+		const key = typeof params.key === "string" ? params.key : undefined;
+		const uid = typeof params.uid === "string" ? params.uid : undefined;
+		const waitForNavigation = params.waitForNavigation === true;
+
+		switch (toolName) {
+			case "browser_etsy_task":
+				return "Ejecutando el flujo Etsy como respaldo compacto.";
+		case "browser_observe":
+				return "Observando el estado actual de la página antes de decidir la siguiente acción.";
+			case "browser_snapshot":
+				return "Obteniendo el snapshot del árbol de accesibilidad de la página.";
+			case "browser_navigate":
+				return url
+					? `Abriendo ${url} y esperando que cargue la página.`
+					: "Abriendo la página solicitada.";
+			case "browser_read_page":
+				return "Leyendo el contenido visible de la página para confirmar qué cargó.";
+			case "browser_screenshot":
+				return "Tomando una captura de pantalla de la página actual.";
+			case "browser_click_uid":
+				return uid
+					? `Dando clic en el elemento ${uid} usando el árbol de accesibilidad${waitForNavigation ? " y esperando que cargue la página" : ""}.`
+					: "Dando clic en el elemento usando su UID de accesibilidad.";
+			case "browser_fill_uid":
+				return text
+					? `Ingresando "${text}" en el campo usando su UID de accesibilidad.`
+					: "Ingresando texto en el campo usando su UID de accesibilidad.";
+			case "browser_click_text":
+				return text
+					? `Dando clic en "${text}"${waitForNavigation ? " y esperando que cargue la página" : ""}.`
+					: "Dando clic en el elemento indicado por su texto.";
+			case "browser_click":
+				return selector
+					? `Dando clic en el elemento ${selector}${waitForNavigation ? " y esperando navegación" : ""}.`
+					: "Dando clic en el elemento seleccionado.";
+			case "browser_type":
+				return text
+					? `Ingresando "${text}" en el campo seleccionado.`
+					: "Ingresando texto en el campo seleccionado.";
+			case "browser_press_key":
+				return key
+					? `Presionando ${key}${waitForNavigation ? " y esperando que cargue la página" : ""}.`
+					: "Presionando una tecla en la página.";
+			case "browser_get_elements":
+				return "Buscando botones, enlaces y campos disponibles en la página.";
+			case "browser_scroll":
+				return "Desplazando la página para revisar más contenido.";
+			case "browser_wait":
+				return "Esperando que la página termine de cargar o estabilizarse.";
+			case "browser_eval":
+				return "Ejecutando JavaScript en la página para extraer datos o URLs.";
+			default:
+				return `Ejecutando ${toolName.replace(/[_-]/g, " ")}.`;
+		}
+	}
+
+	private encodeStatusField(value: string): string {
+		return Buffer.from(value, "utf8").toString("base64");
+	}
+
+	private stableJson(value: unknown): string {
+		const normalize = (input: unknown): unknown => {
+			if (Array.isArray(input)) return input.map(normalize);
+			if (input && typeof input === "object") {
+				return Object.keys(input as Record<string, unknown>)
+					.sort()
+					.reduce<Record<string, unknown>>((acc, key) => {
+						acc[key] = normalize((input as Record<string, unknown>)[key]);
+						return acc;
+					}, {});
+			}
+			return input;
+		};
+
+		try {
+			return JSON.stringify(normalize(value));
+		} catch {
+			return String(value);
+		}
+	}
+
+	private getToolBudget(toolName: string): number {
+		if (toolName === "browser_etsy_task") return 2;
+		if (toolName === "browser_screenshot") return 2;
+		if (toolName === "browser_snapshot") return 4;
+		if (toolName === "browser_read_page") return 4;
+		if (toolName === "browser_wait") return 2;
+		if (toolName === "browser_eval") return 3;
+		if (toolName === "browser_extract_images") return 3;
+		if (toolName.startsWith("browser_")) return 4;
+		if (toolName === "image-url-to-base64" || toolName === "save_media") return 6;
+		return 8;
+	}
+
+	private parseToolParams(toolCall: LLMToolCall): {
+		params: Record<string, unknown>;
+		error?: string;
+	} {
+		try {
+			const parsed = JSON.parse(toolCall.function.arguments || "{}");
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				return {
+					params: {},
+					error: "Tool arguments must be a JSON object.",
+				};
+			}
+			return { params: parsed as Record<string, unknown> };
+		} catch (err) {
+			return {
+				params: {},
+				error: err instanceof Error ? err.message : String(err),
+			};
+		}
+	}
+
+	private createToolPolicyResult(
+		message: string,
+	): { success: false; resultContent: string } {
+		return { success: false, resultContent: `Tool policy: ${message}` };
+	}
+
+	private createEvidenceLedger(message: string): EvidenceLedger {
+		const lower = message.toLowerCase();
+		const objectiveKind: ObjectiveKind =
+			/(imagen|imágenes|image|images|foto|fotos|producto|product|etsy)/i.test(lower)
+				? "product_media"
+				: "generic";
+		const countMatch = lower.match(/(?:las|los|the)?\s*(\d{1,2})\s*(?:im[aá]genes|images|fotos|photos)/i);
+		return {
+			objectiveKind,
+			requestedImageCount: countMatch ? Number.parseInt(countMatch[1], 10) : undefined,
+			imageUrls: [],
+			mediaUrls: [],
+			searchScreenshotUrls: [],
+			productScreenshotUrls: [],
+			blockers: [],
+			usefulResults: 0,
+			consecutiveErrors: 0,
+			toolHistory: [],
+		};
+	}
+
+	private addUnique(target: string[], values: string[]): boolean {
+		let changed = false;
+		for (const value of values) {
+			if (!value || target.includes(value)) continue;
+			target.push(value);
+			changed = true;
+		}
+		return changed;
+	}
+
+	private extractImageUrls(text: string): string[] {
+		const urls = new Set<string>();
+		for (const match of text.matchAll(/https?:\/\/[^\s"'<>\])]+/gi)) {
+			const url = match[0].replace(/[,.]+$/, "");
+			if (/\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(url) || /i\.etsystatic\.com/i.test(url)) {
+				urls.add(url);
+			}
+		}
+		return Array.from(urls);
+	}
+
+	private extractMediaUrls(text: string): string[] {
+		const urls = new Set<string>();
+		for (const match of text.matchAll(/\/api\/media\/file\/[^\s)\]]+/g)) {
+			urls.add(match[0]);
+		}
+		return Array.from(urls);
+	}
+
+	private extractJsonPayload(text: string): unknown | null {
+		const firstObject = text.indexOf("{");
+		const lastObject = text.lastIndexOf("}");
+		if (firstObject >= 0 && lastObject > firstObject) {
+			try {
+				return JSON.parse(text.slice(firstObject, lastObject + 1));
+			} catch {
+				/* try array */
+			}
+		}
+		const firstArray = text.indexOf("[");
+		const lastArray = text.lastIndexOf("]");
+		if (firstArray >= 0 && lastArray > firstArray) {
+			try {
+				return JSON.parse(text.slice(firstArray, lastArray + 1));
+			} catch {
+				return null;
+			}
+		}
+		return null;
+	}
+
+	private collectUrlsFromJson(value: unknown, urls: Set<string>): void {
+		if (typeof value === "string") {
+			if (/^https?:\/\//i.test(value) && (/\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(value) || /i\.etsystatic\.com/i.test(value))) {
+				urls.add(value);
+			}
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (const item of value) this.collectUrlsFromJson(item, urls);
+			return;
+		}
+		if (value && typeof value === "object") {
+			for (const item of Object.values(value as Record<string, unknown>)) {
+				this.collectUrlsFromJson(item, urls);
+			}
+		}
+	}
+
+	private updateEvidenceLedger(
+		ledger: EvidenceLedger,
+		toolName: string,
+		resultContent: string,
+		success: boolean,
+	): void {
+		let useful = false;
+		const mediaUrls = this.extractMediaUrls(resultContent);
+		if (this.addUnique(ledger.mediaUrls, mediaUrls)) useful = true;
+
+		if (toolName === "browser_screenshot" || toolName === "browser_etsy_task") {
+			const target = /listing\/\d+|product/i.test(resultContent)
+				? ledger.productScreenshotUrls
+				: ledger.searchScreenshotUrls;
+			if (this.addUnique(target, mediaUrls)) useful = true;
+		}
+
+		const json = this.extractJsonPayload(resultContent);
+		if (json) {
+			const jsonUrls = new Set<string>();
+			this.collectUrlsFromJson(json, jsonUrls);
+			if (this.addUnique(ledger.imageUrls, Array.from(jsonUrls))) useful = true;
+			const parsed = json as Record<string, unknown>;
+			if (typeof parsed.status === "string" && ["completed", "partial"].includes(parsed.status)) useful = true;
+			const product = parsed.product as Record<string, unknown> | undefined;
+			if (product && typeof product.url === "string") ledger.productUrl = product.url;
+			const search = parsed.search as Record<string, unknown> | undefined;
+			if (search && typeof search.url === "string") ledger.searchUrl = search.url;
+		}
+
+		if (this.addUnique(ledger.imageUrls, this.extractImageUrls(resultContent))) useful = true;
+		const productUrlMatch = resultContent.match(/https?:\/\/(?:www\.)?etsy\.com\/listing\/[^\s"')]+/i);
+		if (productUrlMatch) {
+			ledger.productUrl = productUrlMatch[0];
+			useful = true;
+		}
+		const searchUrlMatch = resultContent.match(/https?:\/\/(?:www\.)?etsy\.com\/search[^\s"')]+/i);
+		if (searchUrlMatch) ledger.searchUrl = searchUrlMatch[0];
+
+		if (/datadome|captcha|blocked|access denied|pardon our interruption/i.test(resultContent)) {
+			this.addUnique(ledger.blockers, [resultContent.slice(0, 300)]);
+		}
+
+		if (success) ledger.consecutiveErrors = 0;
+		else ledger.consecutiveErrors += 1;
+		if (useful) ledger.usefulResults += 1;
+		ledger.toolHistory.push({
+			name: toolName,
+			success,
+			useful,
+			summary: resultContent.slice(0, 300),
+		});
+	}
+
+	private isObjectiveSatisfied(ledger: EvidenceLedger): boolean {
+		if (ledger.objectiveKind !== "product_media") return false;
+		if (ledger.imageUrls.length === 0) return false;
+		if (ledger.requestedImageCount && ledger.imageUrls.length >= ledger.requestedImageCount) return true;
+		return ledger.imageUrls.length > 0 && (ledger.searchScreenshotUrls.length > 0 || ledger.productScreenshotUrls.length > 0 || Boolean(ledger.productUrl));
+	}
+
+	private decideBeforeToolCall(
+		toolName: string,
+		params: Record<string, unknown>,
+		ledger: EvidenceLedger,
+		remainingIterations: number | null,
+	): ToolDecision {
+		if (ledger.usefulResults > 0 && ledger.consecutiveErrors >= 3) {
+			return { action: "stop", reason: "Ya hay evidencia útil y los intentos de recuperación están fallando." };
+		}
+
+		if (ledger.usefulResults > 0 && remainingIterations !== null && remainingIterations <= 1) {
+			return { action: "stop", reason: "Queda poco presupuesto de herramientas y ya existe evidencia útil." };
+		}
+
+		const recent = ledger.toolHistory.slice(-3);
+		if (toolName === "browser_screenshot" && recent.filter((t) => t.name === "browser_screenshot" && !t.success).length >= 2) {
+			return { action: "skip", reason: "Se omitió otra captura porque las últimas capturas fallaron; usar DOM/extracción o responder con evidencia parcial." };
+		}
+
+		if (toolName === "browser_wait" && recent.some((t) => t.name === "browser_wait" && !t.useful)) {
+			return { action: "skip", reason: "Otra espera sin una condición nueva tiene bajo valor esperado." };
+		}
+
+		if (toolName === "browser_navigate" && typeof params.url === "string" && params.url === ledger.productUrl) {
+			return { action: "skip", reason: "La navegación solicitada apunta al producto ya identificado." };
+		}
+
+		return { action: "execute" };
+	}
+
+	private buildDecisionGuidance(
+		ledger: EvidenceLedger,
+		toolName: string,
+		resultContent: string,
+		success: boolean,
+		remainingIterations: number | null,
+	): string {
+		const recent = ledger.toolHistory.slice(-4).map((item) => `${item.name}:${item.success ? "ok" : "error"}${item.useful ? ":useful" : ""}`).join(", ");
+		const objectiveSatisfied = this.isObjectiveSatisfied(ledger);
+		const remainingBudget = remainingIterations === null ? "unlimited" : remainingIterations;
+		return [
+			"# Navigation Decision Guidance",
+			`Previous tool: ${toolName} (${success ? "success" : "error"}).`,
+			`Remaining tool budget: ${remainingBudget}.`,
+			`Evidence: images=${ledger.imageUrls.length}, media=${ledger.mediaUrls.length}, searchScreenshots=${ledger.searchScreenshotUrls.length}, productScreenshots=${ledger.productScreenshotUrls.length}, productUrl=${ledger.productUrl ? "yes" : "no"}.`,
+			`Recent actions: ${recent || "none"}.`,
+			objectiveSatisfied
+				? "The requested evidence appears sufficient. Prefer answering now unless one clearly required artifact is still missing."
+				: "Before the next action, evaluate whether the previous action changed the page or produced evidence. Choose exactly one next action with a clear expected observable change.",
+			"If uncertain about the current page, use browser_observe before clicking. Do not repeat a failed click/wait/screenshot unless new evidence changed the target or condition.",
+			`Last result excerpt: ${resultContent.replace(/\s+/g, " ").slice(0, 700)}`,
+		].join("\n");
+	}
+
+	private evidenceSummary(ledger: EvidenceLedger): string {
+		const lines = [
+			`Objective: ${ledger.objectiveKind}`,
+			`Image URLs found: ${ledger.imageUrls.length}`,
+			`Media URLs found: ${ledger.mediaUrls.length}`,
+			`Search screenshots: ${ledger.searchScreenshotUrls.length}`,
+			`Product screenshots: ${ledger.productScreenshotUrls.length}`,
+		];
+		if (ledger.productUrl) lines.push(`Product URL: ${ledger.productUrl}`);
+		if (ledger.searchUrl) lines.push(`Search URL: ${ledger.searchUrl}`);
+		if (ledger.blockers.length > 0) lines.push(`Blockers: ${ledger.blockers.join(" | ")}`);
+		if (ledger.imageUrls.length > 0) {
+			lines.push("Images:");
+			ledger.imageUrls.slice(0, 20).forEach((url, index) => lines.push(`${index + 1}. ${url}`));
+		}
+		if (ledger.mediaUrls.length > 0) {
+			lines.push("Media:");
+			ledger.mediaUrls.slice(0, 10).forEach((url, index) => lines.push(`${index + 1}. ${url}`));
+		}
+		return lines.join("\n");
+	}
+
+	private buildContinuationCheckpoint(
+		ledger: EvidenceLedger,
+		toolName: string,
+		resultContent: string,
+		success: boolean,
+	): string {
+		const safeResult = resultContent
+			.replace(/--/g, "- -")
+			.replace(/\s+/g, " ")
+			.slice(0, 1200);
+		const safeEvidence = this.evidenceSummary(ledger).replace(/--/g, "- -");
+		return `\n<!-- octopus-continuation-checkpoint\nLast tool: ${toolName} (${success ? "success" : "error"})\n${safeEvidence}\nLast result excerpt: ${safeResult}\nInstruction for continuation: reuse completed evidence and artifacts above; resume from the first missing requirement instead of repeating completed steps.\n-->\n`;
+	}
+
+	private buildFinalizationMessages(
+		messages: LLMMessage[],
+		ledger: EvidenceLedger,
+		reason: string,
+	): LLMMessage[] {
+		const sanitized = messages.filter((msg) => msg.role !== "tool" && !msg.toolCalls);
+		return [
+			...sanitized,
+			{
+				role: "system",
+				content: `Runtime decision gate stopped further tool use. Reason: ${reason}\n\nUse the evidence below to answer the user now. Do not call tools. If something is missing, state exactly what is available and what could not be confirmed.\n\n${this.evidenceSummary(ledger)}`,
+			},
+		];
+	}
+
+	private buildFallbackFinalResponse(ledger: EvidenceLedger, reason: string): string {
+		const lines = [`Detuve las herramientas porque ${reason}`];
+		if (ledger.searchScreenshotUrls.length > 0) {
+			lines.push("", "Captura de busqueda:");
+			ledger.searchScreenshotUrls.forEach((url) => lines.push(`![Captura](${url})`));
+		}
+		if (ledger.productScreenshotUrls.length > 0) {
+			lines.push("", "Captura del producto:");
+			ledger.productScreenshotUrls.forEach((url) => lines.push(`![Producto](${url})`));
+		}
+		if (ledger.productUrl) lines.push("", `Producto: ${ledger.productUrl}`);
+		if (ledger.imageUrls.length > 0) {
+			lines.push("", "Imagenes encontradas:");
+			ledger.imageUrls.slice(0, 20).forEach((url, index) => lines.push(`${index + 1}. ${url}`));
+		}
+		if (ledger.blockers.length > 0) {
+			lines.push("", `Bloqueos detectados: ${ledger.blockers.join(" | ")}`);
+		}
+		return lines.join("\n");
+	}
+
+	private async *streamFinalResponse(
+		messages: LLMMessage[],
+		ledger: EvidenceLedger,
+		reason: string,
+	): AsyncIterable<string> {
+		let yielded = false;
+		try {
+			const request: LLMRequest = {
+				model: this.config.model ?? "default",
+				messages: this.buildFinalizationMessages(messages, ledger, reason),
+				maxTokens: this.config.maxTokens,
+				temperature: this.config.temperature,
+				stream: true,
+			};
+			for await (const chunk of this.llmRouter.chatStream(request)) {
+				if (!chunk.content) continue;
+				yielded = true;
+				yield chunk.content;
+			}
+		} catch {
+			/* fallback below */
+		}
+		if (!yielded) yield this.buildFallbackFinalResponse(ledger, reason);
+	}
+
+	private async generateFinalResponse(
+		messages: LLMMessage[],
+		ledger: EvidenceLedger,
+		reason: string,
+	): Promise<string> {
+		try {
+			const response = await this.llmRouter.chat({
+				model: this.config.model ?? "default",
+				messages: this.buildFinalizationMessages(messages, ledger, reason),
+				maxTokens: this.config.maxTokens,
+				temperature: this.config.temperature,
+			});
+			if (response.content?.trim()) return response.content;
+		} catch {
+			/* fallback below */
+		}
+		return this.buildFallbackFinalResponse(ledger, reason);
+	}
+
 	async initialize(): Promise<void> {
 		if (!this.config.id) {
 			throw new Error("Agent config must have an id");
@@ -75,6 +767,7 @@ export class AgentRuntime {
 	}
 
 	async processMessage(message: string, channelId?: string): Promise<string> {
+		const startedAt = Date.now();
 		const userTurn: ConversationTurn = {
 			role: "user",
 			content: message,
@@ -91,8 +784,9 @@ export class AgentRuntime {
 			domains: [],
 			keywords: message.split(/\s+/).filter((w) => w.length > 3),
 		});
+		const learningInsights = await this.getRelevantLearning(message);
 
-		const context = await this.buildContext(memories, skills, message, channelId);
+		const context = await this.buildContext(memories, skills, message, channelId, learningInsights);
 		const tools = this.getAvailableTools();
 
 		const response = await this.executeWithTools(context, tools);
@@ -115,15 +809,30 @@ export class AgentRuntime {
 		this.dailyMemory?.addMessage(message, "user", channelId || "system").catch(() => {});
 		this.dailyMemory?.addMessage(response.content, "assistant", channelId || "system").catch(() => {});
 
+		this.recordLearningExperience({
+			userRequest: message,
+			finalResponse: response.content,
+			channelId,
+			startedAt,
+			toolsUsed: response.toolCallsExecuted.map((tool) => ({
+				name: tool.name,
+				success: !tool.result.startsWith("Error:"),
+				summary: tool.result.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+			})),
+			skillsUsed: this.toSkillTrace(skills),
+		});
+
 		return response.content;
 	}
 
-	static readonly STATUS_RE = /^\\x00STATUS:(\w+)(?::(\w+))?\\x00$/;
+	static readonly STATUS_RE =
+		/^\\x00STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\\x00$/;
 
 	async *processMessageStream(
 		message: string,
 		channelId?: string,
 	): AsyncIterable<string> {
+		const startedAt = Date.now();
 		const userTurn: ConversationTurn = {
 			role: "user",
 			content: message,
@@ -140,15 +849,21 @@ export class AgentRuntime {
 			domains: [],
 			keywords: message.split(/\s+/).filter((w) => w.length > 3),
 		});
+		const learningInsights = await this.getRelevantLearning(message);
 
-		const context = await this.buildContext(memories, skills, message, channelId);
+		const context = await this.buildContext(memories, skills, message, channelId, learningInsights);
 		const tools = this.getAvailableTools();
 
 		const messages = [...context];
 		let iterations = 0;
 		let fullResponse = "";
+		const toolSignatureCounts = new Map<string, number>();
+		const toolNameCounts = new Map<string, number>();
+		const ledger = this.createEvidenceLedger(message);
+		const toolTrace: ExperienceToolTrace[] = [];
+		let stoppedByDecision = false;
 
-		while (iterations < MAX_TOOL_ITERATIONS) {
+		while (this.hasToolIterationsRemaining(iterations) && !stoppedByDecision) {
 			iterations++;
 
 			const request: LLMRequest = {
@@ -168,6 +883,7 @@ export class AgentRuntime {
 			}> = [];
 			let hasContent = false;
 			let isThinking = false;
+			let hasYieldedResponding = false;
 
 			try {
 				yield "\x00STATUS:thinking\x00";
@@ -176,7 +892,6 @@ export class AgentRuntime {
 						if (!isThinking) {
 							isThinking = true;
 						}
-						// Do not yield thinking text to stream
 					}
 					
 					if (chunk.content) {
@@ -184,8 +899,11 @@ export class AgentRuntime {
 							isThinking = false;
 						}
 						chunkContent += chunk.content;
-						fullResponse += chunk.content;
 						hasContent = true;
+						if (!hasYieldedResponding) {
+							yield "\x00STATUS:responding\x00";
+							hasYieldedResponding = true;
+						}
 						yield chunk.content;
 					}
 					if (chunk.toolCalls) {
@@ -211,6 +929,17 @@ export class AgentRuntime {
 				}
 			} catch (err) {
 				const errMsg = err instanceof Error ? err.message : String(err);
+				if (chunkContent) {
+					fullResponse += chunkContent;
+				}
+				if (ledger.usefulResults > 0) {
+					fullResponse += this.buildContinuationCheckpoint(
+						ledger,
+						"runtime_error",
+						errMsg,
+						false,
+					);
+				}
 				fullResponse += `\n\n⚠️ Error: ${errMsg}`;
 				yield errMsg;
 				break;
@@ -232,6 +961,9 @@ export class AgentRuntime {
 				!this.toolExecutor ||
 				!this.toolRegistry
 			) {
+				if (chunkContent) {
+					fullResponse += chunkContent;
+				}
 				break;
 			}
 
@@ -250,26 +982,117 @@ export class AgentRuntime {
 					? Buffer.from(toolDef.uiIcon).toString("base64")
 					: "";
 				const statusType = isCodeTool ? "code" : "tool";
-				yield `\x00STATUS:${statusType}:${toolCall.function.name}:${uiIconB64}\x00`;
 
-				let params: Record<string, unknown>;
-				try {
-					params = JSON.parse(toolCall.function.arguments);
-				} catch {
-					params = {};
+				const parsedParams = this.parseToolParams(toolCall);
+				const params = parsedParams.params;
+
+				if (!parsedParams.error) {
+					const decision = this.decideBeforeToolCall(
+						toolCall.function.name,
+						params,
+						ledger,
+						this.getRemainingToolIterations(iterations),
+					);
+					if (decision.action === "stop") {
+						const detail = this.encodeStatusField(decision.reason);
+						yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${detail}\x00`;
+						yield "\x00STATUS:responding\x00";
+						let finalText = "";
+						for await (const finalChunk of this.streamFinalResponse(
+							messages,
+							ledger,
+							decision.reason,
+						)) {
+							finalText += finalChunk;
+							yield finalChunk;
+						}
+						fullResponse += finalText;
+						stoppedByDecision = true;
+						break;
+					}
 				}
 
-				const toolResult: ToolResult = await this.toolExecutor.execute(
+				const activityDetail = this.describeToolActivity(
 					toolCall.function.name,
 					params,
+					chunkContent,
 				);
+				const activityDetailB64 = this.encodeStatusField(activityDetail);
+				yield `\x00STATUS:${statusType}:${toolCall.function.name}:${uiIconB64}:${activityDetailB64}\x00`;
 
-				const resultContentStr = toolResult.success
+				let toolResult: ToolResult;
+				let skipped = false;
+				if (parsedParams.error) {
+					skipped = true;
+					const policyResult = this.createToolPolicyResult(
+						`Invalid JSON arguments for ${toolCall.function.name}: ${parsedParams.error}. Retry once with valid JSON arguments instead of executing with empty parameters.`,
+					);
+					toolResult = { success: false, output: "", error: policyResult.resultContent };
+				} else {
+					const toolNameCount = (toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
+					toolNameCounts.set(toolCall.function.name, toolNameCount);
+					const toolBudget = this.getToolBudget(toolCall.function.name);
+					const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
+					const signatureCount = (toolSignatureCounts.get(signature) ?? 0) + 1;
+					toolSignatureCounts.set(signature, signatureCount);
+
+					if (toolNameCount > toolBudget) {
+						skipped = true;
+						const policyResult = this.createToolPolicyResult(
+							`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
+						);
+						toolResult = { success: false, output: "", error: policyResult.resultContent };
+					} else if (signatureCount > MAX_REPEATED_TOOL_SIGNATURES) {
+						skipped = true;
+						const policyResult = this.createToolPolicyResult(
+							`Repeated action suppressed for ${toolCall.function.name}. The same parameters were already tried ${MAX_REPEATED_TOOL_SIGNATURES} times. Choose a different approach or provide a final answer with the current evidence.`,
+						);
+						toolResult = { success: false, output: "", error: policyResult.resultContent };
+					} else {
+						const decision = this.decideBeforeToolCall(
+							toolCall.function.name,
+							params,
+							ledger,
+							this.getRemainingToolIterations(iterations),
+						);
+						if (decision.action === "skip") {
+							skipped = true;
+							const policyResult = this.createToolPolicyResult(decision.reason);
+							toolResult = { success: false, output: "", error: policyResult.resultContent };
+						} else {
+							toolResult = await this.toolExecutor.execute(
+								toolCall.function.name,
+								params,
+								this.getToolExecutionContext(),
+							);
+						}
+					}
+				}
+
+				const rawResultContentStr = toolResult.success
 					? (typeof toolResult.output === "string" ? toolResult.output : JSON.stringify(toolResult.output, null, 2))
 					: `Error: ${toolResult.error ?? "Unknown error"}`;
+				const resultContentStr = this.compactToolResultForContext(rawResultContentStr);
+				this.updateEvidenceLedger(ledger, toolCall.function.name, resultContentStr, toolResult.success && !skipped);
+				fullResponse += this.buildContinuationCheckpoint(
+					ledger,
+					toolCall.function.name,
+					resultContentStr,
+					toolResult.success && !skipped,
+				);
+				toolTrace.push({
+					name: toolCall.function.name,
+					success: toolResult.success && !skipped,
+					useful: !skipped && toolResult.success && !resultContentStr.startsWith("Error:"),
+					summary: resultContentStr.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+					error: toolResult.success ? undefined : toolResult.error,
+				});
 
 				// Emit tool-done status (intercepted by frontend, not shown as text)
-				if (toolResult.success) {
+				if (skipped) {
+					const skippedDetail = this.encodeStatusField(resultContentStr.replace(/^Error:\s*/, ""));
+					yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${skippedDetail}\x00`;
+				} else if (toolResult.success) {
 					yield `\x00STATUS:tool_done:${toolCall.function.name}:\x00`;
 				} else {
 					yield `\x00STATUS:tool_error:${toolCall.function.name}:\x00`;
@@ -279,19 +1102,41 @@ export class AgentRuntime {
 <!-- tool:${toolCall.function.name}:${toolResult.success ? "ok" : "error"} -->
 `;
 
+
+				const parsedContent = this.formatToolResultForModel(resultContentStr);
+
 				messages.push({
 					role: "tool",
-					content: resultContentStr.slice(0, 8000),
+					content: parsedContent,
 					toolCallId: toolCall.id,
 				});
+				messages.push({
+					role: "system",
+					content: this.buildDecisionGuidance(
+						ledger,
+						toolCall.function.name,
+						resultContentStr,
+						toolResult.success && !skipped,
+						this.getRemainingToolIterations(iterations),
+					),
+				});
 			}
+			if (stoppedByDecision) break;
 
 			fullResponse += "\n\n";
 		}
 
 		// If we exhausted all iterations, warn the user
-		if (iterations >= MAX_TOOL_ITERATIONS) {
-			const limitMsg = "\n\n⚠️ He alcanzado el límite máximo de herramientas en una sola respuesta (30 iteraciones). Puedo continuar si me lo pides.";
+		if (!stoppedByDecision && this.hasReachedToolIterationLimit(iterations)) {
+			const maxIterations = this.getToolIterationLimit().maxIterations;
+			let limitMsg = `\n\n⚠️ He alcanzado el límite máximo de herramientas en una sola respuesta (${maxIterations} iteraciones). Puedo continuar si me lo pides.`;
+			if (ledger.usefulResults > 0) {
+				limitMsg = await this.generateFinalResponse(
+					messages,
+					ledger,
+					`se alcanzó el límite de ${maxIterations} iteraciones con evidencia útil disponible`,
+				);
+			}
 			fullResponse += limitMsg;
 			yield limitMsg;
 		}
@@ -313,6 +1158,18 @@ export class AgentRuntime {
 		this.dailyMemory?.addMessage(fullResponse, "assistant", channelId || "system").catch(() => {});
 		
 		this.updateActiveTask(fullResponse);
+		this.recordLearningExperience({
+			userRequest: message,
+			finalResponse: fullResponse,
+			channelId,
+			startedAt,
+			toolsUsed: toolTrace,
+			skillsUsed: this.toSkillTrace(skills),
+			metadata: {
+				stoppedByDecision,
+				toolIterations: iterations,
+			},
+		});
 	}
 
 	private async executeWithTools(
@@ -325,8 +1182,13 @@ export class AgentRuntime {
 		const toolCallsExecuted: { name: string; result: string }[] = [];
 		const messages = [...context];
 		let iterations = 0;
+		const toolSignatureCounts = new Map<string, number>();
+		const toolNameCounts = new Map<string, number>();
+		const lastUser = [...context].reverse().find((msg) => msg.role === "user");
+		const userText = typeof lastUser?.content === "string" ? lastUser.content : "";
+		const ledger = this.createEvidenceLedger(userText);
 
-		while (iterations < MAX_TOOL_ITERATIONS) {
+		while (this.hasToolIterationsRemaining(iterations)) {
 			iterations++;
 
 			const request: LLMRequest = {
@@ -352,33 +1214,92 @@ export class AgentRuntime {
 				};
 				messages.push(assistantMessage);
 
-				const toolPromises = response.toolCalls.map(async (toolCall) => {
-					let params: Record<string, unknown>;
-					try {
-						params = JSON.parse(toolCall.function.arguments);
-					} catch {
-						params = {};
+				const toolResults: Array<{
+					toolCallId: string;
+					name: string;
+					resultContent: string | ContentPart[];
+					executedName: string;
+					executedResult: string;
+				}> = [];
+
+				for (const toolCall of response.toolCalls) {
+					const parsedParams = this.parseToolParams(toolCall);
+					const params = parsedParams.params;
+					let toolResult: ToolResult;
+
+					if (parsedParams.error) {
+						toolResult = {
+							success: false,
+							output: "",
+							error: this.createToolPolicyResult(
+								`Invalid JSON arguments for ${toolCall.function.name}: ${parsedParams.error}. Retry once with valid JSON arguments instead of executing with empty parameters.`,
+							).resultContent,
+						};
+					} else {
+						const decision = this.decideBeforeToolCall(
+							toolCall.function.name,
+							params,
+							ledger,
+							this.getRemainingToolIterations(iterations),
+						);
+						if (decision.action === "stop") {
+							const finalContent = await this.generateFinalResponse(messages, ledger, decision.reason);
+							return { content: finalContent, toolCallsExecuted };
+						}
+						const toolNameCount = (toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
+						toolNameCounts.set(toolCall.function.name, toolNameCount);
+						const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
+						const signatureCount = (toolSignatureCounts.get(signature) ?? 0) + 1;
+						toolSignatureCounts.set(signature, signatureCount);
+						const toolBudget = this.getToolBudget(toolCall.function.name);
+
+						if (toolNameCount > toolBudget) {
+							toolResult = {
+								success: false,
+								output: "",
+								error: this.createToolPolicyResult(
+									`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
+								).resultContent,
+							};
+						} else if (signatureCount > MAX_REPEATED_TOOL_SIGNATURES) {
+							toolResult = {
+								success: false,
+								output: "",
+								error: this.createToolPolicyResult(
+									`Repeated action suppressed for ${toolCall.function.name}. The same parameters were already tried ${MAX_REPEATED_TOOL_SIGNATURES} times. Choose a different approach or provide a final answer with the current evidence.`,
+								).resultContent,
+							};
+						} else if (decision.action === "skip") {
+							toolResult = {
+								success: false,
+								output: "",
+								error: this.createToolPolicyResult(decision.reason).resultContent,
+							};
+						} else {
+							toolResult = await this.toolExecutor!.execute(
+								toolCall.function.name,
+								params,
+								this.getToolExecutionContext(),
+							);
+						}
 					}
 
-					const toolResult: ToolResult = await this.toolExecutor!.execute(
-						toolCall.function.name,
-						params,
-					);
-
-					const resultContent = toolResult.success
+					const rawResultContent = toolResult.success
 						? toolResult.output
 						: `Error: ${toolResult.error ?? "Unknown error"}`;
+					const resultContent = this.compactToolResultForContext(rawResultContent);
+					this.updateEvidenceLedger(ledger, toolCall.function.name, resultContent, toolResult.success);
 
-					return {
+					const parsedContent = this.formatToolResultForModel(resultContent);
+
+					toolResults.push({
 						toolCallId: toolCall.id,
 						name: toolCall.function.name,
-						resultContent: resultContent.slice(0, 8000),
+						resultContent: parsedContent,
 						executedName: toolCall.function.name,
-						executedResult: resultContent.slice(0, 2000),
-					};
-				});
-
-				const toolResults = await Promise.all(toolPromises);
+						executedResult: resultContent.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+					});
+				}
 
 				for (const res of toolResults) {
 					toolCallsExecuted.push({
@@ -391,10 +1312,32 @@ export class AgentRuntime {
 						content: res.resultContent,
 						toolCallId: res.toolCallId,
 					});
+					messages.push({
+						role: "system",
+						content: this.buildDecisionGuidance(
+							ledger,
+							res.executedName,
+							res.executedResult,
+							!res.executedResult.startsWith("Error:"),
+							this.getRemainingToolIterations(iterations),
+						),
+					});
 				}
 			} else {
 				return { content: response.content, toolCallsExecuted };
 			}
+		}
+
+		if (ledger.usefulResults > 0) {
+			const maxIterations = this.getToolIterationLimit().maxIterations;
+			return {
+				content: await this.generateFinalResponse(
+					messages,
+					ledger,
+					`se alcanzó el límite de ${maxIterations} iteraciones con evidencia útil disponible`,
+				),
+				toolCallsExecuted,
+			};
 		}
 
 		return {
@@ -413,6 +1356,7 @@ export class AgentRuntime {
 		skills: LoadedSkill[],
 		userMessage: string,
 		channelId?: string,
+		learningInsights: LearningInsight[] = [],
 	): Promise<LLMMessage[]> {
 		const messages: LLMMessage[] = [];
 		const contextParts: string[] = [];
@@ -452,6 +1396,16 @@ export class AgentRuntime {
 			systemContent += `\n\n# Relevant Skills\n${skillInstructions}`;
 		}
 
+		if (learningInsights.length > 0) {
+			const guidance = learningInsights
+				.map((insight) => {
+					const label = insight.type.replace(/_/g, " ");
+					return `- ${label}: ${insight.content}`;
+				})
+				.join("\n");
+			systemContent += `\n\n# Learned Operating Guidance\nUse these prior operational learnings when they are relevant. Prefer higher-confidence procedures and avoid listed anti-patterns.\n${guidance}`;
+		}
+
 		if (this.toolRegistry && this.toolRegistry.list().length > 0) {
 			const toolNames = this.toolRegistry
 				.list()
@@ -466,6 +1420,46 @@ export class AgentRuntime {
 - You have access to a persistent Long-Term Memory (LTM) system.
 - NEVER claim that you do not have memory or that "each conversation starts fresh".
 - If no memories are provided in the context below, simply state that you don't have relevant information.`;
+
+		const activeModel = this.config.model ?? "unspecified";
+		const zaiVisionMode = this.shouldUseZaiVisionToolsForImages();
+		systemContent += `\n\n## BROWSER AUTOMATION RULES (MANDATORY)
+Active model: ${activeModel}
+When using browser tools to navigate websites:
+
+### ACCESSIBILITY TREE NAVIGATION (PRIMARY METHOD)
+You MUST use the accessibility tree for all browser interactions. Follow this workflow:
+1. After any page load (browser_navigate, browser_click_text with waitForNavigation, etc.), ALWAYS call browser_snapshot to get the accessibility tree of the new page.
+2. Read the snapshot to understand what elements are available (buttons, links, inputs, headings, etc. with their UIDs).
+3. To interact with elements, use browser_click_uid (for clicking) or browser_fill_uid (for typing into inputs) with the UID from the snapshot.
+4. The UID tools use the cached snapshot first for speed and return an updated accessibility tree snapshot — use it to decide the next action.
+5. If a UID is no longer valid (page changed), run browser_snapshot again to get fresh UIDs.
+
+### NAVIGATION PRIORITY
+1. Use browser_navigate with direct URLs when possible (e.g. a site's search URL with query parameters).
+2. After navigation, use browser_snapshot (NOT browser_read_page) to understand the page.
+3. Use browser_click_uid and browser_fill_uid as the PRIMARY interaction methods.
+4. Only fall back to browser_click/browser_type with CSS selectors if browser_snapshot fails.
+5. Only use browser_read_page when you need the raw text content of the page (not for navigation decisions).
+
+### BLOCKED PAGE HANDLING
+6. If the page appears blocked, empty, stuck on verification, hidden by an overlay, or not showing the expected content, take or inspect a browser screenshot before giving up.
+7. ${zaiVisionMode ? "Because the active model is Z.ai GLM, analyze browser screenshots with a Z.AI Vision MCP tool using the local screenshot path before deciding the next browser action. Do not rely on direct image understanding for these screenshots." : "Because the active model is not Z.ai GLM, use direct multimodal image understanding for browser screenshots when available. Do not call Z.AI Vision MCP tools solely to inspect browser screenshots."}
+8. Based on the screenshot or vision analysis, decide and act: close popups, dismiss cookie banners, click Continue/Verify/Accept buttons using browser_click_uid, retry the original page, or continue reading if no real block exists.
+9. For CAPTCHA pages, do not manually click reCAPTCHA/anti-bot checkboxes and do not claim the CAPTCHA was solved unless a fresh snapshot/read/screenshot shows the verification UI is gone. If configured, browser_solve_captchas may attempt supported provider handling, but token application is only an attempt; verifiedClear=true or equivalent page evidence is required before continuing. If the challenge remains visible, report the blocker, ask for manual completion, or use a source-specific/non-Google alternative.
+10. If normal Playwright navigation is blocked, the IP appears blocked, or the task is pure public scraping where browser interaction is unnecessary, use Decodo: continue with the configured Decodo browser fallback or call decodo_scrape for advanced Web Scraping API retrieval.
+
+### GENERAL RULES
+11. NEVER navigate to Google as a fallback. Stay on the original target website and complete the task there.
+12. When searching on a website, prefer a direct search URL or one robust form submission. Avoid trying the same submit/click repeatedly.
+13. Cookie consent dialogs are automatically dismissed, but if you see one in a snapshot, click the "Accept" or equivalent button manually using browser_click_uid.
+14. If a browser tool reports a connection error or unavailable browser, call browser_restart once and retry the same browser action. If it still fails, report the exact browser/configuration error; do not offer unrelated alternatives such as generating images, using a different task, or asking whether to proceed another way.
+15. The browser may connect through a residential proxy, so pages may appear in the proxy region/language. This is normal; interact with the page language as shown.
+16. Navigate step by step and decide intelligently. Before each browser action, evaluate the last snapshot: did URL/title/elements change, did the action fail, and what exact observable change is expected next?
+17. browser_etsy_task is only a fallback if normal step-by-step navigation stalls repeatedly or the user explicitly requests a compact Etsy flow. Do not use it as the first/default action.
+18. For requests to show, list, retrieve, or capture multiple page/product images, optimize for direct extraction once on the product/page: use browser_extract_images before clicking thumbnails. Only use browser_eval if the specialized extractor misses data. Deduplicate URLs, prefer the highest-resolution candidates, track obtained/pending internally, and avoid recapturing images already found.
+19. Stop using browser tools as soon as requested data is available. If browser_extract_images returns images or the required screenshots/images are available, answer immediately with available screenshots/images instead of navigating again.
+20. Keep browser/tool work out of the final answer while acting. When helpful, provide one concise present-tense activity sentence immediately before a tool call (for example: "Ingresando la búsqueda en Etsy", "Tomando una captura", "Extrayendo URLs de imágenes"); the UI will show it as transient progress instead of final response text. Return a compact final result with ordered images/URLs, missing items, or blockers only.`;
 
 		if (contextParts.length > 0) {
 			systemContent += `\n\n${contextParts.join("\n\n")}`;
@@ -522,7 +1516,26 @@ export class AgentRuntime {
 			messages.push({ role: "user", content: userMessage });
 		}
 
-		return messages;
+		const parsedMessages = messages.map(msg => {
+			if (typeof msg.content === "string") {
+				const imgRegex = /!\[.*?\]\(\/api\/media\/file\/([^)]+)\)/g;
+				const matches = [...msg.content.matchAll(imgRegex)];
+				if (matches.length > 0) {
+					const localPaths = this.getLocalMediaPathsFromContent(msg.content);
+					if (this.shouldUseZaiVisionToolsForImages()) {
+						return { ...msg, content: this.appendZaiVisionHint(msg.content, localPaths) };
+					}
+
+					return {
+						...msg,
+						content: `${msg.content}\n[Image media is referenced by URL/path and not re-embedded into context.]`,
+					};
+				}
+			}
+			return msg;
+		});
+
+		return parsedMessages;
 	}
 
 	private updateActiveTask(responseText: string): void {

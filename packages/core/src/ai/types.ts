@@ -28,9 +28,13 @@ export interface LLMToolCall {
 	};
 }
 
+export type ContentPart = 
+	| { type: "text"; text: string }
+	| { type: "image_url"; image_url: { url: string } };
+
 export interface LLMMessage {
 	role: "system" | "user" | "assistant" | "tool";
-	content: string;
+	content: string | ContentPart[];
 	toolCallId?: string;
 	toolCalls?: LLMToolCall[];
 }

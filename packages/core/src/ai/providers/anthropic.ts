@@ -36,7 +36,8 @@ export class AnthropicProvider extends BaseLLMProvider {
 
 		for (const msg of messages) {
 			if (msg.role === "system") {
-				systemMessages.push(msg.content);
+				const systemStr = typeof msg.content === "string" ? msg.content : (msg.content.find(p => p.type === "text") as any)?.text ?? "";
+				systemMessages.push(systemStr);
 			} else {
 				filtered.push(msg);
 			}
@@ -59,7 +60,12 @@ export class AnthropicProvider extends BaseLLMProvider {
 			if (m.role === "assistant" && m.toolCalls?.length) {
 				const contentBlocks: Array<Record<string, unknown>> = [];
 				if (m.content) {
-					contentBlocks.push({ type: "text", text: m.content });
+					if (Array.isArray(m.content)) {
+						const textPart = m.content.find(p => p.type === "text") as {text: string} | undefined;
+						if (textPart) contentBlocks.push({ type: "text", text: textPart.text });
+					} else {
+						contentBlocks.push({ type: "text", text: m.content });
+					}
 				}
 				for (const tc of m.toolCalls) {
 					contentBlocks.push({
@@ -70,6 +76,27 @@ export class AnthropicProvider extends BaseLLMProvider {
 					});
 				}
 				return { role: "assistant" as const, content: contentBlocks };
+			}
+
+			if (Array.isArray(m.content)) {
+				const anthropicBlocks = m.content.map(part => {
+					if (part.type === "text") return part;
+					if (part.type === "image_url") {
+						const match = part.image_url.url.match(/^data:(image\/[a-z0-9-]+);base64,(.+)$/);
+						if (match) {
+							return {
+								type: "image",
+								source: {
+									type: "base64",
+									media_type: match[1],
+									data: match[2]
+								}
+							};
+						}
+					}
+					return part; // fallback
+				});
+				return { role: m.role as "user" | "assistant", content: anthropicBlocks };
 			}
 
 			return { role: m.role as "user" | "assistant", content: m.content };
@@ -262,9 +289,26 @@ export class AnthropicProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const readNext = async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					reader.read(),
+					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error("Anthropic stream read timeout")),
+							120_000,
+						);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
 
-		while (true) {
-			const { done, value } = await reader.read();
+		try {
+			while (true) {
+			const { done, value } = await readNext();
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 			const parts = buffer.split("\n\n");
@@ -320,11 +364,24 @@ export class AnthropicProvider extends BaseLLMProvider {
 								},
 							},
 						};
-					} else if (
-						event.type === "message_delta" &&
-						event.delta?.stop_reason
-					) {
-						yield { finishReason: event.delta.stop_reason };
+					} else if (event.type === "message_delta") {
+						const hasStopReason = !!event.delta?.stop_reason;
+						const outputTokens = hasStopReason
+							? event.usage?.output_tokens
+							: undefined;
+						const chunk: LLMChunk = {
+							...(hasStopReason ? { finishReason: event.delta.stop_reason } : {}),
+							...(outputTokens != null
+								? {
+									usage: {
+										promptTokens: 0,
+										completionTokens: outputTokens,
+										totalTokens: outputTokens,
+									},
+								}
+								: {}),
+						};
+						if (Object.keys(chunk).length > 0) yield chunk;
 					} else if (event.type === "message_start" && event.message?.usage) {
 						yield {
 							usage: {
@@ -338,6 +395,9 @@ export class AnthropicProvider extends BaseLLMProvider {
 					}
 				}
 			}
+		}
+		} finally {
+			await reader.cancel().catch(() => {});
 		}
 	}
 

@@ -20,13 +20,14 @@ export class CohereProvider extends BaseLLMProvider {
 		let systemMsg = "";
 
 		for (const m of request.messages) {
+			const textContent = typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") as any)?.text ?? "";
 			if (m.role === "system") {
-				systemMsg = m.content;
+				systemMsg = textContent;
 			} else if (m.role === "user") {
-				lastUserMsg = m.content;
-				chatHistory.push({ role: "USER", message: m.content });
+				lastUserMsg = textContent;
+				chatHistory.push({ role: "USER", message: textContent });
 			} else if (m.role === "assistant") {
-				chatHistory.push({ role: "CHATBOT", message: m.content });
+				chatHistory.push({ role: "CHATBOT", message: textContent });
 			}
 		}
 
@@ -160,9 +161,25 @@ export class CohereProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const readNext = async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					reader.read(),
+					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error("Cohere stream read timeout")),
+							120_000,
+						);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
 
 		while (true) {
-			const { done, value } = await reader.read();
+			const { done, value } = await readNext();
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 			const lines = buffer.split("\n");

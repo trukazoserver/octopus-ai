@@ -1,7 +1,7 @@
 {
 	"name": "@octopus-ai/core",
 	"version": "0.1.0",
-	"description": "Octopus AI Core SDK - Agent runtime, memory, skills, channels, and connection management",
+	"description": "Octopus AI Core SDK - Agent runtime, memory, continuous learning, skills, channels, and connection management",
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -33,6 +33,10 @@
 		"./memory/*": {
 			"types": "./dist/memory/*.d.ts",
 			"default": "./dist/memory/*.js"
+		},
+		"./mascots/*": {
+			"types": "./dist/mascots/*.d.ts",
+			"default": "./dist/mascots/*.js"
 		},
 		"./plugins/*": {
 			"types": "./dist/plugins/*.d.ts",
@@ -96,8 +100,11 @@
 		"nanoid": "^5.1.5",
 		"node-cron": "^4.2.1",
 		"pino": "^9.6.0",
+		"playwright": "^1.59.1",
+		"playwright-extra": "^4.3.6",
 		"puppeteer-core": "^24.40.0",
 		"puppeteer-extra": "^3.3.6",
+		"puppeteer-extra-plugin-recaptcha": "^3.6.8",
 		"puppeteer-extra-plugin-stealth": "^2.11.2",
 		"sql.js": "1.12.0",
 		"ws": "^8.18.0"

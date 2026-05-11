@@ -16,8 +16,9 @@ Esta guía te mostrará cómo empezar a usar Octopus AI de inmediato después de
 - [4. Usar el Panel Web](#4-usar-el-panel-web)
 - [5. Usar la App de Escritorio](#5-usar-la-app-de-escritorio)
 - [6. Explorar la Memoria](#6-explorar-la-memoria-humana)
-- [7. Conectar Canales de Mensajería](#7-conectar-canales-de-mensajería)
-- [8. Explorar las Skills](#8-explorar-las-skills-habilidades)
+- [7. Ver el Aprendizaje Continuo](#7-ver-el-aprendizaje-continuo)
+- [8. Conectar Canales de Mensajería](#8-conectar-canales-de-mensajería)
+- [9. Explorar las Skills](#9-explorar-las-skills-habilidades)
 - [¿Qué puedes hacer con Octopus AI?](#-qué-puedes-hacer-con-octopus-ai)
 - [Siguientes Pasos](#-siguientes-pasos)
 
@@ -37,8 +38,8 @@ Deberías ver todos los elementos con un check verde (✓):
   ✓ Node.js:             v22.x (>= 22)
   ✓ pnpm:                v10.x
   ✓ Python:              Python 3.x
-  ✓ Build Tools (C++):   OK
-  ✓ better-sqlite3:      Bindings nativos OK
+  ✓ Build Tools (C++, opcional): OK
+  ✓ Database:            OK
   ✓ Config File:         ~/.octopus/config.json
   ✓ API Keys:            Z.ai ✓
   ✓ Disk Space:          Writable
@@ -226,7 +227,31 @@ Adicionalmente, el runtime actual mantiene un resumen global del día y un perfi
 
 ---
 
-## 7. Conectar Canales de Mensajería
+## 7. Ver el Aprendizaje Continuo
+
+Después de completar tareas, Octopus registra experiencias y extrae aprendizajes reutilizables. Puedes inspeccionarlos desde la API HTTP si el backend está corriendo:
+
+```bash
+# Iniciar backend si no está activo
+node packages/cli/dist/index.js start
+
+# Ver aprendizajes recientes
+curl http://localhost:18789/api/learning/insights
+```
+
+También puedes enviar feedback para reforzar o corregir una experiencia:
+
+```bash
+curl -X POST http://localhost:18789/api/learning/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"conversationId":"conv_123","rating":"positive"}'
+```
+
+> Más detalles: [Motor de Aprendizaje Continuo](../architecture/learning.md)
+
+---
+
+## 8. Conectar Canales de Mensajería
 
 Octopus AI puede funcionar en múltiples plataformas de mensajería. La misma IA, la misma memoria, en todos lados:
 
@@ -261,7 +286,7 @@ node packages/cli/dist/index.js channels disable telegram
 
 ---
 
-## 8. Explorar las Skills (Habilidades)
+## 9. Explorar las Skills (Habilidades)
 
 Las Skills son herramientas que Octopus AI puede usar para realizar tareas específicas:
 
@@ -288,9 +313,9 @@ node packages/cli/dist/index.js skills create mi-skill
 | `writing` | Escritura asistida (emails, documentos, creativa) |
 | `research` | Investigación, búsqueda y síntesis de información |
 
-### Skills auto-generadas
+### Skills auto-generadas y aprendizaje
 
-Octopus AI puede **crear automáticamente** nuevas skills cuando detecta que necesita una herramienta que no tiene. También las **auto-mejora** con el tiempo basándose en su tasa de éxito.
+Octopus AI puede **crear automáticamente** nuevas skills cuando detecta experiencias exitosas repetidas. También las **auto-mejora** con el tiempo basándose en tasa de éxito, feedback y antipatrones aprendidos.
 
 > Más detalles: [Motor de Skills](../architecture/skills.md)
 

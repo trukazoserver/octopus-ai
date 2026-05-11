@@ -16,10 +16,49 @@ const ZHIPU_ENDPOINTS: Record<ZhipuApiMode, string> = {
 	global: "https://api.z.ai/api/paas/v4",
 };
 
+type ZhipuStreamPayload = {
+	error?: { message?: string };
+	usage?: {
+		prompt_tokens?: number;
+		completion_tokens?: number;
+		total_tokens?: number;
+		completion_tokens_details?: { reasoning_tokens?: number };
+	};
+	choices?: Array<{
+		delta?: {
+			content?: string;
+			reasoning_content?: string;
+			tool_calls?: Array<{
+				id?: string;
+				function?: { name?: string; arguments?: string };
+			}>;
+		};
+		finish_reason?: string;
+	}>;
+};
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const DEFAULT_STREAM_READ_TIMEOUT_MS = 15 * 60 * 1000;
+
+function getTimeoutMs(envName: string, fallback: number): number {
+	const raw = process.env[envName];
+	if (!raw) return fallback;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export class ZhipuProvider extends BaseLLMProvider {
 	private baseUrl: string;
 	private prefix = "zhipu";
 	private mode: ZhipuApiMode;
+	private requestTimeoutMs = getTimeoutMs(
+		"OCTOPUS_ZAI_REQUEST_TIMEOUT_MS",
+		DEFAULT_REQUEST_TIMEOUT_MS,
+	);
+	private streamReadTimeoutMs = getTimeoutMs(
+		"OCTOPUS_ZAI_STREAM_READ_TIMEOUT_MS",
+		DEFAULT_STREAM_READ_TIMEOUT_MS,
+	);
 
 	constructor(config: ProviderConfig & { mode?: ZhipuApiMode }) {
 		super(config);
@@ -67,7 +106,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 			method: "POST",
 			headers: this.getHeaders(),
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(600000),
+			signal: AbortSignal.timeout(this.requestTimeoutMs),
 		});
 
 		if (!response.ok) {
@@ -140,6 +179,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 		const body: Record<string, unknown> = {
 			model,
 			stream: true,
+			stream_options: { include_usage: true },
 			messages: request.messages.map((m) => ({
 				role: m.role,
 				content: m.content,
@@ -162,7 +202,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 			method: "POST",
 			headers: this.getHeaders(),
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(600000),
+			signal: AbortSignal.timeout(this.requestTimeoutMs),
 		});
 
 		if (!response.ok) {
@@ -177,57 +217,92 @@ export class ZhipuProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const readNext = async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					reader.read(),
+					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error("Z.ai stream read timeout")),
+							this.streamReadTimeoutMs,
+						);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
 
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
-			const parts = buffer.split("\n\n");
-			buffer = parts.pop() ?? "";
-			for (const part of parts) {
-				const lines = part.split("\n");
-				for (const line of lines) {
-					const trimmed = line.trim();
-					if (!trimmed.startsWith("data: ")) continue;
-					const payload = trimmed.slice(6);
-					if (payload === "[DONE]") return;
-					let parsed: any;
-					try {
-						parsed = JSON.parse(payload);
-					} catch {
-						continue; // ignore malformed chunks
-					}
-					if (parsed.error) {
-						throw new Error(parsed.error.message || JSON.stringify(parsed.error));
-					}
-					const delta = parsed.choices?.[0];
-					if (!delta) continue;
-					const chunk: LLMChunk = {};
-					if (delta.delta?.content) {
-						chunk.content = delta.delta.content;
-					}
-					if (delta.delta?.reasoning_content) {
-						chunk.thinking = delta.delta.reasoning_content;
-					}
-					if (delta.delta?.tool_calls) {
-						const tc = delta.delta.tool_calls[0];
-						if (tc) {
-							chunk.toolCalls = {
-								id: tc.id ?? "",
-								type: "function",
-								function: {
-									name: tc.function?.name ?? "",
-									arguments: tc.function?.arguments ?? "",
+		try {
+			while (true) {
+				const { done, value } = await readNext();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const parts = buffer.split("\n\n");
+				buffer = parts.pop() ?? "";
+				for (const part of parts) {
+					const lines = part.split("\n");
+					for (const line of lines) {
+						const trimmed = line.trim();
+						if (!trimmed.startsWith("data: ")) continue;
+						const payload = trimmed.slice(6);
+						if (payload === "[DONE]") return;
+						let parsed: ZhipuStreamPayload;
+						try {
+							parsed = JSON.parse(payload);
+						} catch {
+							continue; // ignore malformed chunks
+						}
+						if (parsed.error) {
+							throw new Error(
+								parsed.error.message || JSON.stringify(parsed.error),
+							);
+						}
+						if (parsed.usage) {
+							const reasoningTokens =
+								parsed.usage.completion_tokens_details?.reasoning_tokens;
+							yield {
+								usage: {
+									promptTokens: parsed.usage.prompt_tokens ?? 0,
+									completionTokens: parsed.usage.completion_tokens ?? 0,
+									totalTokens: parsed.usage.total_tokens ?? 0,
+									...(reasoningTokens ? { reasoningTokens } : {}),
 								},
 							};
 						}
+						const delta = parsed.choices?.[0];
+						if (!delta) continue;
+						const chunk: LLMChunk = {};
+						if (delta.delta?.content) {
+							chunk.content = delta.delta.content;
+						}
+						if (delta.delta?.reasoning_content) {
+							chunk.thinking = delta.delta.reasoning_content;
+						}
+						if (delta.delta?.tool_calls) {
+							const tc = delta.delta.tool_calls[0];
+							if (tc) {
+								chunk.toolCalls = {
+									id: tc.id ?? "",
+									type: "function",
+									function: {
+										name: tc.function?.name ?? "",
+										arguments: tc.function?.arguments ?? "",
+									},
+								};
+							}
+						}
+						if (delta.finish_reason) {
+							chunk.finishReason = delta.finish_reason;
+						}
+						yield chunk;
+						if (chunk.finishReason) return;
 					}
-					if (delta.finish_reason) {
-						chunk.finishReason = delta.finish_reason;
-					}
-					yield chunk;
 				}
 			}
+		} finally {
+			await reader.cancel().catch(() => {});
 		}
 	}
 

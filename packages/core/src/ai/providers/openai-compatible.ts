@@ -51,10 +51,10 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		return headers;
 	}
 
-	private buildMessages(request: LLMRequest) {
+	private buildMessages(request: LLMRequest): any[] {
 		return request.messages.map((m) => ({
 			role: m.role,
-			content: m.content,
+			content: m.content as any,
 			...(m.toolCalls ? { tool_calls: m.toolCalls } : {}),
 			...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
 		}));
@@ -194,6 +194,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		const body: Record<string, unknown> = {
 			model,
 			stream: true,
+			stream_options: { include_usage: true },
 			messages: this.buildMessages(request),
 			...(request.maxTokens != null ? { max_tokens: request.maxTokens } : {}),
 			...(request.temperature != null
@@ -222,59 +223,98 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const readNext = async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					reader.read(),
+					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error("OpenAI-compatible stream read timeout")),
+							120_000,
+						);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
 
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
-			const parts = buffer.split("\n\n");
-			buffer = parts.pop() ?? "";
-			for (const part of parts) {
-				const lines = part.split("\n");
-				for (const line of lines) {
-					const trimmed = line.trim();
-					if (!trimmed.startsWith("data: ")) continue;
-					const payload = trimmed.slice(6);
-					if (payload === "[DONE]") return;
-					let parsed: any;
-					try {
-						parsed = JSON.parse(payload);
-					} catch {
-						continue; // ignore malformed chunks
-					}
-					if (parsed.error) {
-						throw new Error(parsed.error.message || JSON.stringify(parsed.error));
-					}
-					const delta = parsed.choices?.[0];
-					if (!delta) continue;
-					const chunk: LLMChunk = {};
-					if (delta.delta?.content) {
-						chunk.content = delta.delta.content;
-						if (delta.delta?.reasoning_content) {
-							chunk.thinking = delta.delta.reasoning_content;
+		try {
+			while (true) {
+				const { done, value } = await readNext();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const parts = buffer.split("\n\n");
+				buffer = parts.pop() ?? "";
+				for (const part of parts) {
+					const lines = part.split("\n");
+					for (const line of lines) {
+						const trimmed = line.trim();
+						if (!trimmed.startsWith("data: ")) continue;
+						const payload = trimmed.slice(6);
+						if (payload === "[DONE]") return;
+						let parsed: any;
+						try {
+							parsed = JSON.parse(payload);
+						} catch {
+							continue; // ignore malformed chunks
 						}
-					} else if (delta.delta?.reasoning_content) {
-						chunk.content = delta.delta.reasoning_content;
-					}
-					if (delta.delta?.tool_calls) {
-						const tc = delta.delta.tool_calls[0];
-						if (tc) {
-							chunk.toolCalls = {
-								id: tc.id ?? "",
-								type: (tc.type as "function") ?? undefined,
-								function: {
-									name: tc.function?.name ?? "",
-									arguments: tc.function?.arguments ?? "",
+						if (parsed.error) {
+							throw new Error(
+								parsed.error.message || JSON.stringify(parsed.error),
+							);
+						}
+						if (parsed.usage) {
+							yield {
+								usage: {
+									promptTokens: parsed.usage.prompt_tokens ?? 0,
+									completionTokens: parsed.usage.completion_tokens ?? 0,
+									totalTokens: parsed.usage.total_tokens ?? 0,
+									...(parsed.usage.completion_tokens_details?.reasoning_tokens
+										? {
+											reasoningTokens:
+												parsed.usage.completion_tokens_details
+													.reasoning_tokens,
+										}
+										: {}),
 								},
 							};
 						}
+						const delta = parsed.choices?.[0];
+						if (!delta) continue;
+						const chunk: LLMChunk = {};
+						if (delta.delta?.content) {
+							chunk.content = delta.delta.content;
+							if (delta.delta?.reasoning_content) {
+								chunk.thinking = delta.delta.reasoning_content;
+							}
+						} else if (delta.delta?.reasoning_content) {
+							chunk.content = delta.delta.reasoning_content;
+						}
+						if (delta.delta?.tool_calls) {
+							const tc = delta.delta.tool_calls[0];
+							if (tc) {
+								chunk.toolCalls = {
+									id: tc.id ?? "",
+									type: (tc.type as "function") ?? undefined,
+									function: {
+										name: tc.function?.name ?? "",
+										arguments: tc.function?.arguments ?? "",
+									},
+								};
+							}
+						}
+						if (delta.finish_reason) {
+							chunk.finishReason = delta.finish_reason;
+						}
+						yield chunk;
+						if (chunk.finishReason) return;
 					}
-					if (delta.finish_reason) {
-						chunk.finishReason = delta.finish_reason;
-					}
-					yield chunk;
 				}
 			}
+		} finally {
+			await reader.cancel().catch(() => {});
 		}
 	}
 

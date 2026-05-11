@@ -2,9 +2,11 @@
 	"name": "octopus-ai",
 	"version": "0.1.0",
 	"private": true,
-	"description": "Self-hosted AI assistant with human-like memory and auto-improvable skills",
+	"description": "Self-hosted AI assistant with persistent memory, continuous learning, automations, and auto-improvable skills",
 	"scripts": {
-		"start": "node packages/cli/dist/index.js start",
+		"start": "octopus start",
+		"launch": "octopus --web",
+		"start:console": "octopus --console",
 		"start:web": "pnpm --filter @octopus-ai/web dev",
 		"start:desktop": "pnpm --filter @octopus-ai/desktop dev",
 		"install:octopus": "node scripts/install.mjs",
@@ -26,9 +28,11 @@
 		"node": ">=22.0.0"
 	},
 	"dependencies": {
+		"@google/genai": "^2.0.1",
 		"@google/generative-ai": "^0.24.1",
-		"better-sqlite3": "^12.9.0",
+		"axios": "^1.15.2",
 		"canvas": "^3.2.3",
+		"sharp": "^0.34.5",
 		"ws": "^8.20.0"
 	}
 }

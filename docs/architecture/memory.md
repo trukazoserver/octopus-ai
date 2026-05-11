@@ -63,6 +63,7 @@ La LTM es el almacenamiento permanente donde se guardan los recuerdos importante
 |---|---|---|
 | **Resumen diario global** | Comprime los mensajes recientes del día en una narrativa breve reutilizable por el runtime | `daily.ts` |
 | **Perfil de usuario** | Aprende estilo de comunicación, idioma preferido, expertise, decisiones y patrones de trabajo | `user-profile.ts` |
+| **Aprendizaje operacional** | Guarda procedimientos, antipatrones y estrategias de tools extraídas de trabajos reales | `learning/engine.ts` |
 
 ### Parámetros
 
@@ -102,6 +103,7 @@ La consolidación es el proceso de transferir información importante de la memo
 | **Hechos (facts)** | Información objetiva: "María vive en Madrid" |
 | **Eventos (events)** | Experiencias con contexto temporal: "Hoy discutimos el plan" |
 | **Procedimientos (procedures)** | Instrucciones aprendidas: "Cuando María pide un resumen, prefiere viñetas" |
+| **Aprendizajes operacionales** | Qué método funcionó o falló en trabajos previos: "Para extraer imágenes de producto, usar primero extracción DOM antes de hacer clic en miniaturas" |
 | **Asociaciones** | Conexiones entre conceptos: "María → prefiere → viñetas" |
 
 ### Configuración
@@ -181,6 +183,7 @@ En el runtime actual, la recuperación de memorias se combina además con:
 
 - **Resumen diario global** para mantener continuidad dentro del mismo día
 - **Perfil del usuario** para ajustar idioma, tono, preferencias y expertise conocidos
+- **Learned Operating Guidance** para recordar procedimientos y antipatrones aprendidos de ejecuciones anteriores
 - **Contexto STM filtrado por conversación/canal** para no mezclar historiales activos distintos
 
 ---

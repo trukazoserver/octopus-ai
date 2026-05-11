@@ -21,9 +21,12 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "eventemitter3";
 import WebSocket, { WebSocketServer, type WebSocket as WSWebSocket } from "ws";
+import { getProviderRegistry, type LLMRouter } from "../ai/router.js";
+import type { UsageStats } from "../ai/types.js";
 import { ConfigLoader } from "../config/loader.js";
 import type { OctopusConfig } from "../config/schema.js";
 import { ConfigValidator } from "../config/validator.js";
+import { getZaiMCPConfigs } from "../plugins/mcp/zai-servers.js";
 import { MCP_CATALOG } from "./mcp-catalog.js";
 import {
 	MessageType,
@@ -48,6 +51,7 @@ export interface TransportServerOptions {
 // biome-ignore lint/suspicious/noExplicitAny: Needed for dynamic context injection
 type SystemContext = {
 	config: OctopusConfig;
+	router?: LLMRouter;
 	// biome-ignore lint/suspicious/noExplicitAny: <explanation>
 	embedFn?: any;
 	// biome-ignore lint/suspicious/noExplicitAny: <explanation>
@@ -207,6 +211,19 @@ function setNestedValue(
 
 function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 	const masked = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+	const maskUrlCredentials = (value: unknown): unknown => {
+		if (typeof value !== "string" || value.length === 0) return value;
+		try {
+			const url = new URL(value);
+			if (url.username || url.password) {
+				url.username = "****";
+				url.password = "****";
+			}
+			return url.toString();
+		} catch {
+			return value;
+		}
+	};
 	const ai = masked.ai as Record<string, unknown>;
 	const providers = ai.providers as Record<string, Record<string, unknown>>;
 	for (const provider of Object.values(providers)) {
@@ -229,7 +246,63 @@ function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 			sec.encryptionKey = "****";
 		}
 	}
+	if (masked.browser && typeof masked.browser === "object") {
+		const browser = masked.browser as Record<string, unknown>;
+		browser.brightDataWsUrl = maskUrlCredentials(browser.brightDataWsUrl);
+		browser.decodoProxyUrl = maskUrlCredentials(browser.decodoProxyUrl);
+	}
 	return masked;
+}
+
+function describeModelRef(
+	config: OctopusConfig,
+	router: LLMRouter | undefined,
+	modelRef: string | undefined,
+): { provider?: string; providerDisplayName?: string; model?: string } {
+	if (!modelRef) return {};
+	const registry = getProviderRegistry();
+	const slashIndex = modelRef.indexOf("/");
+	if (slashIndex !== -1) {
+		const provider = modelRef.slice(0, slashIndex);
+		return {
+			provider,
+			providerDisplayName: registry[provider]?.displayName ?? provider,
+			model: modelRef.slice(slashIndex + 1),
+		};
+	}
+
+	for (const [provider, providerConfig] of Object.entries(config.ai.providers)) {
+		const models =
+			"models" in providerConfig && Array.isArray(providerConfig.models)
+				? providerConfig.models
+				: [];
+		if (models.includes(modelRef)) {
+			return {
+				provider,
+				providerDisplayName: registry[provider]?.displayName ?? provider,
+				model: modelRef,
+			};
+		}
+	}
+
+	for (const [provider, entry] of Object.entries(registry)) {
+		if (entry.defaultModels.includes(modelRef)) {
+			return {
+				provider,
+				providerDisplayName: entry.displayName,
+				model: modelRef,
+			};
+		}
+	}
+
+	const activeProvider = router?.getAvailableProviders()[0];
+	return {
+		provider: activeProvider,
+		providerDisplayName: activeProvider
+			? (registry[activeProvider]?.displayName ?? activeProvider)
+			: undefined,
+		model: modelRef,
+	};
 }
 
 export class TransportServer {
@@ -318,6 +391,25 @@ export class TransportServer {
 					return;
 				}
 
+				if (req.method === "GET" && pathname === "/api/learning/insights") {
+					void this.handleLearningInsights(res, url.searchParams);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/learning/feedback") {
+					void this.handleLearningFeedback(req, res);
+					return;
+				}
+
+				if (
+					req.method === "DELETE" &&
+					/^\/api\/learning\/insights\/[^/]+$/.test(pathname)
+				) {
+					const id = decodeURIComponent(pathname.split("/").pop() ?? "");
+					void this.handleForgetLearningInsight(res, id);
+					return;
+				}
+
 				if (req.method === "GET" && pathname === "/api/skills") {
 					void this.handleGetSkills(res);
 					return;
@@ -346,6 +438,39 @@ export class TransportServer {
 
 				if (req.method === "POST" && pathname === "/api/code/create-tool") {
 					void this.handleCreateTool(req, res);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/tools") {
+					this.handleGetToolsUnified(res);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					pathname.startsWith("/api/tools/system/") &&
+					pathname.endsWith("/toggle")
+				) {
+					const toolName = decodeURIComponent(pathname.split("/")[4] ?? "");
+					void this.handleToggleSystemTool(res, toolName);
+					return;
+				}
+
+				if (
+					req.method === "GET" &&
+					/^\/api\/tools\/dynamic\/[^/]+$/.test(pathname)
+				) {
+					const toolName = decodeURIComponent(pathname.split("/").pop() ?? "");
+					this.handleGetDynamicToolDetail(res, toolName);
+					return;
+				}
+
+				if (
+					req.method === "PUT" &&
+					/^\/api\/tools\/dynamic\/[^/]+$/.test(pathname)
+				) {
+					const toolName = decodeURIComponent(pathname.split("/").pop() ?? "");
+					void this.handleUpdateDynamicTool(req, res, toolName);
 					return;
 				}
 
@@ -606,6 +731,38 @@ export class TransportServer {
 					return;
 				}
 
+				if (
+					req.method === "POST" &&
+					/^\/api\/mcp\/servers\/[^/]+\/toggle$/.test(pathname)
+				) {
+					const parts = pathname.split("/");
+					const serverName = decodeURIComponent(parts[4] ?? "");
+					void this.handleToggleMCPServer(res, serverName);
+					return;
+				}
+
+				if (
+					req.method === "GET" &&
+					/^\/api\/mcp\/servers\/[^/]+$/.test(pathname)
+				) {
+					const serverName = decodeURIComponent(
+						pathname.split("/").pop() ?? "",
+					);
+					void this.handleGetMCPServer(res, serverName);
+					return;
+				}
+
+				if (
+					req.method === "PUT" &&
+					/^\/api\/mcp\/servers\/[^/]+$/.test(pathname)
+				) {
+					const serverName = decodeURIComponent(
+						pathname.split("/").pop() ?? "",
+					);
+					void this.handleUpdateMCPServer(req, res, serverName);
+					return;
+				}
+
 				if (req.method === "PUT" && pathname === "/api/mcp/servers") {
 					void this.handleSyncMCPServers(res, req);
 					return;
@@ -751,10 +908,24 @@ export class TransportServer {
 			this.emitter.emit("connect", clientId);
 		});
 
+		this.httpServer.requestTimeout = 600_000;
+		this.httpServer.headersTimeout = 120_000;
+		this.httpServer.keepAliveTimeout = 30_000;
+
 		return new Promise<void>((resolve, reject) => {
-			this.httpServer?.on("error", reject);
+			const cleanup = () => {
+				this.httpServer?.removeListener("error", onError);
+				this.wss?.removeListener("error", onError);
+			};
+			const onError = (err: Error) => {
+				cleanup();
+				reject(err);
+			};
+
+			this.httpServer?.once("error", onError);
+			this.wss?.once("error", onError);
 			this.httpServer?.listen(this.port, this.host, () => {
-				this.httpServer?.removeListener("error", reject);
+				cleanup();
 				resolve();
 			});
 		});
@@ -763,16 +934,26 @@ export class TransportServer {
 	private handleStatus(res: ServerResponse): void {
 		try {
 			const config = this.loadConfig();
+			const router = this.system?.router;
+			const active = describeModelRef(config, router, config.ai.default);
+			const fallback = describeModelRef(config, router, config.ai.fallback);
+			const usage: UsageStats | undefined = router?.getUsage();
 			const enabledChannels: string[] = [];
 			for (const [name, ch] of Object.entries(config.channels)) {
 				if (ch.enabled) enabledChannels.push(name);
 			}
 			jsonRes(res, 200, {
 				status: "running",
-				provider: config.ai.default,
+				provider: active.provider,
+				providerDisplayName: active.providerDisplayName,
+				model: active.model ?? config.ai.default,
 				fallback: config.ai.fallback,
+				fallbackProvider: fallback.provider,
+				fallbackModel: fallback.model,
 				thinking: config.ai.thinking,
 				maxTokens: config.ai.maxTokens,
+				availableProviders: router?.getAvailableProviders() ?? [],
+				usage,
 				channels: enabledChannels,
 				memoryEnabled: config.memory.enabled,
 				skillsEnabled: config.skills.enabled,
@@ -877,6 +1058,19 @@ export class TransportServer {
 
 			if (this.system) {
 				this.system.config = configObj as unknown as OctopusConfig;
+				if (keyPath === "browser" || keyPath.startsWith("browser.")) {
+					await this.system.refreshBrowserTools?.(this.system.config);
+				}
+				if (keyPath === "tools" || keyPath.startsWith("tools.iterationLimit")) {
+					this.system.agentRuntime?.setToolIterationLimit?.(
+						this.system.config.tools.iterationLimit,
+					);
+				}
+				if (keyPath === "tools" || keyPath.startsWith("tools.timeouts")) {
+					this.system.toolExecutor?.updateConfig?.({
+						timeouts: this.system.config.tools.timeouts,
+					});
+				}
 			}
 
 			jsonRes(res, 200, { ok: true, key: keyPath });
@@ -932,8 +1126,13 @@ export class TransportServer {
 	private async handleMemoryConsolidate(res: ServerResponse): Promise<void> {
 		try {
 			let result: unknown = null;
-			if (this.system?.memoryConsolidator?.consolidate && this.system?.agentRuntime?.stm) {
-				result = await this.system.memoryConsolidator.consolidate(this.system.agentRuntime.stm);
+			if (
+				this.system?.memoryConsolidator?.consolidate &&
+				this.system?.agentRuntime?.stm
+			) {
+				result = await this.system.memoryConsolidator.consolidate(
+					this.system.agentRuntime.stm,
+				);
 			} else {
 				jsonRes(res, 200, {
 					ok: true,
@@ -944,6 +1143,78 @@ export class TransportServer {
 				return;
 			}
 			jsonRes(res, 200, { ok: true, result });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleLearningInsights(
+		res: ServerResponse,
+		params: URLSearchParams,
+	): Promise<void> {
+		try {
+			if (!this.system?.learningEngine) {
+				jsonRes(res, 200, { enabled: false, insights: [] });
+				return;
+			}
+			const limit = Number.parseInt(params.get("limit") ?? "50", 10);
+			const type = params.get("type") ?? undefined;
+			const insights = await this.system.learningEngine.listInsights({
+				limit: Number.isFinite(limit) ? limit : 50,
+				...(type ? { type } : {}),
+			});
+			jsonRes(res, 200, { enabled: true, insights });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleLearningFeedback(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			if (!this.system?.learningEngine) {
+				jsonRes(res, 404, { error: "Learning engine not available" });
+				return;
+			}
+			let body: Record<string, unknown>;
+			try {
+				body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+			await this.system.learningEngine.addFeedback({
+				experienceId: typeof body.experienceId === "string" ? body.experienceId : undefined,
+				conversationId: typeof body.conversationId === "string" ? body.conversationId : undefined,
+				messageId: typeof body.messageId === "string" ? body.messageId : undefined,
+				rating: typeof body.rating === "number" || body.rating === "positive" || body.rating === "negative" ? body.rating : "positive",
+				comment: typeof body.comment === "string" ? body.comment : undefined,
+			});
+			jsonRes(res, 200, { ok: true });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleForgetLearningInsight(
+		res: ServerResponse,
+		id: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.learningEngine) {
+				jsonRes(res, 404, { error: "Learning engine not available" });
+				return;
+			}
+			const ok = await this.system.learningEngine.forgetInsight(id);
+			jsonRes(res, ok ? 200 : 404, ok ? { ok: true } : { error: "Insight not found" });
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -1126,6 +1397,440 @@ export class TransportServer {
 		}
 	}
 
+	private handleGetToolsUnified(res: ServerResponse): void {
+		try {
+			const items: any[] = [];
+			let systemCount = 0;
+			let dynamicCount = 0;
+			let mcpServerCount = 0;
+			let mcpToolCount = 0;
+
+			// Get disabled tools from config
+			const config = this.loadConfig() as any;
+			const disabledTools = config.tools?.disabled || [];
+
+			// 1. Get System & Dynamic Tools from ToolRegistry
+			if (this.system?.toolRegistry) {
+				const registeredTools = this.system.toolRegistry.list();
+				for (const t of registeredTools) {
+					const metadata = t.metadata || {};
+					const source = metadata.source || "system";
+
+					if (source === "system" || source === "dynamic") {
+						const isEnabled = !disabledTools.includes(t.name);
+						const paramCount = Object.keys(t.parameters || {}).length;
+
+						items.push({
+							id: `${source}:${t.name}`,
+							source,
+							resourceType: "tool",
+							managementScope: "tool",
+							name: t.name,
+							displayName: t.name,
+							description: t.description,
+							status: isEnabled ? "active" : "inactive",
+							enabled: isEnabled,
+							registered: true,
+							persisted: true,
+							uiIcon: t.uiIcon,
+							paramCount,
+							parameters: t.parameters,
+							origin: metadata,
+							capabilities: {
+								canToggle: source === "dynamic" ? false : true,
+								canEdit: source === "dynamic",
+								canDelete: source === "dynamic",
+								canRestart: false,
+							},
+						});
+
+						if (source === "system") systemCount++;
+						if (source === "dynamic") dynamicCount++;
+					}
+				}
+			}
+
+			// Add un-registered dynamic tools (from disk)
+			const dir = join(homedir(), ".octopus", "tools");
+			if (existsSync(dir)) {
+				const entries = readdirSync(dir, { withFileTypes: true });
+				for (const entry of entries) {
+					if (entry.isDirectory()) {
+						const manifestPath = join(dir, entry.name, "manifest.json");
+						if (existsSync(manifestPath)) {
+							try {
+								const manifest = JSON.parse(
+									readFileSync(manifestPath, "utf-8"),
+								);
+								const isLoaded = items.some(
+									(i) => i.source === "dynamic" && i.name === manifest.name,
+								);
+								if (!isLoaded) {
+									items.push({
+										id: `dynamic:${manifest.name}`,
+										source: "dynamic",
+										resourceType: "tool",
+										managementScope: "tool",
+										name: manifest.name,
+										displayName: manifest.name,
+										description: manifest.description || "",
+										status: "not_loaded",
+										enabled: false,
+										registered: false,
+										persisted: true,
+										version: manifest.version,
+										language: manifest.language,
+										uiIcon: manifest.uiIcon,
+										origin: { path: manifestPath },
+										capabilities: {
+											canToggle: false,
+											canEdit: true,
+											canDelete: true,
+											canRestart: false,
+										},
+									});
+									dynamicCount++;
+								} else {
+									const loadedItem = items.find(
+										(i) => i.source === "dynamic" && i.name === manifest.name,
+									);
+									if (loadedItem) {
+										loadedItem.version = manifest.version;
+										loadedItem.language = manifest.language;
+									}
+								}
+							} catch {}
+						}
+					}
+				}
+			}
+
+			// 2. MCP Servers
+			if (this.system?.mcpManager) {
+				const servers = this.system.mcpManager.listServers();
+				for (const s of servers) {
+					mcpServerCount++;
+					mcpToolCount += (s.tools || []).length;
+					const autoDisabled = config.mcp?.autoDisabled || [];
+					const isAutoDisabled = autoDisabled.includes(s.name);
+
+					let status = "active";
+					if (isAutoDisabled || s.config.enabled === false) status = "inactive";
+					else if (s.status === "error") status = "error";
+					else if (s.status === "disconnected") status = "not_loaded";
+
+					// Mask env
+					const envKeys = s.config.env ? Object.keys(s.config.env) : [];
+
+					items.push({
+						id: `mcp-server:${s.name}`,
+						source: "mcp",
+						resourceType: "mcp-server",
+						managementScope: "server",
+						name: s.name,
+						displayName: s.name,
+						description: `MCP Server: ${s.name}`,
+						status,
+						enabled: status !== "inactive",
+						registered: s.status === "connected",
+						persisted: true,
+						mcp: {
+							tools: (s.tools || []).map((tName: string) => ({
+								name: tName,
+								runtimeName: tName,
+							})),
+							command: s.config.command,
+							args: s.config.args,
+							envKeys,
+						},
+						runtime: {
+							error: s.error,
+						},
+						capabilities: {
+							canToggle: true,
+							canEdit: true,
+							canDelete: true,
+							canRestart: true,
+						},
+					});
+				}
+			}
+
+			jsonRes(res, 200, {
+				items,
+				summary: {
+					system: systemCount,
+					dynamic: dynamicCount,
+					mcpServers: mcpServerCount,
+					mcpTools: mcpToolCount,
+				},
+			});
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleToggleSystemTool(
+		res: ServerResponse,
+		name: string,
+	): Promise<void> {
+		try {
+			const loader = new ConfigLoader();
+			const config = loader.load() as any;
+			config.tools = config.tools || { disabled: [] };
+			config.tools.disabled = config.tools.disabled || [];
+
+			let isEnabled = true;
+			if (config.tools.disabled.includes(name)) {
+				config.tools.disabled = config.tools.disabled.filter(
+					(n: string) => n !== name,
+				);
+			} else {
+				config.tools.disabled.push(name);
+				isEnabled = false;
+			}
+			loader.save(config);
+
+			if (this.system) {
+				this.system.config = config;
+			}
+
+			jsonRes(res, 200, {
+				ok: true,
+				name,
+				enabled: isEnabled,
+				requiresRestart: true,
+			});
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private handleGetDynamicToolDetail(res: ServerResponse, name: string): void {
+		try {
+			const dir = join(homedir(), ".octopus", "tools", name);
+			if (!existsSync(dir)) {
+				jsonRes(res, 404, { error: "Tool not found" });
+				return;
+			}
+			const manifestPath = join(dir, "manifest.json");
+			if (!existsSync(manifestPath)) {
+				jsonRes(res, 404, { error: "Manifest not found" });
+				return;
+			}
+			const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+			const ext = manifest.language === "typescript" ? "mts" : "mjs";
+			const codePath = join(dir, `index.${ext}`);
+			let code = "";
+			if (existsSync(codePath)) {
+				code = readFileSync(codePath, "utf-8");
+			}
+			jsonRes(res, 200, { manifest, code });
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleUpdateDynamicTool(
+		req: IncomingMessage,
+		res: ServerResponse,
+		name: string,
+	): Promise<void> {
+		try {
+			const body = JSON.parse(await readBody(req));
+			const dir = join(homedir(), ".octopus", "tools", name);
+			if (!existsSync(dir)) {
+				jsonRes(res, 404, { error: "Tool not found" });
+				return;
+			}
+			const manifestPath = join(dir, "manifest.json");
+			const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+
+			if (body.description) manifest.description = body.description;
+			if (body.uiIcon !== undefined) manifest.uiIcon = body.uiIcon;
+			if (body.parameters_schema)
+				manifest.parameters = JSON.parse(body.parameters_schema);
+			manifest.updatedAt = new Date().toISOString();
+
+			writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+
+			if (body.code) {
+				const ext = manifest.language === "typescript" ? "mts" : "mjs";
+				const codePath = join(dir, `index.${ext}`);
+				writeFileSync(codePath, body.code, "utf-8");
+			}
+
+			jsonRes(res, 200, { ok: true, requiresRestart: true });
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleToggleMCPServer(
+		res: ServerResponse,
+		name: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.mcpManager) {
+				jsonRes(res, 503, { error: "MCP Manager not available" });
+				return;
+			}
+			const loader = new ConfigLoader();
+			const config = loader.load() as any;
+			const isAutoManaged = name.startsWith("zai-");
+
+			if (isAutoManaged) {
+				config.mcp = config.mcp || {};
+				config.mcp.autoDisabled = config.mcp.autoDisabled || [];
+				let enabled = true;
+				if (config.mcp.autoDisabled.includes(name)) {
+					config.mcp.autoDisabled = config.mcp.autoDisabled.filter(
+						(n: string) => n !== name,
+					);
+				} else {
+					config.mcp.autoDisabled.push(name);
+					enabled = false;
+				}
+				loader.save(config);
+				this.system.config = config;
+
+				if (!enabled) {
+					await this.system.mcpManager.removeServer(name);
+				} else {
+					const apiKey = config.ai?.providers?.zhipu?.apiKey;
+					if (apiKey) {
+						const zaiConfigs = getZaiMCPConfigs(apiKey);
+						const serverConfig = zaiConfigs[name];
+						if (serverConfig) {
+							await this.system.mcpManager.addServer(name, serverConfig);
+						}
+					}
+				}
+				jsonRes(res, 200, { ok: true, enabled });
+			} else {
+				const server = this.system.mcpManager.getServer(name);
+				if (!server) {
+					jsonRes(res, 404, { error: "Server not found" });
+					return;
+				}
+				const currentState = server.config.enabled !== false;
+				const newState = !currentState;
+
+				config.mcp = config.mcp || { servers: {} };
+				config.mcp.servers = config.mcp.servers || {};
+				config.mcp.servers[name] = { ...server.config, enabled: newState };
+				loader.save(config);
+				this.system.config = config;
+
+				await this.system.mcpManager.setServerEnabled(name, newState);
+				jsonRes(res, 200, { ok: true, enabled: newState });
+			}
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleGetMCPServer(
+		res: ServerResponse,
+		name: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.mcpManager) {
+				jsonRes(res, 503, { error: "Not available" });
+				return;
+			}
+			const server = this.system.mcpManager.getServer(name);
+			if (!server) {
+				jsonRes(res, 404, { error: "Server not found" });
+				return;
+			}
+			const maskedEnv: Record<string, string> = {};
+			if (server.config.env) {
+				for (const [k, v] of Object.entries(server.config.env)) {
+					maskedEnv[k] =
+						typeof v === "string" && v.length > 4
+							? `${v.slice(0, 4)}...`
+							: String(v || "");
+				}
+			}
+			const maskedHeaders: Record<string, string> = {};
+			if (server.config.headers) {
+				for (const [k, v] of Object.entries(server.config.headers)) {
+					maskedHeaders[k] =
+						typeof v === "string" && v.length > 12
+							? `${v.slice(0, 12)}...`
+							: String(v || "");
+				}
+			}
+			jsonRes(res, 200, {
+				name: server.name,
+				config: {
+					type: server.config.type,
+					url: server.config.url,
+					command: server.config.command,
+					args: server.config.args,
+					env: maskedEnv,
+					headers: maskedHeaders,
+				},
+			});
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleUpdateMCPServer(
+		req: IncomingMessage,
+		res: ServerResponse,
+		name: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.mcpManager) {
+				jsonRes(res, 503, { error: "Not available" });
+				return;
+			}
+			const body = JSON.parse(await readBody(req));
+			const existing = this.system.mcpManager.getServer(name);
+			if (!existing) {
+				jsonRes(res, 404, { error: "Server not found" });
+				return;
+			}
+
+			// merge env with existing env to keep masked secrets
+			const newEnv = { ...(existing.config.env || {}) };
+			if (body.env) {
+				for (const [k, v] of Object.entries(body.env)) {
+					if (typeof v === "string" && !v.includes("...")) {
+						newEnv[k] = v;
+					}
+				}
+			}
+			const newHeaders = { ...(existing.config.headers || {}) };
+			if (body.headers) {
+				for (const [k, v] of Object.entries(body.headers)) {
+					if (typeof v === "string" && !v.includes("...")) {
+						newHeaders[k] = v;
+					}
+				}
+			}
+
+			const newConfig = {
+				type: body.type || existing.config.type,
+				url: body.url || existing.config.url,
+				headers: newHeaders,
+				command: body.command || existing.config.command,
+				args: body.args || existing.config.args,
+				env: newEnv,
+				enabled: existing.config.enabled,
+			};
+
+			await this.system.mcpManager.removeServer(name);
+			const newServer = await this.system.mcpManager.addServer(name, newConfig);
+			jsonRes(res, 200, { ok: true, server: newServer });
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
 	private handleGetDynamicTools(res: ServerResponse): void {
 		try {
 			const dir = join(homedir(), ".octopus", "tools");
@@ -1158,7 +1863,11 @@ export class TransportServer {
 
 	private handleGetRegisteredTools(res: ServerResponse): void {
 		try {
-			const registered: { name: string; description: string; paramCount: number }[] = [];
+			const registered: {
+				name: string;
+				description: string;
+				paramCount: number;
+			}[] = [];
 			if (this.system?.toolRegistry?.list) {
 				const tools = this.system.toolRegistry.list();
 				for (const t of tools) {
@@ -1230,7 +1939,10 @@ export class TransportServer {
 					createdAt: new Date(),
 					updatedAt: new Date(),
 				});
-				jsonRes(res, 200, { ok: true, message: `Skill '${parsed.name}' created` });
+				jsonRes(res, 200, {
+					ok: true,
+					message: `Skill '${parsed.name}' created`,
+				});
 			} else {
 				jsonRes(res, 503, { error: "Skill registry not available" });
 			}
@@ -1263,12 +1975,17 @@ export class TransportServer {
 				}
 				await this.system.skillRegistry.store({
 					...existing,
-					...(parsed.description !== undefined ? { description: parsed.description } : {}),
+					...(parsed.description !== undefined
+						? { description: parsed.description }
+						: {}),
 					...(parsed.content !== undefined ? { content: parsed.content } : {}),
 					...(parsed.domain !== undefined ? { domain: parsed.domain } : {}),
 					updatedAt: new Date(),
 				});
-				jsonRes(res, 200, { ok: true, message: `Skill '${skillName}' updated` });
+				jsonRes(res, 200, {
+					ok: true,
+					message: `Skill '${skillName}' updated`,
+				});
 			} else {
 				jsonRes(res, 503, { error: "Skill registry not available" });
 			}
@@ -1286,13 +2003,18 @@ export class TransportServer {
 		try {
 			if (this.system?.skillRegistry?.delete) {
 				await this.system.skillRegistry.delete(skillName);
-				jsonRes(res, 200, { ok: true, message: `Skill '${skillName}' deleted` });
+				jsonRes(res, 200, {
+					ok: true,
+					message: `Skill '${skillName}' deleted`,
+				});
 			} else if (this.system?.db) {
-				await this.system.db.run(
-					"DELETE FROM skills WHERE name = ?",
-					[skillName],
-				);
-				jsonRes(res, 200, { ok: true, message: `Skill '${skillName}' deleted` });
+				await this.system.db.run("DELETE FROM skills WHERE name = ?", [
+					skillName,
+				]);
+				jsonRes(res, 200, {
+					ok: true,
+					message: `Skill '${skillName}' deleted`,
+				});
 			} else {
 				jsonRes(res, 503, { error: "Skill deletion not available" });
 			}
@@ -1307,14 +2029,24 @@ export class TransportServer {
 		try {
 			if (this.system?.agentRuntime?.stm) {
 				const turns = this.system.agentRuntime.stm.getContext();
-				const recentTurns = turns.slice(-30).map(
-					(t: { role: string; content: string; timestamp: Date; metadata?: Record<string, unknown> }) => ({
-						role: t.role,
-						content: t.content.length > 500 ? `${t.content.substring(0, 500)}...` : t.content,
-						timestamp: t.timestamp?.toISOString?.() ?? null,
-						channel: t.metadata?.conversationId ?? null,
-					}),
-				);
+				const recentTurns = turns
+					.slice(-30)
+					.map(
+						(t: {
+							role: string;
+							content: string;
+							timestamp: Date;
+							metadata?: Record<string, unknown>;
+						}) => ({
+							role: t.role,
+							content:
+								t.content.length > 500
+									? `${t.content.substring(0, 500)}...`
+									: t.content,
+							timestamp: t.timestamp?.toISOString?.() ?? null,
+							channel: t.metadata?.conversationId ?? null,
+						}),
+					);
 				jsonRes(res, 200, { turns: recentTurns, total: turns.length });
 			} else {
 				jsonRes(res, 200, { turns: [], total: 0 });
@@ -1331,7 +2063,8 @@ export class TransportServer {
 			if (this.system?.dailyMemory) {
 				const ctx = await this.system.dailyMemory.getCurrentContext();
 				const structured = await this.system.dailyMemory.getStructuredData?.();
-				const messageCount = (await this.system.dailyMemory.getMessageCount?.()) ?? 0;
+				const messageCount =
+					(await this.system.dailyMemory.getMessageCount?.()) ?? 0;
 				jsonRes(res, 200, {
 					context: ctx,
 					structured: structured ?? null,
@@ -1339,7 +2072,12 @@ export class TransportServer {
 					date: new Date().toISOString().split("T")[0],
 				});
 			} else {
-				jsonRes(res, 200, { context: "", structured: null, messageCount: 0, date: new Date().toISOString().split("T")[0] });
+				jsonRes(res, 200, {
+					context: "",
+					structured: null,
+					messageCount: 0,
+					date: new Date().toISOString().split("T")[0],
+				});
 			}
 		} catch (err) {
 			jsonRes(res, 500, {
@@ -1351,7 +2089,8 @@ export class TransportServer {
 	private async handleGetUserProfile(res: ServerResponse): Promise<void> {
 		try {
 			if (this.system?.userProfileManager) {
-				const profile = await this.system.userProfileManager.getProfile("owner");
+				const profile =
+					await this.system.userProfileManager.getProfile("owner");
 				jsonRes(res, 200, { profile });
 			} else {
 				jsonRes(res, 200, { profile: null });
@@ -1376,10 +2115,14 @@ export class TransportServer {
 				preferredLanguage?: string;
 			};
 			if (this.system?.userProfileManager) {
-				const profile = await this.system.userProfileManager.getProfile("owner");
-				if (parsed.displayName !== undefined) profile.displayName = parsed.displayName;
-				if (parsed.communicationStyle) profile.communicationStyle = parsed.communicationStyle;
-				if (parsed.preferredLanguage) profile.preferredLanguage = parsed.preferredLanguage;
+				const profile =
+					await this.system.userProfileManager.getProfile("owner");
+				if (parsed.displayName !== undefined)
+					profile.displayName = parsed.displayName;
+				if (parsed.communicationStyle)
+					profile.communicationStyle = parsed.communicationStyle;
+				if (parsed.preferredLanguage)
+					profile.preferredLanguage = parsed.preferredLanguage;
 				if (parsed.preferences) {
 					for (const [k, v] of Object.entries(parsed.preferences)) {
 						profile.preferences[k] = v;
@@ -1935,6 +2678,9 @@ export class TransportServer {
 			});
 			if (body?.key && body?.value !== undefined) {
 				process.env[String(body.key)] = String(body.value);
+				if (["BRIGHTDATA_WS_URL", "TWOCAPTCHA_API_KEY", "TWO_CAPTCHA_API_KEY", "TWOCAPTCHA_PROXY_ADDRESS", "TWOCAPTCHA_PROXY_PORT", "TWOCAPTCHA_PROXY_LOGIN", "TWOCAPTCHA_PROXY_PASSWORD", "DECODO_PROXY_URL", "DECODO_PROXY_SERVER", "DECODO_PROXY_PROTOCOL", "DECODO_PROXY_USERNAME", "DECODO_PROXY_USER", "DECODO_PROXY_PASSWORD", "DECODO_PROXY_PASS", "DECODO_PROXY_COUNTRY", "DECODO_PROXY_CITY", "DECODO_PROXY_STATE", "DECODO_PROXY_ZIP", "DECODO_PROXY_SESSION", "DECODO_PROXY_SESSION_DURATION", "DECODO_SCRAPER_TOKEN", "DECODO_API_TOKEN", "DECODO_SCRAPER_USERNAME", "DECODO_API_USERNAME", "DECODO_SCRAPER_PASSWORD", "DECODO_API_PASSWORD"].includes(String(body.key))) {
+					await this.system.refreshBrowserTools?.(this.system.config);
+				}
 			}
 			jsonRes(res, 200, result);
 		} catch (err) {
@@ -1954,6 +2700,9 @@ export class TransportServer {
 			const ok = await this.system.envVarManager.delete(key);
 			if (ok) {
 				delete process.env[key];
+				if (["BRIGHTDATA_WS_URL", "TWOCAPTCHA_API_KEY", "TWO_CAPTCHA_API_KEY", "TWOCAPTCHA_PROXY_ADDRESS", "TWOCAPTCHA_PROXY_PORT", "TWOCAPTCHA_PROXY_LOGIN", "TWOCAPTCHA_PROXY_PASSWORD", "DECODO_PROXY_URL", "DECODO_PROXY_SERVER", "DECODO_PROXY_PROTOCOL", "DECODO_PROXY_USERNAME", "DECODO_PROXY_USER", "DECODO_PROXY_PASSWORD", "DECODO_PROXY_PASS", "DECODO_PROXY_COUNTRY", "DECODO_PROXY_CITY", "DECODO_PROXY_STATE", "DECODO_PROXY_ZIP", "DECODO_PROXY_SESSION", "DECODO_PROXY_SESSION_DURATION", "DECODO_SCRAPER_TOKEN", "DECODO_API_TOKEN", "DECODO_SCRAPER_USERNAME", "DECODO_API_USERNAME", "DECODO_SCRAPER_PASSWORD", "DECODO_API_PASSWORD"].includes(key)) {
+					await this.system.refreshBrowserTools?.(this.system.config);
+				}
 			}
 			jsonRes(res, ok ? 200 : 404, { ok });
 		} catch (err) {
@@ -1967,7 +2716,31 @@ export class TransportServer {
 				jsonRes(res, 200, []);
 				return;
 			}
-			jsonRes(res, 200, this.system.mcpManager.listServers());
+			const servers = this.system.mcpManager.listServers().map((s: any) => {
+				const maskedEnv: Record<string, string> = {};
+				if (s.config.env) {
+					for (const [k, v] of Object.entries(s.config.env)) {
+						maskedEnv[k] =
+							typeof v === "string" && v.length > 4
+								? `${v.slice(0, 4)}...`
+								: String(v || "");
+					}
+				}
+				const maskedHeaders: Record<string, string> = {};
+				if (s.config.headers) {
+					for (const [k, v] of Object.entries(s.config.headers)) {
+						maskedHeaders[k] =
+							typeof v === "string" && v.length > 12
+								? `${v.slice(0, 12)}...`
+								: String(v || "");
+					}
+				}
+				return {
+					...s,
+					config: { ...s.config, env: maskedEnv, headers: maskedHeaders },
+				};
+			});
+			jsonRes(res, 200, servers);
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
@@ -1984,6 +2757,9 @@ export class TransportServer {
 			}
 			const body = JSON.parse(await readBody(req));
 			const server = await this.system.mcpManager.addServer(body.name, {
+				type: body.type,
+				url: body.url,
+				headers: body.headers,
 				command: body.command,
 				args: body.args ?? [],
 				env: body.env,
@@ -2249,7 +3025,22 @@ export class TransportServer {
 				saved.push(item);
 			}
 			saveMediaMeta(items);
-			jsonRes(res, 201, saved.length === 1 ? saved[0] : saved);
+			if (saved.length === 1) {
+				const item = saved[0]!;
+				const ext =
+					extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
+				jsonRes(res, 201, { ...item, url: `/api/media/file/${item.id}${ext}` });
+			} else {
+				jsonRes(
+					res,
+					201,
+					saved.map((item) => {
+						const ext =
+							extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
+						return { ...item, url: `/api/media/file/${item.id}${ext}` };
+					}),
+				);
+			}
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),

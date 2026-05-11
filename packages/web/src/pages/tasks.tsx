@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost, apiPut } from "../hooks/useApi.js";
+import { apiDelete, apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 interface Task {
 	id: string;
@@ -51,10 +51,18 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
-	pending: "Pending",
-	running: "Running",
-	completed: "Completed",
-	failed: "Failed",
+	pending: "Pendiente",
+	running: "En ejecución",
+	completed: "Completada",
+	failed: "Fallida",
+};
+
+const FILTER_LABELS: Record<StatusFilter, string> = {
+	all: "Todas",
+	pending: "Pendientes",
+	running: "En ejecución",
+	completed: "Completadas",
+	failed: "Fallidas",
 };
 
 const EDITABLE_STATUSES = ["pending", "running", "completed", "failed"];
@@ -141,7 +149,10 @@ export const TasksPage: React.FC = () => {
 	}, [msg]);
 
 	const handleCreate = async () => {
-		if (!newTitle.trim()) return;
+		if (!newTitle.trim()) {
+			setMsg({ text: "El título es obligatorio", ok: false });
+			return;
+		}
 		setCreating(true);
 		setMsg(null);
 		try {
@@ -156,7 +167,7 @@ export const TasksPage: React.FC = () => {
 			setNewPriority(5);
 			setNewAgentId("");
 			setShowCreateForm(false);
-			setMsg({ text: "Task created", ok: true });
+			setMsg({ text: "Tarea creada", ok: true });
 			await Promise.all([loadTasks(), loadStats()]);
 		} catch (e) {
 			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
@@ -176,17 +187,21 @@ export const TasksPage: React.FC = () => {
 
 	const handleSaveEdit = async () => {
 		if (!editingTask) return;
+		if (!editTitle.trim()) {
+			setMsg({ text: "El título es obligatorio", ok: false });
+			return;
+		}
 		setSaving(true);
 		setMsg(null);
 		try {
-			await apiPut(`/api/tasks/${editingTask.id}`, {
+			await apiPutJson(`/api/tasks/${editingTask.id}`, {
 				title: editTitle.trim(),
 				description: editDescription.trim() || null,
 				status: editStatus,
 				assignedAgentId: editAgentId || null,
 			});
 			setEditingTask(null);
-			setMsg({ text: "Task updated", ok: true });
+			setMsg({ text: "Tarea actualizada", ok: true });
 			await Promise.all([loadTasks(), loadStats()]);
 		} catch (e) {
 			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
@@ -199,9 +214,9 @@ export const TasksPage: React.FC = () => {
 		setDeletingId(id);
 		setMsg(null);
 		try {
-			await fetch(`/api/tasks/${id}`, { method: "DELETE" });
+			await apiDelete(`/api/tasks/${id}`);
 			setConfirmDeleteId(null);
-			setMsg({ text: "Task deleted", ok: true });
+			setMsg({ text: "Tarea eliminada", ok: true });
 			await Promise.all([loadTasks(), loadStats()]);
 		} catch (e) {
 			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
@@ -239,7 +254,7 @@ export const TasksPage: React.FC = () => {
 							animation: "pulse 1.4s infinite ease-in-out",
 						}}
 					/>
-					<span>Loading tasks...</span>
+					<span>Cargando tareas...</span>
 				</div>
 			</div>
 		);
@@ -262,7 +277,7 @@ export const TasksPage: React.FC = () => {
 							letterSpacing: "-0.02em",
 						}}
 					>
-						Tasks
+						Tareas
 					</h2>
 					<p
 						style={{
@@ -273,7 +288,7 @@ export const TasksPage: React.FC = () => {
 							lineHeight: 1.6,
 						}}
 					>
-						Manage and track tasks across agents
+						Gestiona y da seguimiento al trabajo entre agentes.
 					</p>
 				</div>
 				<button
@@ -294,7 +309,7 @@ export const TasksPage: React.FC = () => {
 						flexShrink: 0,
 					}}
 				>
-					{showCreateForm ? "Cancel" : "+ Create Task"}
+					{showCreateForm ? "Cancelar" : "+ Crear tarea"}
 				</button>
 			</div>
 
@@ -321,25 +336,25 @@ export const TasksPage: React.FC = () => {
 				<StatCard icon="📋" label="Total" value={stats.total} color="#e4e4e7" />
 				<StatCard
 					icon="⏳"
-					label="Pending"
+					label="Pendientes"
 					value={stats.pending}
 					color={STATUS_COLORS.pending}
 				/>
 				<StatCard
 					icon="▶️"
-					label="Running"
+					label="En ejecución"
 					value={stats.running}
 					color={STATUS_COLORS.running}
 				/>
 				<StatCard
 					icon="✅"
-					label="Completed"
+					label="Completadas"
 					value={stats.completed}
 					color={STATUS_COLORS.completed}
 				/>
 				<StatCard
 					icon="❌"
-					label="Failed"
+					label="Fallidas"
 					value={stats.failed}
 					color={STATUS_COLORS.failed}
 				/>
@@ -363,7 +378,7 @@ export const TasksPage: React.FC = () => {
 							color: "#f4f4f5",
 						}}
 					>
-						Create New Task
+						Crear nueva tarea
 					</h3>
 					<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 						<div>
@@ -378,13 +393,15 @@ export const TasksPage: React.FC = () => {
 									letterSpacing: "0.04em",
 								}}
 							>
-								Title *
+								Título *
 							</label>
 							<input
+								id="task-new-title"
+								name="title"
 								type="text"
 								value={newTitle}
 								onChange={(e) => setNewTitle(e.target.value)}
-								placeholder="Task title"
+								placeholder="Título de la tarea"
 								style={inputStyle}
 							/>
 						</div>
@@ -400,12 +417,14 @@ export const TasksPage: React.FC = () => {
 									letterSpacing: "0.04em",
 								}}
 							>
-								Description
+								Descripción
 							</label>
 							<textarea
+								id="task-new-description"
+								name="description"
 								value={newDescription}
 								onChange={(e) => setNewDescription(e.target.value)}
-								placeholder="Task description (optional)"
+								placeholder="Descripción opcional"
 								rows={3}
 								style={{
 									...inputStyle,
@@ -414,13 +433,7 @@ export const TasksPage: React.FC = () => {
 								}}
 							/>
 						</div>
-						<div
-							style={{
-								display: "grid",
-								gridTemplateColumns: "1fr 1fr",
-								gap: 14,
-							}}
-						>
+						<div className="responsive-grid-2" style={{ gap: 14 }}>
 							<div>
 								<label
 									style={{
@@ -433,9 +446,11 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-									Priority: {newPriority}
+								Prioridad: {newPriority}
 								</label>
 								<input
+									id="task-new-priority"
+									name="priority"
 									type="range"
 									min={1}
 									max={10}
@@ -451,8 +466,8 @@ export const TasksPage: React.FC = () => {
 										color: "#71717a",
 									}}
 								>
-									<span>1 (Low)</span>
-									<span>10 (Critical)</span>
+									<span>1 (baja)</span>
+									<span>10 (crítica)</span>
 								</div>
 							</div>
 							<div>
@@ -467,14 +482,16 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-									Assign Agent
+								Asignar agente
 								</label>
 								<select
+									id="task-new-agent"
+									name="assignedAgentId"
 									value={newAgentId}
 									onChange={(e) => setNewAgentId(e.target.value)}
 									style={selectStyle}
 								>
-									<option value="">Unassigned</option>
+									<option value="">Sin asignar</option>
 									{agents.map((a) => (
 										<option key={a.id} value={a.id}>
 											{a.name || a.id}
@@ -491,7 +508,7 @@ export const TasksPage: React.FC = () => {
 								onClick={() => setShowCreateForm(false)}
 								style={cancelBtnStyle}
 							>
-								Cancel
+								Cancelar
 							</button>
 							<button
 								type="button"
@@ -504,7 +521,7 @@ export const TasksPage: React.FC = () => {
 										creating || !newTitle.trim() ? "not-allowed" : "pointer",
 								}}
 							>
-								{creating ? "Creating..." : "Create Task"}
+								{creating ? "Creando..." : "Crear tarea"}
 							</button>
 						</div>
 					</div>
@@ -529,7 +546,7 @@ export const TasksPage: React.FC = () => {
 							color: "#f4f4f5",
 						}}
 					>
-						Edit Task
+						Editar tarea
 					</h3>
 					<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 						<div>
@@ -544,9 +561,11 @@ export const TasksPage: React.FC = () => {
 									letterSpacing: "0.04em",
 								}}
 							>
-								Title
+								Título
 							</label>
 							<input
+								id="task-edit-title"
+								name="title"
 								type="text"
 								value={editTitle}
 								onChange={(e) => setEditTitle(e.target.value)}
@@ -565,9 +584,11 @@ export const TasksPage: React.FC = () => {
 									letterSpacing: "0.04em",
 								}}
 							>
-								Description
+								Descripción
 							</label>
 							<textarea
+								id="task-edit-description"
+								name="description"
 								value={editDescription}
 								onChange={(e) => setEditDescription(e.target.value)}
 								rows={3}
@@ -578,13 +599,7 @@ export const TasksPage: React.FC = () => {
 								}}
 							/>
 						</div>
-						<div
-							style={{
-								display: "grid",
-								gridTemplateColumns: "1fr 1fr",
-								gap: 14,
-							}}
-						>
+						<div className="responsive-grid-2" style={{ gap: 14 }}>
 							<div>
 								<label
 									style={{
@@ -597,9 +612,11 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-									Status
+								Estado
 								</label>
 								<select
+									id="task-edit-status"
+									name="status"
 									value={editStatus}
 									onChange={(e) => setEditStatus(e.target.value)}
 									style={selectStyle}
@@ -623,14 +640,16 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-									Assign Agent
+								Asignar agente
 								</label>
 								<select
+									id="task-edit-agent"
+									name="assignedAgentId"
 									value={editAgentId}
 									onChange={(e) => setEditAgentId(e.target.value)}
 									style={selectStyle}
 								>
-									<option value="">Unassigned</option>
+									<option value="">Sin asignar</option>
 									{agents.map((a) => (
 										<option key={a.id} value={a.id}>
 											{a.name || a.id}
@@ -647,7 +666,7 @@ export const TasksPage: React.FC = () => {
 								onClick={() => setEditingTask(null)}
 								style={cancelBtnStyle}
 							>
-								Cancel
+								Cancelar
 							</button>
 							<button
 								type="button"
@@ -659,7 +678,7 @@ export const TasksPage: React.FC = () => {
 									cursor: saving ? "not-allowed" : "pointer",
 								}}
 							>
-								{saving ? "Saving..." : "Save Changes"}
+								{saving ? "Guardando..." : "Guardar cambios"}
 							</button>
 						</div>
 					</div>
@@ -695,7 +714,7 @@ export const TasksPage: React.FC = () => {
 								transition: "all 0.15s ease",
 							}}
 						>
-							{s === "all" ? "All" : (STATUS_LABELS[s] ?? s)}
+							{FILTER_LABELS[s] ?? STATUS_LABELS[s] ?? s}
 							{s === "all" && stats.total > 0 && (
 								<span style={{ marginLeft: 6, opacity: 0.7 }}>
 									({stats.total})
@@ -724,12 +743,28 @@ export const TasksPage: React.FC = () => {
 				>
 					<div style={{ fontSize: "2rem", marginBottom: 12 }}>📋</div>
 					<div style={{ fontSize: "1rem", fontWeight: 600, marginBottom: 6 }}>
-						No tasks found
+						No hay tareas
 					</div>
 					<div style={{ fontSize: "0.85rem" }}>
-						{activeFilter !== "all" ? "Try changing the filter or " : ""}
-						Create a new task to get started
+						{activeFilter !== "all" ? "Cambia el filtro o " : ""}
+						crea una tarea para empezar.
 					</div>
+					<button
+						type="button"
+						onClick={() => setShowCreateForm(true)}
+						style={{
+							marginTop: 16,
+							padding: "10px 18px",
+							borderRadius: 10,
+							border: "none",
+							background: "#3b82f6",
+							color: "#fff",
+							fontWeight: 700,
+							cursor: "pointer",
+						}}
+					>
+						Crear tarea
+					</button>
 				</div>
 			) : (
 				<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -843,19 +878,19 @@ export const TasksPage: React.FC = () => {
 										>
 											{task.assigned_agent_id && (
 												<span>
-													Agent:{" "}
+								Agente:{" "}
 													<span style={{ color: "#a1a1aa" }}>
 														{agents.find((a) => a.id === task.assigned_agent_id)
 															?.name ?? task.assigned_agent_id}
 													</span>
 												</span>
 											)}
-											<span>Created: {formatDate(task.created_at)}</span>
+							<span>Creada: {formatDate(task.created_at)}</span>
 											{task.started_at && (
-												<span>Started: {formatDate(task.started_at)}</span>
+								<span>Iniciada: {formatDate(task.started_at)}</span>
 											)}
 											{task.completed_at && (
-												<span>Completed: {formatDate(task.completed_at)}</span>
+								<span>Completada: {formatDate(task.completed_at)}</span>
 											)}
 										</div>
 										{task.error && (
@@ -899,19 +934,21 @@ export const TasksPage: React.FC = () => {
 									>
 										{!isConfirming ? (
 											<>
-												<button
-													type="button"
-													onClick={() => startEdit(task)}
-													style={actionBtnStyle}
-													title="Edit"
+						<button
+							type="button"
+							onClick={() => startEdit(task)}
+							style={actionBtnStyle}
+							title="Edit"
+							aria-label={`Editar tarea ${task.title}`}
 												>
 													✏️
 												</button>
-												<button
-													type="button"
-													onClick={() => setConfirmDeleteId(task.id)}
-													style={actionBtnStyle}
-													title="Delete"
+						<button
+							type="button"
+							onClick={() => setConfirmDeleteId(task.id)}
+							style={actionBtnStyle}
+							title="Delete"
+							aria-label={`Eliminar tarea ${task.title}`}
 												>
 													🗑️
 												</button>
@@ -925,7 +962,7 @@ export const TasksPage: React.FC = () => {
 														fontWeight: 600,
 													}}
 												>
-													Delete?
+							¿Eliminar?
 												</span>
 												<button
 													type="button"
@@ -942,7 +979,7 @@ export const TasksPage: React.FC = () => {
 														fontWeight: 600,
 													}}
 												>
-													{isDeleting ? "..." : "Yes"}
+							{isDeleting ? "..." : "Sí"}
 												</button>
 												<button
 													type="button"
@@ -958,7 +995,7 @@ export const TasksPage: React.FC = () => {
 														fontWeight: 600,
 													}}
 												>
-													No
+							No
 												</button>
 											</>
 										)}

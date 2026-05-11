@@ -17,6 +17,7 @@ Octopus AI es altamente configurable. Toda la configuración se almacena localme
 - [Configurar Modelos Locales (Ollama)](#-configurar-modelos-locales-ollama)
 - [Niveles de Razonamiento](#-niveles-de-razonamiento-aithinking)
 - [Sistema de Memoria](#-sistema-de-memoria)
+- [Motor de Aprendizaje Continuo](#-motor-de-aprendizaje-continuo)
 - [Motor de Skills](#-motor-de-skills-habilidades)
 - [Canales de Mensajería](#-canales-de-mensajería)
 - [Configuración del Servidor](#-configuración-del-servidor)
@@ -363,8 +364,58 @@ El runtime actual añade dos capas persistentes gestionadas automáticamente por
 
 - **Resumen diario global** para mantener continuidad dentro del mismo día
 - **Perfil de usuario** para recordar idioma, preferencias, estilo y expertise
+- **Aprendizaje operacional** para guardar procedimientos y antipatrones derivados de trabajos reales
 
 > Más detalles sobre la arquitectura: [Sistema de Memoria](../architecture/memory.md)
+
+---
+
+## 📈 Motor de Aprendizaje Continuo
+
+El bloque `learning` controla cómo Octopus registra experiencias, extrae aprendizajes reutilizables y los recupera en tareas futuras.
+
+```json
+{
+  "learning": {
+    "enabled": true,
+    "autoReflect": true,
+    "minConfidenceToStore": 0.65,
+    "minConfidenceToInject": 0.55,
+    "maxInsightsPerContext": 5,
+    "maxContextTokens": 1000,
+    "autoCreateSkills": true,
+    "minSimilarSuccessesForSkill": 3,
+    "retainFailedInsights": true
+  }
+}
+```
+
+| Parámetro | Descripción | Valor por defecto |
+|---|---|---|
+| `learning.enabled` | Activa el registro de experiencias y aprendizajes | `true` |
+| `learning.autoReflect` | Usa reflexión LLM adicional cuando está disponible | `true` |
+| `learning.minConfidenceToStore` | Confianza mínima para guardar un insight | `0.65` |
+| `learning.minConfidenceToInject` | Confianza mínima para inyectar un insight en contexto | `0.55` |
+| `learning.maxInsightsPerContext` | Máximo de aprendizajes recuperados por tarea | `5` |
+| `learning.maxContextTokens` | Presupuesto máximo de tokens para guía aprendida | `1000` |
+| `learning.autoCreateSkills` | Permite crear skills desde experiencias repetidas | `true` |
+| `learning.minSimilarSuccessesForSkill` | Experiencias exitosas similares requeridas para crear skill | `3` |
+| `learning.retainFailedInsights` | Guarda antipatrones derivados de fallos | `true` |
+
+Ejemplos:
+
+```bash
+# Desactivar aprendizaje continuo
+node packages/cli/dist/index.js config set learning.enabled false
+
+# Hacer más conservadora la persistencia de aprendizajes
+node packages/cli/dist/index.js config set learning.minConfidenceToStore 0.8
+
+# Reducir el contexto dedicado a aprendizajes
+node packages/cli/dist/index.js config set learning.maxContextTokens 500
+```
+
+> Más detalles: [Motor de Aprendizaje Continuo](../architecture/learning.md)
 
 ---
 
@@ -395,6 +446,8 @@ El runtime actual añade dos capas persistentes gestionadas automáticamente por
   }
 }
 ```
+
+Las skills se benefician del motor de aprendizaje: cuando una skill participa en una experiencia, Octopus registra si ayudó a completar la tarea y actualiza su tasa de éxito.
 
 | Parámetro | Descripción | Valor por defecto |
 |---|---|---|

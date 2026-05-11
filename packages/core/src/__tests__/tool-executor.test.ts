@@ -76,7 +76,12 @@ describe("ToolExecutor", () => {
 			const result = await executor.execute("test-tool", { input: "hello" });
 			expect(result.success).toBe(true);
 			expect(result.output).toBe("processed: hello");
-			expect(tool.handler).toHaveBeenCalledWith({ input: "hello" });
+			expect(tool.handler).toHaveBeenCalledWith(
+				{ input: "hello" },
+				expect.objectContaining({
+					media: expect.any(Object),
+				}),
+			);
 		});
 
 		it("should return error for missing required parameters", async () => {

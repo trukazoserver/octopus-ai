@@ -14,6 +14,37 @@ const ServerSchema = Type.Object({
 	),
 });
 
+const BrowserSchema = Type.Object({
+	headless: Type.Boolean({ default: false }),
+	provider: Type.Union(
+		[
+			Type.Literal("embedded"),
+			Type.Literal("brightdata"),
+			Type.Literal("decodo"),
+			Type.Literal("auto"),
+		],
+		{ default: "auto" },
+	),
+	brightDataEnabled: Type.Boolean({ default: true }),
+	brightDataWsUrl: Type.Optional(Type.String()),
+	decodoEnabled: Type.Boolean({ default: true }),
+	decodoProxyUrl: Type.Optional(Type.String()),
+	solveCaptchas: Type.Boolean({ default: true }),
+	captchaProvider: Type.Union([Type.Literal("2captcha")], {
+		default: "2captcha",
+	}),
+	captchaTimeoutMs: Type.Number({ default: 120000 }),
+	persistCookies: Type.Boolean({ default: true }),
+	sessionStorageDir: Type.Optional(Type.String()),
+	sessionTtlHours: Type.Number({ default: 168 }),
+	autoFallbackOnBlock: Type.Boolean({ default: true }),
+	blockFallbackProvider: Type.Union(
+		[Type.Literal("brightdata"), Type.Literal("decodo"), Type.Literal("embedded")],
+		{ default: "decodo" },
+	),
+	confirmBlockWithVision: Type.Boolean({ default: true }),
+});
+
 const AnthropicProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
 	models: Type.Array(Type.String(), {
@@ -250,6 +281,18 @@ const SkillsSchema = Type.Object({
 	registry: RegistrySchema,
 });
 
+const LearningSchema = Type.Object({
+	enabled: Type.Boolean({ default: true }),
+	autoReflect: Type.Boolean({ default: true }),
+	minConfidenceToStore: Type.Number({ default: 0.65 }),
+	minConfidenceToInject: Type.Number({ default: 0.55 }),
+	maxInsightsPerContext: Type.Number({ default: 5 }),
+	maxContextTokens: Type.Number({ default: 1000 }),
+	autoCreateSkills: Type.Boolean({ default: true }),
+	minSimilarSuccessesForSkill: Type.Number({ default: 3 }),
+	retainFailedInsights: Type.Boolean({ default: true }),
+});
+
 const PluginsSchema = Type.Object({
 	directories: Type.Array(Type.String(), { default: ["~/.octopus/plugins"] }),
 	builtin: Type.Array(Type.String(), { default: ["productivity", "coding"] }),
@@ -269,26 +312,72 @@ const SecuritySchema = Type.Object({
 });
 
 const MCPServerEntrySchema = Type.Object({
-	command: Type.String(),
+	type: Type.Optional(Type.String()),
+	url: Type.Optional(Type.String()),
+	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
+	command: Type.Optional(Type.String()),
 	args: Type.Array(Type.String(), { default: [] }),
 	env: Type.Optional(Type.Record(Type.String(), Type.String())),
+	enabled: Type.Optional(Type.Boolean()),
 });
 
 const MCPchema = Type.Object({
 	servers: Type.Record(Type.String(), MCPServerEntrySchema, { default: {} }),
+	autoDisabled: Type.Array(Type.String(), { default: [] }),
+});
+
+const ToolIterationLimitSchema = Type.Object({
+	enabled: Type.Boolean({ default: true }),
+	maxIterations: Type.Integer({ default: 18, minimum: 1 }),
+});
+
+const ToolTimeoutsSchema = Type.Object({
+	defaultMs: Type.Number({ default: 45000, minimum: 1000 }),
+	longRunningMs: Type.Number({ default: 90000, minimum: 1000 }),
+	captchaMs: Type.Number({ default: 150000, minimum: 1000 }),
+	scrapingMs: Type.Number({ default: 165000, minimum: 1000 }),
+	byTool: Type.Record(Type.String(), Type.Number({ minimum: 1000 }), {
+		default: {},
+	}),
+});
+
+const ToolsConfigSchema = Type.Object({
+	disabled: Type.Array(Type.String(), { default: [] }),
+	iterationLimit: ToolIterationLimitSchema,
+	timeouts: ToolTimeoutsSchema,
+});
+
+const MascotIdSchema = Type.Union(
+	[
+		Type.Literal("anemona-anita"),
+		Type.Literal("calamar-cali"),
+		Type.Literal("cangrejo-crabby"),
+		Type.Literal("estrella-estelita"),
+		Type.Literal("medusa-medi"),
+		Type.Literal("pulpo-octavio"),
+	],
+	{ default: "pulpo-octavio" },
+);
+
+const MascotsConfigSchema = Type.Object({
+	defaultId: MascotIdSchema,
 });
 
 export const ConfigSchema = Type.Object({
 	version: Type.Number({ default: 1 }),
 	server: ServerSchema,
+	browser: BrowserSchema,
+	mascots: MascotsConfigSchema,
 	ai: AiSchema,
 	channels: ChannelsSchema,
 	connection: ConnectionSchema,
 	memory: MemorySchema,
 	skills: SkillsSchema,
+	learning: LearningSchema,
 	plugins: PluginsSchema,
 	storage: StorageSchema,
 	security: SecuritySchema,
+	tools: ToolsConfigSchema,
 	mcp: Type.Optional(MCPchema),
 });
 

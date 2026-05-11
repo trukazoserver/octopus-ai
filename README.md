@@ -5,7 +5,7 @@
 <h1 align="center">Octopus AI</h1>
 
 <p align="center">
-  <strong>Asistente de IA autoalojado con memoria persistente, automatizaciones autónomas y mensajería multicanal</strong>
+  <strong>Asistente de IA autoalojado con memoria persistente, aprendizaje continuo, automatizaciones autónomas y mensajería multicanal</strong>
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 ---
 
-Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para correr en tu propia infraestructura. A diferencia de los chatbots tradicionales, Octopus cuenta con una memoria a largo plazo que evoluciona, capacidades de razonamiento profundo nativo y la habilidad de crear y mejorar sus propias herramientas (Skills).
+Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para correr en tu propia infraestructura. A diferencia de los chatbots tradicionales, Octopus cuenta con memoria a largo plazo, aprendizaje continuo basado en experiencias reales, razonamiento profundo nativo y la habilidad de crear y mejorar sus propias herramientas (Skills).
 
 ## Tabla de Contenidos
 
@@ -37,6 +37,7 @@ Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para c
 
 - 🧠 **Razonamiento Profundo (Thinking):** Soporte nativo para *chain-of-thought* en proveedores como OpenAI o-series, Anthropic, Google, Z.ai y DeepSeek Reasoner.
 - 💾 **Memoria Contextual Persistente:** STM + LTM con consolidación automática, resumen diario global y perfil de usuario que se actualiza conversación a conversación.
+- 📈 **Aprendizaje Continuo:** Registra experiencias, extrae procedimientos/antipatrones, aprende qué funcionó y reutiliza esos insights en tareas futuras.
 - 🤖 **Automatización Autónoma:** Tareas programadas por cron, heartbeat proactivo evaluado por LLM y runtime listo para ejecución continua en segundo plano.
 - 🛠️ **Sistema de Tools Extensible:** Filesystem, shell, browser automation, media, sandbox Docker, delegación multi-agente y tools dinámicas creadas en tiempo real.
 - 🌐 **Multi-Canal:** Integra el mismo agente con Telegram, Discord, Slack, Teams, webchat y otros canales manteniendo memoria compartida.
@@ -50,6 +51,7 @@ Octopus AI no es solo un chatbot. Es un asistente inteligente que aprende de ti 
 | Caso de uso | Ejemplo |
 |---|---|
 | **Chat con memoria** | "Recuerda que soy alérgico a la lactosa" → Lo recordará en futuras conversaciones |
+| **Auto-mejora** | Completa una tarea compleja → Guarda qué estrategia funcionó y la aplica en tareas parecidas |
 | **Análisis de código** | "Revisa este archivo y dime si hay errores" → Analiza sintaxis, lógica y mejores prácticas |
 | **Escritura asistida** | "Ayúdame a redactar un email formal" → Genera, edita y mejora textos |
 | **Investigación** | "Resume los puntos clave de este tema" → Sintetiza información compleja |
@@ -84,8 +86,8 @@ App nativa para Windows, macOS y Linux. Experiencia de escritorio completa con t
 |---|---|---|
 | [Node.js](https://nodejs.org/) | >= 22 | Entorno de ejecución principal |
 | [pnpm](https://pnpm.io/) | >= 10 | Gestor de paquetes |
-| Python 3.x | >= 3.10 | Compilación de dependencias nativas (SQLite) |
-| C++ Build Tools | — | Compilación de `better-sqlite3` |
+| Python 3.x | >= 3.10 | Recomendado para herramientas y scripts auxiliares |
+| C++ Build Tools | — | Opcional para dependencias nativas de terceros; SQLite usa `sql.js` WASM |
 
 > **Hardware recomendado:** 4 GB RAM, 2 GB almacenamiento libre.
 
@@ -102,11 +104,10 @@ pnpm run install:octopus
 
 El instalador hace todo por ti:
 1. Verifica Node.js, pnpm y Python
-2. Instala Build Tools de C++ si faltan
+2. Verifica herramientas del entorno si faltan
 3. Instala todas las dependencias
-4. Compila `better-sqlite3` para tu sistema
-5. Construye el proyecto completo
-6. Te guía para configurar tus API Keys
+4. Construye el proyecto completo
+5. Te guía para configurar tus API Keys
 
 > Guía completa: [Instalación paso a paso](docs/getting-started/installation.md)
 
@@ -163,7 +164,7 @@ Octopus AI es agnóstico al modelo. Puedes usar y combinar:
 ```text
 octopus-ai/
 ├── packages/
-│   ├── core/                 # SDK principal (Memoria, Agentes, Config)
+│   ├── core/                 # SDK principal (Agentes, Memoria, Learning, Tools, Config)
 │   ├── cli/                  # Interfaz de terminal interactiva
 │   ├── desktop/              # App de escritorio (Electron)
 │   ├── web/                  # Panel de control / Dashboard (Vite + React)
@@ -177,14 +178,15 @@ octopus-ai/
 ### Empezando
 - [Instalación Completa](docs/getting-started/installation.md) — Requisitos, instalador automático, manual y Docker
 - [Inicio Rápido](docs/getting-started/quick-start.md) — Tu primera conversación con Octopus AI
-- [Configuración](docs/getting-started/configuration.md) — Proveedores de IA, memoria, skills, canales
+- [Configuración](docs/getting-started/configuration.md) — Proveedores de IA, memoria, aprendizaje, skills, canales
 - [Guía de Docker](docs/getting-started/docker.md) — Instalación y despliegue con contenedores
 - [App de Escritorio](docs/getting-started/desktop.md) — Compilar y usar la app Electron
 - [Panel Web](docs/getting-started/web-dashboard.md) — Usar el dashboard desde el navegador
 
 ### Arquitectura
 - [Visión General](docs/architecture/overview.md) — Monorepo, módulos y flujo de datos
-- [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, decaimiento
+- [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, decaimiento y memoria procedural
+- [Motor de Aprendizaje](docs/architecture/learning.md) — Experiencias, insights, feedback y auto-mejora controlada
 - [Agente Autónomo y Automatizaciones](docs/architecture/automation.md) — Daemon, heartbeat, cron, delegación y sandbox
 - [Motor de Habilidades (Skills)](docs/architecture/skills.md) — Creación automática, mejora, A/B testing
 - [Sistema de Plugins](docs/architecture/plugins.md) — Engine, MCP, marketplace

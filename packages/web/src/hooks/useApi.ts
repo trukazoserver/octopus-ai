@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-const API_BASE = `http://${window.location.hostname}:18789`;
+export const API_BASE = `http://${window.location.hostname}:18789`;
 
 export async function apiGet<T>(path: string): Promise<T> {
 	const res = await fetch(`${API_BASE}${path}`);
@@ -16,6 +16,22 @@ export async function apiPut(
 		method: "PUT",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ value }),
+	});
+	if (!res.ok) {
+		const err = await res.json().catch(() => ({ error: res.statusText }));
+		throw new Error(err.error || res.statusText);
+	}
+	return res.json();
+}
+
+export async function apiPutJson(
+	path: string,
+	body: unknown,
+): Promise<Record<string, unknown>> {
+	const res = await fetch(`${API_BASE}${path}`, {
+		method: "PUT",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(body),
 	});
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({ error: res.statusText }));

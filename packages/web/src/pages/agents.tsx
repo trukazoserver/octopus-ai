@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost, apiPut } from "../hooks/useApi.js";
+import { apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 interface AgentRecord {
 	id: string;
@@ -129,7 +129,7 @@ export const AgentsPage: React.FC = () => {
 
 	const handleSubmit = async () => {
 		if (!form.name.trim()) {
-			showMessage("Name is required", false);
+			showMessage("El nombre es obligatorio", false);
 			return;
 		}
 		setSaving(true);
@@ -145,11 +145,11 @@ export const AgentsPage: React.FC = () => {
 				color: form.color.trim(),
 			};
 			if (editingId) {
-				await apiPut(`/api/agents/${editingId}`, payload);
-				showMessage("Agent updated", true);
+				await apiPutJson(`/api/agents/${editingId}`, payload);
+				showMessage("Agente actualizado", true);
 			} else {
 				await apiPost("/api/agents", payload);
-				showMessage("Agent created", true);
+				showMessage("Agente creado", true);
 			}
 			closeForm();
 			await loadAgents();
@@ -164,7 +164,7 @@ export const AgentsPage: React.FC = () => {
 		setSaving(true);
 		try {
 			await deleteAgent(id);
-			showMessage("Agent deleted", true);
+			showMessage("Agente eliminado", true);
 			setDeleteConfirm(null);
 			await loadAgents();
 		} catch (e) {
@@ -204,7 +204,7 @@ export const AgentsPage: React.FC = () => {
 							animation: "pulse 1.4s infinite ease-in-out",
 						}}
 					/>
-					<span>Loading agents...</span>
+					<span>Cargando agentes...</span>
 				</div>
 			</div>
 		);
@@ -223,7 +223,7 @@ export const AgentsPage: React.FC = () => {
 						fontSize: "0.9rem",
 					}}
 				>
-					Error loading agents: {error}
+					Error al cargar agentes: {error}
 				</div>
 			</div>
 		);
@@ -248,7 +248,7 @@ export const AgentsPage: React.FC = () => {
 							letterSpacing: "-0.02em",
 						}}
 					>
-						Agents
+						Agentes
 					</h2>
 					<p
 						style={{
@@ -259,8 +259,7 @@ export const AgentsPage: React.FC = () => {
 							lineHeight: 1.6,
 						}}
 					>
-						Manage your AI agents, their roles, personalities, and system
-						prompts.
+						Gestiona tus agentes IA, sus roles, personalidad y prompts del sistema.
 					</p>
 				</div>
 				<button
@@ -283,7 +282,7 @@ export const AgentsPage: React.FC = () => {
 					}}
 				>
 					<span style={{ fontSize: "1.1rem", lineHeight: 1 }}>+</span>
-					Create Agent
+					Crear agente
 				</button>
 			</div>
 
@@ -307,15 +306,15 @@ export const AgentsPage: React.FC = () => {
 			)}
 
 			<div className="settings-summary-grid" style={{ marginBottom: "24px" }}>
-				<StatCard label="Total Agents" value={agents.length} accent="#818cf8" />
-				<StatCard label="Main Agent" value={mainCount} accent="#22c55e" />
+				<StatCard label="Agentes totales" value={agents.length} accent="#818cf8" />
+				<StatCard label="Agente principal" value={mainCount} accent="#22c55e" />
 				<StatCard
-					label="Roles Used"
+					label="Roles usados"
 					value={Object.keys(roleCounts).length}
 					accent="#f59e0b"
 				/>
 				<StatCard
-					label="Custom Agents"
+					label="Agentes personalizados"
 					value={agents.filter((a) => !a.is_main && !a.is_default).length}
 					accent="#3b82f6"
 				/>
@@ -341,7 +340,7 @@ export const AgentsPage: React.FC = () => {
 							color: "#f4f4f5",
 						}}
 					>
-						{editingId ? "Edit Agent" : "Create Agent"}
+						{editingId ? "Editar agente" : "Crear agente"}
 					</h3>
 
 					<div
@@ -349,13 +348,13 @@ export const AgentsPage: React.FC = () => {
 						style={{ gap: "16px", marginBottom: "16px" }}
 					>
 						<FormInput
-							label="Name"
+							label="Nombre"
 							value={form.name}
 							onChange={(v) => setForm((f) => ({ ...f, name: v }))}
-							placeholder="Agent name"
+							placeholder="Nombre del agente"
 						/>
 						<FormSelect
-							label="Role"
+							label="Rol"
 							value={form.role}
 							options={ROLE_OPTIONS}
 							onChange={(v) => setForm((f) => ({ ...f, role: v }))}
@@ -367,13 +366,13 @@ export const AgentsPage: React.FC = () => {
 						style={{ gap: "16px", marginBottom: "16px" }}
 					>
 						<FormInput
-							label="Model"
+							label="Modelo"
 							value={form.model}
 							onChange={(v) => setForm((f) => ({ ...f, model: v }))}
 							placeholder="e.g. openai/gpt-4o"
 						/>
 						<FormInput
-							label="Avatar (emoji or text)"
+							label="Avatar (emoji o texto)"
 							value={form.avatar}
 							onChange={(v) => setForm((f) => ({ ...f, avatar: v }))}
 							placeholder="🤖"
@@ -392,28 +391,28 @@ export const AgentsPage: React.FC = () => {
 							type="color"
 						/>
 						<FormInput
-							label="Description"
+							label="Descripción"
 							value={form.description}
 							onChange={(v) => setForm((f) => ({ ...f, description: v }))}
-							placeholder="Short description"
+							placeholder="Descripción breve"
 						/>
 					</div>
 
 					<FormTextarea
-						label="Personality"
+						label="Personalidad"
 						value={form.personality}
 						onChange={(v) => setForm((f) => ({ ...f, personality: v }))}
-						placeholder="Describe the agent's personality traits..."
+						placeholder="Describe los rasgos de personalidad del agente..."
 						rows={3}
 					/>
 
 					<div style={{ height: "16px" }} />
 
 					<FormTextarea
-						label="System Prompt"
+						label="Prompt del sistema"
 						value={form.systemPrompt}
 						onChange={(v) => setForm((f) => ({ ...f, systemPrompt: v }))}
-						placeholder="Define the agent's behavior and instructions..."
+						placeholder="Define el comportamiento e instrucciones del agente..."
 						rows={5}
 					/>
 
@@ -426,7 +425,7 @@ export const AgentsPage: React.FC = () => {
 						}}
 					>
 						<button type="button" onClick={closeForm} style={cancelBtnStyle}>
-							Cancel
+							Cancelar
 						</button>
 						<button
 							type="button"
@@ -439,10 +438,10 @@ export const AgentsPage: React.FC = () => {
 							}}
 						>
 							{saving
-								? "Saving..."
+							? "Guardando..."
 								: editingId
-									? "Update Agent"
-									: "Create Agent"}
+									? "Actualizar agente"
+									: "Crear agente"}
 						</button>
 					</div>
 				</div>
@@ -463,17 +462,17 @@ export const AgentsPage: React.FC = () => {
 					<div
 						style={{ fontSize: "1.1rem", fontWeight: 600, color: "#a1a1aa" }}
 					>
-						No agents yet
+						Aún no hay agentes
 					</div>
 					<div style={{ fontSize: "0.85rem", marginTop: "8px" }}>
-						Click "Create Agent" to add your first agent.
+						Crea tu primer agente o conecta una plantilla especializada para empezar.
 					</div>
 				</div>
 			) : (
 				<div
 					style={{
 						display: "grid",
-						gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))",
+						gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
 						gap: "16px",
 					}}
 				>
@@ -617,7 +616,7 @@ const AgentCard: React.FC<{
 										letterSpacing: "0.04em",
 									}}
 								>
-									Main
+									Principal
 								</span>
 							)}
 						</div>
@@ -700,7 +699,7 @@ const AgentCard: React.FC<{
 						<span
 							style={{ fontSize: "0.8rem", color: "#ef4444", fontWeight: 500 }}
 						>
-							Delete?
+							¿Eliminar?
 						</span>
 						<button
 							type="button"
@@ -711,7 +710,7 @@ const AgentCard: React.FC<{
 								opacity: saving ? 0.45 : 1,
 							}}
 						>
-							{saving ? "..." : "Yes"}
+							{saving ? "..." : "Sí"}
 						</button>
 						<button
 							type="button"
@@ -724,10 +723,10 @@ const AgentCard: React.FC<{
 				) : (
 					<div style={{ display: "flex", gap: "8px" }}>
 						<button type="button" onClick={onEdit} style={actionBtnStyle}>
-							Edit
+						Editar
 						</button>
 						<button type="button" onClick={onDelete} style={dangerBtnStyle}>
-							Delete
+						Eliminar
 						</button>
 					</div>
 				)}
@@ -773,16 +772,23 @@ const labelStyle: React.CSSProperties = {
 	letterSpacing: "0.03em",
 };
 
+const slugifyLabel = (label: string) =>
+	`agent-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+
 const FormInput: React.FC<{
 	label: string;
 	value: string;
 	onChange: (v: string) => void;
 	placeholder?: string;
 	type?: string;
-}> = ({ label, value, onChange, placeholder, type = "text" }) => (
+}> = ({ label, value, onChange, placeholder, type = "text" }) => {
+	const id = slugifyLabel(label);
+	return (
 	<div>
-		<label style={labelStyle}>{label}</label>
+		<label htmlFor={id} style={labelStyle}>{label}</label>
 		<input
+			id={id}
+			name={id}
 			type={type}
 			value={value}
 			onChange={(e) => onChange(e.target.value)}
@@ -805,17 +811,21 @@ const FormInput: React.FC<{
 			}}
 		/>
 	</div>
-);
+); };
 
 const FormSelect: React.FC<{
 	label: string;
 	value: string;
 	options: string[];
 	onChange: (v: string) => void;
-}> = ({ label, value, options, onChange }) => (
+}> = ({ label, value, options, onChange }) => {
+	const id = slugifyLabel(label);
+	return (
 	<div>
-		<label style={labelStyle}>{label}</label>
+		<label htmlFor={id} style={labelStyle}>{label}</label>
 		<select
+			id={id}
+			name={id}
 			value={value}
 			onChange={(e) => onChange(e.target.value)}
 			style={{
@@ -831,7 +841,7 @@ const FormSelect: React.FC<{
 			))}
 		</select>
 	</div>
-);
+); };
 
 const FormTextarea: React.FC<{
 	label: string;
@@ -839,10 +849,14 @@ const FormTextarea: React.FC<{
 	onChange: (v: string) => void;
 	placeholder?: string;
 	rows?: number;
-}> = ({ label, value, onChange, placeholder, rows = 3 }) => (
+}> = ({ label, value, onChange, placeholder, rows = 3 }) => {
+	const id = slugifyLabel(label);
+	return (
 	<div>
-		<label style={labelStyle}>{label}</label>
+		<label htmlFor={id} style={labelStyle}>{label}</label>
 		<textarea
+			id={id}
+			name={id}
 			value={value}
 			onChange={(e) => onChange(e.target.value)}
 			placeholder={placeholder}
@@ -861,7 +875,7 @@ const FormTextarea: React.FC<{
 			}}
 		/>
 	</div>
-);
+); };
 
 const actionBtnStyle: React.CSSProperties = {
 	padding: "6px 14px",

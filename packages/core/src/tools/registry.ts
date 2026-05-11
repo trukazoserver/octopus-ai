@@ -1,5 +1,25 @@
 import type { LLMTool } from "../ai/types.js";
 
+const JSON_SCHEMA_TYPES = new Set([
+	"string",
+	"number",
+	"integer",
+	"boolean",
+	"object",
+	"array",
+]);
+
+function normalizeSchemaType(type: unknown): string {
+	if (typeof type === "string" && JSON_SCHEMA_TYPES.has(type)) return type;
+	if (Array.isArray(type)) {
+		const firstSupported = type.find(
+			(item) => typeof item === "string" && JSON_SCHEMA_TYPES.has(item),
+		);
+		if (typeof firstSupported === "string") return firstSupported;
+	}
+	return "string";
+}
+
 export interface ToolContext {
 	media: {
 		/**
@@ -23,12 +43,17 @@ export interface ToolContext {
 			url: string,
 		) => Promise<{ buffer: Buffer; mimeType: string }>;
 	};
+	agent?: {
+		model?: string;
+		usesZaiVisionToolForImages?: boolean;
+	};
 }
 
 export interface ToolDefinition {
 	name: string;
 	description: string;
 	uiIcon?: string;
+	metadata?: Record<string, unknown>;
 	parameters: Record<
 		string,
 		{ type: string; description: string; required?: boolean }
@@ -80,7 +105,11 @@ export class ToolRegistry {
 					properties: Object.fromEntries(
 						Object.entries(tool.parameters).map(([key, param]) => [
 							key,
-							{ type: param.type, description: param.description },
+							{
+								type: normalizeSchemaType(param.type),
+								description:
+									typeof param.description === "string" ? param.description : "",
+							},
 						]),
 					),
 					required: Object.entries(tool.parameters)

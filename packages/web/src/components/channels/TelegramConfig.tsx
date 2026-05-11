@@ -33,7 +33,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({
 	};
 
 	return (
-		<div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+		<form onSubmit={(e) => { e.preventDefault(); void handleSave(); }} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
 			<div>
 				<label
 					htmlFor="telegram-bot-token"
@@ -82,9 +82,8 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({
 					Obtenlo de @BotFather en Telegram
 				</div>
 			</div>
-			<button
-				type="button"
-				onClick={handleSave}
+				<button
+					type="submit"
 				disabled={!token.trim() || saving || !enabled}
 				style={{
 					padding: "8px 16px",
@@ -104,6 +103,6 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({
 			>
 				{saving ? "Guardando..." : "Guardar Token"}
 			</button>
-		</div>
+		</form>
 	);
 };

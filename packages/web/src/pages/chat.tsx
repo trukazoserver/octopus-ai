@@ -2,7 +2,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPatch, apiPost } from "../hooks/useApi.js";
+import { API_BASE, apiDelete, apiGet, apiPatch, apiPost } from "../hooks/useApi.js";
 
 const WS_URL = `ws://${window.location.hostname}:18789`;
 const ACTIVE_CONVERSATION_STORAGE_KEY = "octopus-active-conversation";
@@ -35,6 +35,7 @@ interface WsPayload {
 	agentStatus?: string;
 	toolName?: string;
 	uiIconB64?: string;
+	activityDetail?: string | null;
 }
 
 interface WsMessage {
@@ -44,6 +45,37 @@ interface WsMessage {
 	payload: WsPayload;
 	timestamp: number;
 }
+
+type AgentActivityStatus =
+	| "thinking"
+	| "tool"
+	| "code"
+	| "responding"
+	| "tool_done"
+	| "tool_error"
+	| "tool_skipped";
+
+type AgentStatus = "idle" | AgentActivityStatus;
+
+interface AgentActivity {
+	id: string;
+	status: AgentActivityStatus;
+	label: string;
+	detail: string;
+	toolName?: string | null;
+	iconSvg?: string | null;
+	timestamp: number;
+}
+
+const AGENT_ACTIVITY_STATUSES = new Set<string>([
+	"thinking",
+	"tool",
+	"code",
+	"responding",
+	"tool_done",
+	"tool_error",
+	"tool_skipped",
+]);
 
 interface Conversation {
 	id: string;
@@ -83,6 +115,183 @@ function formatTime(ts: number): string {
 	});
 }
 
+function formatToolLabel(toolName?: string | null): string {
+	if (!toolName) return "herramienta";
+	return toolName.replace(/[_-]/g, " ");
+}
+
+function getActivityCopy(
+	status: AgentActivityStatus,
+	toolName?: string | null,
+): { label: string; detail: string } {
+	const toolLabel = formatToolLabel(toolName);
+	switch (status) {
+		case "thinking":
+			return {
+				label: "Pensando",
+				detail: "Analizando la solicitud y preparando el siguiente paso.",
+			};
+		case "tool":
+			return {
+				label: `Usando ${toolLabel}`,
+				detail: "Ejecutando una herramienta conectada.",
+			};
+		case "code":
+			return {
+				label: `Ejecutando ${toolLabel}`,
+				detail: "Procesando código o comandos locales.",
+			};
+		case "responding":
+			return {
+				label: "Preparando respuesta",
+				detail: "Organizando el resultado final para mostrarlo limpio.",
+			};
+		case "tool_done":
+			return {
+				label: `${toolLabel} completada`,
+				detail: "Resultado recibido y agregado al contexto.",
+			};
+		case "tool_error":
+			return {
+				label: `${toolLabel} falló`,
+				detail: "La herramienta devolvió un error; el agente continuará si puede.",
+			};
+		case "tool_skipped":
+			return {
+				label: `${toolLabel} omitida`,
+				detail: "Se evitó repetir una acción o exceder el presupuesto de herramientas.",
+			};
+	}
+}
+
+function activityColor(status: AgentActivityStatus): string {
+	if (status === "tool_skipped") return "#a1a1aa";
+	if (status === "tool" || status === "tool_done") return "#f59e0b";
+	if (status === "code") return "#10b981";
+	if (status === "tool_error") return "#ef4444";
+	if (status === "responding") return "#60a5fa";
+	return "#818cf8";
+}
+
+function AgentActivityIcon({
+	activity,
+	active,
+}: {
+	activity: AgentActivity;
+	active?: boolean;
+}) {
+	const color = activityColor(activity.status);
+	if (activity.iconSvg && (activity.status === "tool" || activity.status === "code")) {
+		return (
+			<span
+				style={{
+					display: "flex",
+					width: 18,
+					height: 18,
+					color,
+					animation: active ? "toolFloat 1.4s infinite ease-in-out" : undefined,
+				}}
+				// biome-ignore lint/security/noDangerouslySetInnerHtml: controlled server SVG icon
+				dangerouslySetInnerHTML={{ __html: activity.iconSvg }}
+			/>
+		);
+	}
+
+	if (activity.status === "tool_done") {
+		return (
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+				<path d="M20 6 9 17l-5-5" />
+			</svg>
+		);
+	}
+
+	if (activity.status === "tool_error") {
+		return (
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+				<circle cx="12" cy="12" r="9" />
+				<path d="m15 9-6 6M9 9l6 6" />
+			</svg>
+		);
+	}
+
+	if (activity.status === "tool_skipped") {
+		return (
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+				<path d="M5 12h14" />
+				<path d="M12 5v14" opacity="0.35" />
+			</svg>
+		);
+	}
+
+	if (activity.status === "responding") {
+		return (
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: active ? "pulse 1.4s infinite ease-in-out" : undefined }}>
+				<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+			</svg>
+		);
+	}
+
+	return (
+		<svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ animation: active ? "spin 1.8s linear infinite" : undefined }}>
+			<circle cx="12" cy="12" r="9" stroke="rgba(255,255,255,0.14)" strokeWidth="2" />
+			<path d="M12 3a9 9 0 0 1 9 9" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
+		</svg>
+	);
+}
+
+function AgentActivityPanel({ activities }: { activities: AgentActivity[] }) {
+	const latest = activities[activities.length - 1];
+	if (!latest) return null;
+	const recent = activities.slice(-5);
+	const color = activityColor(latest.status);
+
+	return (
+		<div className="agent-activity-row">
+			<div className="agent-activity-avatar">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+					<path d="M12 3c-3.4 0-6 2.3-6 5.4 0 2.2 1.2 3.7 2.5 4.5" />
+					<path d="M15.5 12.9c1.3-.8 2.5-2.3 2.5-4.5C18 5.3 15.4 3 12 3" />
+					<path d="M8 14c-1.2 1.4-2.3 2.2-4 2.4" />
+					<path d="M10 15c-.7 1.8-1.5 3-3.2 4" />
+					<path d="M14 15c.7 1.8 1.5 3 3.2 4" />
+					<path d="M16 14c1.2 1.4 2.3 2.2 4 2.4" />
+					<circle cx="9.5" cy="8" r=".8" fill="currentColor" stroke="none" />
+					<circle cx="14.5" cy="8" r=".8" fill="currentColor" stroke="none" />
+				</svg>
+			</div>
+			<div className="agent-activity-card" style={{ borderColor: `${color}55` }}>
+				<div className="agent-activity-current">
+					<div className="agent-activity-orb" style={{ background: `${color}22`, boxShadow: `0 0 22px ${color}33` }}>
+						<AgentActivityIcon activity={latest} active />
+					</div>
+					<div style={{ minWidth: 0 }}>
+						<div className="agent-activity-title" style={{ color }}>{latest.label}</div>
+						<div className="agent-activity-detail">{latest.detail}</div>
+					</div>
+					<div className="agent-activity-dots" aria-hidden="true">
+						{[0, 1, 2].map((i) => (
+							<span key={i} style={{ animationDelay: `${i * 0.16}s`, background: color }} />
+						))}
+					</div>
+				</div>
+				{recent.length > 1 && (
+					<div className="agent-activity-steps">
+						{recent.map((activity, index) => (
+							<div key={activity.id} className="agent-activity-step">
+								<span className="agent-activity-step-line" />
+								<span className="agent-activity-step-icon">
+									<AgentActivityIcon activity={activity} active={index === recent.length - 1} />
+								</span>
+								<span className="agent-activity-step-text">{activity.label}</span>
+							</div>
+						))}
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
 const MEDIA_BASE = `http://${window.location.hostname}:18789`;
 
 function isMediaUrl(href: string): boolean {
@@ -93,15 +302,14 @@ function isMediaUrl(href: string): boolean {
 
 function getMediaType(url: string): "image" | "audio" | "video" | null {
 	const path = url.split("?")[0] ?? "";
+	if (/\.(mp3|wav|ogg|m4a|weba|flac)(\/|$)/i.test(path)) return "audio";
+	if (/\.(mp4|webm|ogv|avi|mov)(\/|$)/i.test(path)) return "video";
 	if (
 		/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)(\/|$)/i.test(path) ||
 		path.includes("/api/media/file/")
 	) {
-		const id = path.split("/api/media/file/")[1]?.split("/")[0] ?? "";
 		return "image";
 	}
-	if (/\.(mp3|wav|ogg|m4a|weba|flac)(\/|$)/i.test(path)) return "audio";
-	if (/\.(mp4|webm|ogv|avi|mov)(\/|$)/i.test(path)) return "video";
 	return null;
 }
 
@@ -144,6 +352,10 @@ function renderMarkdown(text: string): string {
 		let processed = text;
 		// Strip think tags so they aren't displayed in the text bubble
 		processed = processed.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
+		
+		// Convert relative markdown images to absolute URLs for rendering
+		processed = processed.replace(/!\[(.*?)\]\(\/api\/media\/file\/([^)]+)\)/g, `![$1](${MEDIA_BASE}/api/media/file/$2)`);
+		
 		// Detect bare media URLs and convert to embeddable media
 		processed = processed.replace(
 			/(?:^|\n)\s*(https?:\/\/[^\s<>"']+\/(?:api\/media\/file\/)?[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|svg|mp3|wav|ogg|m4a|mp4|webm)|\/api\/media\/file\/[^\s<>"']+)/gi,
@@ -218,6 +430,22 @@ export const ChatPage: React.FC = () => {
 	const messagesContainerRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const pendingIdRef = useRef<string>("");
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const [isUploadingImage, setIsUploadingImage] = useState(false);
+	const [pendingAttachments, setPendingAttachments] = useState<{url: string, file: File, previewUrl: string}[]>([]);
+	const clearPendingAttachments = useCallback(() => {
+		setPendingAttachments((current) => {
+			for (const attachment of current) URL.revokeObjectURL(attachment.previewUrl);
+			return [];
+		});
+	}, []);
+	const removePendingAttachment = useCallback((index: number) => {
+		setPendingAttachments((current) => {
+			const removed = current[index];
+			if (removed) URL.revokeObjectURL(removed.previewUrl);
+			return current.filter((_, i) => i !== index);
+		});
+	}, []);
 
 	const [sidebarOpen, setSidebarOpen] = useState(true);
 	const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -242,11 +470,9 @@ export const ChatPage: React.FC = () => {
 		}
 	});
 	const [isStreaming, setIsStreaming] = useState(false);
-	const [agentStatus, setAgentStatus] = useState<
-		"idle" | "thinking" | "tool" | "code" | "responding"
-	>("idle");
-	const [agentToolName, setAgentToolName] = useState<string | null>(null);
-	const [agentToolIcon, setAgentToolIcon] = useState<string | null>(null);
+	const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle");
+	const [agentActivity, setAgentActivity] = useState<AgentActivity[]>([]);
+	const lastActivityKeyRef = useRef<string>("");
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
 	const [editingTitle, setEditingTitle] = useState("");
 	const [mediaPreviewSrc, setMediaPreviewSrc] = useState<string | null>(null);
@@ -273,6 +499,41 @@ export const ChatPage: React.FC = () => {
 		tasks: number;
 		memories: number;
 	} | null>(null);
+
+	const addAgentActivity = useCallback(
+		(
+			status: AgentActivityStatus,
+			toolName?: string | null,
+			iconSvg?: string | null,
+			activityDetail?: string | null,
+		) => {
+			const key = `${status}:${toolName ?? ""}:${activityDetail?.trim() ?? ""}`;
+			if (
+				lastActivityKeyRef.current === key &&
+				status !== "tool_done" &&
+				status !== "tool_error"
+			) {
+				return;
+			}
+
+			lastActivityKeyRef.current = key;
+			const copy = getActivityCopy(status, toolName);
+			const detail = activityDetail?.trim() || copy.detail;
+			setAgentActivity((prev) => [
+				...prev,
+				{
+					id: nanoid(8),
+					status,
+					label: copy.label,
+					detail,
+					toolName: toolName ?? null,
+					iconSvg: iconSvg ?? null,
+					timestamp: Date.now(),
+				},
+			].slice(-6));
+		},
+		[],
+	);
 
 	const loadDashboardStats = useCallback(async () => {
 		try {
@@ -544,6 +805,8 @@ export const ChatPage: React.FC = () => {
 
 				if (msg.type === "response") {
 					setAgentStatus("idle");
+					setAgentActivity([]);
+					lastActivityKeyRef.current = "";
 					const assistantContent = getPayloadText(msg.payload);
 
 					setMessages((prev) => {
@@ -577,6 +840,8 @@ export const ChatPage: React.FC = () => {
 					const chunk = getPayloadText(msg.payload);
 					const streamId = `stream-${msg.id}`;
 					setIsStreaming(true);
+					setAgentStatus("responding");
+					addAgentActivity("responding");
 					setMessages((prev) => {
 						const existing = prev.find((m) => m.id === streamId);
 						if (existing) {
@@ -600,8 +865,8 @@ export const ChatPage: React.FC = () => {
 					setIsLoading(false);
 					setIsStreaming(false);
 					setAgentStatus("idle");
-					setAgentToolName(null);
-					setAgentToolIcon(null);
+					setAgentActivity([]);
+					lastActivityKeyRef.current = "";
 					pendingIdRef.current = "";
 					loadConversations();
 					inputRef.current?.focus();
@@ -609,14 +874,27 @@ export const ChatPage: React.FC = () => {
 					const agentStatus = msg.payload?.agentStatus;
 					if (
 						agentStatus &&
-						["thinking", "tool", "code", "responding"].includes(agentStatus)
+						AGENT_ACTIVITY_STATUSES.has(agentStatus)
 					) {
-						setAgentStatus(
-							agentStatus as "thinking" | "tool" | "code" | "responding",
-						);
-						setAgentToolName(msg.payload?.toolName || null);
+						const nextStatus = agentStatus as AgentActivityStatus;
+						const nextToolName = msg.payload?.toolName || null;
 						const iconB64 = msg.payload?.uiIconB64;
-						setAgentToolIcon(iconB64 ? atob(iconB64) : null);
+						let nextIcon: string | null = null;
+						if (iconB64) {
+							try {
+								nextIcon = atob(iconB64);
+							} catch {
+								nextIcon = null;
+							}
+						}
+						setAgentStatus(nextStatus);
+						addAgentActivity(
+							nextStatus,
+							nextToolName,
+							nextIcon,
+							msg.payload?.activityDetail,
+						);
+						scrollToBottom(true);
 					}
 				} else if (msg.type === "error") {
 					const errMsg = msg.payload?.error || "Error desconocido";
@@ -632,6 +910,8 @@ export const ChatPage: React.FC = () => {
 					setIsLoading(false);
 					setIsStreaming(false);
 					setAgentStatus("idle");
+					setAgentActivity([]);
+					lastActivityKeyRef.current = "";
 					pendingIdRef.current = "";
 					loadConversations();
 				}
@@ -641,14 +921,15 @@ export const ChatPage: React.FC = () => {
 		};
 
 		wsRef.current = ws;
-	}, [loadConversations]);
+	}, [addAgentActivity, loadConversations, scrollToBottom]);
 
 	useEffect(() => {
 		connect();
 		return () => {
 			wsRef.current?.close();
+			clearPendingAttachments();
 		};
-	}, [connect]);
+	}, [connect, clearPendingAttachments]);
 
 	useEffect(() => {
 		inputRef.current?.focus();
@@ -656,7 +937,13 @@ export const ChatPage: React.FC = () => {
 
 	const handleSend = () => {
 		const text = input.trim();
-		if (!text || isLoading) return;
+		if ((!text && pendingAttachments.length === 0) || !isConnected || isLoading) return;
+
+		let finalContent = text;
+		if (pendingAttachments.length > 0) {
+			const imagesMd = pendingAttachments.map(a => `![Image](${a.url})`).join("\n");
+			finalContent = finalContent ? `${finalContent}\n\n${imagesMd}` : imagesMd;
+		}
 
 		const userMsg: Message = {
 			id: nanoid(),
@@ -666,7 +953,22 @@ export const ChatPage: React.FC = () => {
 		};
 		setMessages((prev) => [...prev, userMsg]);
 		setInput("");
+		clearPendingAttachments();
 		setIsLoading(true);
+		setIsStreaming(false);
+		setAgentStatus("thinking");
+		lastActivityKeyRef.current = "";
+		const initialActivityCopy = getActivityCopy("thinking");
+		setAgentActivity([
+			{
+				id: nanoid(8),
+				status: "thinking",
+				label: initialActivityCopy.label,
+				detail: initialActivityCopy.detail,
+				timestamp: Date.now(),
+			},
+		]);
+		lastActivityKeyRef.current = "thinking::";
 
 		if (inputRef.current) {
 			inputRef.current.style.height = "auto";
@@ -677,7 +979,7 @@ export const ChatPage: React.FC = () => {
 		pendingIdRef.current = requestId;
 
 		const payload: Record<string, unknown> = {
-			message: text,
+			message: finalContent,
 			stream: streamEnabled,
 		};
 		if (activeConversationId) payload.conversationId = activeConversationId;
@@ -697,11 +999,12 @@ export const ChatPage: React.FC = () => {
 		if (wsRef.current?.readyState === WebSocket.OPEN) {
 			wsRef.current.send(JSON.stringify(wsMsg));
 
-			if (isFirstMsg && text.trim().length > 0) {
+			if (isFirstMsg && finalContent.trim().length > 0) {
 				const targetConvId = convIdForTitle ?? activeConversationId;
 				if (targetConvId) {
+					const titleSource = text || "Imagen";
 					const title =
-						text.length > 50 ? `${text.substring(0, 50).trimEnd()}...` : text;
+						titleSource.length > 50 ? `${titleSource.substring(0, 50).trimEnd()}...` : titleSource;
 					apiPatch(`/api/conversations/${targetConvId}`, { title }).catch(
 						() => {},
 					);
@@ -736,6 +1039,44 @@ export const ChatPage: React.FC = () => {
 		setInput(e.target.value);
 		e.target.style.height = "auto";
 		e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+	};
+
+	const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+		const file = e.target.files?.[0];
+		if (!file) return;
+
+		setIsUploadingImage(true);
+		try {
+			const formData = new FormData();
+			formData.append("file", file);
+			
+			const res = await fetch(`${API_BASE}/api/media/upload`, {
+				method: "POST",
+				body: formData,
+			});
+			
+			if (!res.ok) throw new Error("Error al subir archivo");
+			const data = await res.json();
+			
+			const previewUrl = URL.createObjectURL(file);
+			setPendingAttachments((prev) => [...prev, { url: data.url, file, previewUrl }]);
+			if (inputRef.current) inputRef.current.focus();
+		} catch (error) {
+			console.error("Upload error:", error);
+			setAgentActivity((prev) => [
+				{
+					id: nanoid(8),
+					status: "tool_error",
+					label: "No se pudo adjuntar la imagen",
+					detail: error instanceof Error ? error.message : "Error de subida",
+					timestamp: Date.now(),
+				},
+				...prev.slice(0, 4),
+			]);
+		} finally {
+			setIsUploadingImage(false);
+			if (fileInputRef.current) fileInputRef.current.value = "";
+		}
 	};
 
 	return (
@@ -861,6 +1202,8 @@ export const ChatPage: React.FC = () => {
 								<div style={{ flex: 1, overflow: "hidden" }}>
 									{editingConvId === conv.id ? (
 										<input
+											id={`conversation-title-${conv.id}`}
+											name="conversationTitle"
 											type="text"
 											value={editingTitle}
 											onChange={(e) => setEditingTitle(e.target.value)}
@@ -1098,6 +1441,8 @@ export const ChatPage: React.FC = () => {
 
 					{/* Agent selector */}
 					<select
+						id="chat-agent-selector"
+						name="agentId"
 						value={selectedAgentId}
 						onChange={(e) => setSelectedAgentId(e.target.value)}
 						style={{
@@ -1550,7 +1895,15 @@ export const ChatPage: React.FC = () => {
 												border: "1px solid #3f3f46",
 											}}
 										>
-											{msg.content}
+											{msg.content.includes("/api/media/file/") ? (
+												<div
+													className="markdown-body"
+													// biome-ignore lint/security/noDangerouslySetInnerHtml: user-uploaded local media
+													dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
+												/>
+											) : (
+												msg.content
+											)}
 										</div>
 									) : (
 										<div
@@ -1583,123 +1936,8 @@ export const ChatPage: React.FC = () => {
 								</div>
 							</div>
 						))}
-												{/* Agent Status Indicators - Positioned at the bottom of the chat flow */}
-						{(isLoading || (isStreaming && agentStatus !== "idle")) && (
-							<div
-								style={{
-									display: "flex",
-									alignItems: "flex-start",
-									marginBottom: "32px",
-								}}
-							>
-								{isStreaming && agentStatus !== "idle" ? (
-									<div
-										style={{
-											padding: "10px 16px",
-											background: "rgba(39,39,42,0.6)",
-											borderRadius: "12px",
-											border: "1px solid rgba(63,63,70,0.5)",
-											display: "flex",
-											alignItems: "center",
-											gap: "12px",
-											boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-											animation: "fadeInFast 0.3s ease-out",
-										}}
-									>
-										{agentStatus === "thinking" ? (
-											<>
-												<svg
-													width="18"
-													height="18"
-													viewBox="0 0 24 24"
-													fill="none"
-													style={{ animation: "spin 2s linear infinite" }}
-												>
-													<circle cx="12" cy="12" r="9" stroke="#27272a" strokeWidth="2" />
-													<path d="M12 3a9 9 0 019 9" stroke="#818cf8" strokeWidth="2" strokeLinecap="round" />
-													<circle cx="12" cy="6" r="1.5" fill="#818cf8" style={{ animation: "pulse 1.5s infinite ease-in-out" }} />
-													<circle cx="8" cy="10" r="1" fill="#818cf8" style={{ animation: "pulse 1.5s infinite ease-in-out 0.3s" }} />
-													<circle cx="16" cy="10" r="1" fill="#818cf8" style={{ animation: "pulse 1.5s infinite ease-in-out 0.6s" }} />
-												</svg>
-												<span style={{ fontSize: "0.85rem", color: "#818cf8", fontWeight: 600 }}>Pensando...</span>
-											</>
-										) : agentStatus === "tool" ? (
-											<>
-												{agentToolIcon ? (
-													<span
-														style={{ display: "flex", width: 18, height: 18, color: "#f59e0b" }}
-														// biome-ignore lint/security/noDangerouslySetInnerHtml: controlled server SVG
-														dangerouslySetInnerHTML={{ __html: agentToolIcon }}
-													/>
-												) : (
-													<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" style={{ animation: "spin 1.5s linear infinite" }}>
-														<path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
-													</svg>
-												)}
-												<span style={{ fontSize: "0.85rem", color: "#f59e0b", fontWeight: 600 }}>
-													{agentToolName ? agentToolName.replace(/_/g, " ") : "Ejecutando herramienta..."}
-												</span>
-												<div style={{ display: "flex", gap: "3px", marginLeft: "4px" }}>
-													{[0, 1, 2].map((i) => (
-														<div key={i} style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#f59e0b", opacity: 0.5, animation: "pulse 1s infinite ease-in-out", animationDelay: `${i * 0.2}s` }} />
-													))}
-												</div>
-											</>
-										) : agentStatus === "code" ? (
-											<>
-												<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "pulse 2s infinite ease-in-out" }}>
-													<polyline points="16 18 22 12 16 6" style={{ animation: "pulse 1.5s infinite ease-in-out" }} />
-													<polyline points="8 6 2 12 8 18" style={{ animation: "pulse 1.5s infinite ease-in-out 0.3s" }} />
-												</svg>
-												<span style={{ fontSize: "0.85rem", color: "#10b981", fontWeight: 600 }}>Ejecutando script local...</span>
-											</>
-										) : (
-											<>
-												<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "pulse 2s infinite ease-in-out" }}>
-													<path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-												</svg>
-												<span style={{ fontSize: "0.85rem", color: "#60a5fa", fontWeight: 600 }}>Escribiendo respuesta...</span>
-											</>
-										)}
-									</div>
-								) : (
-									/* Default Loader (bouncing balls) - Only show if not specifically detailing an agentStatus */
-									!isStreaming && (
-										<div style={{ display: "flex", alignItems: "flex-start", width: "100%" }}>
-											<div style={{ width: "36px", height: "36px", borderRadius: "10px", background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center", marginRight: "16px", flexShrink: 0, boxShadow: "0 2px 8px rgba(99, 102, 241, 0.25)" }}>
-												<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.5">
-													<path d="M12 2C8 2 5 5 5 8c0 2 1 3.5 2 4.5V14a2 2 0 002 2h6a2 2 0 002-2v-1.5c1-1 2-2.5 2-4.5 0-3-3-6-7-6z" style={{ animation: "pulse 2s infinite ease-in-out", transformOrigin: "center" }} />
-													<path d="M9 18h6M10 20h4" strokeLinecap="round" style={{ animation: "pulse 2s infinite ease-in-out 0.3s", opacity: 0.7 }} />
-													<circle cx="9" cy="8" r="1" fill="#fff" style={{ animation: "pulse 1.5s infinite ease-in-out 0.2s" }} />
-													<circle cx="15" cy="8" r="1" fill="#fff" style={{ animation: "pulse 1.5s infinite ease-in-out 0.5s" }} />
-													<circle cx="12" cy="5" r="0.8" fill="#fff" style={{ animation: "pulse 1.5s infinite ease-in-out 0.8s" }} />
-												</svg>
-											</div>
-											<div
-												style={{
-													padding: "10px 0",
-													display: "flex",
-													flexDirection: "column",
-													gap: "10px",
-												}}
-											>
-												<div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-													<svg width="20" height="20" viewBox="0 0 24 24" style={{ animation: "spin 2s linear infinite" }}>
-														<circle cx="12" cy="12" r="9" fill="none" stroke="#27272a" strokeWidth="2" />
-														<path d="M12 3a9 9 0 019 9" fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round" />
-													</svg>
-													<span style={{ fontSize: "0.9rem", fontWeight: 600, color: "#a1a1aa" }}>Pensando...</span>
-												</div>
-												<div style={{ display: "flex", gap: "3px" }}>
-													{[0, 1, 2, 3, 4].map((i) => (
-														<div key={i} style={{ width: "28px", height: "3px", borderRadius: "2px", background: "#6366f1", opacity: 0.3, animation: "pulse 1.4s infinite ease-in-out", animationDelay: `${i * 0.15}s` }} />
-													))}
-												</div>
-											</div>
-										</div>
-									)
-								)}
-							</div>
+						{(isLoading || isStreaming || agentStatus !== "idle") && (
+							<AgentActivityPanel activities={agentActivity} />
 						)}
 
 						<div ref={messagesEndRef} style={{ height: "1px", width: "100%" }} />
@@ -1726,16 +1964,97 @@ export const ChatPage: React.FC = () => {
 						<div
 							style={{
 								display: "flex",
+								flexDirection: "column",
 								background: "#18181b",
 								borderRadius: "16px",
 								border: "1px solid #3f3f46",
 								padding: "8px 12px",
-								alignItems: "flex-end",
 								boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
 								transition: "border-color 0.2s",
 							}}
 						>
+							{pendingAttachments.length > 0 && (
+								<div style={{ display: "flex", flexWrap: "wrap", gap: "8px", paddingBottom: "8px", borderBottom: "1px solid #27272a", marginBottom: "8px" }}>
+									{pendingAttachments.map((attachment, idx) => (
+										<div key={idx} style={{ position: "relative", width: "60px", height: "60px", borderRadius: "8px", overflow: "hidden", border: "1px solid #3f3f46" }}>
+											<img src={attachment.previewUrl} alt="adjunto" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+											<button
+												onClick={() => removePendingAttachment(idx)}
+												style={{
+													position: "absolute",
+													top: "2px",
+													right: "2px",
+													background: "rgba(0,0,0,0.6)",
+													color: "white",
+													border: "none",
+													borderRadius: "50%",
+													width: "20px",
+													height: "20px",
+													display: "flex",
+													alignItems: "center",
+													justifyContent: "center",
+													cursor: "pointer",
+													fontSize: "12px"
+												}}
+											>
+												✕
+											</button>
+										</div>
+									))}
+								</div>
+							)}
+							<div style={{ display: "flex", alignItems: "flex-end" }}>
+								<input
+								id="chat-image-upload"
+								name="imageUpload"
+								type="file"
+								ref={fileInputRef}
+								style={{ display: "none" }}
+								onChange={handleFileUpload}
+								accept="image/*"
+							/>
+							<button
+								type="button"
+								aria-label="Adjuntar imagen"
+								onClick={() => fileInputRef.current?.click()}
+								disabled={isUploadingImage}
+								title="Adjuntar imagen"
+								style={{
+									width: "36px",
+									height: "36px",
+									borderRadius: "10px",
+									border: "none",
+									background: "transparent",
+									color: isUploadingImage ? "#6366f1" : "#a1a1aa",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									cursor: isUploadingImage ? "wait" : "pointer",
+									transition: "all 0.2s",
+									marginBottom: "4px",
+									marginRight: "4px",
+									flexShrink: 0,
+								}}
+								onMouseEnter={(e) => {
+									if (!isUploadingImage) e.currentTarget.style.color = "#f4f4f5";
+								}}
+								onMouseLeave={(e) => {
+									if (!isUploadingImage) e.currentTarget.style.color = "#a1a1aa";
+								}}
+							>
+								{isUploadingImage ? (
+									<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: "spin 2s linear infinite" }}>
+										<circle cx="12" cy="12" r="9" strokeDasharray="30" />
+									</svg>
+								) : (
+									<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+										<path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+									</svg>
+								)}
+							</button>
 							<textarea
+								id="chat-message-input"
+								name="message"
 								ref={inputRef}
 								value={input}
 								onChange={handleInput}
@@ -1764,25 +2083,25 @@ export const ChatPage: React.FC = () => {
 							<button
 								type="button"
 								onClick={handleSend}
-								disabled={!input.trim() || !isConnected || isLoading}
+								disabled={(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading}
 								style={{
 									width: "36px",
 									height: "36px",
 									borderRadius: "10px",
 									border: "none",
 									background:
-										!input.trim() || !isConnected || isLoading
+										(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading
 											? "#27272a"
 											: "#6366f1",
 									color:
-										!input.trim() || !isConnected || isLoading
+										(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading
 											? "#52525b"
 											: "#fff",
 									display: "flex",
 									alignItems: "center",
 									justifyContent: "center",
 									cursor:
-										!input.trim() || !isConnected || isLoading
+										(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading
 											? "not-allowed"
 											: "pointer",
 									transition: "all 0.2s",
@@ -1806,6 +2125,7 @@ export const ChatPage: React.FC = () => {
 									<polygon points="22 2 15 22 11 13 2 9 22 2" />
 								</svg>
 							</button>
+							</div>
 						</div>
 						<div
 							style={{
@@ -1823,9 +2143,40 @@ export const ChatPage: React.FC = () => {
 			</div>
 
 			<style>{`
+				@keyframes spin {
+					from { transform: rotate(0deg); }
+					to { transform: rotate(360deg); }
+				}
 				@keyframes pulse {
 					0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
 					40% { opacity: 1; transform: scale(1); }
+				}
+				@keyframes fadeInFast {
+					from { opacity: 0; transform: translateY(8px); }
+					to { opacity: 1; transform: translateY(0); }
+				}
+				@keyframes toolFloat {
+					0%, 100% { transform: translateY(0) scale(1); }
+					50% { transform: translateY(-2px) scale(1.04); }
+				}
+				.agent-activity-row { display: flex; align-items: flex-start; margin-bottom: 32px; animation: fadeInFast 0.22s ease-out; }
+				.agent-activity-avatar { width: 36px; height: 36px; border-radius: 12px; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; display: flex; align-items: center; justify-content: center; margin-right: 16px; flex-shrink: 0; box-shadow: 0 8px 24px rgba(99, 102, 241, 0.28); animation: toolFloat 2.2s infinite ease-in-out; }
+				.agent-activity-card { min-width: 260px; max-width: min(620px, calc(100vw - 120px)); padding: 12px 14px; border-radius: 16px; background: linear-gradient(135deg, rgba(24,24,27,0.92), rgba(9,9,11,0.84)); border: 1px solid rgba(63,63,70,0.75); box-shadow: 0 12px 34px rgba(0,0,0,0.28); backdrop-filter: blur(10px); }
+				.agent-activity-current { display: flex; align-items: center; gap: 12px; }
+				.agent-activity-orb { width: 34px; height: 34px; border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+				.agent-activity-title { font-size: 0.88rem; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				.agent-activity-detail { margin-top: 2px; font-size: 0.76rem; color: #a1a1aa; line-height: 1.35; }
+				.agent-activity-dots { margin-left: auto; display: flex; gap: 4px; padding-left: 10px; }
+				.agent-activity-dots span { width: 5px; height: 5px; border-radius: 999px; opacity: 0.35; animation: pulse 1s infinite ease-in-out; }
+				.agent-activity-steps { margin-top: 12px; padding-top: 11px; border-top: 1px solid rgba(63,63,70,0.45); display: grid; gap: 8px; }
+				.agent-activity-step { display: flex; align-items: center; gap: 9px; color: #d4d4d8; font-size: 0.76rem; min-width: 0; position: relative; }
+				.agent-activity-step-line { width: 7px; height: 1px; border-radius: 999px; background: #3f3f46; flex-shrink: 0; }
+				.agent-activity-step-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; opacity: 0.9; }
+				.agent-activity-step-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				@media (max-width: 640px) {
+					.agent-activity-card { min-width: 0; max-width: calc(100vw - 92px); }
+					.agent-activity-detail { font-size: 0.72rem; }
+					.agent-activity-steps { display: none; }
 				}
 				.markdown-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 				.markdown-body p { margin: 0 0 12px 0; }

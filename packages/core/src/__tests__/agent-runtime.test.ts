@@ -86,6 +86,26 @@ function createMockSkillLoader(skills: LoadedSkill[] = []) {
 	};
 }
 
+function createMockLearningEngine() {
+	return {
+		retrieveRelevant: vi.fn().mockResolvedValue([
+			{
+				id: "learn-1",
+				experienceId: "exp-1",
+				type: "procedure",
+				keywords: ["review", "code"],
+				content: "Run type checks after code edits.",
+				confidence: 0.9,
+				importance: 0.8,
+				embedding: [],
+				useCount: 0,
+				createdAt: new Date(),
+			},
+		]),
+		recordExperience: vi.fn().mockResolvedValue({ id: "exp-1" }),
+	};
+}
+
 function createMockToolRegistry(
 	tools: { name: string; description: string }[] = [],
 ) {
@@ -227,7 +247,7 @@ describe("AgentRuntime", () => {
 		});
 	});
 
-	describe("processMessage", () => {
+		describe("processMessage", () => {
 		it("should return a string response", async () => {
 			const result = await runtime.processMessage("Hello");
 			expect(typeof result).toBe("string");
@@ -329,8 +349,107 @@ describe("AgentRuntime", () => {
 			const result = await runtime.processMessage("calculate 2+2");
 			expect(mockExecutor.execute).toHaveBeenCalledWith("calculator", {
 				expression: "2+2",
-			});
+			}, expect.objectContaining({ usesZaiVisionToolForImages: false }));
 			expect(result).toBe("The answer is 4");
+		});
+
+		it("should stop tool execution at the configured iteration limit", async () => {
+			mockLLMRouter.chat.mockResolvedValue({
+				content: "",
+				model: "test-model",
+				usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+				finishReason: "tool_calls",
+				toolCalls: [
+					{
+						id: "call-1",
+						type: "function" as const,
+						function: {
+							name: "calculator",
+							arguments: '{"expression":"2+2"}',
+						},
+					},
+				],
+			});
+
+			const mockRegistry = createMockToolRegistry([
+				{ name: "calculator", description: "Performs calculations" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+
+			runtime = new AgentRuntime(
+				{
+					...baseConfig,
+					toolIterationLimit: { enabled: true, maxIterations: 1 },
+				},
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const result = await runtime.processMessage("calculate repeatedly");
+			expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
+			expect(result).toContain("maximum number of tool iterations");
+		});
+
+		it("should ignore maxIterations when the iteration limit is disabled", async () => {
+			const toolResponse = {
+				content: "",
+				model: "test-model",
+				usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+				finishReason: "tool_calls" as const,
+				toolCalls: [
+					{
+						id: "call-1",
+						type: "function" as const,
+						function: {
+							name: "calculator",
+							arguments: '{"expression":"2+2"}',
+						},
+					},
+				],
+			};
+			mockLLMRouter.chat
+				.mockResolvedValueOnce(toolResponse)
+				.mockResolvedValueOnce(toolResponse)
+				.mockResolvedValueOnce({
+					content: "Finished after extra tools",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+					finishReason: "stop",
+				});
+
+			const mockRegistry = createMockToolRegistry([
+				{ name: "calculator", description: "Performs calculations" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+
+			runtime = new AgentRuntime(
+				{
+					...baseConfig,
+					toolIterationLimit: { enabled: false, maxIterations: 1 },
+				},
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const result = await runtime.processMessage("calculate without limit");
+			expect(mockExecutor.execute).toHaveBeenCalledTimes(2);
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(3);
+			expect(result).toBe("Finished after extra tools");
 		});
 
 		it("should include skills in system prompt when resolved", async () => {
@@ -424,10 +543,27 @@ describe("AgentRuntime", () => {
 			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
 			const memoryMsg = request.messages.find(
 				(m: { role: string; content: string }) =>
-					m.role === "system" && m.content.startsWith("Relevant context:"),
+					m.role === "system" && m.content.startsWith("Relevant memories from long-term storage:"),
 			);
 			expect(memoryMsg).toBeDefined();
 			expect(memoryMsg?.content).toContain("User prefers dark mode");
+		});
+
+		it("should inject relevant learning guidance and record the experience", async () => {
+			const learningEngine = createMockLearningEngine();
+			runtime.setLearningEngine(learningEngine as never);
+
+			await runtime.processMessage("Review this code", "conv-1");
+
+			expect(learningEngine.retrieveRelevant).toHaveBeenCalledWith("Review this code");
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+			expect(request.messages[0]?.content).toContain("Learned Operating Guidance");
+			expect(request.messages[0]?.content).toContain("Run type checks after code edits.");
+			expect(learningEngine.recordExperience).toHaveBeenCalledWith(expect.objectContaining({
+				conversationId: "conv-1",
+				userRequest: "Review this code",
+				finalResponse: "Hello from assistant",
+			}));
 		});
 	});
 

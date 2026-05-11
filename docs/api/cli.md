@@ -166,6 +166,9 @@ node packages/cli/dist/index.js config set <ruta> <valor>
 | `ai.providers.openai.apiKey` | `"sk-..."` | API Key de OpenAI |
 | `ai.providers.anthropic.apiKey` | `"sk-ant-..."` | API Key de Anthropic |
 | `memory.enabled` | `true` | Activar/desactivar memoria |
+| `learning.enabled` | `true` | Activar/desactivar aprendizaje continuo |
+| `learning.minConfidenceToStore` | `0.65` | Confianza mínima para guardar aprendizajes |
+| `learning.maxInsightsPerContext` | `5` | Aprendizajes máximos por respuesta |
 | `server.port` | `18789` | Puerto del servidor |
 | `server.host` | `"127.0.0.1"` | Host del servidor |
 
@@ -200,9 +203,9 @@ node packages/cli/dist/index.js doctor
 **Verifica:**
 - Node.js (versión >= 22)
 - pnpm (disponible)
-- Python (para módulos nativos)
-- Build Tools C++ (para better-sqlite3)
-- better-sqlite3 (bindings compilados)
+- Python opcional para scripts y tools Python
+- Build Tools C++ opcional para dependencias nativas de terceros
+- Base de datos SQLite (`sql.js` WASM)
 - Archivo de configuración
 - Base de datos SQLite
 - API Keys configuradas
@@ -214,8 +217,8 @@ node packages/cli/dist/index.js doctor
   ✓ Node.js:             v22.x (>= 22)
   ✓ pnpm:                v10.x
   ✓ Python:              Python 3.x
-  ✓ Build Tools (C++):   OK
-  ✓ better-sqlite3:      Bindings nativos OK
+  ✓ Build Tools (C++, opcional): OK
+  ✓ Database:            OK
   ✓ Config File:         ~/.octopus/config.json
   ✓ Config Valid:        Configuration is valid
   ✓ Database:            OK
@@ -256,6 +259,8 @@ node packages/cli/dist/index.js memory consolidate
 ```
 
 > El resumen diario global y el perfil persistente del usuario se inspeccionan desde el dashboard o la [API HTTP](./http.md).
+
+Los aprendizajes operacionales del motor `learning` se inspeccionan actualmente desde la API HTTP: `GET /api/learning/insights`.
 
 ---
 

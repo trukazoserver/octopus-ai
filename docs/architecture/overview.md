@@ -18,6 +18,7 @@ octopus-ai/
 │   │       ├── channels/        # Integraciones de mensajería
 │   │       ├── config/          # Loader, schema, defaults, env manager, SOUL parser
 │   │       ├── memory/          # STM, LTM, consolidación, daily memory, perfil
+│   │       ├── learning/        # Experiencias, insights, feedback y auto-mejora
 │   │       ├── plugins/         # Engine, registry, marketplace, MCP
 │   │       ├── skills/          # Registry, loader, forge, improver, evaluator
 │   │       ├── storage/         # SQLite y adaptadores de base de datos
@@ -42,6 +43,7 @@ octopus-ai/
 | `ai` | `router.ts`, `providers/*.ts` | Router con múltiples proveedores, razonamiento y cambio dinámico de provider/modelo |
 | `agent` | `runtime.ts`, `reflection.ts`, `heartbeat.ts`, `daemon.ts` | Ejecución conversacional, autoevaluación, trabajo proactivo y operación continua |
 | `memory` | `stm.ts`, `ltm.ts`, `consolidator.ts`, `daily.ts`, `user-profile.ts` | Contexto activo, memoria persistente, resumen diario y perfil del usuario |
+| `learning` | `engine.ts`, `types.ts` | Registra experiencias, extrae aprendizajes reutilizables y los reinyecta como guia operacional |
 | `skills` | `loader.ts`, `forge.ts`, `improver.ts`, `evaluator.ts` | Carga progresiva, creación y mejora continua de skills |
 | `tools` | `registry.ts`, `executor.ts`, `browser.ts`, `sandbox-tool.ts`, `media.ts` | Catálogo de tools del agente, ejecución, browser automation, sandbox y media |
 | `tasks` | `manager.ts`, `automation-manager.ts`, `cron-runner.ts`, `webhooks.ts` | Tareas del workspace, automatizaciones y disparadores programados |
@@ -71,10 +73,21 @@ Entrada del usuario o trigger del sistema
                 ↓
          Respuesta y eventos de estado
                 ↓
-   Consolidación + perfil + resumen diario
+   Consolidación + perfil + resumen diario + aprendizaje
                 ↓
             Persistencia en SQLite
 ```
+
+## Ciclo de Auto-Mejora
+
+Octopus registra cada trabajo como una experiencia con solicitud, respuesta final, tools usadas, skills cargadas, resultado estimado y confianza. A partir de esas experiencias extrae aprendizajes accionables:
+
+- procedimientos que funcionaron
+- estrategias de tools útiles
+- antipatrones y fallos a evitar
+- candidatos para nuevas skills
+
+Los aprendizajes de alta confianza se guardan también como memoria procedural y se recuperan en tareas similares dentro de `Learned Operating Guidance`. Las llamadas de aprendizaje son best-effort: si fallan, no interrumpen la respuesta al usuario.
 
 ## Servicios Autónomos
 
@@ -83,6 +96,7 @@ Entrada del usuario o trigger del sistema
 | `HeartbeatDaemon` | Evalúa una checklist periódica con el LLM y decide si actuar o permanecer en silencio |
 | `AutomationRunner` | Registra jobs cron persistidos y lanza prompts del agente sin intervención humana |
 | `ReflectionEngine` | Revisa tareas complejas y detecta patrones reutilizables para skills |
+| `LearningEngine` | Convierte trabajos exitosos o fallidos en procedimientos, antipatrones y métricas de skills |
 | `OctopusDaemon` | Coordina heartbeat, automatizaciones, canales y health checks como proceso de larga vida |
 
 ## Capa HTTP/WebSocket
@@ -90,7 +104,7 @@ Entrada del usuario o trigger del sistema
 El servidor de transporte expone la API usada por el dashboard y por integraciones locales:
 
 - salud y estado del sistema
-- configuración y memoria
+- configuración, memoria y aprendizaje continuo
 - skills, tools dinámicas y ejecución de código
 - conversaciones, agentes, tareas y automatizaciones
 - variables de entorno, MCP, canales y biblioteca multimedia

@@ -7,6 +7,23 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		host: "127.0.0.1",
 		transport: "auto",
 	},
+	browser: {
+		headless: false,
+		provider: "auto",
+		brightDataEnabled: true,
+		decodoEnabled: true,
+		solveCaptchas: true,
+		captchaProvider: "2captcha",
+		captchaTimeoutMs: 120000,
+		persistCookies: true,
+		sessionTtlHours: 168,
+		autoFallbackOnBlock: true,
+		blockFallbackProvider: "decodo",
+		confirmBlockWithVision: true,
+	},
+	mascots: {
+		defaultId: "pulpo-octavio",
+	},
 	ai: {
 		default: "zhipu/glm-5.1",
 		fallback: "openai/gpt-4.1",
@@ -156,6 +173,17 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			],
 		},
 	},
+	learning: {
+		enabled: true,
+		autoReflect: true,
+		minConfidenceToStore: 0.65,
+		minConfidenceToInject: 0.55,
+		maxInsightsPerContext: 5,
+		maxContextTokens: 1000,
+		autoCreateSkills: true,
+		minSimilarSuccessesForSkill: 3,
+		retainFailedInsights: true,
+	},
 	plugins: {
 		directories: ["~/.octopus/plugins"],
 		builtin: ["productivity", "coding"],
@@ -168,6 +196,26 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		encryptionKey: "",
 		allowedPaths: ["~/Documents", "~/Desktop"],
 		sandboxCommands: true,
+	},
+	tools: {
+		disabled: [],
+		iterationLimit: {
+			enabled: true,
+			maxIterations: 18,
+		},
+		timeouts: {
+			defaultMs: 45000,
+			longRunningMs: 90000,
+			captchaMs: 150000,
+			scrapingMs: 165000,
+			byTool: {
+				delegate_task: 300000,
+			},
+		},
+	},
+	mcp: {
+		servers: {},
+		autoDisabled: [],
 	},
 };
 

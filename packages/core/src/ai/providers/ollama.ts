@@ -25,7 +25,7 @@ export class OllamaProvider extends BaseLLMProvider {
 			model,
 			messages: request.messages.map((m) => ({
 				role: m.role,
-				content: m.content,
+				content: m.content as any,
 			})),
 			stream: false,
 			...(request.maxTokens != null
@@ -95,7 +95,7 @@ export class OllamaProvider extends BaseLLMProvider {
 			model,
 			messages: request.messages.map((m) => ({
 				role: m.role,
-				content: m.content,
+				content: m.content as any,
 			})),
 			stream: true,
 			...(request.maxTokens != null
@@ -123,9 +123,25 @@ export class OllamaProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const readNext = async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					reader.read(),
+					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error("Ollama stream read timeout")),
+							120_000,
+						);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
 
 		while (true) {
-			const { done, value } = await reader.read();
+			const { done, value } = await readNext();
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 			const lines = buffer.split("\n");

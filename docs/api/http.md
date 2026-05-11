@@ -71,6 +71,43 @@ curl "http://localhost:18789/api/memory/search?q=proyecto"
 
 ---
 
+## Aprendizaje Continuo
+
+| Metodo | Ruta | Uso |
+|---|---|---|
+| `GET` | `/api/learning/insights` | Lista aprendizajes recientes |
+| `GET` | `/api/learning/insights?limit=20&type=procedure` | Filtra insights por tipo y limite |
+| `POST` | `/api/learning/feedback` | Registra feedback humano positivo o negativo |
+| `DELETE` | `/api/learning/insights/{id}` | Borra un aprendizaje incorrecto |
+
+Tipos de insight: `procedure`, `tool_strategy`, `anti_pattern`, `what_worked`, `what_failed`, `skill_candidate`.
+
+Ejemplo para listar aprendizajes:
+
+```bash
+curl http://localhost:18789/api/learning/insights
+```
+
+Ejemplo para corregir una experiencia:
+
+```bash
+curl -X POST http://localhost:18789/api/learning/feedback \
+  -H "Content-Type: application/json" \
+  -d '{
+    "conversationId": "conv_123",
+    "rating": "negative",
+    "comment": "La respuesta no resolvió la tarea"
+  }'
+```
+
+Ejemplo para borrar un insight:
+
+```bash
+curl -X DELETE http://localhost:18789/api/learning/insights/learn_123
+```
+
+---
+
 ## Skills y Tools
 
 | Metodo | Ruta | Uso |

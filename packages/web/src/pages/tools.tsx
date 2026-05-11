@@ -2,59 +2,58 @@ import type React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { apiDelete, apiGet, apiPost } from "../hooks/useApi.js";
 
-type TabId = "registered" | "dynamic" | "create" | "execute";
+type TabId = "inventory" | "create" | "execute";
 
-interface RegisteredTool {
+interface ToolInventoryItem {
+	id: string;
+	source: "system" | "dynamic" | "mcp";
+	resourceType: "tool" | "mcp-server";
+	managementScope: "tool" | "server";
 	name: string;
+	displayName: string;
 	description: string;
-	paramCount: number;
-}
-
-interface DynamicTool {
-	name: string;
-	description?: string;
+	status: "active" | "inactive" | "error" | "not_loaded";
+	enabled: boolean;
+	registered: boolean;
+	persisted: boolean;
 	version?: string;
-}
-
-const CATEGORIES: Record<string, { icon: string; color: string }> = {
-	"generate-image": { icon: "🎨", color: "#a855f7" },
-	"edit-image": { icon: "✏️", color: "#f59e0b" },
-	"nano-banana": { icon: "🍌", color: "#fbbf24" },
-	"save-image": { icon: "💾", color: "#22c55e" },
-	"image-url": { icon: "🔗", color: "#3b82f6" },
-	calculator: { icon: "🔢", color: "#06b6d4" },
-	smart: { icon: "🧠", color: "#ec4899" },
-	search: { icon: "🔍", color: "#10b981" },
-	browse: { icon: "🌐", color: "#6366f1" },
-	shell: { icon: "💻", color: "#78716c" },
-	execute: { icon: "▶️", color: "#22d3ee" },
-	create: { icon: "🛠️", color: "#8b5cf6" },
-	file: { icon: "📁", color: "#f97316" },
-	read: { icon: "📄", color: "#64748b" },
-	write: { icon: "✍️", color: "#84cc16" },
-	default: { icon: "⚙️", color: "#94a3b8" },
-};
-
-function getCategory(name: string): { icon: string; color: string } {
-	for (const [key, val] of Object.entries(CATEGORIES)) {
-		if (key !== "default" && name.toLowerCase().includes(key.toLowerCase())) return val;
-	}
-	return CATEGORIES.default;
+	language?: string;
+	uiIcon?: string;
+	paramCount?: number;
+	mcp?: {
+		tools?: Array<{ name: string; runtimeName: string }>;
+		command?: string;
+		args?: string[];
+		envKeys?: string[];
+	};
+	runtime?: {
+		error?: string;
+	};
+	capabilities: {
+		canToggle: boolean;
+		canEdit: boolean;
+		canDelete: boolean;
+		canRestart: boolean;
+	};
 }
 
 const LANGUAGES = ["javascript", "typescript", "python", "bash"];
 
 export const ToolsPage: React.FC = () => {
-	const [activeTab, setActiveTab] = useState<TabId>("registered");
-	const [registered, setRegistered] = useState<RegisteredTool[]>([]);
-	const [dynamic, setDynamic] = useState<DynamicTool[]>([]);
+	const [activeTab, setActiveTab] = useState<TabId>("inventory");
+	const [items, setItems] = useState<ToolInventoryItem[]>([]);
+	const [summary, setSummary] = useState<any>({});
 	const [loading, setLoading] = useState(true);
-	const [msg, setMsg] = useState<string | null>(null);
+	const [msg, setMsg] = useState<{text: string, ok: boolean} | null>(null);
+	const [search, setSearch] = useState("");
+	const [sourceFilter, setSourceFilter] = useState<"all" | "system" | "dynamic" | "mcp">("all");
+	const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
 	// Create tool state
 	const [toolName, setToolName] = useState("");
 	const [toolDescription, setToolDescription] = useState("");
 	const [toolCode, setToolCode] = useState("");
+	const [toolLanguage, setToolLanguage] = useState("javascript");
 	const [creating, setCreating] = useState(false);
 
 	// Execute code state
@@ -68,14 +67,11 @@ export const ToolsPage: React.FC = () => {
 	const loadData = useCallback(async () => {
 		setLoading(true);
 		try {
-			const [reg, dyn] = await Promise.all([
-				apiGet<{ tools: RegisteredTool[] }>("/api/tools/registered"),
-				apiGet<{ tools: DynamicTool[] }>("/api/code/tools"),
-			]);
-			setRegistered(reg.tools ?? []);
-			setDynamic(dyn.tools ?? []);
+			const res = await apiGet<{ items: ToolInventoryItem[], summary: any }>("/api/tools");
+			setItems(res.items ?? []);
+			setSummary(res.summary ?? {});
 		} catch (e) {
-			setMsg(e instanceof Error ? e.message : String(e));
+			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
 		} finally {
 			setLoading(false);
 		}
@@ -83,14 +79,55 @@ export const ToolsPage: React.FC = () => {
 
 	useEffect(() => { loadData(); }, [loadData]);
 
-	const handleDeleteDynamic = async (name: string) => {
-		if (!confirm(`¿Eliminar la herramienta "${name}"?`)) return;
+	const showMessage = (text: string, ok = true) => {
+		setMsg({ text, ok });
+		setTimeout(() => setMsg(null), 4000);
+	};
+
+	const handleToggle = async (item: ToolInventoryItem) => {
 		try {
-			await apiDelete(`/api/tools/dynamic/${encodeURIComponent(name)}`);
-			setMsg(`✓ Herramienta '${name}' eliminada`);
+			if (item.source === "system") {
+				await apiPost(`/api/tools/system/${encodeURIComponent(item.name)}/toggle`);
+			} else if (item.source === "dynamic") {
+				await apiPost(`/api/tools/dynamic/${encodeURIComponent(item.name)}/toggle`);
+			} else if (item.source === "mcp") {
+				await apiPost(`/api/mcp/servers/${encodeURIComponent(item.name)}/toggle`);
+			}
+			showMessage(`Estado de ${item.name} actualizado`);
 			loadData();
 		} catch (e) {
-			setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+			showMessage(`Error: ${e instanceof Error ? e.message : String(e)}`, false);
+		}
+	};
+
+	const handleDelete = async (item: ToolInventoryItem) => {
+		if (confirmDeleteId !== item.id) {
+			setConfirmDeleteId(item.id);
+			return;
+		}
+		try {
+			if (item.source === "dynamic") {
+				await apiDelete(`/api/tools/dynamic/${encodeURIComponent(item.name)}`);
+			} else if (item.source === "mcp") {
+				await apiDelete(`/api/mcp/servers/${encodeURIComponent(item.name)}`);
+			}
+			showMessage(`✓ '${item.name}' eliminado`);
+			setConfirmDeleteId(null);
+			loadData();
+		} catch (e) {
+			showMessage(`Error: ${e instanceof Error ? e.message : String(e)}`, false);
+		}
+	};
+
+	const handleRestart = async (item: ToolInventoryItem) => {
+		try {
+			if (item.source === "mcp") {
+				await apiPost(`/api/mcp/servers/${encodeURIComponent(item.name)}/restart`);
+				showMessage(`✓ Servidor '${item.name}' reiniciado`);
+				loadData();
+			}
+		} catch (e) {
+			showMessage(`Error: ${e instanceof Error ? e.message : String(e)}`, false);
 		}
 	};
 
@@ -100,21 +137,30 @@ export const ToolsPage: React.FC = () => {
 		setMsg(null);
 		try {
 			const result = await apiPost("/api/code/create-tool", {
-				name: toolName, description: toolDescription, code: toolCode, language: "javascript",
+				name: toolName, description: toolDescription, code: toolCode, language: toolLanguage,
 			});
 			if (result.success) {
-				setMsg(`✓ Herramienta '${toolName}' creada exitosamente`);
-				setToolName(""); setToolDescription(""); setToolCode("");
+				showMessage(`✓ Herramienta '${toolName}' creada exitosamente`);
+				setToolName(""); setToolDescription(""); setToolCode(""); setToolLanguage("javascript");
+				setActiveTab("inventory");
 				loadData();
 			} else {
-				setMsg(`✗ ${result.error ?? "Error desconocido"}`);
+				showMessage(`Error: ${result.error ?? "Error desconocido"}`, false);
 			}
 		} catch (e) {
-			setMsg(`✗ ${e instanceof Error ? e.message : "Error"}`);
+			showMessage(`Error: ${e instanceof Error ? e.message : "Error"}`, false);
 		} finally {
 			setCreating(false);
 		}
 	};
+
+	const filteredItems = items.filter((item) => {
+		const q = search.trim().toLowerCase();
+		const matchesSource = sourceFilter === "all" || item.source === sourceFilter;
+		const matchesSearch = !q || [item.name, item.displayName, item.description, item.source]
+			.some((value) => value?.toLowerCase().includes(q));
+		return matchesSource && matchesSearch;
+	});
 
 	const handleExecute = async () => {
 		if (!code.trim()) return;
@@ -133,131 +179,178 @@ export const ToolsPage: React.FC = () => {
 		}
 	};
 
-	const tabs: { id: TabId; label: string; icon: string }[] = [
-		{ id: "registered", label: "Registradas", icon: "⚙️" },
-		{ id: "dynamic", label: "Dinámicas", icon: "🔌" },
-		{ id: "create", label: "Crear", icon: "➕" },
-		{ id: "execute", label: "Ejecutar Código", icon: "▶️" },
-	];
-
 	const S = {
 		section: { padding: "20px", backgroundColor: "#18181b", borderRadius: "10px", border: "1px solid #27272a", marginBottom: "20px" } as React.CSSProperties,
 		textarea: { width: "100%", minHeight: "200px", padding: "12px", borderRadius: "8px", border: "1px solid #27272a", backgroundColor: "#0f1117", color: "#e4e4e7", fontFamily: '"JetBrains Mono", "Fira Code", monospace', fontSize: "13px", lineHeight: "1.5", resize: "vertical" as const, outline: "none", boxSizing: "border-box" as const },
 		input: { width: "100%", padding: "8px 12px", borderRadius: "8px", border: "1px solid #27272a", backgroundColor: "#0f1117", color: "#e4e4e7", fontSize: "13px", outline: "none", boxSizing: "border-box" as const },
+		badge: (color: string, bg: string) => ({
+			display: "inline-flex", alignItems: "center", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: 600, color, backgroundColor: bg
+		}),
+		btn: {
+			padding: "6px 12px", borderRadius: 6, border: "1px solid #3f3f46", background: "transparent", color: "#e4e4e7", cursor: "pointer", fontSize: "12px", fontWeight: 500, transition: "all 0.2s"
+		}
 	};
-
-	if (loading) return <div style={{ padding: 40, color: "#666" }}>Cargando herramientas...</div>;
 
 	return (
 		<div className="page-shell page-shell--xl" style={{ padding: "24px", overflowY: "auto", height: "100%" }}>
 			<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px", flexWrap: "wrap", gap: "12px" }}>
 				<div>
-					<h2 style={{ margin: "0 0 4px 0", fontSize: "20px", fontWeight: 700 }}>🔧 Herramientas</h2>
+					<h2 style={{ margin: "0 0 4px 0", fontSize: "20px", fontWeight: 700 }}>🔧 Inventario de Herramientas</h2>
 					<p style={{ color: "#71717a", margin: 0, fontSize: "13px" }}>
-						{registered.length} registradas · {dynamic.length} dinámicas
+						{summary.system || 0} sistema · {summary.dynamic || 0} dinámicas · {summary.mcpServers || 0} MCP servers ({summary.mcpTools || 0} tools)
 					</p>
 				</div>
 				<div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-					{tabs.map((t) => (
-						<button key={t.id} type="button" onClick={() => setActiveTab(t.id)} style={{
-							padding: "7px 14px", borderRadius: "8px", border: "none", cursor: "pointer", fontSize: "13px", fontWeight: 500,
-							backgroundColor: activeTab === t.id ? "#3b82f6" : "#27272a",
-							color: activeTab === t.id ? "#fff" : "#a1a1aa", transition: "all 0.15s ease",
-						}}>
-							{t.icon} {t.label}
-						</button>
-					))}
+					<button onClick={() => setActiveTab("inventory")} style={{...S.btn, backgroundColor: activeTab === "inventory" ? "#3b82f6" : "#27272a", color: activeTab === "inventory" ? "#fff" : "#a1a1aa", border: "none"}}>
+						📦 Inventario
+					</button>
+					<button onClick={() => setActiveTab("create")} style={{...S.btn, backgroundColor: activeTab === "create" ? "#3b82f6" : "#27272a", color: activeTab === "create" ? "#fff" : "#a1a1aa", border: "none"}}>
+						➕ Crear
+					</button>
+					<button onClick={() => setActiveTab("execute")} style={{...S.btn, backgroundColor: activeTab === "execute" ? "#3b82f6" : "#27272a", color: activeTab === "execute" ? "#fff" : "#a1a1aa", border: "none"}}>
+						▶️ Ejecutar
+					</button>
 				</div>
 			</div>
 
 			{msg && (
 				<div style={{
 					padding: "10px 16px", borderRadius: 8, marginBottom: 12, fontSize: "0.85rem",
-					background: msg.startsWith("✓") ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
-					color: msg.startsWith("✓") ? "#22c55e" : "#ef4444", border: `1px solid ${msg.startsWith("✓") ? "#22c55e33" : "#ef444433"}`,
+					background: msg.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+					color: msg.ok ? "#22c55e" : "#ef4444", border: `1px solid ${msg.ok ? "#22c55e33" : "#ef444433"}`,
 				}}>
-					{msg}
+					{msg.text}
 				</div>
 			)}
 
-			{activeTab === "registered" && (
-				<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "12px" }}>
-					{registered.map((tool) => {
-						const cat = getCategory(tool.name);
-						return (
-							<div key={tool.name} style={{
-								...S.section, marginBottom: 0, display: "flex", gap: "14px", alignItems: "flex-start",
-								transition: "border-color 0.2s", cursor: "default",
-							}}>
-								<div style={{
-									width: 40, height: 40, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center",
-									fontSize: "1.2rem", backgroundColor: `${cat.color}22`, flexShrink: 0,
-								}}>
-									{cat.icon}
-								</div>
-								<div style={{ flex: 1, minWidth: 0 }}>
-									<div style={{ fontWeight: 600, fontSize: "0.9rem", color: "#e4e4e7", marginBottom: 2 }}>{tool.name}</div>
-									<div style={{ fontSize: "0.78rem", color: "#71717a", lineHeight: 1.4 }}>
-										{tool.description.length > 120 ? `${tool.description.substring(0, 120)}...` : tool.description}
+			{loading && items.length === 0 ? (
+				<div style={{ padding: 40, color: "#666", textAlign: "center" }}>Cargando herramientas...</div>
+			) : null}
+
+			{activeTab === "inventory" && (
+				<div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+					<div className="toolbar-wrap" style={{ justifyContent: "space-between", marginBottom: "4px" }}>
+						<input
+							id="tools-search"
+							name="toolsSearch"
+							value={search}
+							onChange={(e) => setSearch(e.target.value)}
+							placeholder="Buscar por nombre, descripción o fuente..."
+							style={{ ...S.input, maxWidth: 420 }}
+						/>
+						<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+							{(["all", "system", "dynamic", "mcp"] as const).map((source) => (
+								<button
+									key={source}
+									type="button"
+									onClick={() => setSourceFilter(source)}
+									style={{
+										...S.btn,
+										background: sourceFilter === source ? "#3b82f6" : "#27272a",
+										borderColor: sourceFilter === source ? "#3b82f6" : "#3f3f46",
+									}}
+								>
+									{source === "all" ? "Todas" : source === "system" ? "Sistema" : source === "dynamic" ? "Dinámicas" : "MCP"}
+								</button>
+							))}
+						</div>
+					</div>
+					{filteredItems.length === 0 && !loading && (
+						<div style={{ ...S.section, textAlign: "center", color: "#a1a1aa" }}>
+							<div style={{ fontSize: "2rem", marginBottom: 8 }}>🔧</div>
+							<div style={{ color: "#f4f4f5", fontWeight: 700, marginBottom: 6 }}>
+								No hay herramientas para este filtro
+							</div>
+							<div style={{ fontSize: "0.85rem" }}>
+								Limpia la búsqueda, crea una herramienta dinámica o conecta un servidor MCP.
+							</div>
+						</div>
+					)}
+					{filteredItems.map(item => (
+						<div key={item.id} style={{ ...S.section, marginBottom: 0, display: "flex", flexDirection: "column", gap: "12px", borderLeft: item.status === "error" ? "4px solid #ef4444" : "1px solid #27272a" }}>
+							<div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
+								<div>
+									<div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+										<div style={{ fontWeight: 600, fontSize: "16px", color: "#e4e4e7" }}>{item.displayName}</div>
+										{item.source === "system" && <span style={S.badge("#38bdf8", "rgba(56, 189, 248, 0.1)")}>Sistema</span>}
+										{item.source === "dynamic" && <span style={S.badge("#a78bfa", "rgba(167, 139, 250, 0.1)")}>Dinámica</span>}
+										{item.source === "mcp" && <span style={S.badge("#fbbf24", "rgba(251, 191, 36, 0.1)")}>MCP Server</span>}
+										
+										{item.status === "active" && <span style={S.badge("#10b981", "rgba(16, 185, 129, 0.1)")}>Activa</span>}
+										{item.status === "inactive" && <span style={S.badge("#71717a", "rgba(113, 113, 122, 0.1)")}>Inactiva</span>}
+										{item.status === "not_loaded" && <span style={S.badge("#f59e0b", "rgba(245, 158, 11, 0.1)")}>No Cargada</span>}
+										{item.status === "error" && <span style={S.badge("#ef4444", "rgba(239, 68, 68, 0.1)")}>Error</span>}
 									</div>
-									{tool.paramCount > 0 && (
-										<div style={{ fontSize: "0.72rem", color: "#525252", marginTop: 4 }}>
-											{tool.paramCount} parámetro{tool.paramCount === 1 ? "" : "s"}
-										</div>
+									<div style={{ fontSize: "13px", color: "#a1a1aa", maxWidth: "600px", lineHeight: "1.4" }}>
+										{item.description || "Sin descripción."}
+									</div>
+								</div>
+								
+								<div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+									{item.capabilities.canToggle && (
+										<button onClick={() => handleToggle(item)} style={{ ...S.btn, color: item.enabled ? "#ef4444" : "#10b981", borderColor: item.enabled ? "#ef444444" : "#10b98144" }}>
+											{item.enabled ? "Desactivar" : "Activar"}
+										</button>
+									)}
+									{item.capabilities.canRestart && (
+										<button onClick={() => handleRestart(item)} style={S.btn}>🔄 Reiniciar</button>
+									)}
+									{item.capabilities.canDelete && (
+										<button onClick={() => handleDelete(item)} style={{ ...S.btn, color: "#ef4444", borderColor: "#ef444444" }}>{confirmDeleteId === item.id ? "Confirmar" : "🗑️ Eliminar"}</button>
+									)}
+									{confirmDeleteId === item.id && (
+										<button type="button" onClick={() => setConfirmDeleteId(null)} style={S.btn}>Cancelar</button>
 									)}
 								</div>
 							</div>
-						);
-					})}
-				</div>
-			)}
 
-			{activeTab === "dynamic" && (
-				<div>
-					{dynamic.length === 0 ? (
-						<div style={{ ...S.section, textAlign: "center", color: "#525252", padding: "40px" }}>
-							No hay herramientas dinámicas creadas aún. Ve a la pestaña "Crear" para crear una.
-						</div>
-					) : (
-						<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "12px" }}>
-							{dynamic.map((tool) => (
-								<div key={tool.name} style={{ ...S.section, marginBottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-									<div>
-										<div style={{ fontWeight: 600, fontSize: "0.9rem", color: "#e4e4e7" }}>🔌 {tool.name}</div>
-										<div style={{ fontSize: "0.78rem", color: "#71717a", marginTop: 2 }}>{tool.description ?? "Sin descripción"}</div>
-										{tool.version && <div style={{ fontSize: "0.72rem", color: "#525252", marginTop: 2 }}>v{tool.version}</div>}
-									</div>
-									<button type="button" onClick={() => handleDeleteDynamic(tool.name)} style={{
-										padding: "6px 14px", borderRadius: 8, border: "1px solid #ef444444", background: "transparent",
-										color: "#ef4444", cursor: "pointer", fontSize: "12px", flexShrink: 0,
-									}}>
-										Eliminar
-									</button>
+							{item.runtime?.error && (
+								<div style={{ fontSize: "12px", color: "#fca5a5", backgroundColor: "rgba(239, 68, 68, 0.1)", padding: "8px 12px", borderRadius: "6px" }}>
+									Error runtime: {item.runtime.error}
 								</div>
-							))}
+							)}
+
+							{item.mcp?.tools && item.mcp.tools.length > 0 && (
+								<div style={{ marginTop: "8px", paddingTop: "12px", borderTop: "1px dashed #27272a" }}>
+									<div style={{ fontSize: "12px", color: "#71717a", marginBottom: "8px" }}>Herramientas expuestas ({item.mcp.tools.length}):</div>
+									<div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+										{item.mcp.tools.map(t => (
+											<span key={t.name} style={{ fontSize: "11px", color: "#d4d4d8", backgroundColor: "#27272a", padding: "2px 8px", borderRadius: "4px" }}>
+												{t.name}
+											</span>
+										))}
+									</div>
+								</div>
+							)}
 						</div>
-					)}
+					))}
 				</div>
 			)}
 
 			{activeTab === "create" && (
 				<div style={S.section}>
-					<h3 style={{ margin: "0 0 4px 0", fontSize: "16px" }}>Crear Nueva Herramienta</h3>
+					<h3 style={{ margin: "0 0 4px 0", fontSize: "16px" }}>Crear Nueva Herramienta Dinámica</h3>
 					<p style={{ color: "#71717a", fontSize: "13px", marginBottom: "16px" }}>
 						Crea una herramienta reutilizable. El código debe exportar una función async por defecto.
 					</p>
 					<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "12px", marginBottom: "12px" }}>
 						<div>
-							<label htmlFor="tool-name" style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Nombre</label>
-							<input id="tool-name" type="text" value={toolName} onChange={(e) => setToolName(e.target.value)} placeholder="mi-herramienta" style={S.input} />
+							<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Nombre</label>
+							<input id="tool-name" name="toolName" type="text" value={toolName} onChange={(e) => setToolName(e.target.value)} placeholder="mi-herramienta" style={S.input} />
 						</div>
 						<div>
-							<label htmlFor="tool-desc" style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Descripción</label>
-							<input id="tool-desc" type="text" value={toolDescription} onChange={(e) => setToolDescription(e.target.value)} placeholder="Qué hace esta herramienta..." style={S.input} />
+							<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Descripción</label>
+							<input id="tool-description" name="toolDescription" type="text" value={toolDescription} onChange={(e) => setToolDescription(e.target.value)} placeholder="Qué hace esta herramienta..." style={S.input} />
+						</div>
+						<div>
+							<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Lenguaje</label>
+							<select id="tool-language" name="toolLanguage" value={toolLanguage} onChange={(e) => setToolLanguage(e.target.value)} style={S.input}>
+								{LANGUAGES.map((lang) => <option key={lang} value={lang}>{lang}</option>)}
+							</select>
 						</div>
 					</div>
-					<label htmlFor="tool-code" style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Código (export default async function)</label>
-					<textarea id="tool-code" value={toolCode} onChange={(e) => setToolCode(e.target.value)}
+					<label style={{ display: "block", fontSize: "12px", color: "#71717a", marginBottom: "4px" }}>Código (export default async function)</label>
+					<textarea id="tool-code" name="toolCode" value={toolCode} onChange={(e) => setToolCode(e.target.value)}
 						placeholder={`export default async function(params) {\n  return { success: true, output: "Resultado" };\n}`}
 						style={S.textarea} />
 					<div style={{ marginTop: "12px" }}>
@@ -272,7 +365,7 @@ export const ToolsPage: React.FC = () => {
 			{activeTab === "execute" && (
 				<div style={S.section}>
 					<h3 style={{ margin: "0 0 12px 0", fontSize: "16px" }}>Ejecutar Código</h3>
-					<div style={{ display: "flex", gap: "8px", marginBottom: "12px", alignItems: "center" }}>
+					<div style={{ display: "flex", gap: "8px", marginBottom: "12px", alignItems: "center", flexWrap: "wrap" }}>
 						<span style={{ fontSize: "13px", color: "#71717a" }}>Lenguaje:</span>
 						{LANGUAGES.map((lang) => (
 							<button key={lang} type="button" onClick={() => setLanguage(lang)} style={{
@@ -284,7 +377,7 @@ export const ToolsPage: React.FC = () => {
 							</button>
 						))}
 					</div>
-					<textarea value={code} onChange={(e) => setCode(e.target.value)}
+					<textarea id="code-executor-input" name="code" value={code} onChange={(e) => setCode(e.target.value)}
 						placeholder={`// Escribe tu código ${language} aquí...`} style={S.textarea} />
 					<div style={{ marginTop: "12px", display: "flex", gap: "8px", alignItems: "center" }}>
 						<button type="button" onClick={handleExecute} disabled={executing || !code.trim()} style={{
@@ -294,6 +387,7 @@ export const ToolsPage: React.FC = () => {
 							{executing ? "Ejecutando..." : "▶ Ejecutar"}
 						</button>
 						{execTime !== null && <span style={{ fontSize: "12px", color: "#71717a" }}>Ejecutado en {execTime}ms</span>}
+						{output && <button type="button" onClick={() => { setOutput(""); setExecError(null); setExecTime(null); }} style={S.btn}>Limpiar salida</button>}
 					</div>
 					{execError && <div style={{ marginTop: "12px", padding: "12px", backgroundColor: "#450a0a", borderRadius: 8, color: "#fca5a5", fontSize: "13px" }}>{execError}</div>}
 					{output && (

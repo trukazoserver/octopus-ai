@@ -122,6 +122,10 @@ export class SqliteDatabase implements DatabaseAdapter {
 		}
 	}
 
+	async flush(): Promise<void> {
+		this.persist();
+	}
+
 	private ensureOpen(): void {
 		if (!this.db) {
 			throw new Error("Database is not initialized. Call initialize() first.");

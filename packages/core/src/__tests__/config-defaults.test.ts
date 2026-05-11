@@ -24,6 +24,13 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.ai.providers.local).toBeDefined();
 		});
 
+		it("should expose browser fallback controls", () => {
+			expect(DEFAULT_CONFIG.browser.brightDataEnabled).toBe(true);
+			expect(DEFAULT_CONFIG.browser.decodoEnabled).toBe(true);
+			expect(DEFAULT_CONFIG.browser.autoFallbackOnBlock).toBe(true);
+			expect(DEFAULT_CONFIG.browser.blockFallbackProvider).toBe("decodo");
+		});
+
 		it("should have channel config with all channels", () => {
 			expect(DEFAULT_CONFIG.channels).toBeDefined();
 			expect(DEFAULT_CONFIG.channels.whatsapp).toBeDefined();
@@ -62,6 +69,13 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.skills.registry).toBeDefined();
 		});
 
+		it("should have learning config", () => {
+			expect(DEFAULT_CONFIG.learning).toBeDefined();
+			expect(DEFAULT_CONFIG.learning.enabled).toBe(true);
+			expect(DEFAULT_CONFIG.learning.minConfidenceToStore).toBeGreaterThan(0);
+			expect(DEFAULT_CONFIG.learning.maxInsightsPerContext).toBeGreaterThan(0);
+		});
+
 		it("should have plugins config", () => {
 			expect(DEFAULT_CONFIG.plugins).toBeDefined();
 			expect(DEFAULT_CONFIG.plugins.directories).toBeDefined();
@@ -78,6 +92,11 @@ describe("Config Defaults", () => {
 		it("should have security config", () => {
 			expect(DEFAULT_CONFIG.security).toBeDefined();
 			expect(DEFAULT_CONFIG.security.sandboxCommands).toBe(true);
+		});
+
+		it("should enable tool iteration limits by default", () => {
+			expect(DEFAULT_CONFIG.tools.iterationLimit.enabled).toBe(true);
+			expect(DEFAULT_CONFIG.tools.iterationLimit.maxIterations).toBe(18);
 		});
 
 		it("should have valid retrieval weight sum close to 1", () => {

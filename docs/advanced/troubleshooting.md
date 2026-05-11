@@ -20,6 +20,7 @@ Si tienes problemas con Octopus AI, esta guía te ayudará a resolverlos.
 - [Problemas con el Panel Web](#-problemas-con-el-panel-web)
 - [Problemas de Conectividad con Canales](#-problemas-de-conectividad-con-canales)
 - [Problemas de Memoria (Base de Datos)](#-problemas-de-memoria-base-de-datos)
+- [Problemas de Aprendizaje Continuo](#-problemas-de-aprendizaje-continuo)
 - [FAQ (Preguntas Frecuentes)](#-faq-preguntas-frecuentes)
 
 ---
@@ -38,11 +39,9 @@ Salida con todos los checks:
   ✓ Node.js:             v22.x (>= 22)
   ✓ pnpm:                v10.x
   ✓ Python:              Python 3.x
-  ✗ Build Tools (C++):   No detectado
-  ✗ better-sqlite3:      Bindings nativos no compilados
   ✓ Config File:         ~/.octopus/config.json
   ✓ Config Valid:        Configuration is valid
-  ✗ Database:            Cannot access database
+  ✓ Database:            OK
   ✓ API Keys:            Z.ai ✓
   ✓ Disk Space:          Writable
   ✓ Network:             Internet connectivity OK
@@ -54,9 +53,9 @@ Cada ✗ indica un problema con sugerencia de corrección.
 
 ## 📥 Errores de Instalación
 
-### "Could not locate the bindings file" (better-sqlite3)
+### "Could not locate the bindings file" en una dependencia nativa
 
-**Causa:** Build Tools C++ no instalados o better-sqlite3 no compilado.
+**Causa:** Alguna dependencia opcional usa `node-gyp` y no encuentra Python o compiladores. La base de datos principal usa `sql.js` WASM y no necesita `better-sqlite3`.
 
 **Windows:**
 ```bash
@@ -66,20 +65,20 @@ node scripts/install.mjs
 # Opción 2: Instalar Build Tools manualmente
 winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
 
-# Luego reconstruir
-pnpm rebuild better-sqlite3
+# Luego reconstruir la dependencia afectada si aplica
+pnpm rebuild
 ```
 
 **Linux:**
 ```bash
 sudo apt install build-essential python3
-pnpm rebuild better-sqlite3
+pnpm rebuild
 ```
 
 **macOS:**
 ```bash
 xcode-select --install
-pnpm rebuild better-sqlite3
+pnpm rebuild
 ```
 
 ---
@@ -92,7 +91,7 @@ pnpm rebuild better-sqlite3
 1. Abrir **Visual Studio Installer**
 2. Click **Modify** en Build Tools 2022
 3. Marcar **"Desktop development with C++"**
-4. Instalar y luego: `pnpm rebuild better-sqlite3`
+4. Instalar y luego: `pnpm rebuild`
 
 ---
 
@@ -188,18 +187,17 @@ node scripts/install.mjs
 
 ### "Cannot access database"
 
-**Causa:** better-sqlite3 no compilado o path de BD inválido.
+**Causa:** path de BD inválido, permisos insuficientes o archivo SQLite corrupto. El runtime usa `sql.js` WASM con persistencia en disco.
 
 **Solución:**
 ```bash
-# 1. Verificar bindings
+# 1. Ejecutar diagnóstico
 node packages/cli/dist/index.js doctor
 
-# 2. Si falla better-sqlite3, reconstruir
-pnpm rebuild better-sqlite3
-
-# 3. Verificar path de BD
+# 2. Verificar path de BD
 node packages/cli/dist/index.js config get storage.path
+
+# 3. Confirmar permisos de escritura en ~/.octopus/data
 ```
 
 ---
@@ -537,6 +535,52 @@ La base de datos puede crecer con el uso. Puedes consolidar la memoria para opti
 
 ```bash
 node packages/cli/dist/index.js memory consolidate
+```
+
+---
+
+## 📈 Problemas de Aprendizaje Continuo
+
+### No aparecen aprendizajes nuevos
+
+```bash
+# Verificar que learning está activo
+node packages/cli/dist/index.js config get learning.enabled
+
+# Si está desactivado, activarlo
+node packages/cli/dist/index.js config set learning.enabled true
+
+# Ver insights desde la API con el backend activo
+curl http://localhost:18789/api/learning/insights
+```
+
+El motor guarda aprendizajes cuando la experiencia tiene suficiente confianza. Si una respuesta fue muy corta, ambigua o fallida, puede no guardar insights nuevos.
+
+---
+
+### Octopus aprendió algo incorrecto
+
+Puedes borrar el insight incorrecto o enviar feedback negativo:
+
+```bash
+# Borrar insight por id
+curl -X DELETE http://localhost:18789/api/learning/insights/INSIGHT_ID
+
+# Enviar feedback negativo a la conversación
+curl -X POST http://localhost:18789/api/learning/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"conversationId":"CONV_ID","rating":"negative","comment":"Este aprendizaje no aplica"}'
+```
+
+---
+
+### Demasiados aprendizajes en el contexto
+
+Reduce el presupuesto de contexto:
+
+```bash
+node packages/cli/dist/index.js config set learning.maxInsightsPerContext 3
+node packages/cli/dist/index.js config set learning.maxContextTokens 500
 ```
 
 ---

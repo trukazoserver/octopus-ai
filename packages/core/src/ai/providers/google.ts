@@ -144,6 +144,7 @@ export class GoogleProvider extends BaseLLMProvider {
 		const body: Record<string, unknown> = {
 			model,
 			stream: true,
+			stream_options: { include_usage: true },
 			messages: request.messages.map((m) => ({
 				role: m.role,
 				content: m.content,
@@ -180,9 +181,26 @@ export class GoogleProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const readNext = async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					reader.read(),
+					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error("Google stream read timeout")),
+							120_000,
+						);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
 
-		while (true) {
-			const { done, value } = await reader.read();
+		try {
+			while (true) {
+			const { done, value } = await readNext();
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 			const parts = buffer.split("\n\n");
@@ -201,7 +219,28 @@ export class GoogleProvider extends BaseLLMProvider {
 						continue; // ignore malformed chunks
 					}
 					if (parsed.error) {
-						throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+						throw new Error(
+							parsed.error.message || JSON.stringify(parsed.error),
+						);
+					}
+					if (parsed.usage) {
+						yield {
+							usage: {
+								promptTokens: parsed.usage.prompt_tokens ?? 0,
+								completionTokens: parsed.usage.completion_tokens ?? 0,
+								totalTokens: parsed.usage.total_tokens ?? 0,
+								...((parsed.usage.completion_tokens_details?.thoughts_tokens ??
+								parsed.usage.completion_tokens_details?.reasoning_tokens)
+									? {
+										reasoningTokens:
+											parsed.usage.completion_tokens_details
+												?.thoughts_tokens ??
+											parsed.usage.completion_tokens_details
+												?.reasoning_tokens,
+									}
+									: {}),
+							},
+						};
 					}
 					const delta = parsed.choices?.[0];
 					if (!delta) continue;
@@ -222,14 +261,16 @@ export class GoogleProvider extends BaseLLMProvider {
 							};
 						}
 					}
-					if (delta.finish_reason)
-						chunk.finishReason = delta.finish_reason;
-					
+					if (delta.finish_reason) chunk.finishReason = delta.finish_reason;
+
 					if (Object.keys(chunk).length > 0) {
 						yield chunk;
 					}
 				}
 			}
+		}
+		} finally {
+			await reader.cancel().catch(() => {});
 		}
 	}
 

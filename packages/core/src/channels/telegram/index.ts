@@ -1,5 +1,9 @@
 import { Bot } from "grammy";
-import type { Channel, ChannelMessage } from "../types.js";
+import type {
+	Channel,
+	ChannelMessage,
+	ChannelMessageHandler,
+} from "../types.js";
 
 import { mediaContext } from "../../tools/media.js";
 
@@ -7,8 +11,11 @@ export class TelegramChannel implements Channel {
 	public readonly name = "Telegram";
 	public readonly type = "telegram";
 	private bot: Bot;
-	private messageHandlers: Set<(msg: ChannelMessage) => void> = new Set();
+	private messageHandlers: Set<ChannelMessageHandler> = new Set();
+	private readonly processedMessageKeys = new Set<string>();
+	private readonly recentMessageKeys: string[] = [];
 	private isConnected = false;
+	private static readonly maxRecentMessages = 1000;
 
 	constructor(
 		public readonly id: string,
@@ -19,6 +26,8 @@ export class TelegramChannel implements Channel {
 		this.bot.on("message", async (ctx) => {
 			const isGroup =
 				ctx.chat.type === "group" || ctx.chat.type === "supergroup";
+			const messageKey = `${ctx.chat.id}:${ctx.msg.message_id}`;
+			if (!this.rememberMessage(messageKey)) return;
 
 			let content = ctx.msg.text || ctx.msg.caption || "";
 
@@ -78,20 +87,34 @@ export class TelegramChannel implements Channel {
 			};
 
 			for (const handler of this.messageHandlers) {
-				try {
-					handler(channelMessage);
-				} catch (error) {
-					console.error(
-						`Error in Telegram message handler for channel ${this.id}:`,
-						error,
-					);
-				}
+				void Promise.resolve()
+					.then(() => handler(channelMessage))
+					.catch((error) => {
+						console.error(
+							`Error in Telegram message handler for channel ${this.id}:`,
+							error,
+						);
+					});
 			}
 		});
 	}
 
 	public async connect(): Promise<void> {
-		this.bot.start().catch((err) => {
+		if (this.isConnected) return;
+
+		try {
+			await this.bot.api.deleteWebhook({ drop_pending_updates: true });
+		} catch (err) {
+			console.warn(
+				`Could not clear Telegram pending updates for channel ${this.id}:`,
+				err,
+			);
+		}
+
+		this.bot.start({
+			drop_pending_updates: true,
+			allowed_updates: ["message"],
+		}).catch((err) => {
 			console.error(`Telegram bot error for channel ${this.id}:`, err);
 			this.isConnected = false;
 		});
@@ -99,8 +122,25 @@ export class TelegramChannel implements Channel {
 	}
 
 	public async disconnect(): Promise<void> {
+		if (!this.isConnected) return;
 		await this.bot.stop();
 		this.isConnected = false;
+	}
+
+	private rememberMessage(messageKey: string): boolean {
+		if (this.processedMessageKeys.has(messageKey)) return false;
+
+		this.processedMessageKeys.add(messageKey);
+		this.recentMessageKeys.push(messageKey);
+
+		if (
+			this.recentMessageKeys.length > TelegramChannel.maxRecentMessages
+		) {
+			const oldest = this.recentMessageKeys.shift();
+			if (oldest) this.processedMessageKeys.delete(oldest);
+		}
+
+		return true;
 	}
 
 	public async send(
@@ -120,7 +160,7 @@ export class TelegramChannel implements Channel {
 		await this.bot.api.sendChatAction(chatId, "typing");
 	}
 
-	public onMessage(handler: (msg: ChannelMessage) => void): void {
+	public onMessage(handler: ChannelMessageHandler): void {
 		this.messageHandlers.add(handler);
 	}
 

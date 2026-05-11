@@ -6,7 +6,10 @@ export interface MCPCatalogEntry {
 	icon: string;
 	tools: string[];
 	config: {
-		command: string;
+		type?: string;
+		url?: string;
+		headers?: Record<string, string>;
+		command?: string;
 		args: string[];
 		env?: Record<string, string>;
 	};
@@ -24,18 +27,15 @@ export const MCP_CATALOG: MCPCatalogEntry[] = [
 		icon: "https://cdn.simpleicons.org/internetexplorer/2563eb",
 		tools: ["webReader"],
 		config: {
-			command: "npx",
-			args: [
-				"-y",
-				"@anthropic-ai/mcp-remote@latest",
-				"https://open.bigmodel.cn/api/mcp/web_reader/mcp",
-				"--header",
-				"Authorization:Bearer ${ZHIPU_API_KEY}",
-			],
+			type: "streamable-http",
+			url: "https://api.z.ai/api/mcp/web_reader/mcp",
+			headers: { Authorization: "Bearer ${ZHIPU_API_KEY}" },
+			command: "streamable-http",
+			args: [],
 			env: {},
 		},
 		requiresApiKey: "Z.AI API Key (ZHIPU_API_KEY)",
-		homepage: "https://open.bigmodel.cn/",
+		homepage: "https://docs.z.ai/devpack/mcp/reader-mcp-server",
 	},
 	{
 		name: "zai-web-search",
@@ -46,18 +46,15 @@ export const MCP_CATALOG: MCPCatalogEntry[] = [
 		icon: "https://cdn.simpleicons.org/google/4285F4",
 		tools: ["webSearchPrime"],
 		config: {
-			command: "npx",
-			args: [
-				"-y",
-				"@anthropic-ai/mcp-remote@latest",
-				"https://open.bigmodel.cn/api/mcp/web_search_prime/mcp",
-				"--header",
-				"Authorization:Bearer ${ZHIPU_API_KEY}",
-			],
+			type: "streamable-http",
+			url: "https://api.z.ai/api/mcp/web_search_prime/mcp",
+			headers: { Authorization: "Bearer ${ZHIPU_API_KEY}" },
+			command: "streamable-http",
+			args: [],
 			env: {},
 		},
 		requiresApiKey: "Z.AI API Key (ZHIPU_API_KEY)",
-		homepage: "https://open.bigmodel.cn/",
+		homepage: "https://docs.z.ai/devpack/mcp/search-mcp-server",
 	},
 	{
 		name: "zai-zread",
@@ -68,18 +65,15 @@ export const MCP_CATALOG: MCPCatalogEntry[] = [
 		icon: "https://cdn.simpleicons.org/readthedocs/8CA1AF",
 		tools: ["search_doc", "get_repo_structure", "read_file"],
 		config: {
-			command: "npx",
-			args: [
-				"-y",
-				"@anthropic-ai/mcp-remote@latest",
-				"https://open.bigmodel.cn/api/mcp/zread/mcp",
-				"--header",
-				"Authorization:Bearer ${ZHIPU_API_KEY}",
-			],
+			type: "streamable-http",
+			url: "https://api.z.ai/api/mcp/zread/mcp",
+			headers: { Authorization: "Bearer ${ZHIPU_API_KEY}" },
+			command: "streamable-http",
+			args: [],
 			env: {},
 		},
 		requiresApiKey: "Z.AI API Key (ZHIPU_API_KEY)",
-		homepage: "https://open.bigmodel.cn/",
+		homepage: "https://docs.z.ai/devpack/mcp/zread-mcp-server",
 	},
 	{
 		name: "zai-vision",
@@ -100,14 +94,14 @@ export const MCP_CATALOG: MCPCatalogEntry[] = [
 		],
 		config: {
 			command: "npx",
-			args: ["-y", "@z_ai/mcp-server"],
+			args: ["-y", "@z_ai/mcp-server@latest"],
 			env: {
 				Z_AI_API_KEY: "${ZHIPU_API_KEY}",
-				Z_AI_MODE: "ZHIPU",
+				Z_AI_MODE: "ZAI",
 			},
 		},
 		requiresApiKey: "Z.AI API Key (ZHIPU_API_KEY)",
-		homepage: "https://open.bigmodel.cn/",
+		homepage: "https://docs.z.ai/devpack/mcp/vision-mcp-server",
 	},
 	{
 		name: "filesystem",

@@ -28,6 +28,7 @@ El panel web es una interfaz gráfica para Octopus AI que se ejecuta en tu naveg
 - Interfaz de chat con mensajes en tiempo real (streaming)
 - Centro de control con estado del sistema
 - Gestión visual de memoria, skills, tareas y automatizaciones
+- Aprendizajes operacionales disponibles por API para auditoría y feedback
 - Herramientas, variables, media y configuración desde la interfaz
 - Diseño responsive (funciona en móviles y tablets)
 
@@ -89,6 +90,7 @@ Visualiza y gestiona lo que Octopus AI recuerda:
 - **Memoria a largo plazo:** Hechos, eventos y procedimientos almacenados
 - **Resumen diario:** Actividad consolidada del día en curso
 - **Perfil de usuario:** Idioma, estilo, preferencias y expertise detectados
+- **Memoria procedural aprendida:** Procedimientos y antipatrones derivados de trabajos exitosos o fallidos
 - **Búsqueda:** Busca entre los recuerdos de la IA
 - **Estadísticas:** Cuántos recuerdos tiene, tipo, antigüedad
 
@@ -100,6 +102,8 @@ La UI actual tambien incluye vistas específicas para:
 - tareas y automatizaciones
 - herramientas y ejecución de código
 - variables gestionadas y biblioteca multimedia
+
+Los aprendizajes de `LearningEngine` se consultan por API en `/api/learning/insights`. Si detectas un aprendizaje incorrecto, puedes borrarlo con `DELETE /api/learning/insights/{id}` o enviar feedback con `POST /api/learning/feedback`.
 
 ### Configuración
 

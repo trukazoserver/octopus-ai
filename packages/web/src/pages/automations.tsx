@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost, apiPut } from "../hooks/useApi.js";
+import { apiDelete, apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 interface Automation {
 	id: string;
@@ -25,6 +25,19 @@ interface Agent {
 
 const TRIGGER_TYPES = ["cron", "event", "webhook"] as const;
 const ACTION_TYPES = ["agent_task", "notify", "code", "api_call"] as const;
+
+const TRIGGER_LABELS: Record<string, string> = {
+	cron: "Programada",
+	event: "Evento",
+	webhook: "Webhook",
+};
+
+const ACTION_LABELS: Record<string, string> = {
+	agent_task: "Tarea de agente",
+	notify: "Notificación",
+	code: "Código",
+	api_call: "Llamada API",
+};
 
 const BG = "#09090b";
 const PANEL = "#18181b";
@@ -140,6 +153,15 @@ const emptyForm = (): FormData => ({
 	enabled: true,
 });
 
+const validateJson = (value: string, label: string): string | null => {
+	try {
+		JSON.parse(value || "{}");
+		return null;
+	} catch (err) {
+		return `${label} debe ser JSON válido: ${err instanceof Error ? err.message : String(err)}`;
+	}
+};
+
 export const AutomationsPage: React.FC = () => {
 	const [automations, setAutomations] = useState<Automation[]>([]);
 	const [agents, setAgents] = useState<Agent[]>([]);
@@ -204,7 +226,19 @@ export const AutomationsPage: React.FC = () => {
 
 	const handleSubmit = async () => {
 		if (!form.name.trim()) {
-			showMsg("Name is required");
+			showMsg("El nombre es obligatorio");
+			return;
+		}
+		const triggerError = validateJson(
+			form.triggerConfig,
+			"La configuración del disparador",
+		);
+		const actionError = validateJson(
+			form.actionConfig,
+			"La configuración de la acción",
+		);
+		if (triggerError || actionError) {
+			showMsg(triggerError ?? actionError ?? "JSON inválido");
 			return;
 		}
 		setSaving(true);
@@ -221,11 +255,11 @@ export const AutomationsPage: React.FC = () => {
 				enabled: form.enabled ? 1 : 0,
 			};
 			if (editingId) {
-				await apiPut(`/api/automations/${editingId}`, payload);
-				showMsg("Automation updated");
+				await apiPutJson(`/api/automations/${editingId}`, payload);
+				showMsg("Automatización actualizada");
 			} else {
 				await apiPost("/api/automations", payload);
-				showMsg("Automation created");
+				showMsg("Automatización creada");
 			}
 			closeForm();
 			await load();
@@ -250,8 +284,8 @@ export const AutomationsPage: React.FC = () => {
 
 	const handleDelete = async (id: string) => {
 		try {
-			await fetch(`/api/automations/${id}`, { method: "DELETE" });
-			showMsg("Automation deleted");
+			await apiDelete(`/api/automations/${id}`);
+			showMsg("Automatización eliminada");
 			setDeleteConfirm(null);
 			await load();
 		} catch (e) {
@@ -276,7 +310,7 @@ export const AutomationsPage: React.FC = () => {
 	if (loading) {
 		return (
 			<div className="page-shell" style={{ padding: 40, color: MUTED }}>
-				Loading automations...
+				Cargando automatizaciones...
 			</div>
 		);
 	}
@@ -294,9 +328,9 @@ export const AutomationsPage: React.FC = () => {
 			}}
 		>
 			<div className="page-header">
-				<h2 style={{ margin: 0, fontSize: "1.3rem" }}>Automations</h2>
+				<h2 style={{ margin: 0, fontSize: "1.3rem" }}>Automatizaciones</h2>
 				<button type="button" style={btnPrimary} onClick={openCreate}>
-					+ Create Automation
+					+ Crear automatización
 				</button>
 			</div>
 
@@ -324,12 +358,10 @@ export const AutomationsPage: React.FC = () => {
 			{showForm && (
 				<div style={{ ...panelStyle, marginBottom: 24 }}>
 					<h3 style={{ margin: "0 0 16px", fontSize: "1.05rem" }}>
-						{editingId ? "Edit Automation" : "Create Automation"}
+						{editingId ? "Editar automatización" : "Crear automatización"}
 					</h3>
 
-					<div
-						style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}
-					>
+					<div className="responsive-grid-2" style={{ gap: 14 }}>
 						<div style={{ gridColumn: "1 / -1" }}>
 							<label
 								style={{
@@ -339,15 +371,17 @@ export const AutomationsPage: React.FC = () => {
 									display: "block",
 								}}
 							>
-								Name *
+								Nombre *
 							</label>
 							<input
+								id="automation-name"
+								name="name"
 								type="text"
 								value={form.name}
 								onChange={(e) =>
 									setForm((f) => ({ ...f, name: e.target.value }))
 								}
-								placeholder="Automation name"
+								placeholder="Nombre de la automatización"
 								style={inputStyle}
 							/>
 						</div>
@@ -361,15 +395,17 @@ export const AutomationsPage: React.FC = () => {
 									display: "block",
 								}}
 							>
-								Description
+								Descripción
 							</label>
 							<input
+								id="automation-description"
+								name="description"
 								type="text"
 								value={form.description}
 								onChange={(e) =>
 									setForm((f) => ({ ...f, description: e.target.value }))
 								}
-								placeholder="Optional description"
+								placeholder="Descripción opcional"
 								style={inputStyle}
 							/>
 						</div>
@@ -383,9 +419,11 @@ export const AutomationsPage: React.FC = () => {
 									display: "block",
 								}}
 							>
-								Trigger Type
+								Disparador
 							</label>
 							<select
+								id="automation-trigger-type"
+								name="triggerType"
 								value={form.triggerType}
 								onChange={(e) =>
 									setForm((f) => ({ ...f, triggerType: e.target.value }))
@@ -394,7 +432,7 @@ export const AutomationsPage: React.FC = () => {
 							>
 								{TRIGGER_TYPES.map((t) => (
 									<option key={t} value={t}>
-										{t}
+										{TRIGGER_LABELS[t] ?? t}
 									</option>
 								))}
 							</select>
@@ -409,9 +447,11 @@ export const AutomationsPage: React.FC = () => {
 									display: "block",
 								}}
 							>
-								Action Type
+								Acción
 							</label>
 							<select
+								id="automation-action-type"
+								name="actionType"
 								value={form.actionType}
 								onChange={(e) =>
 									setForm((f) => ({ ...f, actionType: e.target.value }))
@@ -420,7 +460,7 @@ export const AutomationsPage: React.FC = () => {
 							>
 								{ACTION_TYPES.map((t) => (
 									<option key={t} value={t}>
-										{t}
+										{ACTION_LABELS[t] ?? t}
 									</option>
 								))}
 							</select>
@@ -435,9 +475,11 @@ export const AutomationsPage: React.FC = () => {
 									display: "block",
 								}}
 							>
-								Trigger Config (JSON)
+								Configuración del disparador (JSON)
 							</label>
 							<textarea
+								id="automation-trigger-config"
+								name="triggerConfig"
 								value={form.triggerConfig}
 								onChange={(e) =>
 									setForm((f) => ({ ...f, triggerConfig: e.target.value }))
@@ -456,9 +498,11 @@ export const AutomationsPage: React.FC = () => {
 									display: "block",
 								}}
 							>
-								Action Config (JSON)
+								Configuración de la acción (JSON)
 							</label>
 							<textarea
+								id="automation-action-config"
+								name="actionConfig"
 								value={form.actionConfig}
 								onChange={(e) =>
 									setForm((f) => ({ ...f, actionConfig: e.target.value }))
@@ -477,16 +521,18 @@ export const AutomationsPage: React.FC = () => {
 									display: "block",
 								}}
 							>
-								Agent
+								Agente
 							</label>
 							<select
+								id="automation-agent"
+								name="agentId"
 								value={form.agentId}
 								onChange={(e) =>
 									setForm((f) => ({ ...f, agentId: e.target.value }))
 								}
 								style={selectStyle}
 							>
-								<option value="">None</option>
+								<option value="">Ninguno</option>
 								{agents.map((a) => (
 									<option key={a.id} value={a.id}>
 										{a.name ?? a.id}
@@ -504,10 +550,12 @@ export const AutomationsPage: React.FC = () => {
 							}}
 						>
 							<label style={{ fontSize: "0.8rem", color: MUTED }}>
-								Enabled
+								Activa
 							</label>
 							<button
 								type="button"
+								aria-label={form.enabled ? "Desactivar automatización" : "Activar automatización"}
+								aria-pressed={form.enabled}
 								onClick={() => setForm((f) => ({ ...f, enabled: !f.enabled }))}
 								style={{
 									width: 44,
@@ -547,10 +595,10 @@ export const AutomationsPage: React.FC = () => {
 								cursor: saving ? "not-allowed" : "pointer",
 							}}
 						>
-							{saving ? "Saving..." : editingId ? "Update" : "Create"}
+							{saving ? "Guardando..." : editingId ? "Actualizar" : "Crear"}
 						</button>
 						<button type="button" onClick={closeForm} style={btnSecondary}>
-							Cancel
+						Cancelar
 						</button>
 					</div>
 				</div>
@@ -567,10 +615,10 @@ export const AutomationsPage: React.FC = () => {
 					}}
 				>
 					<div style={{ fontSize: "2rem", marginBottom: 8 }}>
-						No automations yet
+						Aún no hay automatizaciones
 					</div>
 					<div style={{ fontSize: "0.9rem" }}>
-						Click "Create Automation" to get started.
+						Crea una automatización programada, por evento o webhook para empezar.
 					</div>
 				</div>
 			)}
@@ -619,7 +667,7 @@ export const AutomationsPage: React.FC = () => {
 											color: a.enabled ? SUCCESS : MUTED,
 										}}
 									>
-										{a.enabled ? "Enabled" : "Disabled"}
+						{a.enabled ? "Activa" : "Inactiva"}
 									</span>
 								</div>
 								{a.description && (
@@ -643,9 +691,9 @@ export const AutomationsPage: React.FC = () => {
 									}}
 								>
 									<span>
-										Trigger:{" "}
+					Disparador:{" "}
 										<span style={{ color: PRIMARY, fontWeight: 600 }}>
-											{a.trigger_type}
+						{TRIGGER_LABELS[a.trigger_type] ?? a.trigger_type}
 										</span>
 										{a.trigger_config && a.trigger_config !== "{}" && (
 											<span style={{ color: "#52525b", marginLeft: 4 }}>
@@ -654,17 +702,17 @@ export const AutomationsPage: React.FC = () => {
 										)}
 									</span>
 									<span>
-										Action:{" "}
+					Acción:{" "}
 										<span style={{ color: "#a78bfa", fontWeight: 600 }}>
-											{a.action_type}
+						{ACTION_LABELS[a.action_type] ?? a.action_type}
 										</span>
 									</span>
 									<span>
-										Runs: <span style={{ color: TEXT }}>{a.run_count}</span>
+					Ejecuciones: <span style={{ color: TEXT }}>{a.run_count}</span>
 									</span>
 									{a.last_run && (
 										<span>
-											Last run:{" "}
+						Última ejecución:{" "}
 											<span style={{ color: TEXT }}>
 												{new Date(a.last_run).toLocaleString()}
 											</span>
@@ -681,11 +729,13 @@ export const AutomationsPage: React.FC = () => {
 									flexShrink: 0,
 								}}
 							>
-								<button
-									type="button"
-									onClick={() => handleToggle(a.id)}
-									disabled={togglingId === a.id}
-									style={{
+					<button
+						type="button"
+						onClick={() => handleToggle(a.id)}
+						disabled={togglingId === a.id}
+						aria-label={a.enabled ? `Desactivar ${a.name}` : `Activar ${a.name}`}
+						aria-pressed={Boolean(a.enabled)}
+						style={{
 										width: 44,
 										height: 24,
 										borderRadius: 12,
@@ -715,7 +765,7 @@ export const AutomationsPage: React.FC = () => {
 									style={btnSmall}
 									onClick={() => openEdit(a)}
 								>
-									Edit
+						Editar
 								</button>
 								{deleteConfirm === a.id ? (
 									<>
@@ -724,14 +774,14 @@ export const AutomationsPage: React.FC = () => {
 											style={btnSmallDanger}
 											onClick={() => handleDelete(a.id)}
 										>
-											Confirm
+							Confirmar
 										</button>
 										<button
 											type="button"
 											style={btnSmall}
 											onClick={() => setDeleteConfirm(null)}
 										>
-											Cancel
+							Cancelar
 										</button>
 									</>
 								) : (
@@ -740,7 +790,7 @@ export const AutomationsPage: React.FC = () => {
 										style={btnSmallDanger}
 										onClick={() => setDeleteConfirm(a.id)}
 									>
-										Delete
+						Eliminar
 									</button>
 								)}
 							</div>

@@ -47,7 +47,7 @@ const NAV_GROUPS: NavGroup[] = [
 		items: [{ id: "channels", icon: "📡", label: "Canales" }],
 	},
 	{
-		label: "Work",
+		label: "Producción",
 		items: [
 			{ id: "agents", icon: "🤖", label: "Agentes" },
 			{ id: "tasks", icon: "✅", label: "Tareas" },
@@ -56,14 +56,14 @@ const NAV_GROUPS: NavGroup[] = [
 		],
 	},
 	{
-		label: "Data",
+		label: "Conocimiento",
 		items: [
 			{ id: "memory", icon: "🧠", label: "Base de Memoria" },
 			{ id: "skills", icon: "⚡", label: "Habilidades" },
 		],
 	},
 	{
-		label: "Config",
+		label: "Sistema",
 		items: [
 			{ id: "media", icon: "📁", label: "Medios" },
 			{ id: "variables", icon: "🔐", label: "Variables" },
@@ -117,8 +117,6 @@ export const App: React.FC = () => {
 				return <DashboardPage onNavigate={(tab) => selectTab(tab as TabId)} />;
 			case "channels":
 				return <ChannelsPage />;
-			case "chat":
-				return <ChatPage />;
 			case "code":
 				return <ToolsPage />;
 			case "memory":
@@ -138,7 +136,10 @@ export const App: React.FC = () => {
 			case "settings":
 				return <SettingsPage />;
 			default:
-				return <DashboardPage onNavigate={(tab) => selectTab(tab as TabId)} />;
+				if (activeTab !== "chat") {
+					return <DashboardPage onNavigate={(tab) => selectTab(tab as TabId)} />;
+				}
+				return null;
 		}
 	};
 
@@ -225,12 +226,23 @@ export const App: React.FC = () => {
 
 			<main className="app-main">
 				<div
-					className="animate-fade-in"
-					key={activeTab}
-					style={{ height: "100%", display: "flex", flexDirection: "column" }}
+					style={{
+						height: "100%",
+						display: activeTab === "chat" ? "flex" : "none",
+						flexDirection: "column",
+					}}
 				>
-					{renderPage()}
+					<ChatPage />
 				</div>
+				{activeTab !== "chat" && (
+					<div
+						className="animate-fade-in"
+						key={activeTab}
+						style={{ height: "100%", display: "flex", flexDirection: "column" }}
+					>
+						{renderPage()}
+					</div>
+				)}
 			</main>
 
 			<ToastContainer />

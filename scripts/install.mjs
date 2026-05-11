@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { platform as getPlatform, homedir } from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,15 @@ import * as readline from "node:readline";
 
 const isWin = getPlatform() === "win32";
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
+const CLI_ENTRY = path.join(
+	PROJECT_ROOT,
+	"packages",
+	"cli",
+	"dist",
+	"index.js",
+);
+const WEB_URL = "http://127.0.0.1:18789";
+const SERVICE_NAME = "OctopusAI";
 const LOG_OK = "\x1b[32m\u2713\x1b[0m";
 const LOG_FAIL = "\x1b[31m\u2717\x1b[0m";
 const LOG_INFO = "\x1b[36m";
@@ -124,7 +133,7 @@ function installPython() {
 		console.log(`${LOG_FAIL} Error: ${r.output}`);
 		return false;
 	}
-	if (platform() === "darwin") {
+	if (getPlatform() === "darwin") {
 		console.log(`${LOG_INFO}  Instalando Python via brew...${RESET}`);
 		const r = run("brew install python3", { timeout: 300000 });
 		if (r.ok) {
@@ -195,7 +204,7 @@ function installBuildTools() {
 		);
 		return false;
 	}
-	if (platform() === "darwin") {
+	if (getPlatform() === "darwin") {
 		console.log(`${LOG_INFO}  Instalando Xcode Command Line Tools...${RESET}`);
 		run("xcode-select --install");
 		console.log(
@@ -231,32 +240,6 @@ function installDeps() {
 	return true;
 }
 
-function rebuildSqlite() {
-	console.log(`${LOG_INFO}  Recompilando better-sqlite3...${RESET}`);
-	const r = run("pnpm rebuild better-sqlite3", { timeout: 120000 });
-	if (!r.ok) {
-		console.log(`${LOG_FAIL} Error: ${r.output}`);
-		console.log(
-			`${LOG_GRAY}  Verifica que Build Tools (C++) este instalado.${RESET}`,
-		);
-		return false;
-	}
-	console.log(`  ${LOG_OK} better-sqlite3 compilado`);
-	return true;
-}
-
-function checkBindings() {
-	const bs3Path = path.join(PROJECT_ROOT, "node_modules", "better-sqlite3");
-	if (!fs.existsSync(bs3Path)) return false;
-	try {
-		return fs.readdirSync(path.join(bs3Path, "prebuilds")).length > 0;
-	} catch {
-		return fs.existsSync(
-			path.join(bs3Path, "build", "Release", "better_sqlite3.node"),
-		);
-	}
-}
-
 function buildProject() {
 	console.log(`${LOG_INFO}  Compilando proyecto (pnpm build)...${RESET}`);
 	const r = run("pnpm build", { timeout: 120000 });
@@ -264,7 +247,7 @@ function buildProject() {
 		console.log(`${LOG_FAIL} Error: ${r.output}`);
 		return false;
 	}
-	console.log(`  ${LOG_OK} Proyecto compilado (11 paquetes)`);
+	console.log(`  ${LOG_OK} Proyecto compilado`);
 	return true;
 }
 
@@ -463,6 +446,241 @@ async function setupWizard() {
 	rl.close();
 }
 
+function octopusDirPath(...segments) {
+	return path.join(homedir(), ".octopus", ...segments);
+}
+
+function quoteShell(value) {
+	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function ensureUserBinOnPath(binDir) {
+	const currentPath = process.env.PATH ?? "";
+	const parts = currentPath.split(path.delimiter).map((p) => path.resolve(p));
+	if (parts.includes(path.resolve(binDir))) return true;
+
+	if (isWin) {
+		const nextPath = `${currentPath}${path.delimiter}${binDir}`;
+		const r = run(`setx PATH "${nextPath}"`, { timeout: 60000 });
+		if (!r.ok) {
+			console.log(
+				`${LOG_WARN}  No se pudo actualizar PATH automaticamente: ${r.output}${RESET}`,
+			);
+			console.log(`${LOG_GRAY}  Agrega manualmente a PATH: ${binDir}${RESET}`);
+			return false;
+		}
+		process.env.PATH = nextPath;
+		return true;
+	}
+
+	const profilePath = path.join(homedir(), ".profile");
+	const marker = "# Octopus AI CLI";
+	const line = `export PATH=\"${binDir}:$PATH\"`;
+	const existing = fs.existsSync(profilePath)
+		? fs.readFileSync(profilePath, "utf8")
+		: "";
+	if (!existing.includes(binDir)) {
+		fs.appendFileSync(profilePath, `\n${marker}\n${line}\n`, "utf8");
+	}
+	process.env.PATH = `${binDir}${path.delimiter}${currentPath}`;
+	return true;
+}
+
+function installCliShims() {
+	const binDir = octopusDirPath("bin");
+	if (!fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true });
+
+	if (isWin) {
+		const shim = (name) =>
+			[
+				"@echo off",
+				`cd /d "${PROJECT_ROOT}"`,
+				`"${process.execPath}" "${CLI_ENTRY}" %*`,
+				"",
+			].join("\r\n");
+		fs.writeFileSync(path.join(binDir, "octopus.cmd"), shim("octopus"), "utf8");
+		fs.writeFileSync(
+			path.join(binDir, "octopus-ai.cmd"),
+			shim("octopus-ai"),
+			"utf8",
+		);
+	} else {
+		const shim = [
+			"#!/usr/bin/env sh",
+			`cd ${quoteShell(PROJECT_ROOT)} || exit 1`,
+			`exec ${quoteShell(process.execPath)} ${quoteShell(CLI_ENTRY)} "$@"`,
+			"",
+		].join("\n");
+		for (const name of ["octopus", "octopus-ai"]) {
+			const fp = path.join(binDir, name);
+			fs.writeFileSync(fp, shim, "utf8");
+			fs.chmodSync(fp, 0o755);
+		}
+	}
+
+	ensureUserBinOnPath(binDir);
+	console.log(`  ${LOG_OK} Comando global instalado en ${binDir}`);
+	const check = run(
+		isWin
+			? "octopus --help"
+			: `${quoteShell(path.join(binDir, "octopus"))} --help`,
+		{ timeout: 60000 },
+	);
+	if (check.ok) console.log(`  ${LOG_OK} octopus --help verificado`);
+	else
+		console.log(
+			`${LOG_WARN}  octopus se instaló, abre una terminal nueva si PATH aun no lo detecta.${RESET}`,
+		);
+	return true;
+}
+
+function ensureLogsDir() {
+	const logsDir = octopusDirPath("logs");
+	if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+	return logsDir;
+}
+
+function openUrl(url) {
+	const platform = getPlatform();
+	const command =
+		platform === "win32" ? "cmd" : platform === "darwin" ? "open" : "xdg-open";
+	const args = platform === "win32" ? ["/c", "start", "", url] : [url];
+	const child = spawn(command, args, {
+		detached: true,
+		stdio: "ignore",
+		windowsHide: true,
+	});
+	child.unref();
+}
+
+function startDetachedServer() {
+	ensureLogsDir();
+	const child = spawn(
+		process.execPath,
+		[CLI_ENTRY, "start", "--no-open", "--no-choice"],
+		{
+			cwd: PROJECT_ROOT,
+			detached: true,
+			stdio: "ignore",
+			windowsHide: true,
+		},
+	);
+	child.unref();
+	console.log(`  ${LOG_OK} Octopus iniciado en segundo plano`);
+}
+
+function installWindowsAutostart() {
+	const logsDir = ensureLogsDir();
+	const launcherPath = octopusDirPath("octopus-server.cmd");
+	const logPath = path.join(logsDir, "server.log");
+	const launcher = [
+		"@echo off",
+		`cd /d "${PROJECT_ROOT}"`,
+		`"${process.execPath}" "${CLI_ENTRY}" start --no-open --no-choice >> "${logPath}" 2>&1`,
+		"",
+	].join("\r\n");
+	fs.writeFileSync(launcherPath, launcher, "utf8");
+
+	const create = run(
+		`schtasks /Create /TN "${SERVICE_NAME}" /SC ONLOGON /F /TR "${launcherPath}"`,
+		{ timeout: 60000 },
+	);
+	if (!create.ok) {
+		console.log(
+			`${LOG_FAIL} No se pudo crear la tarea de inicio: ${create.output}`,
+		);
+		return false;
+	}
+
+	const runNow = run(`schtasks /Run /TN "${SERVICE_NAME}"`, { timeout: 60000 });
+	if (!runNow.ok) {
+		console.log(
+			`${LOG_WARN}  Tarea creada, pero no se pudo iniciar ahora: ${runNow.output}${RESET}`,
+		);
+		return true;
+	}
+
+	console.log(`  ${LOG_OK} Octopus quedo activo y se iniciara con tu sesion`);
+	return true;
+}
+
+function installPersistentBackground() {
+	if (isWin) return installWindowsAutostart();
+	startDetachedServer();
+	console.log(
+		`${LOG_WARN}  Inicio automatico permanente aun no se configura en ${getPlatform()}. Octopus queda activo en segundo plano para esta sesion.${RESET}`,
+	);
+	return true;
+}
+
+function runCliForeground(args) {
+	return new Promise((resolve) => {
+		const child = spawn(process.execPath, [CLI_ENTRY, ...args], {
+			cwd: PROJECT_ROOT,
+			stdio: "inherit",
+			windowsHide: false,
+		});
+		child.on("close", () => resolve());
+	});
+}
+
+async function postInstallActions() {
+	const rl = readline.createInterface({
+		input: process.stdin,
+		output: process.stdout,
+	});
+	try {
+		console.log(
+			`${LOG_INFO}${LOG_BOLD}  Activacion posterior a la instalacion${RESET}`,
+		);
+		const keepActive = await ask(
+			rl,
+			`  ${LOG_WARN}Dejar Octopus activo en segundo plano aunque cierres la consola? (S/n): ${RESET}`,
+		);
+		let backgroundStarted = false;
+		if (keepActive.toLowerCase() !== "n") {
+			backgroundStarted = installPersistentBackground();
+		}
+
+		console.log();
+		console.log("  Como quieres entrar ahora?");
+		console.log(`${LOG_INFO}    1) Abrir interfaz web${RESET}`);
+		console.log(`${LOG_INFO}    2) Quedarme en consola/chat${RESET}`);
+		console.log(`${LOG_INFO}    3) Solo dejarlo en segundo plano${RESET}`);
+		console.log(`${LOG_INFO}    4) Salir${RESET}`);
+		const mode = await ask(rl, `  ${LOG_WARN}Seleccion [1]: ${RESET}`);
+
+		if ((mode === "" || mode === "1") && !backgroundStarted) {
+			startDetachedServer();
+			backgroundStarted = true;
+		}
+		if (mode === "" || mode === "1") {
+			await new Promise((resolve) => setTimeout(resolve, 2500));
+			openUrl(WEB_URL);
+			console.log(`  ${LOG_OK} Interfaz web abierta: ${WEB_URL}`);
+			return;
+		}
+
+		if (mode === "2") {
+			if (!backgroundStarted) startDetachedServer();
+			console.log(
+				`${LOG_DIM}  Abriendo chat. Usa /exit para cerrar la consola; el servidor seguira activo.${RESET}`,
+			);
+			rl.close();
+			await runCliForeground(["--console"]);
+			return;
+		}
+
+		if (mode === "3") {
+			if (!backgroundStarted) startDetachedServer();
+			console.log(`  ${LOG_OK} Octopus queda ejecutandose en segundo plano`);
+			return;
+		}
+	} finally {
+		if (!rl.closed) rl.close();
+	}
+}
+
 async function main() {
 	banner();
 
@@ -490,7 +708,7 @@ async function main() {
 		}
 		if (!pythonOk) {
 			console.log(
-				`${LOG_WARN}  Sin Python, algunos modulos nativos pueden fallar.${RESET}`,
+				`${LOG_WARN}  Sin Python, las tools/scripts Python pueden no estar disponibles.${RESET}`,
 			);
 		}
 	}
@@ -515,7 +733,7 @@ async function main() {
 		}
 		if (!btOk) {
 			console.log(
-				`${LOG_RED}  Sin Build Tools, better-sqlite3 no podra compilarse.${RESET}`,
+				`${LOG_WARN}  Sin Build Tools, solo fallaran dependencias nativas opcionales.${RESET}`,
 			);
 			const rl2 = readline.createInterface({
 				input: process.stdin,
@@ -535,23 +753,12 @@ async function main() {
 	);
 	if (!installDeps()) process.exit(1);
 
-	if (btOk && !checkBindings()) {
-		console.log(
-			`\n${LOG_INFO}${LOG_BOLD}  Paso 5b: Compilando better-sqlite3${RESET}`,
-		);
-		if (!rebuildSqlite()) {
-			console.log(
-				`${LOG_WARN}  better-sqlite3 no se pudo compilar. BD y memoria no disponibles.${RESET}`,
-			);
-		}
-	} else if (checkBindings()) {
-		console.log(`  ${LOG_OK} better-sqlite3 bindings OK`);
-	}
-
 	console.log(
 		`\n${LOG_INFO}${LOG_BOLD}  Paso 6/7: Compilando proyecto${RESET}`,
 	);
 	if (!buildProject()) process.exit(1);
+	console.log(`${LOG_INFO}  Instalando comando global octopus...${RESET}`);
+	installCliShims();
 
 	console.log(
 		`\n${LOG_INFO}${LOG_BOLD}  Paso 7/7: Configuracion inicial${RESET}`,
@@ -571,18 +778,22 @@ async function main() {
 	console.log();
 	console.log("  Comandos disponibles:");
 	console.log(
-		`${LOG_INFO}    node packages/cli/dist/index.js start          ${LOG_GRAY}Iniciar servidor${RESET}`,
+		`${LOG_INFO}    octopus                         ${LOG_GRAY}Iniciar servidor y abrir consola TUI${RESET}`,
 	);
 	console.log(
-		`${LOG_INFO}    node packages/cli/dist/index.js chat            ${LOG_GRAY}Chat interactivo${RESET}`,
+		`${LOG_INFO}    octopus --web                   ${LOG_GRAY}Iniciar y abrir interfaz web${RESET}`,
 	);
 	console.log(
-		`${LOG_INFO}    node packages/cli/dist/index.js agent -m \"hola\"${LOG_GRAY}Enviar mensaje${RESET}`,
+		`${LOG_INFO}    octopus --console               ${LOG_GRAY}Consola TUI sin duplicar runtime${RESET}`,
 	);
 	console.log(
-		`${LOG_INFO}    node packages/cli/dist/index.js doctor          ${LOG_GRAY}Diagnosticar${RESET}`,
+		`${LOG_INFO}    octopus agent -m \"hola\"         ${LOG_GRAY}Enviar mensaje${RESET}`,
+	);
+	console.log(
+		`${LOG_INFO}    octopus doctor                  ${LOG_GRAY}Diagnosticar${RESET}`,
 	);
 	console.log();
+	await postInstallActions();
 }
 
 main().catch((err) => {

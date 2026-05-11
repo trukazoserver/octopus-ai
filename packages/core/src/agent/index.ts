@@ -1,5 +1,6 @@
 export type {
 	AgentConfig,
+	ToolIterationLimitConfig,
 	TaskState,
 	ConversationTurn,
 	TaskDescription,
@@ -17,4 +18,3 @@ export { HeartbeatDaemon } from "./heartbeat.js";
 export type { HeartbeatConfig, HeartbeatItem, HeartbeatResult, HeartbeatAction } from "./heartbeat.js";
 export { OctopusDaemon } from "./daemon.js";
 export type { DaemonConfig, DaemonStatus } from "./daemon.js";
-

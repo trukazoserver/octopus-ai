@@ -81,6 +81,7 @@ export class ChatManager {
 			now,
 			conversationId,
 		]);
+		await this.db.flush?.();
 		return {
 			id,
 			conversation_id: conversationId,
@@ -92,6 +93,34 @@ export class ChatManager {
 			tokens: opts?.tokens ?? null,
 			parent_id: opts?.parentId ?? null,
 		};
+	}
+
+	async updateMessage(
+		messageId: string,
+		content: string,
+		opts?: {
+			metadata?: Record<string, unknown>;
+			model?: string;
+			tokens?: number;
+		},
+	): Promise<void> {
+		const now = new Date().toISOString();
+		const metadata = opts?.metadata ? JSON.stringify(opts.metadata) : null;
+		await this.db.run(
+			"UPDATE messages SET content = ?, metadata = ?, model = COALESCE(?, model), tokens = COALESCE(?, tokens) WHERE id = ?",
+			[content, metadata, opts?.model ?? null, opts?.tokens ?? null, messageId],
+		);
+		const row = await this.db.get<{ conversation_id: string }>(
+			"SELECT conversation_id FROM messages WHERE id = ?",
+			[messageId],
+		);
+		if (row?.conversation_id) {
+			await this.db.run(
+				"UPDATE conversations SET updated_at = ? WHERE id = ?",
+				[now, row.conversation_id],
+			);
+		}
+		await this.db.flush?.();
 	}
 
 	async getConversation(
@@ -154,10 +183,22 @@ export class ChatManager {
 
 	async getConversationMessages(
 		conversationId: string,
-		opts?: { limit?: number; offset?: number },
+		opts?: { limit?: number; offset?: number; recent?: boolean },
 	): Promise<ChatMessage[]> {
 		const limit = opts?.limit ?? 100;
 		const offset = opts?.offset ?? 0;
+		if (opts?.recent) {
+			return this.db.all<ChatMessage>(
+				`SELECT * FROM (
+					SELECT * FROM messages
+					WHERE conversation_id = ?
+					ORDER BY timestamp DESC
+					LIMIT ? OFFSET ?
+				) recent_messages
+				ORDER BY timestamp ASC`,
+				[conversationId, limit, offset],
+			);
+		}
 		return this.db.all<ChatMessage>(
 			"SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC LIMIT ? OFFSET ?",
 			[conversationId, limit, offset],

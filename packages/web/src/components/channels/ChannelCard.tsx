@@ -146,11 +146,31 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 				</span>
 			</div>
 
+
 			{/* Config section (children) */}
-			{channel.enabled && children}
+			{children && (
+				<div style={{ marginBottom: "12px" }}>
+					{!channel.enabled && (
+						<div
+							style={{
+								marginBottom: "10px",
+								padding: "8px 10px",
+								borderRadius: "10px",
+								background: "rgba(245, 158, 11, 0.08)",
+								border: "1px solid rgba(245, 158, 11, 0.18)",
+								color: "#fbbf24",
+								fontSize: "0.78rem",
+							}}
+						>
+							Puedes configurar este canal antes de activarlo.
+						</div>
+					)}
+					{children}
+				</div>
+			)}
 
 			{/* Action buttons */}
-			{channel.enabled && (
+			{(
 				<div
 					style={{
 						display: "flex",
@@ -158,7 +178,7 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 						marginTop: channel.enabled && children ? "12px" : "0",
 					}}
 				>
-					{channel.type === "telegram" && (
+					{(
 						<button
 							type="button"
 							onClick={() => onTest(channel.name)}
@@ -206,28 +226,6 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 						{channel.enabled ? "Desactivar" : "Activar"}
 					</button>
 				</div>
-			)}
-
-			{!channel.enabled && (
-				<button
-					type="button"
-					onClick={() => onToggle(channel.name)}
-					style={{
-						width: "100%",
-						padding: "10px",
-						borderRadius: "10px",
-						border: "1px solid rgba(16, 185, 129, 0.3)",
-						background: "rgba(16, 185, 129, 0.1)",
-						color: "#10b981",
-						fontSize: "0.85rem",
-						fontWeight: 600,
-						cursor: "pointer",
-						fontFamily: "inherit",
-						transition: "all 0.15s",
-					}}
-				>
-					Activar canal
-				</button>
 			)}
 		</div>
 	);

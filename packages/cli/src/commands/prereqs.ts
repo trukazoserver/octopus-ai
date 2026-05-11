@@ -89,9 +89,9 @@ export function checkPrerequisites(): PrereqResult[] {
 
 	const pythonVersion = run("python --version") || run("python3 --version");
 	results.push({
-		name: "Python",
-		passed: !!pythonVersion,
-		message: pythonVersion || "No encontrado",
+		name: "Python (opcional)",
+		passed: true,
+		message: pythonVersion || "No encontrado; solo requerido para scripts o tools Python",
 		fixHint: isWin
 			? "Se intentará instalar via winget"
 			: "Ejecuta: sudo apt install python3 (Debian/Ubuntu) o brew install python3 (macOS)",
@@ -119,11 +119,11 @@ export function checkPrerequisites(): PrereqResult[] {
 	if (isWin) {
 		buildToolsOk = checkWindowsBuildTools();
 		results.push({
-			name: "Build Tools (C++)",
-			passed: buildToolsOk,
+			name: "Build Tools (C++, opcional)",
+			passed: true,
 			message: buildToolsOk
 				? "Visual Studio Build Tools detectado"
-				: "No detectado",
+				: "No detectado; solo requerido para dependencias nativas opcionales",
 			fixHint: "Se intentará instalar Visual Studio Build Tools via winget",
 			autoInstall: async () => {
 				console.log(
@@ -160,9 +160,9 @@ export function checkPrerequisites(): PrereqResult[] {
 		const ccVersion = run("cc --version") || run("gcc --version");
 		buildToolsOk = !!ccVersion;
 		results.push({
-			name: "Build Tools (C/C++)",
-			passed: buildToolsOk,
-			message: buildToolsOk ? "Compilador detectado" : "No detectado",
+			name: "Build Tools (C/C++, opcional)",
+			passed: true,
+			message: buildToolsOk ? "Compilador detectado" : "No detectado; solo requerido para dependencias nativas opcionales",
 			fixHint:
 				"Ejecuta: sudo apt install build-essential (Debian/Ubuntu) o xcode-select --install (macOS)",
 			autoInstall:
@@ -186,37 +186,25 @@ export function checkPrerequisites(): PrereqResult[] {
 
 export function checkNativeBindings(): PrereqResult {
 	const projectRoot = findProjectRoot();
-	let nativeBindingsOk = false;
+	let sqlJsOk = false;
 
 	if (projectRoot) {
-		const bsPath = path.join(projectRoot, "node_modules", "better-sqlite3");
-		if (fs.existsSync(bsPath)) {
-			try {
-				const prebuilds = fs.readdirSync(path.join(bsPath, "prebuilds"), {
-					recursive: true,
-				});
-				nativeBindingsOk = prebuilds.length > 0;
-			} catch {
-				nativeBindingsOk = fs.existsSync(
-					path.join(bsPath, "build", "Release", "better_sqlite3.node"),
-				);
-			}
-		}
+		const rootPath = path.join(projectRoot, "node_modules", "sql.js");
+		const corePath = path.join(projectRoot, "packages", "core", "node_modules", "sql.js");
+		sqlJsOk = fs.existsSync(rootPath) || fs.existsSync(corePath);
 	}
 
 	return {
-		name: "better-sqlite3",
-		passed: nativeBindingsOk,
-		message: nativeBindingsOk
-			? "Bindings nativos OK"
-			: "Bindings nativos no compilados",
-		fixHint: "Se ejecutará pnpm rebuild better-sqlite3",
+		name: "sql.js",
+		passed: sqlJsOk,
+		message: sqlJsOk ? "SQLite WASM disponible" : "sql.js no encontrado",
+		fixHint: "Ejecuta pnpm install para instalar dependencias",
 		autoInstall: async () => {
 			const root = projectRoot ?? process.cwd();
-			console.log(chalk.cyan("    Recompilando better-sqlite3..."));
-			const r = runShell("pnpm rebuild better-sqlite3", { cwd: root });
+			console.log(chalk.cyan("    Instalando dependencias..."));
+			const r = runShell("pnpm install", { cwd: root });
 			if (r.ok) {
-				console.log(chalk.green("    better-sqlite3 compilado correctamente"));
+				console.log(chalk.green("    Dependencias instaladas correctamente"));
 				return true;
 			}
 			console.log(chalk.red(`    Error: ${r.output}`));

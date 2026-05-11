@@ -33,7 +33,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({
 	};
 
 	return (
-		<div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+		<form onSubmit={(e) => { e.preventDefault(); handleSave(); }} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
 			<div>
 				<label
 					htmlFor="slack-bot-token"
@@ -82,9 +82,8 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({
 					Obtenlo en api.slack.com → Your Apps → OAuth & Permissions
 				</div>
 			</div>
-			<button
-				type="button"
-				onClick={handleSave}
+				<button
+					type="submit"
 				disabled={!token.trim() || saving || !enabled}
 				style={{
 					padding: "8px 16px",
@@ -104,6 +103,6 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({
 			>
 				{saving ? "Guardando..." : "Guardar Token"}
 			</button>
-		</div>
+		</form>
 	);
 };

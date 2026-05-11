@@ -1,3 +1,7 @@
+export type ChannelMessageHandler = (
+	msg: ChannelMessage,
+) => void | Promise<void>;
+
 export interface ChannelMessage {
 	id: string;
 	channelId: string;
@@ -29,6 +33,6 @@ export interface Channel {
 		content: string,
 		options?: { replyTo?: string },
 	): Promise<string>;
-	onMessage(handler: (msg: ChannelMessage) => void): void;
+	onMessage(handler: ChannelMessageHandler): void;
 	isHealthy(): Promise<boolean>;
 }

@@ -1,3 +1,8 @@
+export interface ToolIterationLimitConfig {
+	enabled?: boolean;
+	maxIterations?: number;
+}
+
 export interface AgentConfig {
 	id: string;
 	name: string;
@@ -8,6 +13,7 @@ export interface AgentConfig {
 	channels?: string[];
 	maxTokens?: number;
 	temperature?: number;
+	toolIterationLimit?: ToolIterationLimitConfig;
 }
 
 export interface TaskState {
