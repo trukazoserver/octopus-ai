@@ -18,12 +18,14 @@ import type { MemoryRetrieval } from "../memory/retrieval.js";
 import type { ShortTermMemory } from "../memory/stm.js";
 import type { ConsolidationResult, MemoryContext } from "../memory/types.js";
 import type { UserProfileManager } from "../memory/user-profile.js";
+import { WorkingMemory } from "../memory/working-memory.js";
 import type { SkillLoader } from "../skills/loader.js";
 import type { LoadedSkill } from "../skills/types.js";
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
 import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
+import { OctopusOrchestrator, type OrchestratorConfig, type OrchestratorEvent } from "./orchestrator.js";
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 18;
 const MAX_REPEATED_TOOL_SIGNATURES = 2;
@@ -32,20 +34,22 @@ const MAX_TOOL_RESULT_STORED_CHARS = 2000;
 const TOOL_IMAGE_RE = /\[IMG:(data:image\/[a-zA-Z0-9-]+;base64,[^\]]+)\]/;
 const MEDIA_FILE_RE = /\/api\/media\/file\/([^\s)\]]+)/g;
 
-type ObjectiveKind = "product_media" | "generic";
+type ObjectiveKind = "media_collection" | "generic";
 
 interface EvidenceLedger {
 	objectiveKind: ObjectiveKind;
-	requestedImageCount?: number;
+	requestedItemCount?: number;
 	imageUrls: string[];
 	mediaUrls: string[];
-	searchScreenshotUrls: string[];
-	productScreenshotUrls: string[];
-	productUrl?: string;
-	searchUrl?: string;
+	capturedScreenshots: string[];
+	detailScreenshots: string[];
+	detailUrl?: string;
+	listUrl?: string;
 	blockers: string[];
 	usefulResults: number;
 	consecutiveErrors: number;
+	/** Domain patterns for recognizing image CDN URLs (e.g., 'etsystatic.com', 'images-amazon.com') */
+	imageCdnPatterns: string[];
 	toolHistory: Array<{
 		name: string;
 		success: boolean;
@@ -84,6 +88,8 @@ export class AgentRuntime {
 	private dailyMemory?: GlobalDailyMemory;
 	private userProfileManager?: UserProfileManager;
 	private learningEngine?: LearningEngine;
+	private orchestrator?: OctopusOrchestrator;
+	private workingMemory: WorkingMemory = new WorkingMemory();
 
 	constructor(
 		config: AgentConfig,
@@ -116,6 +122,31 @@ export class AgentRuntime {
 
 	setLearningEngine(engine: LearningEngine): void {
 		this.learningEngine = engine;
+	}
+
+	/**
+	 * Configura el orquestador multi-agente para ejecución paralela.
+	 * Si se configura, las tareas complejas se descomponen automáticamente.
+	 */
+	enableOrchestrator(config?: Partial<OrchestratorConfig>): void {
+		if (!this.toolRegistry || !this.toolExecutor) {
+			console.warn("[Orchestrator] Tool system not configured yet. Call setToolSystem first.");
+			return;
+		}
+		this.orchestrator = new OctopusOrchestrator(
+			this.llmRouter,
+			this.toolRegistry,
+			this.toolExecutor,
+			this.config,
+			config,
+		);
+	}
+
+	/**
+	 * Obtener el orquestador (para acceso directo desde el servidor).
+	 */
+	getOrchestrator(): OctopusOrchestrator | undefined {
+		return this.orchestrator;
 	}
 
 	setToolIterationLimit(toolIterationLimit: AgentConfig["toolIterationLimit"]): void {
@@ -309,17 +340,14 @@ export class AgentRuntime {
 		if (modelDetail) return modelDetail;
 
 		const text = typeof params.text === "string" ? params.text : typeof params.value === "string" ? params.value : undefined;
-		const selector =
-			typeof params.selector === "string" ? params.selector : undefined;
+		const selector = typeof params.selector === "string" ? params.selector : undefined;
 		const url = typeof params.url === "string" ? params.url : undefined;
 		const key = typeof params.key === "string" ? params.key : undefined;
 		const uid = typeof params.uid === "string" ? params.uid : undefined;
 		const waitForNavigation = params.waitForNavigation === true;
 
 		switch (toolName) {
-			case "browser_etsy_task":
-				return "Ejecutando el flujo Etsy como respaldo compacto.";
-		case "browser_observe":
+			case "browser_observe":
 				return "Observando el estado actual de la página antes de decidir la siguiente acción.";
 			case "browser_snapshot":
 				return "Obteniendo el snapshot del árbol de accesibilidad de la página.";
@@ -394,7 +422,7 @@ export class AgentRuntime {
 	}
 
 	private getToolBudget(toolName: string): number {
-		if (toolName === "browser_etsy_task") return 2;
+
 		if (toolName === "browser_screenshot") return 2;
 		if (toolName === "browser_snapshot") return 4;
 		if (toolName === "browser_read_page") return 4;
@@ -436,20 +464,33 @@ export class AgentRuntime {
 	private createEvidenceLedger(message: string): EvidenceLedger {
 		const lower = message.toLowerCase();
 		const objectiveKind: ObjectiveKind =
-			/(imagen|imágenes|image|images|foto|fotos|producto|product|etsy)/i.test(lower)
-				? "product_media"
+			/(imagen|imágenes|image|images|foto|fotos|producto|product|media|screenshot|captura)/i.test(lower)
+				? "media_collection"
 				: "generic";
 		const countMatch = lower.match(/(?:las|los|the)?\s*(\d{1,2})\s*(?:im[aá]genes|images|fotos|photos)/i);
+		// Detect domain-specific CDN patterns from the user message
+		const cdnPatterns: string[] = [];
+		const knownCdns: Record<string, string> = {
+			"etsy": "etsystatic.com",
+			"amazon": "images-amazon.com",
+			"ebay": "ebayimg.com",
+			"aliexpress": "ae01.alicdn.com",
+			"shopify": "cdn.shopify.com",
+		};
+		for (const [keyword, cdn] of Object.entries(knownCdns)) {
+			if (lower.includes(keyword)) cdnPatterns.push(cdn);
+		}
 		return {
 			objectiveKind,
-			requestedImageCount: countMatch ? Number.parseInt(countMatch[1], 10) : undefined,
+			requestedItemCount: countMatch ? Number.parseInt(countMatch[1], 10) : undefined,
 			imageUrls: [],
 			mediaUrls: [],
-			searchScreenshotUrls: [],
-			productScreenshotUrls: [],
+			capturedScreenshots: [],
+			detailScreenshots: [],
 			blockers: [],
 			usefulResults: 0,
 			consecutiveErrors: 0,
+			imageCdnPatterns: cdnPatterns,
 			toolHistory: [],
 		};
 	}
@@ -464,11 +505,13 @@ export class AgentRuntime {
 		return changed;
 	}
 
-	private extractImageUrls(text: string): string[] {
+	private extractImageUrls(text: string, cdnPatterns?: string[]): string[] {
 		const urls = new Set<string>();
 		for (const match of text.matchAll(/https?:\/\/[^\s"'<>\])]+/gi)) {
 			const url = match[0].replace(/[,.]+$/, "");
-			if (/\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(url) || /i\.etsystatic\.com/i.test(url)) {
+			const isImageExt = /\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(url);
+			const isCdnImage = cdnPatterns?.some((p) => url.toLowerCase().includes(p)) ?? false;
+			if (isImageExt || isCdnImage) {
 				urls.add(url);
 			}
 		}
@@ -505,20 +548,22 @@ export class AgentRuntime {
 		return null;
 	}
 
-	private collectUrlsFromJson(value: unknown, urls: Set<string>): void {
+	private collectUrlsFromJson(value: unknown, urls: Set<string>, cdnPatterns?: string[]): void {
 		if (typeof value === "string") {
-			if (/^https?:\/\//i.test(value) && (/\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(value) || /i\.etsystatic\.com/i.test(value))) {
-				urls.add(value);
+			if (/^https?:\/\//i.test(value)) {
+				const isImageExt = /\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(value);
+				const isCdnImage = cdnPatterns?.some((p) => value.toLowerCase().includes(p)) ?? false;
+				if (isImageExt || isCdnImage) urls.add(value);
 			}
 			return;
 		}
 		if (Array.isArray(value)) {
-			for (const item of value) this.collectUrlsFromJson(item, urls);
+			for (const item of value) this.collectUrlsFromJson(item, urls, cdnPatterns);
 			return;
 		}
 		if (value && typeof value === "object") {
 			for (const item of Object.values(value as Record<string, unknown>)) {
-				this.collectUrlsFromJson(item, urls);
+				this.collectUrlsFromJson(item, urls, cdnPatterns);
 			}
 		}
 	}
@@ -533,36 +578,38 @@ export class AgentRuntime {
 		const mediaUrls = this.extractMediaUrls(resultContent);
 		if (this.addUnique(ledger.mediaUrls, mediaUrls)) useful = true;
 
-		if (toolName === "browser_screenshot" || toolName === "browser_etsy_task") {
-			const target = /listing\/\d+|product/i.test(resultContent)
-				? ledger.productScreenshotUrls
-				: ledger.searchScreenshotUrls;
+		if (toolName === "browser_screenshot") {
+			const target = /listing\/\d+|product|detail/i.test(resultContent)
+				? ledger.detailScreenshots
+				: ledger.capturedScreenshots;
 			if (this.addUnique(target, mediaUrls)) useful = true;
 		}
 
 		const json = this.extractJsonPayload(resultContent);
 		if (json) {
 			const jsonUrls = new Set<string>();
-			this.collectUrlsFromJson(json, jsonUrls);
+			this.collectUrlsFromJson(json, jsonUrls, ledger.imageCdnPatterns);
 			if (this.addUnique(ledger.imageUrls, Array.from(jsonUrls))) useful = true;
 			const parsed = json as Record<string, unknown>;
 			if (typeof parsed.status === "string" && ["completed", "partial"].includes(parsed.status)) useful = true;
-			const product = parsed.product as Record<string, unknown> | undefined;
-			if (product && typeof product.url === "string") ledger.productUrl = product.url;
-			const search = parsed.search as Record<string, unknown> | undefined;
-			if (search && typeof search.url === "string") ledger.searchUrl = search.url;
+			const detail = parsed.product as Record<string, unknown> | undefined;
+			if (detail && typeof detail.url === "string") ledger.detailUrl = detail.url;
+			const list = parsed.search as Record<string, unknown> | undefined;
+			if (list && typeof list.url === "string") ledger.listUrl = list.url;
 		}
 
-		if (this.addUnique(ledger.imageUrls, this.extractImageUrls(resultContent))) useful = true;
-		const productUrlMatch = resultContent.match(/https?:\/\/(?:www\.)?etsy\.com\/listing\/[^\s"')]+/i);
-		if (productUrlMatch) {
-			ledger.productUrl = productUrlMatch[0];
+		if (this.addUnique(ledger.imageUrls, this.extractImageUrls(resultContent, ledger.imageCdnPatterns))) useful = true;
+
+		// Generic detail/list URL extraction from any e-commerce domain
+		const detailUrlMatch = resultContent.match(/https?:\/\/[^\s"')]+\/(?:listing|product|item|dp)\/[^\s"')]+/i);
+		if (detailUrlMatch) {
+			ledger.detailUrl = detailUrlMatch[0];
 			useful = true;
 		}
-		const searchUrlMatch = resultContent.match(/https?:\/\/(?:www\.)?etsy\.com\/search[^\s"')]+/i);
-		if (searchUrlMatch) ledger.searchUrl = searchUrlMatch[0];
+		const listUrlMatch = resultContent.match(/https?:\/\/[^\s"')]+\/(?:search|browse|category|s\?)[^\s"')]+/i);
+		if (listUrlMatch) ledger.listUrl = listUrlMatch[0];
 
-		if (/datadome|captcha|blocked|access denied|pardon our interruption/i.test(resultContent)) {
+		if (/datadome|captcha|blocked|access denied|pardon our interruption|cloudflare|challenge/i.test(resultContent)) {
 			this.addUnique(ledger.blockers, [resultContent.slice(0, 300)]);
 		}
 
@@ -578,10 +625,10 @@ export class AgentRuntime {
 	}
 
 	private isObjectiveSatisfied(ledger: EvidenceLedger): boolean {
-		if (ledger.objectiveKind !== "product_media") return false;
+		if (ledger.objectiveKind !== "media_collection") return false;
 		if (ledger.imageUrls.length === 0) return false;
-		if (ledger.requestedImageCount && ledger.imageUrls.length >= ledger.requestedImageCount) return true;
-		return ledger.imageUrls.length > 0 && (ledger.searchScreenshotUrls.length > 0 || ledger.productScreenshotUrls.length > 0 || Boolean(ledger.productUrl));
+		if (ledger.requestedItemCount && ledger.imageUrls.length >= ledger.requestedItemCount) return true;
+		return ledger.imageUrls.length > 0 && (ledger.capturedScreenshots.length > 0 || ledger.detailScreenshots.length > 0 || Boolean(ledger.detailUrl));
 	}
 
 	private decideBeforeToolCall(
@@ -607,8 +654,8 @@ export class AgentRuntime {
 			return { action: "skip", reason: "Otra espera sin una condición nueva tiene bajo valor esperado." };
 		}
 
-		if (toolName === "browser_navigate" && typeof params.url === "string" && params.url === ledger.productUrl) {
-			return { action: "skip", reason: "La navegación solicitada apunta al producto ya identificado." };
+		if (toolName === "browser_navigate" && typeof params.url === "string" && params.url === ledger.detailUrl) {
+			return { action: "skip", reason: "La navegación solicitada apunta al detalle ya identificado." };
 		}
 
 		return { action: "execute" };
@@ -628,7 +675,7 @@ export class AgentRuntime {
 			"# Navigation Decision Guidance",
 			`Previous tool: ${toolName} (${success ? "success" : "error"}).`,
 			`Remaining tool budget: ${remainingBudget}.`,
-			`Evidence: images=${ledger.imageUrls.length}, media=${ledger.mediaUrls.length}, searchScreenshots=${ledger.searchScreenshotUrls.length}, productScreenshots=${ledger.productScreenshotUrls.length}, productUrl=${ledger.productUrl ? "yes" : "no"}.`,
+			`Evidence: images=${ledger.imageUrls.length}, media=${ledger.mediaUrls.length}, screenshots=${ledger.capturedScreenshots.length}, detailScreenshots=${ledger.detailScreenshots.length}, detailUrl=${ledger.detailUrl ? "yes" : "no"}.`,
 			`Recent actions: ${recent || "none"}.`,
 			objectiveSatisfied
 				? "The requested evidence appears sufficient. Prefer answering now unless one clearly required artifact is still missing."
@@ -643,11 +690,11 @@ export class AgentRuntime {
 			`Objective: ${ledger.objectiveKind}`,
 			`Image URLs found: ${ledger.imageUrls.length}`,
 			`Media URLs found: ${ledger.mediaUrls.length}`,
-			`Search screenshots: ${ledger.searchScreenshotUrls.length}`,
-			`Product screenshots: ${ledger.productScreenshotUrls.length}`,
+			`Screenshots: ${ledger.capturedScreenshots.length}`,
+			`Detail screenshots: ${ledger.detailScreenshots.length}`,
 		];
-		if (ledger.productUrl) lines.push(`Product URL: ${ledger.productUrl}`);
-		if (ledger.searchUrl) lines.push(`Search URL: ${ledger.searchUrl}`);
+		if (ledger.detailUrl) lines.push(`Detail URL: ${ledger.detailUrl}`);
+		if (ledger.listUrl) lines.push(`List URL: ${ledger.listUrl}`);
 		if (ledger.blockers.length > 0) lines.push(`Blockers: ${ledger.blockers.join(" | ")}`);
 		if (ledger.imageUrls.length > 0) {
 			lines.push("Images:");
@@ -691,15 +738,15 @@ export class AgentRuntime {
 
 	private buildFallbackFinalResponse(ledger: EvidenceLedger, reason: string): string {
 		const lines = [`Detuve las herramientas porque ${reason}`];
-		if (ledger.searchScreenshotUrls.length > 0) {
-			lines.push("", "Captura de busqueda:");
-			ledger.searchScreenshotUrls.forEach((url) => lines.push(`![Captura](${url})`));
+		if (ledger.capturedScreenshots.length > 0) {
+			lines.push("", "Capturas:");
+			ledger.capturedScreenshots.forEach((url) => lines.push(`![Captura](${url})`));
 		}
-		if (ledger.productScreenshotUrls.length > 0) {
-			lines.push("", "Captura del producto:");
-			ledger.productScreenshotUrls.forEach((url) => lines.push(`![Producto](${url})`));
+		if (ledger.detailScreenshots.length > 0) {
+			lines.push("", "Capturas de detalle:");
+			ledger.detailScreenshots.forEach((url) => lines.push(`![Detalle](${url})`));
 		}
-		if (ledger.productUrl) lines.push("", `Producto: ${ledger.productUrl}`);
+		if (ledger.detailUrl) lines.push("", `URL de detalle: ${ledger.detailUrl}`);
 		if (ledger.imageUrls.length > 0) {
 			lines.push("", "Imagenes encontradas:");
 			ledger.imageUrls.slice(0, 20).forEach((url, index) => lines.push(`${index + 1}. ${url}`));
@@ -776,6 +823,9 @@ export class AgentRuntime {
 		};
 		this.stm.add(userTurn);
 
+		// Update working memory from user message
+		this.workingMemory.updateFromUserMessage(message);
+
 		const memories = await this.memoryRetrieval.retrieveForContext(message);
 
 		const skills = await this.skillLoader.resolveSkillsForTask({
@@ -841,6 +891,61 @@ export class AgentRuntime {
 		};
 		this.stm.add(userTurn);
 
+		// === Auto-escalado a multi-agente ===
+		if (this.orchestrator) {
+			try {
+				const shouldDecompose = await this.orchestrator.shouldDecompose(message);
+				if (shouldDecompose) {
+					const decomposition = await this.orchestrator.decompose(message);
+					if (decomposition.subtasks.length > 0) {
+						yield `\x00STATUS:orchestrating:${decomposition.subtasks.length}\x00`;
+						for await (const event of this.orchestrator.executeParallel(decomposition)) {
+							switch (event.type) {
+								case "worker_started":
+									yield `\x00STATUS:worker_start:${event.workerId}:${Buffer.from(event.description.slice(0, 100), "utf8").toString("base64")}\x00`;
+									break;
+								case "worker_progress":
+									yield `\x00STATUS:worker_progress:${event.workerId}:${Buffer.from(event.message.slice(0, 100), "utf8").toString("base64")}\x00`;
+									break;
+								case "worker_done":
+									yield `\x00STATUS:worker_done:${event.workerId}\x00`;
+									break;
+								case "worker_error":
+									yield `\x00STATUS:worker_error:${event.workerId}:${Buffer.from(event.error.slice(0, 100), "utf8").toString("base64")}\x00`;
+									break;
+								case "synthesis":
+									yield "\x00STATUS:responding\x00";
+									yield event.result;
+									// Guardar en STM y memoria
+									const assistantTurn: ConversationTurn = {
+										role: "assistant",
+										content: event.result,
+										timestamp: new Date(),
+										metadata: channelId ? { conversationId: channelId } : undefined,
+									};
+									this.stm.add(assistantTurn);
+									this.dailyMemory?.addMessage(message, "user", channelId || "system").catch(() => {});
+									this.dailyMemory?.addMessage(event.result, "assistant", channelId || "system").catch(() => {});
+									this.recordLearningExperience({
+										userRequest: message,
+										finalResponse: event.result,
+										channelId,
+										startedAt,
+										metadata: { mode: "multi-agent", workers: decomposition.subtasks.length },
+									});
+									return;
+							}
+						}
+						return; // Multi-agent completado
+					}
+				}
+			} catch (err) {
+				console.error("[Orchestrator] Falló, usando single-agent:", err instanceof Error ? err.message : err);
+				// Fallback a single-agent silenciosamente
+			}
+		}
+
+		// === Single-agent (flujo normal) ===
 		const memories = await this.memoryRetrieval.retrieveForContext(message);
 
 		const skills = await this.skillLoader.resolveSkillsForTask({
@@ -1421,6 +1526,27 @@ export class AgentRuntime {
 - NEVER claim that you do not have memory or that "each conversation starts fresh".
 - If no memories are provided in the context below, simply state that you don't have relevant information.`;
 
+		systemContent += `\n\n## AUTHENTICATED BROWSING (MANDATORY)
+Your browser has PERSISTENT SESSIONS. Cookies and login state are automatically saved to disk and restored when revisiting sites. This means:
+
+1. **NEVER refuse to interact with logged-in websites.** If the user says "check my Facebook/Instagram/etc", DO IT. The session cookies are already saved from a previous login. Do NOT say you "cannot handle credentials" or "cannot log in" — you are NOT logging in, you are using an EXISTING session.
+2. **If a site requires login and no session exists**, tell the user: "I need you to log in manually first. I'll open the page, you enter your credentials, and I'll remember the session for next time." Do NOT refuse the task entirely.
+3. **Sessions persist for 7 days** across restarts. The user does not need to re-login every time.
+4. **You CAN perform all human actions**: click, type, scroll, like, comment, post, upload, download, navigate menus, etc. You are a full browser automation agent.
+
+## SPA HANDLING (Facebook, Instagram, TikTok, YouTube, Reddit, Discord, etc.)
+Modern web apps (SPAs) use heavy JavaScript rendering. The accessibility tree (browser_snapshot) may return EMPTY or INCOMPLETE content. When this happens:
+
+1. **DO NOT give up or claim "the content won't load".** Instead, try these strategies IN ORDER:
+   a. First scroll down 2-3 times (browser_eval: window.scrollBy(0, 800)) and wait 2 seconds between scrolls to trigger lazy loading.
+   b. Use browser_eval to extract visible text directly from the DOM: document.body.innerText or specific selectors.
+   c. Take a browser_screenshot and analyze it visually to understand what's on screen.
+   d. Use browser_eval with platform-specific selectors (e.g., [role="article"] for Facebook posts, [data-testid="tweet"] for Twitter).
+2. **For Facebook specifically**: Navigate to facebook.com/your-page/notifications or use Meta Business Suite (business.facebook.com) which has better accessibility.
+3. **For comments/notifications**: Try direct URLs like facebook.com/page_id/notifications, youtube.com/comments, etc.
+4. **NEVER say "Facebook detects automation"** as an excuse. The browser has stealth mode, realistic fingerprints, and persistent sessions. Just interact naturally.
+5. **Be persistent**: If one approach fails, try another. Use at least 3 different strategies before reporting failure.`;
+
 		const activeModel = this.config.model ?? "unspecified";
 		const zaiVisionMode = this.shouldUseZaiVisionToolsForImages();
 		systemContent += `\n\n## BROWSER AUTOMATION RULES (MANDATORY)
@@ -1463,6 +1589,11 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 
 		if (contextParts.length > 0) {
 			systemContent += `\n\n${contextParts.join("\n\n")}`;
+		}
+
+		// Inject WorkingMemory state
+		if (this.workingMemory.hasContent()) {
+			systemContent += `\n\n${this.workingMemory.toContextString()}`;
 		}
 
 		messages.push({ role: "system", content: systemContent });

@@ -43,6 +43,12 @@ const BrowserSchema = Type.Object({
 		{ default: "decodo" },
 	),
 	confirmBlockWithVision: Type.Boolean({ default: true }),
+	blockResources: Type.Array(Type.String(), {
+		default: ["font"],
+	}),
+	blockTrackerDomains: Type.Boolean({ default: true }),
+	humanBehavior: Type.Boolean({ default: true }),
+	autoDismissPopups: Type.Boolean({ default: true }),
 });
 
 const AnthropicProviderSchema = Type.Object({

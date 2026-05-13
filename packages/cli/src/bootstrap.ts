@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
+import * as os from "node:os";
 import { join } from "node:path";
+import * as path from "node:path";
 import {
 	AgentManager,
 	AgentMessageBus,
@@ -45,6 +47,7 @@ import {
 	createVectorStore,
 	expandTildePath,
 	getZaiMCPConfigs,
+	EmbeddingProvider,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
@@ -166,35 +169,134 @@ function normalizeDynamicToolParameters(
 	return normalized;
 }
 
-const embedFn: EmbeddingFunction = async (text: string) => {
-	const dim = 384;
-	const vec = new Array(dim).fill(0);
+// --- Real Embedding Provider (Multi-Provider) ---
+function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
+	type ApiType = "openai" | "google" | "cohere" | "ollama";
 
-	const cleanText = text.toLowerCase().replace(/[^\w\s]/g, "");
-	const words = cleanText.split(/\s+/).filter((w) => w.length > 0);
+	let apiKey = "";
+	let baseUrl = "";
+	let model = "";
+	let apiType: ApiType = "openai";
+	let dimensions = 1024;
+	let providerName = "";
 
-	if (words.length === 0) {
-		return vec;
+	// Priority chain: zhipu → openai → google → deepseek → mistral → xai → cohere → ollama
+	const providers = config.ai.providers;
+
+	// 1. Zhipu/Z.ai (OpenAI-compatible)
+	if (!apiKey && providers.zhipu?.apiKey) {
+		apiKey = providers.zhipu.apiKey;
+		// Always use global API for embeddings (embedding-3 only exists on api.z.ai)
+		baseUrl = "https://api.z.ai/api/paas/v4";
+		model = "embedding-3";
+		apiType = "openai";
+		dimensions = 1024;
+		providerName = "Z.ai";
 	}
 
-	for (let i = 0; i < words.length; i++) {
-		const word = words[i];
-		let hash = 0;
-		for (let j = 0; j < word.length; j++) {
-			hash = (hash << 5) - hash + word.charCodeAt(j);
-			hash |= 0; // Convert to 32bit integer
-		}
-
-		const idx = Math.abs(hash) % dim;
-		vec[idx] += 1;
+	// 2. OpenAI
+	if (!apiKey && providers.openai?.apiKey) {
+		apiKey = providers.openai.apiKey;
+		baseUrl = "https://api.openai.com/v1";
+		model = "text-embedding-3-small";
+		apiType = "openai";
+		dimensions = 1536;
+		providerName = "OpenAI";
 	}
 
-	const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-	if (norm > 0) {
-		return vec.map((v) => v / norm);
+	// 3. Google/Gemini (native API)
+	if (!apiKey && providers.google?.apiKey) {
+		apiKey = providers.google.apiKey;
+		baseUrl = "https://generativelanguage.googleapis.com";
+		model = "text-embedding-004";
+		apiType = "google";
+		dimensions = 768;
+		providerName = "Google";
 	}
-	return vec;
-};
+
+	// 4. DeepSeek (OpenAI-compatible)
+	if (!apiKey && (providers as Record<string, any>).deepseek?.apiKey) {
+		const ds = (providers as Record<string, any>).deepseek;
+		apiKey = ds.apiKey;
+		baseUrl = ds.baseUrl || "https://api.deepseek.com/v1";
+		model = "deepseek-embed";
+		apiType = "openai";
+		dimensions = 1024;
+		providerName = "DeepSeek";
+	}
+
+	// 5. Mistral (OpenAI-compatible)
+	if (!apiKey && (providers as Record<string, any>).mistral?.apiKey) {
+		const ms = (providers as Record<string, any>).mistral;
+		apiKey = ms.apiKey;
+		baseUrl = ms.baseUrl || "https://api.mistral.ai/v1";
+		model = "mistral-embed";
+		apiType = "openai";
+		dimensions = 1024;
+		providerName = "Mistral";
+	}
+
+	// 6. xAI/Grok (OpenAI-compatible)
+	if (!apiKey && (providers as Record<string, any>).xai?.apiKey) {
+		const xai = (providers as Record<string, any>).xai;
+		apiKey = xai.apiKey;
+		baseUrl = xai.baseUrl || "https://api.x.ai/v1";
+		model = "v1";
+		apiType = "openai";
+		dimensions = 1024;
+		providerName = "xAI";
+	}
+
+	// 7. Cohere (native API)
+	if (!apiKey && (providers as Record<string, any>).cohere?.apiKey) {
+		const co = (providers as Record<string, any>).cohere;
+		apiKey = co.apiKey;
+		baseUrl = co.baseUrl || "https://api.cohere.com";
+		model = "embed-multilingual-v3.0";
+		apiType = "cohere";
+		dimensions = 1024;
+		providerName = "Cohere";
+	}
+
+	// 8. Ollama (local, no API key needed)
+	if (!apiKey && providers.local) {
+		const localUrl = providers.local.baseUrl || "http://localhost:11434";
+		apiKey = "ollama"; // Ollama doesn't need real key, but we use it as flag
+		baseUrl = localUrl;
+		model = "nomic-embed-text";
+		apiType = "ollama";
+		dimensions = 768;
+		providerName = "Ollama";
+	}
+
+	const provider = new EmbeddingProvider({
+		apiKey: apiKey === "ollama" ? "" : apiKey, // Ollama needs empty key
+		baseUrl,
+		model,
+		apiType,
+		dimensions,
+		maxBatchSize: apiType === "ollama" ? 8 : 32,
+		maxTextLength: 8000,
+		cacheSize: 500,
+	});
+
+	// Ollama needs the key set but empty works for auth-less endpoints
+	if (apiKey === "ollama") {
+		// Override: Ollama doesn't use auth headers
+		(provider as any).config.apiKey = "nokey";
+	}
+
+	if (apiKey) {
+		console.log(`  ✓ Embedding provider: ${model} via ${providerName} (${apiType})`);
+	} else {
+		console.log("  ⚠ No embedding API — using hash fallback (semantic search limited)");
+	}
+
+	return provider;
+}
+
+
+
 
 function normalizeBrowserWsUrl(...values: Array<string | undefined | null>): string | undefined {
 	for (const value of values) {
@@ -244,6 +346,10 @@ export async function bootstrap(options?: {
 	const vectorStore = createVectorStore(config.memory.longTerm.backend, db);
 	const ltm = new LongTermMemory(vectorStore, db);
 
+	// Real Embedding Provider — replaces the old hash-based stub
+	const embeddingProvider = createEmbeddingProvider(config);
+	const embedFn: EmbeddingFunction = embeddingProvider.getEmbedFunction();
+
 	const memoryRetrieval = new MemoryRetrieval(ltm, stm, embedFn, {
 		maxResults: config.memory.retrieval.maxResults,
 		maxTokens: config.memory.retrieval.maxTokens,
@@ -284,6 +390,61 @@ export async function bootstrap(options?: {
 		thinking: config.ai.thinking,
 	});
 	await router.initialize();
+
+	// Wire STM condensation callback — uses LLM to summarize before evicting
+	stm.setCondensationCallback(async (turns) => {
+		try {
+			const text = turns.map((t) => `[${t.role}]: ${t.content.slice(0, 300)}`).join("\n");
+			const response = await router.chat({
+				model: config.ai.default,
+				messages: [
+					{
+						role: "system",
+						content: "Extract a brief summary (max 150 words) preserving: user goals, decisions made, errors encountered, file paths, URLs, and key data points. Output ONLY the summary, nothing else.",
+					},
+					{ role: "user", content: text },
+				],
+				maxTokens: 300,
+				temperature: 0.1,
+			});
+			return response.content;
+		} catch {
+			return "";
+		}
+	});
+
+	// Wire LLM-based fact extraction for consolidator
+	memoryConsolidator.setLLMExtractor(async (conversationText) => {
+		try {
+			const response = await router.chat({
+				model: config.ai.default,
+				messages: [
+					{
+						role: "system",
+						content: `Extract structured information from this conversation. Return ONLY valid JSON with this schema:
+{"facts": ["string"], "decisions": ["string"], "errors": ["string"], "toolsUsed": ["string"]}
+- facts: Important facts, preferences, or knowledge mentioned
+- decisions: Decisions made or preferences stated  
+- errors: Errors encountered and their resolutions
+- toolsUsed: Names of tools/commands used
+Keep each item concise (1 sentence max). Return empty arrays if nothing relevant found.`,
+					},
+					{ role: "user", content: conversationText },
+				],
+				maxTokens: 500,
+				temperature: 0.1,
+			});
+			const parsed = JSON.parse(response.content.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+			return {
+				facts: Array.isArray(parsed.facts) ? parsed.facts : [],
+				decisions: Array.isArray(parsed.decisions) ? parsed.decisions : [],
+				errors: Array.isArray(parsed.errors) ? parsed.errors : [],
+				toolsUsed: Array.isArray(parsed.toolsUsed) ? parsed.toolsUsed : [],
+			};
+		} catch {
+			return { facts: [], decisions: [], errors: [], toolsUsed: [] };
+		}
+	});
 
 	const dailyMemory = new GlobalDailyMemory(db, router, tokenCounter, {
 		maxTokens: 1500,
@@ -375,19 +536,27 @@ export async function bootstrap(options?: {
 		toolRegistry.register(tool);
 	};
 
+	const defaultAllowedPaths = [
+		os.homedir(),
+		path.join(os.homedir(), ".octopus"),
+		process.cwd(),
+	];
+	const userAllowedPaths = (config as any).tools?.allowedPaths || [];
+	const allowedPaths = [...new Set([...defaultAllowedPaths, ...userAllowedPaths])];
+
 	const toolExecutor = new ToolExecutor(toolRegistry, {
-		sandboxCommands: false,
-		allowedPaths: [],
+		sandboxCommands: true,
+		allowedPaths,
 		timeouts: config.tools.timeouts,
 	});
 
-	const filesystemTools = createFileSystemTools([]);
+	const filesystemTools = createFileSystemTools(allowedPaths);
 	for (const tool of filesystemTools) {
 		registerSystemTool(tool);
 	}
 
 	const shellTool = createShellTool({
-		sandboxCommands: false,
+		sandboxCommands: true,
 	});
 	registerSystemTool(shellTool);
 
@@ -618,6 +787,10 @@ export async function bootstrap(options?: {
 			autoFallbackOnBlock: browserCfg.autoFallbackOnBlock,
 			blockFallbackProvider: browserCfg.blockFallbackProvider,
 			confirmBlockWithVision: browserCfg.confirmBlockWithVision,
+			blockResources: browserCfg.blockResources,
+			blockTrackerDomains: browserCfg.blockTrackerDomains,
+			humanBehavior: browserCfg.humanBehavior,
+			autoDismissPopups: browserCfg.autoDismissPopups,
 		};
 
 		if (!(isEmbedded || isBrightData || isDecodo || isAuto)) {
@@ -962,6 +1135,10 @@ Always be concise, helpful, and thorough.`,
 	agentRuntime.setDailyMemory(dailyMemory);
 	agentRuntime.setUserProfileManager(userProfileManager);
 	agentRuntime.setLearningEngine(learningEngine);
+	agentRuntime.enableOrchestrator({
+		maxWorkers: 5,
+		complexityThreshold: 5,
+	});
 	await agentRuntime.initialize();
 
 	const mainAgentRecord: AgentRecord = {

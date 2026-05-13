@@ -1,5 +1,11 @@
 import type { ConversationTurn, TaskState } from "../agent/types.js";
 
+/**
+ * CondensationCallback — permite al STM solicitar un resumen
+ * sin acoplarse directamente al LLMRouter.
+ */
+export type CondensationCallback = (turns: ConversationTurn[]) => Promise<string>;
+
 export class ShortTermMemory {
 	private workingContext: ConversationTurn[] = [];
 	private scratchPad: Map<string, string> = new Map();
@@ -10,6 +16,14 @@ export class ShortTermMemory {
 		countTokens: (text: string) => number;
 		countMessagesTokens: (msgs: ConversationTurn[]) => number;
 	};
+
+	/**
+	 * Condensed summaries of evicted segments.
+	 * These get injected at the start of context to preserve continuity.
+	 */
+	private condensedHistory: string[] = [];
+	private condensationFn: CondensationCallback | null = null;
+	private condensing = false;
 
 	constructor(config: {
 		maxTokens: number;
@@ -25,21 +39,45 @@ export class ShortTermMemory {
 		this.tokenCounter = config.tokenCounter;
 	}
 
+	/**
+	 * Set the condensation callback (typically wired to the LLM).
+	 * If not set, falls back to heuristic extraction.
+	 */
+	setCondensationCallback(fn: CondensationCallback): void {
+		this.condensationFn = fn;
+	}
+
 	add(turn: ConversationTurn): void {
 		this.workingContext.push(turn);
 		if (this.autoEviction) {
-			this.evictOldest();
+			this.evictWithCondensation();
 		}
 	}
 
 	getRelevant(_query: string, maxTokens: number): ConversationTurn[] {
 		let tokenBudget = maxTokens;
 		const result: ConversationTurn[] = [];
+
+		// Include condensed history first
+		if (this.condensedHistory.length > 0) {
+			const historyTurn: ConversationTurn = {
+				role: "system",
+				content: `## Previous Context (condensed)\n${this.condensedHistory.join("\n\n---\n\n")}`,
+				timestamp: new Date(),
+			};
+			const historyTokens = this.tokenCounter.countTokens(historyTurn.content);
+			if (historyTokens <= tokenBudget) {
+				result.push(historyTurn);
+				tokenBudget -= historyTokens;
+			}
+		}
+
+		// Then recent messages (most recent first)
 		for (let i = this.workingContext.length - 1; i >= 0; i--) {
 			const turn = this.workingContext[i];
 			const tokens = this.tokenCounter.countTokens(turn.content);
 			if (tokens <= tokenBudget) {
-				result.unshift(turn);
+				result.splice(this.condensedHistory.length > 0 ? 1 : 0, 0, turn);
 				tokenBudget -= tokens;
 			}
 		}
@@ -66,6 +104,7 @@ export class ShortTermMemory {
 		this.workingContext = [];
 		this.scratchPad.clear();
 		this.activeTask = null;
+		this.condensedHistory = [];
 	}
 
 	getLoad(): number {
@@ -77,11 +116,123 @@ export class ShortTermMemory {
 		return [...this.workingContext];
 	}
 
+	getCondensedHistory(): string[] {
+		return [...this.condensedHistory];
+	}
+
 	getTokenCount(): number {
 		return this.tokenCounter.countMessagesTokens(this.workingContext);
 	}
 
-	private evictOldest(): void {
+	/**
+	 * Intelligent eviction: condense old messages before discarding.
+	 * Preserves: user goals, errors, decisions, and key data.
+	 */
+	private evictWithCondensation(): void {
+		if (this.getTokenCount() <= this.maxTokens) return;
+		if (this.condensing) {
+			// If already condensing, do simple eviction to prevent overflow
+			this.evictOldestSimple();
+			return;
+		}
+
+		// Determine how many turns to evict (evict oldest half)
+		const totalTurns = this.workingContext.length;
+		if (totalTurns <= 2) {
+			this.evictOldestSimple();
+			return;
+		}
+
+		const evictCount = Math.max(2, Math.floor(totalTurns / 2));
+		const toEvict = this.workingContext.slice(0, evictCount);
+		const toKeep = this.workingContext.slice(evictCount);
+
+		// Generate condensed summary (async, non-blocking)
+		this.condensing = true;
+		if (this.condensationFn) {
+			this.condensationFn(toEvict)
+				.then((summary) => {
+					if (summary && summary.trim().length > 0) {
+						this.condensedHistory.push(summary);
+						// Keep max 5 condensed segments (~2500 tokens)
+						if (this.condensedHistory.length > 5) {
+							this.condensedHistory.shift();
+						}
+					}
+				})
+				.catch(() => {
+					// Fallback: use heuristic
+					const fallback = this.heuristicCondensation(toEvict);
+					if (fallback) this.condensedHistory.push(fallback);
+				})
+				.finally(() => {
+					this.condensing = false;
+				});
+		} else {
+			const fallback = this.heuristicCondensation(toEvict);
+			if (fallback) {
+				this.condensedHistory.push(fallback);
+				if (this.condensedHistory.length > 5) {
+					this.condensedHistory.shift();
+				}
+			}
+			this.condensing = false;
+		}
+
+		this.workingContext = toKeep;
+	}
+
+	/**
+	 * Heuristic condensation without LLM.
+	 * Extracts: user requests, errors, decisions, URLs/paths.
+	 */
+	private heuristicCondensation(turns: ConversationTurn[]): string | null {
+		const parts: string[] = [];
+
+		// Extract user requests
+		const userMessages = turns
+			.filter((t) => t.role === "user")
+			.map((t) => t.content.slice(0, 150).replace(/\n/g, " "));
+		if (userMessages.length > 0) {
+			parts.push(`User asked: ${userMessages.join("; ")}`);
+		}
+
+		// Extract errors mentioned
+		const errorMentions = turns
+			.filter((t) => /error|fail|crash|exception|bug/i.test(t.content))
+			.map((t) => {
+				const match = t.content.match(/(?:error|fail|exception|bug)[^.!?\n]{0,120}/i);
+				return match ? match[0].trim() : null;
+			})
+			.filter(Boolean);
+		if (errorMentions.length > 0) {
+			parts.push(`Errors: ${errorMentions.slice(0, 3).join("; ")}`);
+		}
+
+		// Extract URLs and file paths
+		const pathsAndUrls = turns
+			.flatMap((t) => {
+				const urls = t.content.match(/https?:\/\/[^\s)]+/g) || [];
+				const paths = t.content.match(/[\/\\][\w\-\.\/\\]+\.\w{1,6}/g) || [];
+				return [...urls, ...paths];
+			})
+			.filter((v, i, a) => a.indexOf(v) === i)
+			.slice(0, 5);
+		if (pathsAndUrls.length > 0) {
+			parts.push(`Key paths/URLs: ${pathsAndUrls.join(", ")}`);
+		}
+
+		// Active task info
+		if (this.activeTask) {
+			parts.push(`Active task: ${this.activeTask.description}`);
+		}
+
+		if (parts.length === 0) return null;
+		return parts.join(". ");
+	}
+
+	/** Simple FIFO eviction as last resort */
+	private evictOldestSimple(): void {
 		while (
 			this.workingContext.length > 0 &&
 			this.getTokenCount() > this.maxTokens

@@ -14,3 +14,13 @@ export { createMediaTools, mediaContext } from "./media.js";
 export { createAutomationTools } from "./automation.js";
 export { createTeamTools } from "./team.js";
 export { createSandboxTools } from "./sandbox-tool.js";
+
+// Stealth browsing
+export { ProxyManager } from "./proxy-manager.js";
+export type { ProxyConfig } from "./proxy-manager.js";
+export { HumanBehavior } from "./human-behavior.js";
+export type {
+	HumanTypingOptions,
+	HumanMouseOptions,
+	HumanScrollOptions,
+} from "./human-behavior.js";

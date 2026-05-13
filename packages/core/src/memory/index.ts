@@ -13,6 +13,7 @@ export { ShortTermMemory } from "./stm.js";
 export { LongTermMemory } from "./ltm.js";
 export { MemoryRetrieval } from "./retrieval.js";
 export { MemoryConsolidator } from "./consolidator.js";
+export type { LLMExtractCallback } from "./consolidator.js";
 export { SqliteVectorStore } from "./sqlite-vss.js";
 export { VectorStore } from "./store.js";
 export { createVectorStore } from "./factory.js";
@@ -25,3 +26,10 @@ export type { UserProfile, UserModelingConfig, UserDecision, WorkflowPattern } f
 
 export { GlobalDailyMemory } from "./daily.js";
 export type { GlobalDailyMemoryConfig } from "./daily.js";
+
+export { EmbeddingProvider } from "./embedding-provider.js";
+export type { EmbeddingProviderConfig, EmbeddingResult, EmbeddingApiType } from "./embedding-provider.js";
+
+export { WorkingMemory } from "./working-memory.js";
+export type { WorkingState } from "./working-memory.js";
+export type { CondensationCallback } from "./stm.js";

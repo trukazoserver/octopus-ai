@@ -20,6 +20,10 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		autoFallbackOnBlock: true,
 		blockFallbackProvider: "decodo",
 		confirmBlockWithVision: true,
+		blockResources: ["font"],
+		blockTrackerDomains: true,
+		humanBehavior: true,
+		autoDismissPopups: true,
 	},
 	mascots: {
 		defaultId: "pulpo-octavio",

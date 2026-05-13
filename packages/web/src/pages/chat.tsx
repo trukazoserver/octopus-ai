@@ -99,13 +99,8 @@ interface Agent {
 	description?: string;
 }
 
-function nanoid(size = 16): string {
-	const chars =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-	let id = "";
-	for (let i = 0; i < size; i++)
-		id += chars[Math.floor(Math.random() * chars.length)];
-	return id;
+function nanoid(): string {
+	return crypto.randomUUID();
 }
 
 function formatTime(ts: number): string {
@@ -182,6 +177,13 @@ function AgentActivityIcon({
 }) {
 	const color = activityColor(activity.status);
 	if (activity.iconSvg && (activity.status === "tool" || activity.status === "code")) {
+		const sanitizedSvg = DOMPurify.sanitize(activity.iconSvg, {
+			USE_PROFILES: { svg: true, svgFilters: true },
+			ADD_TAGS: ["svg", "path", "circle", "line", "polyline", "polygon", "rect", "ellipse", "g", "defs", "use", "animate", "animateTransform"],
+			ADD_ATTR: ["viewBox", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "d", "cx", "cy", "r", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "points", "opacity", "transform", "style"],
+			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
+			FORBID_TAGS: ["script", "iframe", "object", "embed"],
+		});
 		return (
 			<span
 				style={{
@@ -191,8 +193,8 @@ function AgentActivityIcon({
 					color,
 					animation: active ? "toolFloat 1.4s infinite ease-in-out" : undefined,
 				}}
-				// biome-ignore lint/security/noDangerouslySetInnerHtml: controlled server SVG icon
-				dangerouslySetInnerHTML={{ __html: activity.iconSvg }}
+				// biome-ignore lint/security/noDangerouslySetInnerHtml: SVG sanitized via DOMPurify
+				dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
 			/>
 		);
 	}
@@ -380,10 +382,10 @@ function renderMarkdown(text: string): string {
 				"controls",
 				"loading",
 				"preload",
-				"onclick",
 				"style",
 				"class",
 			],
+			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
 		});
 	} catch {
 		return DOMPurify.sanitize(text, {
@@ -393,10 +395,10 @@ function renderMarkdown(text: string): string {
 				"controls",
 				"loading",
 				"preload",
-				"onclick",
 				"style",
 				"class",
 			],
+			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
 		});
 	}
 }
@@ -522,7 +524,7 @@ export const ChatPage: React.FC = () => {
 			setAgentActivity((prev) => [
 				...prev,
 				{
-					id: nanoid(8),
+					id: nanoid(),
 					status,
 					label: copy.label,
 					detail,
@@ -961,7 +963,7 @@ export const ChatPage: React.FC = () => {
 		const initialActivityCopy = getActivityCopy("thinking");
 		setAgentActivity([
 			{
-				id: nanoid(8),
+				id: nanoid(),
 				status: "thinking",
 				label: initialActivityCopy.label,
 				detail: initialActivityCopy.detail,
@@ -1065,7 +1067,7 @@ export const ChatPage: React.FC = () => {
 			console.error("Upload error:", error);
 			setAgentActivity((prev) => [
 				{
-					id: nanoid(8),
+					id: nanoid(),
 					status: "tool_error",
 					label: "No se pudo adjuntar la imagen",
 					detail: error instanceof Error ? error.message : "Error de subida",

@@ -15,8 +15,20 @@ type PartialMemoryItem = Omit<
 	"id" | "embedding" | "createdAt" | "associations"
 >;
 
+/**
+ * Callback for LLM-based fact extraction.
+ * Should return structured extraction from conversation turns.
+ */
+export type LLMExtractCallback = (conversationText: string) => Promise<{
+	facts: string[];
+	decisions: string[];
+	errors: string[];
+	toolsUsed: string[];
+}>;
+
 export class MemoryConsolidator {
 	private db: DatabaseAdapter;
+	private llmExtractor: LLMExtractCallback | null = null;
 	constructor(
 		private ltm: LongTermMemory,
 		db: DatabaseAdapter,
@@ -30,6 +42,14 @@ export class MemoryConsolidator {
 		},
 	) {
 		this.db = db;
+	}
+
+	/**
+	 * Set LLM-based extraction callback for higher quality fact extraction.
+	 * Falls back to regex if not set or if LLM fails.
+	 */
+	setLLMExtractor(fn: LLMExtractCallback): void {
+		this.llmExtractor = fn;
 	}
 
 	async consolidate(stm: ShortTermMemory): Promise<ConsolidationResult> {
@@ -67,10 +87,18 @@ export class MemoryConsolidator {
 
 		let allItems: (PartialMemoryItem & { importance: number })[] = [];
 
-		if (this.config.extractFacts) {
-			const facts = this.extractFacts(turns);
-			const scored = await this.scoreImportance(facts);
+		// Try LLM extraction first (much higher quality)
+		const llmItems = await this.tryLLMExtraction(turns);
+		if (llmItems.length > 0) {
+			const scored = await this.scoreImportance(llmItems);
 			allItems = allItems.concat(scored);
+		} else {
+			// Fallback to regex-based extraction
+			if (this.config.extractFacts) {
+				const facts = this.extractFacts(turns);
+				const scored = await this.scoreImportance(facts);
+				allItems = allItems.concat(scored);
+			}
 		}
 
 		if (this.config.extractEvents) {
@@ -109,6 +137,90 @@ export class MemoryConsolidator {
 		result.forgotten = decayResult.forgotten;
 
 		return result;
+	}
+
+	/**
+	 * Try LLM-based extraction for higher quality fact capture.
+	 * Returns empty array if LLM is not configured or fails.
+	 */
+	private async tryLLMExtraction(turns: ConversationTurn[]): Promise<PartialMemoryItem[]> {
+		if (!this.llmExtractor) return [];
+
+		try {
+			// Build conversation text for the LLM
+			const conversationText = turns
+				.map((t) => `[${t.role}]: ${t.content.slice(0, 500)}`)
+				.join("\n");
+
+			if (conversationText.length < 20) return [];
+
+			const extraction = await this.llmExtractor(conversationText);
+			const items: PartialMemoryItem[] = [];
+			const now = new Date();
+
+			// Convert facts
+			for (const fact of extraction.facts) {
+				if (fact.trim().length > 5) {
+					items.push({
+						type: "semantic" as MemoryType,
+						content: fact.trim(),
+						importance: 0,
+						accessCount: 0,
+						lastAccessed: now,
+						source: {},
+						metadata: { extractedFrom: "llm", category: "fact" },
+					});
+				}
+			}
+
+			// Convert decisions
+			for (const decision of extraction.decisions) {
+				if (decision.trim().length > 5) {
+					items.push({
+						type: "semantic" as MemoryType,
+						content: `Decision: ${decision.trim()}`,
+						importance: 0,
+						accessCount: 0,
+						lastAccessed: now,
+						source: {},
+						metadata: { extractedFrom: "llm", category: "decision" },
+					});
+				}
+			}
+
+			// Convert errors
+			for (const error of extraction.errors) {
+				if (error.trim().length > 5) {
+					items.push({
+						type: "episodic" as MemoryType,
+						content: `Error encountered: ${error.trim()}`,
+						importance: 0,
+						accessCount: 0,
+						lastAccessed: now,
+						source: {},
+						metadata: { extractedFrom: "llm", category: "error" },
+					});
+				}
+			}
+
+			// Convert tools used
+			if (extraction.toolsUsed.length > 0) {
+				items.push({
+					type: "procedural" as MemoryType,
+					content: `Tools used in workflow: ${extraction.toolsUsed.join(", ")}`,
+					importance: 0,
+					accessCount: 0,
+					lastAccessed: now,
+					source: {},
+					metadata: { extractedFrom: "llm", category: "procedure" },
+				});
+			}
+
+			return items;
+		} catch {
+			// LLM failed, return empty to trigger regex fallback
+			return [];
+		}
 	}
 
 	private extractFacts(turns: ConversationTurn[]): PartialMemoryItem[] {

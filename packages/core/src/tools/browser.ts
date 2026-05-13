@@ -3,7 +3,12 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { chromium } from "playwright-extra";
+import stealthPlugin from "puppeteer-extra-plugin-stealth";
+
+chromium.use(stealthPlugin());
+
 import type { ToolDefinition, ToolResult, ToolContext } from "./registry.js";
+import { HumanBehavior } from "./human-behavior.js";
 
 const BROWSER_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
 const DATADOME_BLOCK_RE = /datadome|captcha-delivery|geo\.captcha-delivery\.com|ct\.captcha-delivery\.com|ddcid|ddv|ddjskey|Pardon Our Interruption/i;
@@ -40,6 +45,112 @@ const REALISTIC_VIEWPORTS = [
 	{ width: 1600, height: 900 },
 ];
 
+const TRACKER_DOMAINS = [
+	"google-analytics.com",
+	"googletagmanager.com",
+	"facebook.net",
+	"connect.facebook.net",
+	"hotjar.com",
+	"intercom.io",
+	"crisp.chat",
+	"doubleclick.net",
+	"adservice.google.com",
+	"pagead2.googlesyndication.com",
+	"amazon-adsystem.com",
+	"adnxs.com",
+	"adsrvr.org",
+	"bidswitch.net",
+	"casalemedia.com",
+	"criteo.com",
+	"demdex.net",
+	"moatads.com",
+	"outbrain.com",
+	"rubiconproject.com",
+	"scorecardresearch.com",
+	"serving-sys.com",
+	"sharethis.com",
+	"taboola.com",
+	"tapad.com",
+	"quantserve.com",
+	"newrelic.com",
+	"fullstory.com",
+	"log_entries",
+	"segment.io",
+	"segment.com",
+	"amplitude.com",
+	"mixpanel.com",
+	"pendo.io",
+	"clarity.ms",
+	"bing.com/widget",
+];
+
+const POPUP_COOKIE_SELECTORS = [
+	"button:has-text('Aceptar')",
+	"button:has-text('Aceptar todo')",
+	"button:has-text('Accept')",
+	"button:has-text('Accept all')",
+	"button:has-text('I agree')",
+	"button:has-text('Agree')",
+	"button:has-text('OK')",
+	"button:has-text('Got it')",
+	"button:has-text('Entendido')",
+	"button:has-text('Continuar')",
+	"button:has-text('Allow')",
+	"button:has-text('Allow all')",
+	"#accept-cookies",
+	"#cookie-accept",
+	"#onetrust-accept-btn-handler",
+	"#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+	".cookie-accept",
+	".accept-cookies",
+	"[data-testid='cookie-accept']",
+	"[aria-label='Accept cookies']",
+	"[class*='accept'][class*='cookie']",
+	"[id*='accept'][id*='cookie']",
+	"[class*='cookie'][class*='btn']",
+];
+
+const POPUP_CLOSE_SELECTORS = [
+	"button:has-text('×')",
+	"button:has-text('✕')",
+	"button:has-text('Close')",
+	"button:has-text('Cerrar')",
+	"button:has-text('No gracias')",
+	"button:has-text('No thanks')",
+	"button:has-text('Skip')",
+	"button:has-text('Omitir')",
+	"button:has-text('Maybe later')",
+	"button:has-text('Más tarde')",
+	"[aria-label='Close']",
+	"[aria-label='Cerrar']",
+	"[aria-label='Dismiss']",
+	".modal-close",
+	".close-button",
+	".btn-close",
+	"[class*='close'][class*='modal']",
+	"[class*='dismiss']",
+	"[class*='popup-close']",
+	"button[class*='close']",
+	"span[class*='close']",
+	"a[class*='close']",
+];
+
+const LOCALE_TIMEZONE_MAP: Record<string, { locale: string; timezoneId: string; locales: string[] }> = {
+	"America/New_York": { locale: "en-US", timezoneId: "America/New_York", locales: ["en-US", "en"] },
+	"America/Chicago": { locale: "en-US", timezoneId: "America/Chicago", locales: ["en-US", "en"] },
+	"America/Los_Angeles": { locale: "en-US", timezoneId: "America/Los_Angeles", locales: ["en-US", "en"] },
+	"America/Lima": { locale: "es-PE", timezoneId: "America/Lima", locales: ["es-PE", "es", "en-US", "en"] },
+	"America/Mexico_City": { locale: "es-MX", timezoneId: "America/Mexico_City", locales: ["es-MX", "es", "en-US", "en"] },
+	"America/Bogota": { locale: "es-CO", timezoneId: "America/Bogota", locales: ["es-CO", "es", "en-US", "en"] },
+	"America/Buenos_Aires": { locale: "es-AR", timezoneId: "America/Buenos_Aires", locales: ["es-AR", "es", "en-US", "en"] },
+	"Europe/Madrid": { locale: "es-ES", timezoneId: "Europe/Madrid", locales: ["es-ES", "es", "en-US", "en"] },
+	"Europe/Berlin": { locale: "de-DE", timezoneId: "Europe/Berlin", locales: ["de-DE", "de", "en-US", "en"] },
+	"Europe/London": { locale: "en-GB", timezoneId: "Europe/London", locales: ["en-GB", "en"] },
+	"Europe/Paris": { locale: "fr-FR", timezoneId: "Europe/Paris", locales: ["fr-FR", "fr", "en-US", "en"] },
+};
+
+const TIMEZONE_KEYS = Object.keys(LOCALE_TIMEZONE_MAP);
+
 const STEALTH_INIT_SCRIPT = `
 (() => {
 	// Overwrite navigator.webdriver
@@ -49,6 +160,9 @@ const STEALTH_INIT_SCRIPT = `
 	delete window.__playwright;
 	delete window.__pw_manual;
 	delete window.__PW_inspect;
+	delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+	delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+	delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
 
 	// Override chrome runtime
 	if (!window.chrome) {
@@ -83,8 +197,7 @@ const STEALTH_INIT_SCRIPT = `
 	// Override languages
 	Object.defineProperty(navigator, 'languages', {
 		get: () => {
-			const lang = navigator.language || 'en-US';
-			return [lang, lang.split('-')[0], 'en-US', 'en'];
+			return window.__octopusFpLanguages || [navigator.language || 'en-US', 'en'];
 		},
 	});
 
@@ -273,6 +386,8 @@ function generateFingerprint(): {
 	screen: { width: number; height: number; availWidth: number; availHeight: number };
 	platform: string;
 	locale: string;
+	timezoneId: string;
+	locales: string[];
 } {
 	const ua = pickRandom(REALISTIC_USER_AGENTS);
 	const viewport = pickRandom(REALISTIC_VIEWPORTS);
@@ -287,9 +402,17 @@ function generateFingerprint(): {
 		: ua.includes("Linux")
 			? "Linux x86_64"
 			: "Win32";
-	const locales = ["en-US", "en-GB", "es-ES", "de-DE", "fr-FR"];
-	const locale = pickRandom(locales);
-	return { userAgent: ua, viewport, screen, platform, locale };
+	const tzKey = pickRandom(TIMEZONE_KEYS);
+	const tzInfo = LOCALE_TIMEZONE_MAP[tzKey];
+	return {
+		userAgent: ua,
+		viewport,
+		screen,
+		platform,
+		locale: tzInfo.locale,
+		timezoneId: tzInfo.timezoneId,
+		locales: tzInfo.locales,
+	};
 }
 
 type BrowserProvider = "embedded" | "brightdata" | "decodo";
@@ -475,6 +598,10 @@ export interface BrowserConfig {
 	autoFallbackOnBlock?: boolean;
 	blockFallbackProvider?: BrowserProvider;
 	confirmBlockWithVision?: boolean;
+	blockResources?: string[];
+	blockTrackerDomains?: boolean;
+	humanBehavior?: boolean;
+	autoDismissPopups?: boolean;
 }
 
 interface BrowserBlockDetectionResult {
@@ -499,6 +626,7 @@ export class BrowserTool {
 	private page: any = null;
 	private activeProvider: BrowserProvider | null = null;
 	private fingerprint: ReturnType<typeof generateFingerprint> | null = null;
+	private humanSim = new HumanBehavior();
 	private lastSnapshot: { id: string; url: string; createdAt: number; output: string; uidToSelector: Map<string, string> } | null = null;
 
 	constructor(config: BrowserConfig) {
@@ -514,6 +642,7 @@ export class BrowserTool {
 
 	private buildBrowserContextOptions(): Record<string, unknown> {
 		const fp = this.ensureFingerprint();
+		const acceptLangs = fp.locales.join(",");
 		return {
 			viewport: fp.viewport,
 			userAgent: fp.userAgent,
@@ -524,15 +653,29 @@ export class BrowserTool {
 			hasTouch: false,
 			isMobile: false,
 			javaScriptEnabled: true,
-			timezoneId: pickRandom(["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/Madrid", "Europe/Berlin", "Europe/London"]),
+			timezoneId: fp.timezoneId,
+			geolocation: { latitude: 0, longitude: 0 },
+			permissions: ["geolocation"],
 			extraHTTPHeaders: {
-				"Accept-Language": `${fp.locale},${fp.locale.split("-")[0]};q=0.9,en;q=0.8`,
+				"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+				"Accept-Language": `${acceptLangs};q=0.9`,
+				"Accept-Encoding": "gzip, deflate, br",
+				"DNT": "1",
+				"Upgrade-Insecure-Requests": "1",
+				"Sec-Fetch-Dest": "document",
+				"Sec-Fetch-Mode": "navigate",
+				"Sec-Fetch-Site": "none",
+				"Sec-Fetch-User": "?1",
 			},
 		};
 	}
 
 	private async addBrowserInitScripts(): Promise<void> {
 		if (!this.context) return;
+		const fp = this.ensureFingerprint();
+		await this.context.addInitScript((locales) => {
+			window.__octopusFpLanguages = locales;
+		}, fp.locales);
 		await this.context.addInitScript(STEALTH_INIT_SCRIPT);
 		await this.context.addInitScript(CAPTCHA_INIT_SCRIPT);
 	}
@@ -595,8 +738,12 @@ export class BrowserTool {
 			const title = await this.page.title().catch(() => "");
 			const text = await this.page.evaluate(() => document.body?.innerText || "").catch(() => "");
 			const html = await this.page.content().catch(() => "");
-			const combined = `${title}\n${text}\n${html.slice(0, 20000)}`;
-			return DATADOME_BLOCK_RE.test(combined) || GENERIC_BLOCK_RE.test(combined);
+			
+			// Only check HTML for highly specific provider tokens to avoid false positives on words like "challenge"
+			const htmlBlock = DATADOME_BLOCK_RE.test(html.slice(0, 20000));
+			const textBlock = DATADOME_BLOCK_RE.test(`${title}\n${text}`) || GENERIC_BLOCK_RE.test(`${title}\n${text}`);
+			
+			return htmlBlock || textBlock;
 		} catch {
 			return false;
 		}
@@ -1104,30 +1251,19 @@ export class BrowserTool {
 	private async autoAcceptCookies(): Promise<void> {
 		if (!this.page) return;
 		try {
-			// Multi-language cookie consent keywords
 			const keywords = [
-				// English
 				"accept all cookies", "accept all", "accept cookies", "allow all", "allow all cookies",
 				"agree", "agree and continue", "okay", "ok", "got it", "i agree", "consent",
-				// Spanish
 				"aceptar todo", "aceptar todas", "aceptar cookies", "aceptar", "permitir",
-				// Swedish (Bright Data proxy often connects from Sweden)
 				"godkänn alla", "godkänn", "acceptera alla", "acceptera", "jag godkänner",
-				// German
 				"alle akzeptieren", "akzeptieren", "alle cookies akzeptieren", "zustimmen",
-				// French
 				"tout accepter", "accepter tout", "accepter", "j'accepte",
-				// Portuguese
 				"aceitar tudo", "aceitar todos", "aceitar",
-				// Italian
 				"accetta tutto", "accetta tutti", "accetta",
-				// Dutch
 				"alles accepteren", "accepteren", "alle cookies accepteren",
-				// Polish
 				"zaakceptuj wszystkie", "akceptuję",
 			];
 			
-			// Strategy 1: Use Playwright's semantic role locator
 			for (const kw of keywords) {
 				try {
 					const locators = await this.page.getByRole('button', { name: new RegExp(kw, 'i') }).all();
@@ -1141,7 +1277,6 @@ export class BrowserTool {
 				} catch { /* try next keyword */ }
 			}
 
-			// Strategy 2: Brute-force JS scan for any button/link with consent text
 			await this.page.evaluate(() => {
 				const consentPatterns = /accept|agree|consent|godkänn|akzeptieren|accepter|aceitar|accetta|accepteren|aceptar|permitir|allow|okay|got it/i;
 				const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="submit"]'));
@@ -1155,6 +1290,8 @@ export class BrowserTool {
 				}
 			}).catch(() => {});
 			await this.page.waitForTimeout(500);
+
+			await this.dismissAllPopups();
 		} catch (e) {
 			// Ignore error — cookies might not exist on this page
 		}
@@ -1225,6 +1362,164 @@ export class BrowserTool {
 		};
 	}
 
+	private async setupResourceBlocking(): Promise<void> {
+		if (!this.context) return;
+		const blockResources = this.config.blockResources || ["font"];
+		const blockTrackers = this.config.blockTrackerDomains !== false;
+		if (blockResources.length === 0 && !blockTrackers) return;
+
+		const blockedTypes = new Set(blockResources);
+		await this.context.route("**/*", async (route, request) => {
+			if (blockTrackers) {
+				const url = request.url().toLowerCase();
+				for (const domain of TRACKER_DOMAINS) {
+					if (url.includes(domain)) {
+						await route.abort();
+						return;
+					}
+				}
+			}
+			if (blockedTypes.has(request.resourceType())) {
+				await route.abort();
+				return;
+			}
+			await route.continue();
+		});
+	}
+
+	private randomDelay(minMs: number = 300, maxMs: number = 1500): Promise<void> {
+		const ms = minMs + Math.random() * (maxMs - minMs);
+		return sleep(ms);
+	}
+
+	private async humanClick(selector: string): Promise<void> {
+		if (!this.page) throw new Error("No page available");
+		const useHuman = this.config.humanBehavior !== false;
+
+		if (useHuman) {
+			try {
+				const element = this.page.locator(selector).first();
+				const box = await element.boundingBox();
+				if (box) {
+					const x = box.x + box.width * (0.2 + Math.random() * 0.6);
+					const y = box.y + box.height * (0.2 + Math.random() * 0.6);
+					await this.humanMouseMove(x, y);
+					await this.randomDelay(50, 200);
+					await this.page.mouse.click(x, y);
+					return;
+				}
+			} catch {}
+		}
+
+		try {
+			await this.page.locator(selector).first().click({ timeout: 5000 });
+		} catch {
+			try {
+				await this.page.locator(selector).first().click({ force: true, timeout: 5000 });
+			} catch {
+				await this.page.evaluate((sel: string) => {
+					const el = document.querySelector(sel) as HTMLElement;
+					if (el) el.click();
+					else throw new Error("Element not found in DOM");
+				}, selector);
+			}
+		}
+	}
+
+	private async humanMouseMove(targetX: number, targetY: number): Promise<void> {
+		if (!this.page) return;
+		const from = this.humanSim.mousePosition;
+		// Use last known position or random start
+		const startX = from.x || Math.random() * (this.fingerprint?.viewport?.width || 800);
+		const startY = from.y || Math.random() * (this.fingerprint?.viewport?.height || 600);
+		const path = this.humanSim.generateMousePath(startX, startY, targetX, targetY);
+		for (const point of path) {
+			await this.page.mouse.move(point.x, point.y);
+			await sleep(point.delayMs);
+		}
+	}
+
+	private async humanType(selector: string, text: string): Promise<void> {
+		if (!this.page) throw new Error("No page available");
+		const useHuman = this.config.humanBehavior !== false;
+
+		await this.page.evaluate((sel: string) => {
+			const el = document.querySelector(sel) as HTMLElement;
+			if (el) el.focus();
+		}, selector).catch(() => {});
+
+		if (useHuman && text.length <= 200) {
+			const loc = this.page.locator(selector).first();
+			await loc.fill("", { force: true, timeout: 3000 }).catch(() => {});
+			const sequence = this.humanSim.generateTypingSequence(text);
+			for (const step of sequence) {
+				if (step.char === "Backspace") {
+					await this.page.keyboard.press("Backspace");
+				} else {
+					await this.page.keyboard.type(step.char, { delay: 0 });
+				}
+				await sleep(step.delayMs);
+			}
+		} else {
+			try {
+				await this.page.locator(selector).first().fill(text, { force: true, timeout: 5000 });
+			} catch {
+				await this.page.evaluate((sel: string, val: string) => {
+					const el = document.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement;
+					if (el) {
+						el.value = val;
+						el.dispatchEvent(new Event("input", { bubbles: true }));
+						el.dispatchEvent(new Event("change", { bubbles: true }));
+					} else {
+						throw new Error("Element not found in DOM");
+					}
+				}, selector, text);
+			}
+		}
+	}
+
+	private async dismissAllPopups(): Promise<number> {
+		if (!this.page || this.config.autoDismissPopups === false) return 0;
+		let dismissed = 0;
+
+		try {
+			const allSelectors = [...POPUP_COOKIE_SELECTORS, ...POPUP_CLOSE_SELECTORS];
+			for (const selector of allSelectors) {
+				try {
+					const element = this.page.locator(selector).first;
+					if (await element.isVisible({ timeout: 300 }).catch(() => false)) {
+						await element.click({ force: true, timeout: 2000 }).catch(() => {});
+						dismissed++;
+						await this.randomDelay(300, 600);
+					}
+				} catch {
+					continue;
+				}
+			}
+
+			if (dismissed > 0) {
+				console.log(`[BrowserTool] Auto-dismissed ${dismissed} popup(s)/banner(s)`);
+			} else {
+				await this.page.keyboard.press("Escape").catch(() => {});
+			}
+		} catch {}
+
+		return dismissed;
+	}
+
+	private async setupDialogHandlers(): Promise<void> {
+		if (!this.page || !this.context) return;
+		this.page.on("dialog", async (dialog: any) => {
+			console.log(`[BrowserTool] Auto-dismissing ${dialog.type()} dialog: ${dialog.message()?.slice(0, 100)}`);
+			await dialog.dismiss().catch(() => {});
+		});
+		this.context.on("page", async (newPage: any) => {
+			console.log(`[BrowserTool] Auto-closing unexpected new tab: ${newPage.url()?.slice(0, 80)}`);
+			await sleep(1000);
+			await newPage.close().catch(() => {});
+		});
+	}
+
 	private async launchEmbeddedBrowser(provider: "embedded" | "decodo" = "embedded"): Promise<void> {
 		if (!this.config.executablePath) {
 			throw new Error("No embedded browser executable path is configured");
@@ -1234,38 +1529,81 @@ export class BrowserTool {
 		if (provider === "decodo" && !decodoProxy) {
 			throw new Error("Decodo proxy is not configured. Set DECODO_PROXY_URL or DECODO_PROXY_USERNAME/DECODO_PROXY_PASSWORD.");
 		}
-		console.log(`[BrowserTool] Launching ${provider === "decodo" ? "Decodo proxied" : "embedded"} Playwright browser with UA: ${fp.userAgent.slice(0, 60)}... viewport: ${fp.viewport.width}x${fp.viewport.height}`);
-		this.browser = await chromium.launch({
+
+		// Persistent browser profile — cookies, localStorage, IndexedDB all persist automatically
+		const userDataDir = join(homedir(), ".octopus", "browser-profile", provider);
+		await fs.promises.mkdir(userDataDir, { recursive: true }).catch(() => {});
+
+		console.log(`[BrowserTool] Launching ${provider === "decodo" ? "Decodo proxied" : "embedded"} persistent browser (profile: ${userDataDir}) with UA: ${fp.userAgent.slice(0, 60)}... viewport: ${fp.viewport.width}x${fp.viewport.height}`);
+
+		const contextOptions = this.buildBrowserContextOptions();
+		this.context = await chromium.launchPersistentContext(userDataDir, {
 			executablePath: this.config.executablePath,
 			headless: this.config.headless ?? false,
+			ignoreDefaultArgs: ["--enable-automation"],
 			...(decodoProxy ? { proxy: { server: decodoProxy.server, username: decodoProxy.username, password: decodoProxy.password } } : {}),
 			args: [
-				"--no-sandbox",
-				"--disable-setuid-sandbox",
 				"--disable-blink-features=AutomationControlled",
-				`--window-size=${fp.viewport.width},${fp.viewport.height}`,
+				"--disable-dev-shm-usage",
+				"--no-sandbox",
 				"--disable-infobars",
-				"--disable-background-timer-throttling",
-				"--disable-backgrounding-occluded-windows",
-				"--disable-renderer-backgrounding",
-				"--disable-component-update",
-				"--disable-default-apps",
 				"--disable-extensions",
-				"--disable-hang-monitor",
-				"--disable-prompt-on-repost",
-				"--disable-sync",
-				"--metrics-recording-only",
-				"--no-first-run",
-				"--password-store=basic",
-				"--use-mock-keychain",
-				"--export-tagged-pdf",
-				"--disable-search-engine-choice-screen",
+				`--window-size=${fp.viewport.width},${fp.viewport.height}`
 			],
+			...contextOptions,
+			// Add extra HTTP headers strictly as requested
+			extraHTTPHeaders: {
+				...(contextOptions.extraHTTPHeaders || {}),
+				"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+				"Accept-Language": "es-PE,es;q=0.9,en-US;q=0.8,en;q=0.7",
+				"Accept-Encoding": "gzip, deflate, br",
+				"DNT": "1",
+				"Upgrade-Insecure-Requests": "1",
+				"Sec-Fetch-Dest": "document",
+				"Sec-Fetch-Mode": "navigate",
+				"Sec-Fetch-Site": "none",
+				"Sec-Fetch-User": "?1",
+			}
 		});
-		this.context = await this.browser.newContext(this.buildBrowserContextOptions());
+
+		this.browser = this.context.browser() || null;
+
+		// Inject stealth init script as requested
+		await this.context.addInitScript(`
+			// Eliminar la propiedad webdriver
+			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+			// Simular plugins reales
+			Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+
+			// Simular lenguajes reales
+			Object.defineProperty(navigator, 'languages', { get: () => ['es-PE', 'es', 'en'] });
+
+			// Chrome runtime (ausente en bots)
+			window.chrome = { runtime: {} };
+			
+			// Eliminar variables de entorno de automatizacion (CDC)
+			delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+			delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+			delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+
+			// Permisos reales
+			const originalQuery = window.navigator.permissions?.query;
+			if (originalQuery) {
+				window.navigator.permissions.query = (parameters) => (
+					parameters.name === 'notifications' ?
+						Promise.resolve({ state: Notification.permission }) :
+						originalQuery.call(window.navigator.permissions, parameters)
+				);
+			}
+		`);
 		await this.addBrowserInitScripts();
-		this.page = await this.context.newPage();
+		await this.setupResourceBlocking();
+		// Persistent context may have existing pages; reuse or create
+		const pages = this.context.pages();
+		this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 		await this.page.setViewportSize(fp.viewport);
+		await this.setupDialogHandlers();
 		this.activeProvider = provider;
 	}
 
@@ -1802,11 +2140,13 @@ export class BrowserTool {
 						console.log(`[BrowserTool] Creating new Bright Data context with UA: ${fp.userAgent.slice(0, 60)}... viewport: ${fp.viewport.width}x${fp.viewport.height}`);
 						this.context = await this.browser.newContext(this.buildBrowserContextOptions());
 						await this.addBrowserInitScripts();
+						await this.setupResourceBlocking();
 					}
 					this.page = this.context.pages()[0];
 					if (!this.page) {
 						this.page = await this.context.newPage();
 					}
+					await this.setupDialogHandlers();
 				}
 			} else if (this.config.executablePath) {
 				await this.launchEmbeddedBrowser("embedded");
@@ -2422,6 +2762,10 @@ export class BrowserTool {
 							// Sometimes networkidle times out on heavy pages, that's okay
 						});
 						
+						if (this.config.humanBehavior !== false) {
+							await this.randomDelay(800, 2500);
+						}
+
 						const blockDetection = await this.detectBlockAndFallback(context);
 
 						await this.autoAcceptCookies();
@@ -2591,8 +2935,22 @@ export class BrowserTool {
 						}
 						
 						const scrollPixels = direction === "down" ? (amount as number) : -(amount as number);
-						await this.page.evaluate((px) => window.scrollBy(0, px), scrollPixels);
-						await this.page.waitForTimeout(500); // Wait for scroll animation/lazy load
+						if (this.config.humanBehavior !== false && Math.abs(scrollPixels) > 100) {
+							const steps = Math.ceil(Math.abs(scrollPixels) / (150 + Math.random() * 250));
+							const perStep = scrollPixels / steps;
+							for (let i = 0; i < steps; i++) {
+								const variation = perStep + (Math.random() - 0.5) * 30;
+								await this.page.evaluate((px) => window.scrollBy(0, px), variation);
+								await this.randomDelay(80, 250);
+								if (Math.random() < 0.08 && direction === "down") {
+									await this.page.evaluate((px) => window.scrollBy(0, px), -(30 + Math.random() * 60));
+									await this.randomDelay(50, 150);
+								}
+							}
+						} else {
+							await this.page.evaluate((px) => window.scrollBy(0, px), scrollPixels);
+						}
+						await this.randomDelay(300, 600);
 						this.invalidateSnapshotCache();
 
 						return { success: true, output: `Successfully scrolled ${direction} by ${Math.abs(scrollPixels)} pixels.\n\nUpdated accessibility tree:\n${(await this.buildSnapshotWithUidMap()).output}` };
@@ -2634,25 +2992,11 @@ export class BrowserTool {
 								error: "Missing or invalid selector parameter",
 							};
 						}
-						
-						const clickAction = async () => {
-							try {
-								// Playwright locator with force=true bypasses invisible overlay blocks
-								await this.page.locator(selector).first().click({ force: true, timeout: 5000 });
-							} catch (e) {
-								console.log(`Standard click failed for ${selector}, falling back to DOM click...`);
-								await this.page.evaluate((sel: string) => {
-									const el = document.querySelector(sel) as HTMLElement;
-									if (el) el.click();
-									else throw new Error("Element not found in DOM");
-								}, selector);
-							}
-						};
 
 						if (waitForNavigation) {
 							await Promise.all([
 								this.page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {}),
-								clickAction(),
+								this.humanClick(selector),
 							]);
 							await this.autoAcceptCookies();
 							await this.saveSessionForCurrentPage();
@@ -2662,7 +3006,7 @@ export class BrowserTool {
 								output: `Successfully clicked element matching selector: ${selector} and waited for navigation to complete.\n\nUpdated accessibility tree:\n${(await this.buildSnapshotWithUidMap()).output}`,
 							};
 						} else {
-							await clickAction();
+							await this.humanClick(selector);
 							await this.autoAcceptCookies();
 							await this.saveSessionForCurrentPage();
 							this.invalidateSnapshotCache();
@@ -2715,28 +3059,7 @@ export class BrowserTool {
 							};
 						}
 						
-						try {
-							const loc = this.page.locator(selector).first();
-							// Force focus via DOM to ensure keyboard events go to the right place
-							await this.page.evaluate((sel: string) => {
-								const el = document.querySelector(sel) as HTMLElement;
-								if (el) el.focus();
-							}, selector).catch(() => {});
-							
-							await loc.fill(text, { force: true, timeout: 5000 });
-						} catch (e) {
-							console.log(`Standard type failed for ${selector}, falling back to DOM value setter...`);
-							await this.page.evaluate((sel: string, val: string) => {
-								const el = document.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement;
-								if (el) {
-									el.value = val;
-									el.dispatchEvent(new Event('input', { bubbles: true }));
-									el.dispatchEvent(new Event('change', { bubbles: true }));
-								} else {
-									throw new Error("Element not found in DOM");
-								}
-							}, selector, text);
-						}
+						await this.humanType(selector, text);
 						this.invalidateSnapshotCache();
 
 						return {
@@ -3217,19 +3540,7 @@ export class BrowserTool {
 						}
 
 						const clickAction = async () => {
-							try {
-								await this.page.locator(selector).first().click({ timeout: 5000 });
-							} catch {
-								try {
-									await this.page.locator(selector).first().click({ force: true, timeout: 5000 });
-								} catch {
-									await this.page.evaluate((sel: string) => {
-										const el = document.querySelector(sel) as HTMLElement;
-										if (el) el.click();
-										else throw new Error("Element not found in DOM");
-									}, selector);
-								}
-							}
+							await this.humanClick(selector);
 						};
 
 						if (waitForNavigation) {
@@ -3309,27 +3620,18 @@ export class BrowserTool {
 						}
 
 						try {
-							const loc = this.page.locator(selector).first();
-							await this.page.evaluate((sel: string) => {
-								const el = document.querySelector(sel) as HTMLElement;
-								if (el) el.focus();
-							}, selector).catch(() => {});
-							await loc.fill(value, { timeout: 5000 });
+							await this.humanType(selector, value);
 						} catch {
-							try {
-								await this.page.locator(selector).first().fill(value, { force: true, timeout: 5000 });
-							} catch {
-								await this.page.evaluate((sel: string, val: string) => {
-									const el = document.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement;
-									if (el) {
-										el.value = val;
-										el.dispatchEvent(new Event("input", { bubbles: true }));
-										el.dispatchEvent(new Event("change", { bubbles: true }));
-									} else {
-										throw new Error("Element not found in DOM");
-									}
-								}, selector, value);
-							}
+							await this.page.evaluate((sel: string, val: string) => {
+								const el = document.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement;
+								if (el) {
+									el.value = val;
+									el.dispatchEvent(new Event("input", { bubbles: true }));
+									el.dispatchEvent(new Event("change", { bubbles: true }));
+								} else {
+									throw new Error("Element not found in DOM");
+								}
+							}, selector, value);
 						}
 
 						if (submit) {

@@ -55,6 +55,10 @@ export {
 	ReflectionEngine,
 	HeartbeatDaemon,
 	OctopusDaemon,
+	EventStream,
+	WorkerPool,
+	OctopusOrchestrator,
+	ContextManager,
 } from "./agent/index.js";
 export type {
 	AgentConfig,
@@ -73,6 +77,15 @@ export type {
 	HeartbeatAction,
 	DaemonConfig,
 	DaemonStatus,
+	AgentEvent,
+	AgentEventType,
+	EventFilter,
+	SubTask,
+	WorkerConfig,
+	TaskDecomposition,
+	OrchestratorConfig,
+	OrchestratorEvent,
+	ContextManagerConfig,
 } from "./agent/index.js";
 
 export {
@@ -108,6 +121,8 @@ export {
 	FTSSearchEngine,
 	UserProfileManager,
 	GlobalDailyMemory,
+	EmbeddingProvider,
+	WorkingMemory,
 } from "./memory/index.js";
 export type {
 	MemoryType,
@@ -125,6 +140,8 @@ export type {
 	UserDecision,
 	WorkflowPattern,
 	GlobalDailyMemoryConfig,
+	WorkingState,
+	CondensationCallback,
 } from "./memory/index.js";
 
 export {
@@ -174,13 +191,19 @@ export {
 	createAutomationTools,
 	createTeamTools,
 	createSandboxTools,
+	ProxyManager,
+	HumanBehavior,
 } from "./tools/index.js";
 export type {
 	ToolDefinition,
 	ToolResult,
 	CodeExecutionResult,
 	CodeExecutorConfig,
+	HumanTypingOptions,
+	HumanMouseOptions,
+	HumanScrollOptions,
 } from "./tools/index.js";
+export type { ProxyConfig as BrowserProxyConfig } from "./tools/index.js";
 
 export {
 	TransportServer,
