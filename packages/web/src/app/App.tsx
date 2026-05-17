@@ -1,20 +1,63 @@
 import type React from "react";
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
 import { ToastContainer } from "../components/ui/Toast.js";
-import { AgentsPage } from "../pages/agents.js";
-import { AutomationsPage } from "../pages/automations.js";
-import { ChannelsPage } from "../pages/channels/Channels.js";
-import { ChatPage } from "../pages/chat.js";
-import { DashboardPage } from "../pages/dashboard/Dashboard.js";
-import { MediaLibraryPage } from "../pages/media-library.js";
-import { MemoryPage } from "../pages/memory.js";
-import { SettingsPage } from "../pages/settings.js";
-import { SkillsPage } from "../pages/skills.js";
-import { TasksPage } from "../pages/tasks.js";
-import { ToolsPage } from "../pages/tools.js";
-import { VariablesPage } from "../pages/variables.js";
 import "./app.css";
+
+const AgentsPage = lazy(() =>
+	import("../pages/agents.js").then(({ AgentsPage }) => ({
+		default: AgentsPage,
+	})),
+);
+const AutomationsPage = lazy(() =>
+	import("../pages/automations.js").then(({ AutomationsPage }) => ({
+		default: AutomationsPage,
+	})),
+);
+const ChannelsPage = lazy(() =>
+	import("../pages/channels/Channels.js").then(({ ChannelsPage }) => ({
+		default: ChannelsPage,
+	})),
+);
+const ChatPage = lazy(() =>
+	import("../pages/chat.js").then(({ ChatPage }) => ({ default: ChatPage })),
+);
+const DashboardPage = lazy(() =>
+	import("../pages/dashboard/Dashboard.js").then(({ DashboardPage }) => ({
+		default: DashboardPage,
+	})),
+);
+const MediaLibraryPage = lazy(() =>
+	import("../pages/media-library.js").then(({ MediaLibraryPage }) => ({
+		default: MediaLibraryPage,
+	})),
+);
+const MemoryPage = lazy(() =>
+	import("../pages/memory.js").then(({ MemoryPage }) => ({
+		default: MemoryPage,
+	})),
+);
+const SettingsPage = lazy(() =>
+	import("../pages/settings.js").then(({ SettingsPage }) => ({
+		default: SettingsPage,
+	})),
+);
+const SkillsPage = lazy(() =>
+	import("../pages/skills.js").then(({ SkillsPage }) => ({
+		default: SkillsPage,
+	})),
+);
+const TasksPage = lazy(() =>
+	import("../pages/tasks.js").then(({ TasksPage }) => ({ default: TasksPage })),
+);
+const ToolsPage = lazy(() =>
+	import("../pages/tools.js").then(({ ToolsPage }) => ({ default: ToolsPage })),
+);
+const VariablesPage = lazy(() =>
+	import("../pages/variables.js").then(({ VariablesPage }) => ({
+		default: VariablesPage,
+	})),
+);
 
 type TabId =
 	| "dashboard"
@@ -73,6 +116,20 @@ const NAV_GROUPS: NavGroup[] = [
 	},
 ];
 
+const PageLoading: React.FC = () => (
+	<div
+		style={{
+			height: "100%",
+			display: "flex",
+			alignItems: "center",
+			justifyContent: "center",
+			color: "var(--text-muted)",
+		}}
+	>
+		Cargando...
+	</div>
+);
+
 export const App: React.FC = () => {
 	const [activeTab, setActiveTab] = useState<TabId>(() => {
 		try {
@@ -97,6 +154,7 @@ export const App: React.FC = () => {
 	const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
 		new Set(),
 	);
+	const [chatLoaded, setChatLoaded] = useState(activeTab === "chat");
 
 	const selectTab = (tab: TabId) => {
 		setActiveTab(tab);
@@ -118,6 +176,10 @@ export const App: React.FC = () => {
 		} catch {
 			// ignore storage failures
 		}
+	}, [activeTab]);
+
+	useEffect(() => {
+		if (activeTab === "chat") setChatLoaded(true);
 	}, [activeTab]);
 
 	const renderPage = () => {
@@ -249,22 +311,26 @@ export const App: React.FC = () => {
 			)}
 
 			<main className="app-main">
-				<div
-					style={{
-						height: "100%",
-						display: activeTab === "chat" ? "flex" : "none",
-						flexDirection: "column",
-					}}
-				>
-					<ChatPage onNavigate={(tab) => selectTab(tab as TabId)} />
-				</div>
+				{chatLoaded && (
+					<div
+						style={{
+							height: "100%",
+							display: activeTab === "chat" ? "flex" : "none",
+							flexDirection: "column",
+						}}
+					>
+						<Suspense fallback={<PageLoading />}>
+							<ChatPage onNavigate={(tab) => selectTab(tab as TabId)} />
+						</Suspense>
+					</div>
+				)}
 				{activeTab !== "chat" && (
 					<div
 						className="animate-fade-in"
 						key={activeTab}
 						style={{ height: "100%", display: "flex", flexDirection: "column" }}
 					>
-						{renderPage()}
+						<Suspense fallback={<PageLoading />}>{renderPage()}</Suspense>
 					</div>
 				)}
 			</main>
