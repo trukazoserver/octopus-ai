@@ -17,6 +17,8 @@ export abstract class VectorStore {
 	): Promise<VectorSearchResult[]>;
 	abstract getById(id: string): Promise<MemoryItem | undefined>;
 	abstract getByIds(ids: string[]): Promise<MemoryItem[]>;
+	abstract listRecent(limit: number): Promise<MemoryItem[]>;
+	abstract listAll(limit?: number): Promise<MemoryItem[]>;
 	abstract update(item: MemoryItem): Promise<void>;
 	abstract delete(id: string): Promise<void>;
 	abstract count(): Promise<number>;

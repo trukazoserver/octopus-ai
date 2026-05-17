@@ -39,13 +39,19 @@ export interface ToolContext {
 		/**
 		 * Resuelve un archivo local o URL nativa de Octopus, y devuelve su Buffer.
 		 */
-		resolve: (
-			url: string,
-		) => Promise<{ buffer: Buffer; mimeType: string }>;
+		resolve: (url: string) => Promise<{ buffer: Buffer; mimeType: string }>;
 	};
 	agent?: {
 		model?: string;
 		usesZaiVisionToolForImages?: boolean;
+		workerId?: string;
+		taskId?: string;
+		role?: string;
+		channelId?: string;
+		runId?: string;
+		toolScope?: string[];
+		fileScope?: string[];
+		abortSignal?: AbortSignal;
 	};
 }
 
@@ -108,7 +114,9 @@ export class ToolRegistry {
 							{
 								type: normalizeSchemaType(param.type),
 								description:
-									typeof param.description === "string" ? param.description : "",
+									typeof param.description === "string"
+										? param.description
+										: "",
 							},
 						]),
 					),

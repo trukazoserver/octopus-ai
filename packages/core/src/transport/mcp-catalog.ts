@@ -475,4 +475,77 @@ export const MCP_CATALOG: MCPCatalogEntry[] = [
 		requiresApiKey: "Google OAuth credentials",
 		homepage: "https://github.com/anthropics/anthropic-quickstarts",
 	},
+	{
+		name: "n8n",
+		displayName: "n8n",
+		description:
+			"Conecta Octopus AI con un endpoint MCP de n8n para ejecutar workflows y automatizaciones.",
+		category: "Automatización",
+		icon: "https://cdn.simpleicons.org/n8n/EA4B71",
+		tools: ["workflow_search", "workflow_execute", "credential_list"],
+		config: {
+			type: "streamable-http",
+			url: "${N8N_MCP_URL}",
+			headers: { Authorization: "Bearer ${N8N_API_KEY}" },
+			command: "streamable-http",
+			args: [],
+			env: {},
+		},
+		requiresApiKey: "n8n MCP URL + API Key (N8N_MCP_URL, N8N_API_KEY)",
+		homepage: "https://n8n.io/",
+	},
+	{
+		name: "claude-code",
+		displayName: "Claude Code",
+		description:
+			"Expone Claude Code como servidor MCP local cuando el CLI de Claude está instalado.",
+		category: "Dev",
+		icon: "https://cdn.simpleicons.org/anthropic/ffffff",
+		tools: ["agent", "code", "filesystem"],
+		config: {
+			command: "claude",
+			args: ["mcp", "serve"],
+			env: {},
+		},
+		homepage: "https://docs.anthropic.com/en/docs/claude-code/mcp",
+	},
+	{
+		name: "openclaw",
+		displayName: "OpenClaw",
+		description:
+			"Conecta un gateway MCP compatible de OpenClaw mediante URL HTTP configurable.",
+		category: "Agentes",
+		icon: "🦀",
+		tools: ["agent_run", "agent_status", "agent_files"],
+		config: {
+			type: "streamable-http",
+			url: "${OPENCLAW_MCP_URL}",
+			headers: { Authorization: "Bearer ${OPENCLAW_API_KEY}" },
+			command: "streamable-http",
+			args: [],
+			env: {},
+		},
+		requiresApiKey:
+			"OpenClaw MCP URL + API Key (OPENCLAW_MCP_URL, OPENCLAW_API_KEY)",
+		homepage: "https://github.com/",
+	},
+	{
+		name: "hermes",
+		displayName: "Hermes",
+		description:
+			"Conecta un endpoint MCP compatible de Hermes para mensajería, tareas o agentes externos.",
+		category: "Agentes",
+		icon: "🪽",
+		tools: ["message_send", "task_create", "task_status"],
+		config: {
+			type: "streamable-http",
+			url: "${HERMES_MCP_URL}",
+			headers: { Authorization: "Bearer ${HERMES_API_KEY}" },
+			command: "streamable-http",
+			args: [],
+			env: {},
+		},
+		requiresApiKey: "Hermes MCP URL + API Key (HERMES_MCP_URL, HERMES_API_KEY)",
+		homepage: "https://github.com/",
+	},
 ];

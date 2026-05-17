@@ -1,7 +1,7 @@
 .app-shell {
 	display: flex;
 	height: 100vh;
-	background: #09090b;
+	background: #000;
 	color: #fafafa;
 	font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
 		sans-serif;
@@ -17,9 +17,9 @@
 	padding: 0 16px;
 	align-items: center;
 	gap: 12px;
-	background: rgba(24, 24, 27, 0.94);
+	background: rgba(0, 0, 0, 0.94);
 	backdrop-filter: blur(12px);
-	border-bottom: 1px solid #27272a;
+	border-bottom: 1px solid #151515;
 	z-index: 40;
 }
 
@@ -32,19 +32,19 @@
 }
 
 .app-sidebar {
-	width: min(320px, 24vw);
+	width: min(320px, 22vw);
 	min-width: 280px;
-	background: #18181b;
-	border-right: 1px solid #27272a;
+	background: #000;
+	border-right: 1px solid #151515;
 	display: flex;
 	flex-direction: column;
-	padding-top: 8px;
+	padding-top: 14px;
 	flex-shrink: 0;
 }
 
 .app-sidebar-header,
 .app-user-card {
-	padding: 20px;
+	padding: 18px 24px;
 }
 
 .app-sidebar-actions {
@@ -60,19 +60,27 @@
 }
 
 .app-logo {
-	width: 40px;
-	height: 40px;
-	border-radius: 12px;
-	background: linear-gradient(135deg, #6366f1, #8b5cf6);
-	font-size: 20px;
-	box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+	width: 46px;
+	height: 46px;
+	border-radius: 16px;
+	background: #151515;
+	border: 1px solid #202020;
+	box-shadow: 0 16px 34px rgba(0, 0, 0, 0.35);
+	overflow: hidden;
+}
+
+.app-logo img {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
 }
 
 .app-brand-title {
 	font-size: 1.2rem;
-	font-weight: 700;
+	font-weight: 850;
 	color: #f4f4f5;
-	letter-spacing: -0.02em;
+	letter-spacing: -0.04em;
 }
 
 .app-brand-subtitle,
@@ -94,11 +102,11 @@
 .app-primary-button {
 	width: 100%;
 	padding: 12px 16px;
-	background: #27272a;
-	border: 1px solid #3f3f46;
-	border-radius: 10px;
-	color: #f4f4f5;
-	font-weight: 600;
+	background: #f4f4f5;
+	border: 1px solid #2a2a2a;
+	border-radius: 12px;
+	color: #050505;
+	font-weight: 800;
 	display: flex;
 	align-items: center;
 	gap: 10px;
@@ -118,10 +126,16 @@
 .app-nav {
 	display: flex;
 	flex-direction: column;
-	gap: 2px;
-	padding: 0 8px;
+	gap: 4px;
+	padding: 8px 16px 16px;
 	flex: 1;
 	overflow-y: auto;
+	scrollbar-width: none;
+}
+
+.app-nav::-webkit-scrollbar,
+.settings-page::-webkit-scrollbar {
+	display: none;
 }
 
 .app-nav-group {
@@ -137,9 +151,9 @@
 	padding: 10px 12px 4px;
 	font-size: 0.7rem;
 	text-transform: uppercase;
-	color: #71717a;
-	font-weight: 700;
-	letter-spacing: 0.05em;
+	color: #6f6f76;
+	font-weight: 850;
+	letter-spacing: 0.08em;
 	background: transparent;
 	border: none;
 	cursor: pointer;
@@ -171,33 +185,42 @@
 }
 
 .app-nav-item {
-	padding: 12px 14px;
+	padding: 11px 12px;
 	text-align: left;
-	border-radius: 10px;
+	border-radius: 12px;
 	background: transparent;
 	color: #a1a1aa;
 	display: flex;
 	align-items: center;
 	gap: 12px;
-	font-size: 0.95rem;
-	font-weight: 500;
+	font-size: 0.94rem;
+	font-weight: 700;
 }
 
 .app-nav-item:hover,
 .app-nav-item:focus-visible {
-	background: #27272a;
+	background: #0d0d0d;
 	color: #e4e4e7;
 	outline: none;
 }
 
 .app-nav-item.is-active {
-	background: rgba(99, 102, 241, 0.15);
-	color: #818cf8;
+	background: #111;
+	color: #f4f4f5;
+	box-shadow: inset 0 0 0 1px #202020;
 }
 
 .app-nav-icon {
-	font-size: 1.15rem;
-	filter: grayscale(100%) opacity(0.7);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 9px;
+	background: #101010;
+	border: 1px solid #1f1f1f;
+	font-size: 0.92rem;
+	filter: grayscale(100%) opacity(0.72);
 }
 
 .app-nav-item.is-active .app-nav-icon {
@@ -205,15 +228,19 @@
 }
 
 .app-user-card {
-	border-top: 1px solid #27272a;
+	border-top: 1px solid #151515;
 	margin-top: auto;
+	background: #050505;
 }
 
 .app-user-avatar {
-	width: 32px;
-	height: 32px;
+	width: 34px;
+	height: 34px;
 	border-radius: 999px;
-	background: #3f3f46;
+	background: #111;
+	border: 1px solid #242424;
+	color: #d4d4d8;
+	font-weight: 850;
 }
 
 .app-user-name {
@@ -230,9 +257,9 @@
 	overflow: hidden;
 	background: radial-gradient(
 			circle at top,
-			rgba(99, 102, 241, 0.05),
+			rgba(255, 255, 255, 0.025),
 			transparent 35%
-		), #09090b;
+		), #000;
 }
 
 .app-overlay {
@@ -267,6 +294,65 @@
 	height: 100%;
 	overflow-y: auto;
 	overflow-x: hidden;
+}
+
+.settings-page {
+	scrollbar-width: none;
+}
+
+.brand-logo {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	border-radius: 999px;
+	background: #111;
+	border: 1px solid #242424;
+	overflow: hidden;
+}
+
+.brand-logo img {
+	position: absolute;
+	inset: 0;
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	padding: 3px;
+	box-sizing: border-box;
+	background: #fff;
+}
+
+.brand-logo-fallback {
+	font-size: 0.58rem;
+	font-weight: 900;
+	letter-spacing: -0.04em;
+	color: #f4f4f5;
+}
+
+.company-heading {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 12px;
+	border-radius: 14px;
+	background: #050505;
+	border: 1px solid #151515;
+}
+
+.company-heading-title {
+	font-size: 0.92rem;
+	font-weight: 850;
+	color: #f4f4f5;
+	line-height: 1.25;
+}
+
+.company-heading-description {
+	margin-top: 3px;
+	font-size: 0.76rem;
+	line-height: 1.45;
+	color: #737373;
 }
 
 .page-shell--xl {

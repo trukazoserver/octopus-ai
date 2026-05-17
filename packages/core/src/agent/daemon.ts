@@ -1,11 +1,11 @@
 import type { LLMRouter } from "../ai/router.js";
+import type { ChannelManager } from "../channels/manager.js";
 import type { DatabaseAdapter } from "../storage/database.js";
+import type { AutomationRunner } from "../tasks/cron-runner.js";
 import { createLogger } from "../utils/logger.js";
 import type { HeartbeatDaemon } from "./heartbeat.js";
 import type { ReflectionEngine } from "./reflection.js";
 import type { AgentRuntime } from "./runtime.js";
-import type { AutomationRunner } from "../tasks/cron-runner.js";
-import type { ChannelManager } from "../channels/manager.js";
 
 /**
  * OctopusDaemon — Persistent Background Service
@@ -135,12 +135,8 @@ export class OctopusDaemon {
 			// Start channel listeners if configured and attached
 			if (this.config.enableChannels && this.channelManager) {
 				const channels = this.channelManager.getAll?.() ?? [];
-				this.status.channelsActive = channels.map(
-					(c: { id: string }) => c.id,
-				);
-				logger.info(
-					`📡 ${this.status.channelsActive.length} channels active`,
-				);
+				this.status.channelsActive = channels.map((c: { id: string }) => c.id);
+				logger.info(`📡 ${this.status.channelsActive.length} channels active`);
 			}
 
 			// Setup health check timer
@@ -158,8 +154,7 @@ export class OctopusDaemon {
 			this.status.consecutiveErrors = 0;
 			logger.info("🐙 Octopus AI Daemon is running");
 		} catch (err) {
-			this.status.lastError =
-				err instanceof Error ? err.message : String(err);
+			this.status.lastError = err instanceof Error ? err.message : String(err);
 			logger.error(`Daemon failed to start: ${String(err)}`);
 			throw err;
 		}
@@ -202,9 +197,7 @@ export class OctopusDaemon {
 	getStatus(): DaemonStatus {
 		return {
 			...this.status,
-			uptime: this.startTime
-				? Date.now() - this.startTime.getTime()
-				: 0,
+			uptime: this.startTime ? Date.now() - this.startTime.getTime() : 0,
 		};
 	}
 
@@ -220,21 +213,16 @@ export class OctopusDaemon {
 			// Check channels
 			if (this.channelManager) {
 				const channels = this.channelManager.getAll?.() ?? [];
-				this.status.channelsActive = channels.map(
-					(c: { id: string }) => c.id,
-				);
+				this.status.channelsActive = channels.map((c: { id: string }) => c.id);
 			}
 
 			this.status.lastHealthCheck = new Date();
 			this.status.consecutiveErrors = 0;
 		} catch (err) {
 			this.status.consecutiveErrors += 1;
-			this.status.lastError =
-				err instanceof Error ? err.message : String(err);
+			this.status.lastError = err instanceof Error ? err.message : String(err);
 
-			if (
-				this.status.consecutiveErrors >= this.config.maxConsecutiveErrors
-			) {
+			if (this.status.consecutiveErrors >= this.config.maxConsecutiveErrors) {
 				this.status.state = "error";
 				logger.error(
 					`Health check failed ${this.status.consecutiveErrors} times. Entering error state.`,

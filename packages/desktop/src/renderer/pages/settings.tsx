@@ -1,5 +1,8 @@
+import {
+	getMascotById,
+	getMascotOptions,
+} from "@octopus-ai/core/mascots/index";
 import type React from "react";
-import { getMascotById, getMascotOptions } from "@octopus-ai/core/mascots/index";
 import { useCallback, useState } from "react";
 import { apiGet, apiPut } from "../hooks/useApi.js";
 
@@ -49,16 +52,21 @@ const PROVIDERS = [
 
 const MASCOT_OPTIONS = getMascotOptions();
 
-function setNestedConfigValue(config: ConfigData, keyPath: string, value: unknown): ConfigData {
+function setNestedConfigValue(
+	config: ConfigData,
+	keyPath: string,
+	value: unknown,
+): ConfigData {
 	const result = { ...config } as Record<string, unknown>;
 	const keys = keyPath.split(".");
 	let current = result;
 	for (let i = 0; i < keys.length - 1; i++) {
 		const key = keys[i];
 		const existing = current[key];
-		const next = existing && typeof existing === "object" && !Array.isArray(existing)
-			? { ...(existing as Record<string, unknown>) }
-			: {};
+		const next =
+			existing && typeof existing === "object" && !Array.isArray(existing)
+				? { ...(existing as Record<string, unknown>) }
+				: {};
 		current[key] = next;
 		current = next;
 	}
@@ -115,7 +123,9 @@ export const Settings: React.FC = () => {
 	const saveConfig = useCallback(async (key: string, value: unknown) => {
 		setSaving(true);
 		setMessage(null);
-		setConfig((current) => current ? setNestedConfigValue(current, key, value) : current);
+		setConfig((current) =>
+			current ? setNestedConfigValue(current, key, value) : current,
+		);
 		try {
 			await apiPut(`/api/config/${key}`, value);
 			setMessage(`Saved ${key}`);
@@ -188,11 +198,23 @@ export const Settings: React.FC = () => {
 
 			<div style={sectionStyle}>
 				<h3 style={{ margin: "0 0 16px 0", fontSize: "16px" }}>Mascot</h3>
-				<div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: "18px", alignItems: "center" }}>
+				<div
+					style={{
+						display: "grid",
+						gridTemplateColumns: "140px 1fr",
+						gap: "18px",
+						alignItems: "center",
+					}}
+				>
 					<img
 						src={selectedMascot.assetPath}
 						alt={`${selectedMascot.animal} ${selectedMascot.nombre}`}
-						style={{ width: "128px", height: "128px", objectFit: "contain", imageRendering: "pixelated" }}
+						style={{
+							width: "128px",
+							height: "128px",
+							objectFit: "contain",
+							imageRendering: "pixelated",
+						}}
 					/>
 					<div>
 						<span style={labelStyle}>Active mascot</span>
@@ -202,13 +224,29 @@ export const Settings: React.FC = () => {
 							style={{ ...inputStyle, marginBottom: "12px" }}
 						>
 							{MASCOT_OPTIONS.map((item) => (
-								<option key={item.id} value={item.id}>{item.nombre} ({item.animal})</option>
+								<option key={item.id} value={item.id}>
+									{item.nombre} ({item.animal})
+								</option>
 							))}
 						</select>
-						<div style={{ fontWeight: 700, marginBottom: "6px" }}>{selectedMascot.nombre} · {selectedMascot.animal}</div>
-						<div style={{ color: "#f97316", fontSize: "13px", marginBottom: "8px" }}>{selectedMascot.tagline}</div>
-						<p style={{ color: "#a1a1aa", lineHeight: 1.5, margin: "0 0 8px" }}>{selectedMascot.personalidad}</p>
-						<p style={{ color: "#71717a", lineHeight: 1.5, margin: 0 }}>{selectedMascot.historia}</p>
+						<div style={{ fontWeight: 700, marginBottom: "6px" }}>
+							{selectedMascot.nombre} · {selectedMascot.animal}
+						</div>
+						<div
+							style={{
+								color: "#f97316",
+								fontSize: "13px",
+								marginBottom: "8px",
+							}}
+						>
+							{selectedMascot.tagline}
+						</div>
+						<p style={{ color: "#a1a1aa", lineHeight: 1.5, margin: "0 0 8px" }}>
+							{selectedMascot.personalidad}
+						</p>
+						<p style={{ color: "#71717a", lineHeight: 1.5, margin: 0 }}>
+							{selectedMascot.historia}
+						</p>
 					</div>
 				</div>
 			</div>

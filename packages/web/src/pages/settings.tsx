@@ -1,14 +1,20 @@
+import {
+	getMascotById,
+	getMascotOptions,
+} from "@octopus-ai/core/mascots/index";
 import type React from "react";
-import { getMascotById, getMascotOptions } from "@octopus-ai/core/mascots/index";
 import { useEffect, useState } from "react";
 import {
 	ConfigSection,
 	Field,
+	SaveButton,
 	Select,
 	StatusBadge,
 	Toggle,
 } from "../components/ConfigSection.js";
-import { apiGet, apiPut } from "../hooks/useApi.js";
+import { AppIcon } from "../components/ui/AppIcon.js";
+import { BrandLogo } from "../components/ui/BrandLogo.js";
+import { apiGet, apiPut, apiPutJson } from "../hooks/useApi.js";
 
 interface ProviderConfig {
 	apiKey?: string;
@@ -16,6 +22,23 @@ interface ProviderConfig {
 	mode?: string;
 	models?: string[];
 }
+
+interface MemoryShortTermConfig {
+	maxTokens?: number;
+	[key: string]: unknown;
+}
+
+interface MemoryLongTermConfig {
+	importanceThreshold?: number;
+	maxItems?: number;
+	[key: string]: unknown;
+}
+
+interface SkillRegistryConfig {
+	builtinSkills?: string[];
+	[key: string]: unknown;
+}
+
 interface ConfigData {
 	ai?: {
 		default?: string;
@@ -42,23 +65,23 @@ interface ConfigData {
 	channels?: Record<string, { enabled: boolean }>;
 	memory?: {
 		enabled?: boolean;
-		shortTerm?: any;
-		longTerm?: any;
-		consolidation?: any;
-		retrieval?: any;
+		shortTerm?: MemoryShortTermConfig;
+		longTerm?: MemoryLongTermConfig;
+		consolidation?: unknown;
+		retrieval?: unknown;
 	};
 	skills?: {
 		enabled?: boolean;
 		autoCreate?: boolean;
 		autoImprove?: boolean;
-		forge?: any;
-		improvement?: any;
-		loading?: any;
-		registry?: any;
+		forge?: unknown;
+		improvement?: unknown;
+		loading?: unknown;
+		registry?: SkillRegistryConfig;
 	};
 	plugins?: { directories?: string[]; builtin?: string[] };
 	server?: { port?: number; host?: string; transport?: string };
-	connection?: any;
+	connection?: unknown;
 	storage?: { backend?: string; path?: string };
 	security?: {
 		encryptionKey?: string;
@@ -74,67 +97,158 @@ interface ConfigData {
 	};
 }
 
-const PROVIDERS = [
+interface UserProfile {
+	displayName: string | null;
+	communicationStyle: string;
+	preferredLanguage: string;
+	preferences: Record<string, string>;
+}
+
+interface UserProfileResponse {
+	profile: UserProfile | null;
+}
+
+interface ProviderOption {
+	key: string;
+	name: string;
+	url: string;
+	logoDomain: string;
+	logoSrc?: string;
+	logoSources?: string[];
+	fallbackLabel?: string;
+	hasMode?: boolean;
+	isLocal?: boolean;
+}
+
+const PROVIDERS: ProviderOption[] = [
 	{
 		key: "zhipu",
 		name: "Z.ai / ZhipuAI",
-		icon: "🇨🇳",
 		url: "https://open.bigmodel.cn/",
+		logoDomain: "chat.z.ai",
+		fallbackLabel: "Z.ai",
 		hasMode: true,
 	},
 	{
 		key: "openai",
 		name: "OpenAI",
-		icon: "🟢",
 		url: "https://platform.openai.com/api-keys",
+		logoDomain: "openai.com",
+		logoSrc:
+			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
 	},
 	{
 		key: "anthropic",
 		name: "Anthropic (Claude)",
-		icon: "🟠",
 		url: "https://console.anthropic.com/",
+		logoDomain: "anthropic.com",
+		logoSrc:
+			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/anthropic.svg",
 	},
 	{
 		key: "google",
 		name: "Google (Gemini)",
-		icon: "🔵",
 		url: "https://aistudio.google.com/",
+		logoDomain: "google.com",
+		logoSrc:
+			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/google.svg",
 	},
 	{
 		key: "deepseek",
 		name: "DeepSeek",
-		icon: "🐋",
 		url: "https://platform.deepseek.com/",
+		logoDomain: "deepseek.com",
+		logoSrc:
+			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/deepseek.svg",
 	},
 	{
 		key: "mistral",
 		name: "Mistral",
-		icon: "🌀",
 		url: "https://console.mistral.ai/",
+		logoDomain: "mistral.ai",
+		logoSrc:
+			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/mistralai.svg",
 	},
-	{ key: "xai", name: "xAI (Grok)", icon: "⚡", url: "https://console.x.ai/" },
+	{
+		key: "xai",
+		name: "xAI (Grok)",
+		url: "https://console.x.ai/",
+		logoDomain: "x.ai",
+		logoSrc: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/x.svg",
+		fallbackLabel: "xAI",
+	},
 	{
 		key: "cohere",
 		name: "Cohere",
-		icon: "🔶",
 		url: "https://dashboard.cohere.com/",
+		logoDomain: "cohere.com",
+		logoSrc:
+			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/cohere.svg",
 	},
 	{
 		key: "openrouter",
 		name: "OpenRouter",
-		icon: "🌐",
 		url: "https://openrouter.ai/keys",
+		logoDomain: "openrouter.ai",
+		logoSrc: "https://openrouter.ai/favicon.ico",
 	},
 	{
 		key: "local",
 		name: "Ollama (Local)",
-		icon: "🦙",
 		url: "https://ollama.com/",
+		logoDomain: "ollama.com",
 		isLocal: true,
 	},
 ];
 
 const MASCOT_OPTIONS = getMascotOptions();
+
+const settingsPanelStyle: React.CSSProperties = {
+	background: "#000",
+	padding: "18px",
+	borderRadius: "16px",
+	border: "1px solid #151515",
+	boxShadow: "0 12px 28px rgba(0,0,0,.18)",
+};
+
+const settingsMutedPanelStyle: React.CSSProperties = {
+	...settingsPanelStyle,
+	background: "#050505",
+};
+
+const settingsPrimaryButtonStyle: React.CSSProperties = {
+	padding: "9px 14px",
+	borderRadius: "10px",
+	border: "1px solid #2a2a2a",
+	background: "#f4f4f5",
+	color: "#050505",
+	fontSize: "0.85rem",
+	fontWeight: 800,
+	cursor: "pointer",
+	fontFamily: "inherit",
+};
+
+const CompanyHeading: React.FC<{
+	domain: string;
+	name: string;
+	description: string;
+	src?: string;
+	sources?: string[];
+}> = ({ domain, name, description, src, sources }) => (
+	<div className="company-heading">
+		<BrandLogo
+			domain={domain}
+			name={name}
+			size={28}
+			src={src}
+			sources={sources}
+		/>
+		<div>
+			<div className="company-heading-title">{name}</div>
+			<div className="company-heading-description">{description}</div>
+		</div>
+	</div>
+);
 
 function setConfigValue(
 	config: ConfigData,
@@ -163,13 +277,20 @@ function setConfigValue(
 
 export const SettingsPage: React.FC = () => {
 	const [config, setConfig] = useState<ConfigData>({});
+	const [profile, setProfile] = useState<UserProfile | null>(null);
+	const [profileDraft, setProfileDraft] = useState<UserProfile | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
 	useEffect(() => {
-		apiGet<ConfigData>("/api/config")
-			.then((c) => {
+		Promise.all([
+			apiGet<ConfigData>("/api/config"),
+			apiGet<UserProfileResponse>("/api/memory/profile"),
+		])
+			.then(([c, profileResponse]) => {
 				setConfig(c);
+				setProfile(profileResponse.profile);
+				setProfileDraft(profileResponse.profile);
 				setLoading(false);
 			})
 			.catch((e) => {
@@ -180,21 +301,85 @@ export const SettingsPage: React.FC = () => {
 
 	const save = async (key: string, value: unknown) => {
 		setMsg(null);
-		setConfig((current) => setConfigValue(current, key, value));
+		let previousConfig: ConfigData | null = null;
+		setConfig((current) => {
+			previousConfig = current;
+			return setConfigValue(current, key, value);
+		});
 		try {
 			await apiPut(`/api/config/${key}`, value);
-			setMsg({ text: `✓ ${key} guardado`, ok: true });
+			setMsg({ text: `${key} guardado`, ok: true });
 
 			// Clear message after 3 seconds
 			setTimeout(() => {
 				setMsg(null);
 			}, 3000);
 		} catch (e) {
+			if (previousConfig) setConfig(previousConfig);
 			setMsg({
-				text: `✗ ${e instanceof Error ? e.message : String(e)}`,
+				text: e instanceof Error ? e.message : String(e),
 				ok: false,
 			});
 		}
+	};
+
+	const saveProfile = async (patch: Partial<UserProfile>) => {
+		setMsg(null);
+		let previousProfile: UserProfile | null = null;
+		setProfile((current) => {
+			previousProfile = current;
+			return {
+				displayName: null,
+				communicationStyle: "concise",
+				preferredLanguage: "es",
+				...(current ?? {}),
+				...patch,
+				preferences: {
+					...(current?.preferences ?? {}),
+					...(patch.preferences ?? {}),
+				},
+			};
+		});
+		try {
+			const response = (await apiPutJson("/api/memory/profile", patch)) as {
+				profile?: UserProfile;
+			};
+			if (response.profile) setProfile(response.profile);
+			setMsg({ text: "Perfil guardado", ok: true });
+			setTimeout(() => setMsg(null), 3000);
+		} catch (e) {
+			setProfile(previousProfile);
+			setMsg({
+				text: e instanceof Error ? e.message : String(e),
+				ok: false,
+			});
+		}
+	};
+
+	const updateProfileDraft = (patch: Partial<UserProfile>) => {
+		setProfileDraft((current) => ({
+			displayName: null,
+			communicationStyle: "concise",
+			preferredLanguage: "es",
+			...(profile ?? {}),
+			...(current ?? {}),
+			...patch,
+			preferences: {
+				...(profile?.preferences ?? {}),
+				...(current?.preferences ?? {}),
+				...(patch.preferences ?? {}),
+			},
+		}));
+	};
+
+	const saveProfileDraft = async () => {
+		if (!profileDraft) return;
+		await saveProfile({
+			displayName: profileDraft.displayName?.trim() || null,
+			preferredLanguage: profileDraft.preferredLanguage || "es",
+			communicationStyle: profileDraft.communicationStyle || "concise",
+			preferences: profileDraft.preferences ?? {},
+		});
 	};
 
 	if (loading)
@@ -223,7 +408,7 @@ export const SettingsPage: React.FC = () => {
 							width: "32px",
 							height: "32px",
 							borderRadius: "50%",
-							background: "#6366f1",
+							background: "#f4f4f5",
 							animation: "pulse 1.4s infinite ease-in-out",
 						}}
 					/>
@@ -238,6 +423,13 @@ export const SettingsPage: React.FC = () => {
 	const tools = config.tools ?? {};
 	const toolIterationLimit = tools.iterationLimit ?? {};
 	const providers = ai.providers ?? {};
+	const userProfile = profileDraft ??
+		profile ?? {
+			displayName: "",
+			communicationStyle: "concise",
+			preferredLanguage: "es",
+			preferences: {},
+		};
 	const allModels: string[] = [];
 	for (const [, p] of Object.entries(providers)) {
 		if (p.models) allModels.push(...p.models);
@@ -245,14 +437,16 @@ export const SettingsPage: React.FC = () => {
 
 	return (
 		<div
+			className="settings-page"
 			style={{
-				padding: "30px",
-				maxWidth: "1000px",
+				padding: "34px 34px 48px",
+				maxWidth: "1120px",
 				margin: "0 auto",
 				overflowY: "auto",
 				height: "100%",
 				width: "100%",
 				boxSizing: "border-box",
+				background: "#000",
 			}}
 		>
 			<div
@@ -260,31 +454,50 @@ export const SettingsPage: React.FC = () => {
 					display: "flex",
 					justifyContent: "space-between",
 					alignItems: "center",
-					marginBottom: "30px",
+					marginBottom: "26px",
 				}}
 			>
-				<h2
-					style={{
-						margin: 0,
-						fontSize: "1.8rem",
-						fontWeight: 700,
-						color: "#f4f4f5",
-						letterSpacing: "-0.02em",
-					}}
-				>
-					Configuración General
-				</h2>
+				<div>
+					<div
+						style={{
+							color: "#737373",
+							fontSize: "0.82rem",
+							fontWeight: 800,
+							letterSpacing: "0.08em",
+							textTransform: "uppercase",
+							marginBottom: "8px",
+						}}
+					>
+						Octopus
+					</div>
+					<h2
+						style={{
+							margin: 0,
+							fontSize: "2.1rem",
+							fontWeight: 850,
+							color: "#f4f4f5",
+							letterSpacing: "-0.04em",
+						}}
+					>
+						Configuración
+					</h2>
+					<p
+						style={{ margin: "8px 0 0", color: "#8f8f94", fontSize: "0.98rem" }}
+					>
+						Perfil, proveedores, herramientas y preferencias del entorno local.
+					</p>
+				</div>
 			</div>
 
 			{msg && (
 				<div
 					style={{
 						padding: "12px 16px",
-						borderRadius: "8px",
+						borderRadius: "14px",
 						marginBottom: "20px",
 						background: msg.ok
-							? "rgba(16, 185, 129, 0.1)"
-							: "rgba(239, 68, 68, 0.1)",
+							? "rgba(16, 185, 129, 0.11)"
+							: "rgba(239, 68, 68, 0.11)",
 						color: msg.ok ? "#10b981" : "#ef4444",
 						border: `1px solid ${msg.ok ? "rgba(16, 185, 129, 0.2)" : "rgba(239, 68, 68, 0.2)"}`,
 						fontSize: "0.9rem",
@@ -299,17 +512,74 @@ export const SettingsPage: React.FC = () => {
 			)}
 
 			<ConfigSection
+				title="Perfil de usuario"
+				icon={<AppIcon name="user" size={17} />}
+				description="Define cómo quieres que Octopus te identifique y adapte sus respuestas. Este nombre también se usa en la pantalla inicial del chat."
+				defaultOpen={true}
+			>
+				<div style={settingsPanelStyle}>
+					<Field
+						label="Nombre para el saludo"
+						value={userProfile.displayName ?? ""}
+						onChange={(v) => updateProfileDraft({ displayName: v })}
+						placeholder="Ej. Edwin"
+						description="Este nombre aparecerá en el saludo del chat."
+					/>
+					<Select
+						label="Idioma preferido"
+						value={userProfile.preferredLanguage || "es"}
+						options={["es", "en", "pt", "auto"]}
+						onChange={(v) => updateProfileDraft({ preferredLanguage: v })}
+						description="Idioma principal para respuestas y textos personalizados."
+					/>
+					<Select
+						label="Estilo de comunicación"
+						value={userProfile.communicationStyle || "concise"}
+						options={["concise", "detailed", "casual", "formal"]}
+						onChange={(v) => updateProfileDraft({ communicationStyle: v })}
+						description="Define si Octopus debe responder de forma breve, detallada, casual o formal."
+					/>
+					<Field
+						label="Preferencia adicional"
+						value={userProfile.preferences.responsePreference ?? ""}
+						onChange={(v) =>
+							updateProfileDraft({ preferences: { responsePreference: v } })
+						}
+						placeholder="Ej. respuestas con pasos claros y ejemplos"
+						description="Instrucción breve sobre cómo prefieres recibir respuestas."
+					/>
+					<SaveButton
+						onClick={() => void saveProfileDraft()}
+						label="Guardar perfil"
+					/>
+				</div>
+			</ConfigSection>
+
+			<ConfigSection
 				title="Mascota"
-				icon="🐙"
+				icon={<AppIcon name="octopus" size={17} />}
 				description="Elige la mascota y personalidad que acompaña a Octopus en CLI, web y escritorio."
 				defaultOpen={true}
 			>
-				<div style={{ display: "grid", gridTemplateColumns: "180px 1fr", gap: "20px", alignItems: "center", background: "#09090b", padding: "16px", borderRadius: "12px", border: "1px solid #27272a" }}>
+				<div
+					style={{
+						...settingsPanelStyle,
+						display: "grid",
+						gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+						gap: "20px",
+						alignItems: "center",
+					}}
+				>
 					<div style={{ display: "flex", justifyContent: "center" }}>
 						<img
 							src={selectedMascot.assetPath}
 							alt={`${selectedMascot.animal} ${selectedMascot.nombre}`}
-							style={{ width: "140px", height: "140px", objectFit: "contain", imageRendering: "pixelated" }}
+							style={{
+								width: "140px",
+								height: "140px",
+								objectFit: "contain",
+								imageRendering: "pixelated",
+							}}
 						/>
 					</div>
 					<div>
@@ -320,10 +590,18 @@ export const SettingsPage: React.FC = () => {
 							onChange={(v) => save("mascots.defaultId", v)}
 							description="La selección se guarda en la configuración global del servidor local."
 						/>
-						<div style={{ color: "#f4f4f5", fontWeight: 700, marginBottom: "6px" }}>
+						<div
+							style={{ color: "#f4f4f5", fontWeight: 700, marginBottom: "6px" }}
+						>
 							{selectedMascot.nombre} · {selectedMascot.animal}
 						</div>
-						<div style={{ color: "#f97316", fontSize: "0.9rem", marginBottom: "8px" }}>
+						<div
+							style={{
+								color: "#f97316",
+								fontSize: "0.9rem",
+								marginBottom: "8px",
+							}}
+						>
 							{selectedMascot.tagline}
 						</div>
 						<p style={{ color: "#a1a1aa", lineHeight: 1.6, margin: "0 0 8px" }}>
@@ -338,12 +616,33 @@ export const SettingsPage: React.FC = () => {
 
 			<ConfigSection
 				title="Navegador Web"
-				icon="🌐"
+				icon={<AppIcon name="globe" size={17} />}
 				description="Ajustes del motor de navegación y evasión de bloqueos."
 				defaultOpen={false}
 			>
 				<div style={{ display: "grid", gap: "20px" }}>
-					<div style={{ background: "#09090b", padding: "16px", borderRadius: "12px", border: "1px solid #27272a" }}>
+					<div style={settingsPanelStyle}>
+						<div
+							style={{
+								display: "grid",
+								gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+								gap: "12px",
+								marginBottom: "18px",
+							}}
+						>
+							<CompanyHeading
+								domain="brightdata.com"
+								name="Bright Data"
+								src="https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/brightdata.svg"
+								description="CDP remoto para navegación y fallback ante bloqueos."
+							/>
+							<CompanyHeading
+								domain="decodo.com"
+								name="Decodo"
+								src="https://decodo.com/favicon.ico"
+								description="Proxy residencial para navegación local con Playwright."
+							/>
+						</div>
 						<Select
 							label="Proveedor de Navegador"
 							value={browser.provider ?? "auto"}
@@ -352,26 +651,26 @@ export const SettingsPage: React.FC = () => {
 							description="embedded: Playwright local | brightdata: CDP remoto | decodo: Playwright local con proxy residencial | auto: usa el navegador disponible"
 						/>
 						<Toggle
-							label="Bright Data Habilitado"
+							label="Habilitar CDP remoto"
 							value={browser.brightDataEnabled ?? true}
 							onChange={(v) => save("browser.brightDataEnabled", v)}
-							description="Permite usar Bright Data como proveedor principal o como destino de fallback"
+							description="Permite usar este proveedor como principal o como destino de fallback."
 						/>
 						<Field
-							label="Bright Data WS URL"
+							label="WS URL"
 							value={browser.brightDataWsUrl ?? ""}
 							onChange={(v) => save("browser.brightDataWsUrl", v)}
 							placeholder="wss://brd-customer-...:password@brd.superproxy.io:9222"
 							description="Opcional. Déjalo vacío para usar la variable gestionada BRIGHTDATA_WS_URL. Solo valores ws:// o wss:// son válidos."
 						/>
 						<Toggle
-							label="Decodo Habilitado"
+							label="Habilitar proxy residencial"
 							value={browser.decodoEnabled ?? true}
 							onChange={(v) => save("browser.decodoEnabled", v)}
-							description="Permite usar Decodo como proxy residencial para Playwright, fallback ante bloqueos y captchas con IP matching"
+							description="Permite usar el proxy residencial para Playwright, fallback ante bloqueos y captchas con IP matching."
 						/>
 						<Field
-							label="Decodo Proxy URL"
+							label="Proxy URL"
 							value={browser.decodoProxyUrl ?? ""}
 							onChange={(v) => save("browser.decodoProxyUrl", v)}
 							placeholder="http://user:password@gate.decodo.com:7000"
@@ -379,7 +678,7 @@ export const SettingsPage: React.FC = () => {
 						/>
 					</div>
 
-					<div style={{ background: "#09090b", padding: "16px", borderRadius: "12px", border: "1px solid #27272a" }}>
+					<div style={settingsPanelStyle}>
 						<Toggle
 							label="Modo Headless"
 							value={browser.headless ?? false}
@@ -403,13 +702,13 @@ export const SettingsPage: React.FC = () => {
 							value={browser.blockFallbackProvider ?? "decodo"}
 							options={["decodo", "brightdata", "embedded"]}
 							onChange={(v) => save("browser.blockFallbackProvider", v)}
-							description="Destino usado cuando el fallback automático está activo. Decodo usa proxy residencial local; Bright Data requiere WS URL; embedded usa el navegador local detectado."
+							description="Destino usado cuando el fallback automático está activo. El proxy residencial usa Playwright local; CDP remoto requiere WS URL; embedded usa el navegador local detectado."
 						/>
 						<Toggle
 							label="Confirmar Bloqueo con Visión"
 							value={browser.confirmBlockWithVision ?? true}
 							onChange={(v) => save("browser.confirmBlockWithVision", v)}
-							description="Tomar captura de pantalla y usar Z.ai Vision para confirmar si realmente hay un bloqueo"
+							description="Tomar captura de pantalla y usar el modelo de visión configurado para confirmar si realmente hay un bloqueo."
 						/>
 					</div>
 				</div>
@@ -417,11 +716,11 @@ export const SettingsPage: React.FC = () => {
 
 			<ConfigSection
 				title="Herramientas e Iteraciones"
-				icon="🛠️"
+				icon={<AppIcon name="tools" size={17} />}
 				description="Controla el límite global de ciclos en los que Octopus puede pedir herramientas antes de responder."
 				defaultOpen={false}
 			>
-				<div style={{ background: "#09090b", padding: "20px", borderRadius: "12px", border: "1px solid #27272a" }}>
+				<div style={settingsPanelStyle}>
 					<Toggle
 						label="Activar Límite de Iteraciones"
 						value={toolIterationLimit.enabled ?? true}
@@ -447,7 +746,7 @@ export const SettingsPage: React.FC = () => {
 
 			<ConfigSection
 				title="Modelos y Proveedores AI"
-				icon="🧠"
+				icon={<AppIcon name="brain" size={17} />}
 				description="Configura tus claves API y modelos para que Octopus AI pueda pensar."
 				defaultOpen={true}
 			>
@@ -462,26 +761,21 @@ export const SettingsPage: React.FC = () => {
 					{PROVIDERS.map((p) => {
 						const prov = providers[p.key] ?? {};
 						const hasKey = p.isLocal
-							? !!(prov as any).baseUrl
-							: !!(prov as any).apiKey &&
-								(prov as any).apiKey !== "" &&
-								!(prov as any).apiKey?.includes("...");
+							? !!prov.baseUrl
+							: !!prov.apiKey &&
+								prov.apiKey !== "" &&
+								!prov.apiKey.includes("...");
 						return (
 							<div
 								key={p.key}
 								style={{
 									padding: "16px",
-									borderRadius: "12px",
-									background: "#09090b",
-									border: "1px solid #27272a",
+									borderRadius: "16px",
+									background: "#000",
+									border: "1px solid #151515",
+									boxShadow: "0 12px 28px rgba(0,0,0,.18)",
 									transition: "border-color 0.2s",
 								}}
-								onMouseOver={(e) =>
-									(e.currentTarget.style.borderColor = "#3f3f46")
-								}
-								onMouseOut={(e) =>
-									(e.currentTarget.style.borderColor = "#27272a")
-								}
 							>
 								<div
 									style={{
@@ -501,7 +795,14 @@ export const SettingsPage: React.FC = () => {
 											gap: "8px",
 										}}
 									>
-										<span>{p.icon}</span> {p.name}
+										<BrandLogo
+											domain={p.logoDomain}
+											name={p.name}
+											src={p.logoSrc}
+											sources={p.logoSources}
+											fallbackLabel={p.fallbackLabel}
+										/>
+										{p.name}
 									</span>
 									<StatusBadge
 										ok={hasKey}
@@ -511,7 +812,7 @@ export const SettingsPage: React.FC = () => {
 								{p.isLocal ? (
 									<Field
 										label="URL Base (Local)"
-										value={(prov as any).baseUrl ?? "http://localhost:11434"}
+										value={prov.baseUrl ?? "http://localhost:11434"}
 										onChange={(v) => save(`ai.providers.${p.key}.baseUrl`, v)}
 									/>
 								) : (
@@ -523,7 +824,8 @@ export const SettingsPage: React.FC = () => {
 												const value = String(
 													formData.get(`provider-${p.key}-api-key`) ?? "",
 												).trim();
-												if (value) void save(`ai.providers.${p.key}.apiKey`, value);
+												if (value)
+													void save(`ai.providers.${p.key}.apiKey`, value);
 											}}
 											style={{ display: "flex", gap: "8px" }}
 										>
@@ -540,8 +842,8 @@ export const SettingsPage: React.FC = () => {
 													flex: 1,
 													padding: "8px 12px",
 													borderRadius: "8px",
-													border: "1px solid #3f3f46",
-													background: "#18181b",
+													border: "1px solid #202020",
+													background: "#000",
 													color: "#f4f4f5",
 													fontSize: "0.85rem",
 													outline: "none",
@@ -549,33 +851,14 @@ export const SettingsPage: React.FC = () => {
 														"ui-monospace, SFMono-Regular, Monaco, monospace",
 													transition: "border-color 0.2s",
 												}}
-												onFocus={(e) =>
-													(e.target.style.borderColor = "#6366f1")
-												}
-												onBlur={(e) => (e.target.style.borderColor = "#3f3f46")}
+												onFocus={(e) => {
+													e.target.style.borderColor = "#4a4a4a";
+												}}
+												onBlur={(e) => {
+													e.target.style.borderColor = "#202020";
+												}}
 											/>
-											<button
-												type="submit"
-											style={{
-													padding: "8px 14px",
-													borderRadius: "8px",
-													border: "none",
-													background: "#27272a",
-													color: "#e4e4e7",
-													fontSize: "0.85rem",
-													fontWeight: 500,
-													cursor: "pointer",
-													transition: "all 0.2s",
-												}}
-												onMouseOver={(e) => {
-													e.currentTarget.style.background = "#3f3f46";
-													e.currentTarget.style.color = "#fff";
-												}}
-												onMouseOut={(e) => {
-													e.currentTarget.style.background = "#27272a";
-													e.currentTarget.style.color = "#e4e4e7";
-												}}
-											>
+											<button type="submit" style={settingsPrimaryButtonStyle}>
 												Guardar
 											</button>
 										</form>
@@ -585,7 +868,7 @@ export const SettingsPage: React.FC = () => {
 									<div style={{ marginTop: 8 }}>
 										<Select
 											label="Modo de Operación"
-											value={(prov as any).mode ?? "coding-plan"}
+											value={prov.mode ?? "coding-plan"}
 											options={[
 												"api",
 												"coding-plan",
@@ -613,6 +896,8 @@ export const SettingsPage: React.FC = () => {
 									>
 										Obtener API Key
 										<svg
+											aria-hidden="true"
+											focusable="false"
 											width="12"
 											height="12"
 											viewBox="0 0 24 24"
@@ -635,12 +920,10 @@ export const SettingsPage: React.FC = () => {
 				<div
 					style={{
 						display: "grid",
-						gridTemplateColumns: "1fr 1fr",
+						gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
 						gap: "20px",
-						background: "#09090b",
-						padding: "20px",
-						borderRadius: "12px",
-						border: "1px solid #27272a",
+						...settingsMutedPanelStyle,
+						padding: "18px",
 					}}
 				>
 					<Select
@@ -689,7 +972,7 @@ export const SettingsPage: React.FC = () => {
 
 			<ConfigSection
 				title="Memoria Autónoma"
-				icon="💭"
+				icon={<AppIcon name="database" size={17} />}
 				description="Configura cómo Octopus recuerda tus conversaciones."
 			>
 				<div
@@ -697,10 +980,7 @@ export const SettingsPage: React.FC = () => {
 						display: "grid",
 						gridTemplateColumns: "1fr",
 						gap: "12px",
-						background: "#09090b",
-						padding: "20px",
-						borderRadius: "12px",
-						border: "1px solid #27272a",
+						...settingsMutedPanelStyle,
 					}}
 				>
 					<Toggle
@@ -711,13 +991,13 @@ export const SettingsPage: React.FC = () => {
 					/>
 
 					<div
-						style={{ height: "1px", background: "#27272a", margin: "8px 0" }}
+						style={{ height: "1px", background: "#151515", margin: "8px 0" }}
 					/>
 
 					<div
 						style={{
 							display: "grid",
-							gridTemplateColumns: "1fr 1fr",
+							gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
 							gap: "20px",
 						}}
 					>
@@ -762,7 +1042,7 @@ export const SettingsPage: React.FC = () => {
 
 			<ConfigSection
 				title="Skills (Habilidades)"
-				icon="⚡"
+				icon={<AppIcon name="spark" size={17} />}
 				description="Las herramientas y capacidades de Octopus."
 			>
 				<div
@@ -770,10 +1050,7 @@ export const SettingsPage: React.FC = () => {
 						display: "grid",
 						gridTemplateColumns: "1fr",
 						gap: "12px",
-						background: "#09090b",
-						padding: "20px",
-						borderRadius: "12px",
-						border: "1px solid #27272a",
+						...settingsMutedPanelStyle,
 					}}
 				>
 					<Toggle
@@ -830,12 +1107,16 @@ export const SettingsPage: React.FC = () => {
 			</ConfigSection>
 
 			<div
-				style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}
+				style={{
+					display: "grid",
+					gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+					gap: "16px",
+				}}
 			>
 				<ConfigSection
 					title="Servidor Local"
-					icon="🖥️"
-					description="⚠️ Requiere reiniciar el servidor."
+					icon={<AppIcon name="server" size={17} />}
+					description="Requiere reiniciar el servidor."
 				>
 					<Field
 						label="Puerto"
@@ -856,7 +1137,10 @@ export const SettingsPage: React.FC = () => {
 					/>
 				</ConfigSection>
 
-				<ConfigSection title="Seguridad" icon="🔒">
+				<ConfigSection
+					title="Seguridad"
+					icon={<AppIcon name="lock" size={17} />}
+				>
 					<Toggle
 						label="Modo Sandbox"
 						description="Limita los comandos que Octopus puede ejecutar."
@@ -875,14 +1159,14 @@ export const SettingsPage: React.FC = () => {
 							Directorios Permitidos:
 						</div>
 						<div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-							{(config.security?.allowedPaths ?? []).map((p, i) => (
+							{(config.security?.allowedPaths ?? []).map((p) => (
 								<span
-									key={i}
+									key={p}
 									style={{
 										padding: "4px 10px",
 										borderRadius: "6px",
-										background: "#27272a",
-										border: "1px solid #3f3f46",
+										background: "#111",
+										border: "1px solid #242424",
 										fontSize: "0.8rem",
 										color: "#e4e4e7",
 										fontFamily: "monospace",

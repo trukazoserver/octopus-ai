@@ -316,8 +316,11 @@ export const Agents: React.FC = () => {
 					>
 						<div style={{ display: "flex", gap: "12px" }}>
 							<div style={{ flex: 1 }}>
-								<label style={labelStyle}>Name</label>
+								<label htmlFor="agent-name" style={labelStyle}>
+									Name
+								</label>
 								<input
+									id="agent-name"
 									type="text"
 									value={form.name}
 									onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -325,8 +328,11 @@ export const Agents: React.FC = () => {
 								/>
 							</div>
 							<div style={{ flex: 1 }}>
-								<label style={labelStyle}>Role</label>
+								<label htmlFor="agent-role" style={labelStyle}>
+									Role
+								</label>
 								<select
+									id="agent-role"
 									value={form.role}
 									onChange={(e) => setForm({ ...form, role: e.target.value })}
 									style={inputStyle}
@@ -339,8 +345,11 @@ export const Agents: React.FC = () => {
 								</select>
 							</div>
 							<div style={{ flex: 1 }}>
-								<label style={labelStyle}>Model</label>
+								<label htmlFor="agent-model" style={labelStyle}>
+									Model
+								</label>
 								<input
+									id="agent-model"
 									type="text"
 									value={form.model}
 									onChange={(e) => setForm({ ...form, model: e.target.value })}
@@ -352,8 +361,11 @@ export const Agents: React.FC = () => {
 
 						<div style={{ display: "flex", gap: "12px" }}>
 							<div style={{ flex: 1 }}>
-								<label style={labelStyle}>Avatar</label>
+								<label htmlFor="agent-avatar" style={labelStyle}>
+									Avatar
+								</label>
 								<input
+									id="agent-avatar"
 									type="text"
 									value={form.avatar}
 									onChange={(e) => setForm({ ...form, avatar: e.target.value })}
@@ -362,8 +374,11 @@ export const Agents: React.FC = () => {
 								/>
 							</div>
 							<div style={{ flex: 1 }}>
-								<label style={labelStyle}>Color</label>
+								<label htmlFor="agent-color" style={labelStyle}>
+									Color
+								</label>
 								<input
+									id="agent-color"
 									type="text"
 									value={form.color}
 									onChange={(e) => setForm({ ...form, color: e.target.value })}
@@ -374,8 +389,11 @@ export const Agents: React.FC = () => {
 						</div>
 
 						<div>
-							<label style={labelStyle}>Description</label>
+							<label htmlFor="agent-description" style={labelStyle}>
+								Description
+							</label>
 							<input
+								id="agent-description"
 								type="text"
 								value={form.description}
 								onChange={(e) =>
@@ -387,8 +405,11 @@ export const Agents: React.FC = () => {
 						</div>
 
 						<div>
-							<label style={labelStyle}>Personality</label>
+							<label htmlFor="agent-personality" style={labelStyle}>
+								Personality
+							</label>
 							<textarea
+								id="agent-personality"
 								value={form.personality}
 								onChange={(e) =>
 									setForm({ ...form, personality: e.target.value })
@@ -405,8 +426,11 @@ export const Agents: React.FC = () => {
 						</div>
 
 						<div>
-							<label style={labelStyle}>System Prompt</label>
+							<label htmlFor="agent-system-prompt" style={labelStyle}>
+								System Prompt
+							</label>
 							<textarea
+								id="agent-system-prompt"
 								value={form.system_prompt}
 								onChange={(e) =>
 									setForm({ ...form, system_prompt: e.target.value })

@@ -39,8 +39,10 @@ function bezierCurve(
 		const mt = 1 - t;
 		const mt2 = mt * mt;
 		const mt3 = mt2 * mt;
-		const x = mt3 * p0[0] + 3 * mt2 * t * p1[0] + 3 * mt * t2 * p2[0] + t3 * p3[0];
-		const y = mt3 * p0[1] + 3 * mt2 * t * p1[1] + 3 * mt * t2 * p2[1] + t3 * p3[1];
+		const x =
+			mt3 * p0[0] + 3 * mt2 * t * p1[0] + 3 * mt * t2 * p2[0] + t3 * p3[0];
+		const y =
+			mt3 * p0[1] + 3 * mt2 * t * p1[1] + 3 * mt * t2 * p2[1] + t3 * p3[1];
 		points.push([Math.round(x), Math.round(y)]);
 	}
 	return points;
@@ -112,7 +114,12 @@ export class HumanBehavior {
 			}
 
 			// Más rápido en secuencias comunes
-			if (i > 1 && /^(th|he|in|er|an|re|on|at|en|nd|ti|es|or|te|of|ed|is|it|al|ar|st|to|nt|ng|se)$/i.test(text.slice(i - 1, i + 1))) {
+			if (
+				i > 1 &&
+				/^(th|he|in|er|an|re|on|at|en|nd|ti|es|or|te|of|ed|is|it|al|ar|st|to|nt|ng|se)$/i.test(
+					text.slice(i - 1, i + 1),
+				)
+			) {
 				delay *= 0.7;
 			}
 
@@ -120,8 +127,14 @@ export class HumanBehavior {
 			if (Math.random() < typoProb && /[a-zA-Z]/.test(char)) {
 				const typoChar = this.nearbyKey(char);
 				if (typoChar) {
-					sequence.push({ char: typoChar, delayMs: clamp(delay * 0.8, 30, 300) });
-					sequence.push({ char: "Backspace", delayMs: clamp(100 + Math.random() * 150, 80, 300) });
+					sequence.push({
+						char: typoChar,
+						delayMs: clamp(delay * 0.8, 30, 300),
+					});
+					sequence.push({
+						char: "Backspace",
+						delayMs: clamp(100 + Math.random() * 150, 80, 300),
+					});
 				}
 			}
 
@@ -142,7 +155,8 @@ export class HumanBehavior {
 		options: HumanMouseOptions = {},
 	): Array<{ x: number; y: number; delayMs: number }> {
 		const distance = Math.sqrt((toX - fromX) ** 2 + (toY - fromY) ** 2);
-		const steps = options.steps ?? Math.max(15, Math.min(50, Math.round(distance / 15)));
+		const steps =
+			options.steps ?? Math.max(15, Math.min(50, Math.round(distance / 15)));
 		const stepDelay = options.stepDelayMs ?? 5 + Math.random() * 10;
 		const overshootProb = options.overshootProbability ?? 0.2;
 
@@ -238,7 +252,12 @@ export class HumanBehavior {
 			// Aceleración/desaceleración: más grande en el medio
 			const t = i / (steps - 1);
 			const factor = Math.sin(Math.PI * t) * 0.7 + 0.3;
-			const pixels = Math.min(remaining, Math.round((totalPixels / steps) * factor * (1 + gaussianRandom() * 0.2)));
+			const pixels = Math.min(
+				remaining,
+				Math.round(
+					(totalPixels / steps) * factor * (1 + gaussianRandom() * 0.2),
+				),
+			);
 
 			sequence.push({
 				deltaY: sign * Math.max(20, pixels),
@@ -265,11 +284,7 @@ export class HumanBehavior {
 		const readingTimeMs = (estimatedWords / 200) * 60_000;
 
 		// Limitar entre 500ms y 5s, con variación
-		return clamp(
-			readingTimeMs * (0.3 + Math.random() * 0.4),
-			500,
-			5000,
-		);
+		return clamp(readingTimeMs * (0.3 + Math.random() * 0.4), 500, 5000);
 	}
 
 	/**

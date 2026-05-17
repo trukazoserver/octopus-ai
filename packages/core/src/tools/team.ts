@@ -12,12 +12,14 @@ export function createTeamTools(spawnWorker: WorkerSpawner): ToolDefinition[] {
 			parameters: {
 				role: {
 					type: "string",
-					description: "The specific persona/role for the worker (e.g. 'Expert Web Researcher', 'Python Code Reviewer').",
+					description:
+						"The specific persona/role for the worker (e.g. 'Expert Web Researcher', 'Python Code Reviewer').",
 					required: true,
 				},
 				task: {
 					type: "string",
-					description: "The highly detailed prompt or goal that the worker needs to accomplish. Provide all necessary context.",
+					description:
+						"The highly detailed prompt or goal that the worker needs to accomplish. Provide all necessary context.",
 					required: true,
 				},
 			},

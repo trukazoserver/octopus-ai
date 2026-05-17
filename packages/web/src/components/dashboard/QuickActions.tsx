@@ -1,7 +1,8 @@
 import type React from "react";
+import { AppIcon, type AppIconName } from "../ui/AppIcon.js";
 
 interface QuickAction {
-	icon: string;
+	icon: AppIconName;
 	label: string;
 	description: string;
 	onClick: () => void;
@@ -16,6 +17,10 @@ interface QuickActionsProps {
 	onViewTasks: () => void;
 	onViewTools: () => void;
 	onViewVariables: () => void;
+	onViewAutomations: () => void;
+	onViewMemory: () => void;
+	onViewSkills: () => void;
+	onViewMedia: () => void;
 }
 
 export const QuickActions: React.FC<QuickActionsProps> = ({
@@ -26,52 +31,84 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
 	onViewTasks,
 	onViewTools,
 	onViewVariables,
+	onViewAutomations,
+	onViewMemory,
+	onViewSkills,
+	onViewMedia,
 }) => {
 	const actions: QuickAction[] = [
 		{
-			icon: "💬",
+			icon: "chat",
 			label: "Nuevo Chat",
 			description: "Inicia una nueva conversación",
 			onClick: onNewChat,
 			color: "#6366f1",
 		},
 		{
-			icon: "🤖",
+			icon: "agent",
 			label: "Ver Agentes",
 			description: "Gestiona tus agentes IA",
 			onClick: onViewAgents,
 			color: "#10b981",
 		},
 		{
-			icon: "📡",
+			icon: "globe",
 			label: "Canales",
 			description: "Configura canales de comunicación",
 			onClick: onViewChannels,
 			color: "#3b82f6",
 		},
 		{
-			icon: "✅",
+			icon: "check",
 			label: "Tareas",
 			description: "Planifica trabajo para agentes",
 			onClick: onViewTasks,
 			color: "#38bdf8",
 		},
 		{
-			icon: "🔧",
+			icon: "tools",
 			label: "Herramientas",
 			description: "Revisa inventario y MCP",
 			onClick: onViewTools,
 			color: "#a78bfa",
 		},
 		{
-			icon: "🔐",
+			icon: "automation",
+			label: "Automatizaciones",
+			description: "Programa flujos y webhooks",
+			onClick: onViewAutomations,
+			color: "#f59e0b",
+		},
+		{
+			icon: "brain",
+			label: "Memoria",
+			description: "Consulta contexto y perfil",
+			onClick: onViewMemory,
+			color: "#818cf8",
+		},
+		{
+			icon: "spark",
+			label: "Habilidades",
+			description: "Gestiona skills del agente",
+			onClick: onViewSkills,
+			color: "#c084fc",
+		},
+		{
+			icon: "folder",
+			label: "Medios",
+			description: "Sube y revisa archivos",
+			onClick: onViewMedia,
+			color: "#38bdf8",
+		},
+		{
+			icon: "key",
 			label: "Variables",
 			description: "Gestiona secretos y API keys",
 			onClick: onViewVariables,
 			color: "#fb7185",
 		},
 		{
-			icon: "⚙️",
+			icon: "settings",
 			label: "Configuración",
 			description: "Ajusta tu workspace",
 			onClick: onViewSettings,
@@ -120,8 +157,8 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
 						e.currentTarget.style.transform = "translateY(0)";
 					}}
 				>
-					<span style={{ fontSize: "1.5rem", flexShrink: 0 }}>
-						{action.icon}
+					<span style={{ color: action.color, flexShrink: 0 }}>
+						<AppIcon name={action.icon} size={24} />
 					</span>
 					<div>
 						<div

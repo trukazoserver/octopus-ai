@@ -1,5 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { AppIcon } from "../components/ui/AppIcon.js";
 import { apiDelete, apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 interface Task {
@@ -113,6 +114,7 @@ export const TasksPage: React.FC = () => {
 			const query = activeFilter !== "all" ? `?status=${activeFilter}` : "";
 			const result = await apiGet<Task[]>(`/api/tasks${query}`);
 			setTasks(Array.isArray(result) ? result : []);
+			setError(null);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
 		}
@@ -138,7 +140,7 @@ export const TasksPage: React.FC = () => {
 			loadTasks();
 			loadStats();
 		}
-	}, [activeFilter]);
+	}, [loading, loadTasks, loadStats]);
 
 	useEffect(() => {
 		if (msg) {
@@ -261,7 +263,43 @@ export const TasksPage: React.FC = () => {
 	}
 
 	if (error) {
-		return <div style={{ padding: 40, color: "#ef4444" }}>Error: {error}</div>;
+		return (
+			<div className="page-shell">
+				<div
+					style={{
+						padding: "32px",
+						borderRadius: "16px",
+						border: "1px solid rgba(239,68,68,0.25)",
+						background: "rgba(239,68,68,0.08)",
+						color: "#fca5a5",
+						textAlign: "center",
+					}}
+				>
+					<AppIcon name="warning" size={32} />
+					<div style={{ fontWeight: 700, margin: "10px 0 6px" }}>
+						No se pudieron cargar las tareas
+					</div>
+					<div style={{ fontSize: "0.85rem", marginBottom: 14 }}>{error}</div>
+					<button
+						type="button"
+						onClick={() => {
+							setError(null);
+							void Promise.all([loadTasks(), loadStats()]);
+						}}
+						style={{
+							padding: "8px 14px",
+							borderRadius: 8,
+							border: "1px solid #ef4444",
+							background: "transparent",
+							color: "#fca5a5",
+							cursor: "pointer",
+						}}
+					>
+						Reintentar
+					</button>
+				</div>
+			</div>
+		);
 	}
 
 	return (
@@ -333,27 +371,32 @@ export const TasksPage: React.FC = () => {
 			)}
 
 			<div className="stats-grid" style={{ marginBottom: 24 }}>
-				<StatCard icon="📋" label="Total" value={stats.total} color="#e4e4e7" />
 				<StatCard
-					icon="⏳"
+					icon={<AppIcon name="folder" />}
+					label="Total"
+					value={stats.total}
+					color="#e4e4e7"
+				/>
+				<StatCard
+					icon={<AppIcon name="activity" />}
 					label="Pendientes"
 					value={stats.pending}
 					color={STATUS_COLORS.pending}
 				/>
 				<StatCard
-					icon="▶️"
+					icon={<AppIcon name="play" />}
 					label="En ejecución"
 					value={stats.running}
 					color={STATUS_COLORS.running}
 				/>
 				<StatCard
-					icon="✅"
+					icon={<AppIcon name="check" />}
 					label="Completadas"
 					value={stats.completed}
 					color={STATUS_COLORS.completed}
 				/>
 				<StatCard
-					icon="❌"
+					icon={<AppIcon name="warning" />}
 					label="Fallidas"
 					value={stats.failed}
 					color={STATUS_COLORS.failed}
@@ -383,6 +426,7 @@ export const TasksPage: React.FC = () => {
 					<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 						<div>
 							<label
+								htmlFor="task-new-title"
 								style={{
 									display: "block",
 									fontSize: "0.8rem",
@@ -407,6 +451,7 @@ export const TasksPage: React.FC = () => {
 						</div>
 						<div>
 							<label
+								htmlFor="task-new-description"
 								style={{
 									display: "block",
 									fontSize: "0.8rem",
@@ -436,6 +481,7 @@ export const TasksPage: React.FC = () => {
 						<div className="responsive-grid-2" style={{ gap: 14 }}>
 							<div>
 								<label
+									htmlFor="task-new-priority"
 									style={{
 										display: "block",
 										fontSize: "0.8rem",
@@ -446,7 +492,7 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-								Prioridad: {newPriority}
+									Prioridad: {newPriority}
 								</label>
 								<input
 									id="task-new-priority"
@@ -472,6 +518,7 @@ export const TasksPage: React.FC = () => {
 							</div>
 							<div>
 								<label
+									htmlFor="task-new-agent"
 									style={{
 										display: "block",
 										fontSize: "0.8rem",
@@ -482,7 +529,7 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-								Asignar agente
+									Asignar agente
 								</label>
 								<select
 									id="task-new-agent"
@@ -551,6 +598,7 @@ export const TasksPage: React.FC = () => {
 					<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 						<div>
 							<label
+								htmlFor="task-edit-title"
 								style={{
 									display: "block",
 									fontSize: "0.8rem",
@@ -574,6 +622,7 @@ export const TasksPage: React.FC = () => {
 						</div>
 						<div>
 							<label
+								htmlFor="task-edit-description"
 								style={{
 									display: "block",
 									fontSize: "0.8rem",
@@ -602,6 +651,7 @@ export const TasksPage: React.FC = () => {
 						<div className="responsive-grid-2" style={{ gap: 14 }}>
 							<div>
 								<label
+									htmlFor="task-edit-status"
 									style={{
 										display: "block",
 										fontSize: "0.8rem",
@@ -612,7 +662,7 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-								Estado
+									Estado
 								</label>
 								<select
 									id="task-edit-status"
@@ -630,6 +680,7 @@ export const TasksPage: React.FC = () => {
 							</div>
 							<div>
 								<label
+									htmlFor="task-edit-agent"
 									style={{
 										display: "block",
 										fontSize: "0.8rem",
@@ -640,7 +691,7 @@ export const TasksPage: React.FC = () => {
 										letterSpacing: "0.04em",
 									}}
 								>
-								Asignar agente
+									Asignar agente
 								</label>
 								<select
 									id="task-edit-agent"
@@ -741,7 +792,15 @@ export const TasksPage: React.FC = () => {
 						border: "1px solid #27272a",
 					}}
 				>
-					<div style={{ fontSize: "2rem", marginBottom: 12 }}>📋</div>
+					<div
+						style={{
+							display: "flex",
+							justifyContent: "center",
+							marginBottom: 12,
+						}}
+					>
+						<AppIcon name="folder" size={32} strokeWidth={1.5} />
+					</div>
 					<div style={{ fontSize: "1rem", fontWeight: 600, marginBottom: 6 }}>
 						No hay tareas
 					</div>
@@ -878,19 +937,19 @@ export const TasksPage: React.FC = () => {
 										>
 											{task.assigned_agent_id && (
 												<span>
-								Agente:{" "}
+													Agente:{" "}
 													<span style={{ color: "#a1a1aa" }}>
 														{agents.find((a) => a.id === task.assigned_agent_id)
 															?.name ?? task.assigned_agent_id}
 													</span>
 												</span>
 											)}
-							<span>Creada: {formatDate(task.created_at)}</span>
+											<span>Creada: {formatDate(task.created_at)}</span>
 											{task.started_at && (
-								<span>Iniciada: {formatDate(task.started_at)}</span>
+												<span>Iniciada: {formatDate(task.started_at)}</span>
 											)}
 											{task.completed_at && (
-								<span>Completada: {formatDate(task.completed_at)}</span>
+												<span>Completada: {formatDate(task.completed_at)}</span>
 											)}
 										</div>
 										{task.error && (
@@ -934,23 +993,23 @@ export const TasksPage: React.FC = () => {
 									>
 										{!isConfirming ? (
 											<>
-						<button
-							type="button"
-							onClick={() => startEdit(task)}
-							style={actionBtnStyle}
-							title="Edit"
-							aria-label={`Editar tarea ${task.title}`}
+												<button
+													type="button"
+													onClick={() => startEdit(task)}
+													style={actionBtnStyle}
+													data-tooltip="Editar"
+													aria-label={`Editar tarea ${task.title}`}
 												>
-													✏️
+													<AppIcon name="edit" size={15} />
 												</button>
-						<button
-							type="button"
-							onClick={() => setConfirmDeleteId(task.id)}
-							style={actionBtnStyle}
-							title="Delete"
-							aria-label={`Eliminar tarea ${task.title}`}
+												<button
+													type="button"
+													onClick={() => setConfirmDeleteId(task.id)}
+													style={actionBtnStyle}
+													data-tooltip="Eliminar"
+													aria-label={`Eliminar tarea ${task.title}`}
 												>
-													🗑️
+													<AppIcon name="trash" size={15} />
 												</button>
 											</>
 										) : (
@@ -962,7 +1021,7 @@ export const TasksPage: React.FC = () => {
 														fontWeight: 600,
 													}}
 												>
-							¿Eliminar?
+													¿Eliminar?
 												</span>
 												<button
 													type="button"
@@ -979,7 +1038,7 @@ export const TasksPage: React.FC = () => {
 														fontWeight: 600,
 													}}
 												>
-							{isDeleting ? "..." : "Sí"}
+													{isDeleting ? "..." : "Sí"}
 												</button>
 												<button
 													type="button"
@@ -995,7 +1054,7 @@ export const TasksPage: React.FC = () => {
 														fontWeight: 600,
 													}}
 												>
-							No
+													No
 												</button>
 											</>
 										)}
@@ -1020,14 +1079,23 @@ function formatDate(iso: string | null): string {
 }
 
 const StatCard: React.FC<{
-	icon: string;
+	icon: React.ReactNode;
 	label: string;
 	value: number;
 	color: string;
 }> = ({ icon, label, value, color }) => (
 	<div className="settings-summary-card">
 		<div className="settings-summary-label">
-			{icon} {label}
+			<span
+				style={{
+					display: "inline-flex",
+					verticalAlign: "-3px",
+					marginRight: 6,
+				}}
+			>
+				{icon}
+			</span>
+			{label}
 		</div>
 		<div className="settings-summary-value" style={{ color }}>
 			{value}

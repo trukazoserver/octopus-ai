@@ -2,7 +2,12 @@ import type { LLMRouter } from "../ai/router.js";
 import type { LLMMessage } from "../ai/types.js";
 import type { SkillForge } from "../skills/forge.js";
 import type { SkillRegistry } from "../skills/registry.js";
-import type { ConversationTurn, TaskDescription, TaskResult, TaskState } from "./types.js";
+import type {
+	ConversationTurn,
+	TaskDescription,
+	TaskResult,
+	TaskState,
+} from "./types.js";
 
 /**
  * ReflectionEngine — Closed Learning Loop
@@ -125,10 +130,7 @@ export class ReflectionEngine {
 	/**
 	 * Determine if a conversation warrants automatic reflection.
 	 */
-	shouldReflect(
-		turns: ConversationTurn[],
-		task: TaskState | null,
-	): boolean {
+	shouldReflect(turns: ConversationTurn[], task: TaskState | null): boolean {
 		// Must have enough turns
 		if (turns.length < this.config.minTurnsForReflection) return false;
 
@@ -164,13 +166,20 @@ export class ReflectionEngine {
 
 		// Step 4: Build TaskResult and TaskDescription for SkillForge
 		const taskResult = this.buildTaskResult(evaluation, response.content);
-		const taskDescription = this.buildTaskDescription(turns, evaluation, response.content);
+		const taskDescription = this.buildTaskDescription(
+			turns,
+			evaluation,
+			response.content,
+		);
 
 		let skillCreated = false;
 		let skillImproved = false;
 
 		// Step 5: Auto-create or improve skills
-		if (evaluation.overallScore >= 0.6 && evaluation.reusablePatterns.length > 0) {
+		if (
+			evaluation.overallScore >= 0.6 &&
+			evaluation.reusablePatterns.length > 0
+		) {
 			if (this.config.autoCreateSkills && this.skillForge) {
 				// Check if a similar skill already exists
 				const existingSkill = this.skillRegistry
@@ -334,9 +343,7 @@ export class ReflectionEngine {
 				whatWorked:
 					parsed.whatWorked ?? evaluation.strengths.join("; ") ?? "N/A",
 				whatCouldImprove:
-					parsed.whatCouldImprove ??
-					evaluation.weaknesses.join("; ") ??
-					"N/A",
+					parsed.whatCouldImprove ?? evaluation.weaknesses.join("; ") ?? "N/A",
 				patterns: evaluation.reusablePatterns,
 			};
 		} catch {
@@ -377,7 +384,9 @@ export class ReflectionEngine {
 			};
 		} catch {
 			return {
-				description: turns.find((t) => t.role === "user")?.content.substring(0, 200) ?? "Task",
+				description:
+					turns.find((t) => t.role === "user")?.content.substring(0, 200) ??
+					"Task",
 				complexity: 0.5,
 				keywords: this.extractKeywords(turns),
 				domains: [],
@@ -408,14 +417,14 @@ export class ReflectionEngine {
 			.map(([word]) => word);
 	}
 
-	private async findSimilarSkill(
-		taskDesc: TaskDescription,
-	): Promise<boolean> {
+	private async findSimilarSkill(taskDesc: TaskDescription): Promise<boolean> {
 		if (!this.skillRegistry) return false;
 		try {
 			// Use list() and check for keyword overlap
 			const allSkills = await this.skillRegistry.list();
-			const keywords = new Set(taskDesc.keywords.map((k: string) => k.toLowerCase()));
+			const keywords = new Set(
+				taskDesc.keywords.map((k: string) => k.toLowerCase()),
+			);
 			return allSkills.some((skill: { tags?: string[] }) =>
 				skill.tags?.some((tag: string) => keywords.has(tag.toLowerCase())),
 			);

@@ -41,7 +41,7 @@ export function createSandboxTools(): ToolDefinition[] {
 
 				// Override image if specified
 				if (args.image && typeof args.image === "string") {
-					(sandbox as any).image = args.image;
+					sandbox.setImage(args.image);
 				}
 
 				try {

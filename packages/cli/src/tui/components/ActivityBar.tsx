@@ -1,4 +1,4 @@
-import { Box, Text, useApp } from "ink";
+import { Box, Text } from "ink";
 import React, { useEffect, useRef, useState } from "react";
 import { colors } from "../theme.js";
 
@@ -23,7 +23,20 @@ const SPINNER_DOTS = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 const SPINNER_ARROWS = ["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"];
 const SPINNER_PULSE = ["◌", "○", "◉", "●", "◉", "○"];
 const SPINNER_GEAR = ["◐", "◓", "◑", "◒"];
-const SPINNER_BLOCKS = ["▏", "▎", "▍", "▌", "▋", "▊", "▉", "▊", "▋", "▌", "▍", "▎"];
+const SPINNER_BLOCKS = [
+	"▏",
+	"▎",
+	"▍",
+	"▌",
+	"▋",
+	"▊",
+	"▉",
+	"▊",
+	"▋",
+	"▌",
+	"▍",
+	"▎",
+];
 const SPINNER_DIAMOND = ["◇", "◈", "◆", "◈"];
 const SPINNER_CIRCLE = ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"];
 const SPINNER_WAVE = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
@@ -34,13 +47,33 @@ const SPINNER_LOAD = ["◴", "◵", "◵", "◶", "◷", "◷", "◶", "◷"];
 function getActivityConfig(status: string): ActivityConfig {
 	switch (status) {
 		case "thinking":
-			return { icon: "✦", label: "Thinking", color: colors.accentBright, spinner: SPINNER_BRAILLE };
+			return {
+				icon: "✦",
+				label: "Thinking",
+				color: colors.accentBright,
+				spinner: SPINNER_BRAILLE,
+			};
 		case "responding":
-			return { icon: ">", label: "Writing response", color: colors.text, spinner: SPINNER_BLOCKS };
+			return {
+				icon: ">",
+				label: "Writing response",
+				color: colors.text,
+				spinner: SPINNER_BLOCKS,
+			};
 		case "tool":
-			return { icon: "⚙", label: "Using tool", color: "#60a5fa", spinner: SPINNER_GEAR };
+			return {
+				icon: "⚙",
+				label: "Using tool",
+				color: "#60a5fa",
+				spinner: SPINNER_GEAR,
+			};
 		case "code":
-			return { icon: "$", label: "Executing code", color: "#a78bfa", spinner: SPINNER_CODE };
+			return {
+				icon: "$",
+				label: "Executing code",
+				color: "#a78bfa",
+				spinner: SPINNER_CODE,
+			};
 		case "tool_done":
 			return { icon: "✓", label: "Tool completed", color: colors.good };
 		case "tool_error":
@@ -48,30 +81,77 @@ function getActivityConfig(status: string): ActivityConfig {
 		case "tool_skipped":
 			return { icon: "○", label: "Tool skipped", color: colors.warn };
 		case "memory":
-			return { icon: "◈", label: "Consolidating memory", color: "#34d399", spinner: SPINNER_MEMORY };
+			return {
+				icon: "◈",
+				label: "Consolidating memory",
+				color: "#34d399",
+				spinner: SPINNER_MEMORY,
+			};
 		case "embedding":
-			return { icon: "◉", label: "Generating embeddings", color: "#818cf8", spinner: SPINNER_LOAD };
+			return {
+				icon: "◉",
+				label: "Generating embeddings",
+				color: "#818cf8",
+				spinner: SPINNER_LOAD,
+			};
 		case "retrieving":
-			return { icon: "?", label: "Searching memory", color: "#38bdf8", spinner: SPINNER_DOTS };
+			return {
+				icon: "?",
+				label: "Searching memory",
+				color: "#38bdf8",
+				spinner: SPINNER_DOTS,
+			};
 		case "planning":
-			return { icon: "◈", label: "Planning actions", color: colors.accent, spinner: SPINNER_DIAMOND };
+			return {
+				icon: "◈",
+				label: "Planning actions",
+				color: colors.accent,
+				spinner: SPINNER_DIAMOND,
+			};
 		case "closing":
 			return { icon: "−", label: "Closing session", color: colors.muted };
 		case "browsing":
-			return { icon: "◈", label: "Browsing web", color: "#60a5fa", spinner: SPINNER_ARROWS };
+			return {
+				icon: "◈",
+				label: "Browsing web",
+				color: "#60a5fa",
+				spinner: SPINNER_ARROWS,
+			};
 		case "searching":
-			return { icon: "?", label: "Searching", color: "#38bdf8", spinner: SPINNER_DOTS };
+			return {
+				icon: "?",
+				label: "Searching",
+				color: "#38bdf8",
+				spinner: SPINNER_DOTS,
+			};
 		case "reading":
-			return { icon: "READ", label: "Reading", color: "#60a5fa", spinner: SPINNER_WAVE };
+			return {
+				icon: "READ",
+				label: "Reading",
+				color: "#60a5fa",
+				spinner: SPINNER_WAVE,
+			};
 		case "writing":
-			return { icon: "WRITE", label: "Writing file", color: "#34d399", spinner: SPINNER_BLOCKS };
+			return {
+				icon: "WRITE",
+				label: "Writing file",
+				color: "#34d399",
+				spinner: SPINNER_BLOCKS,
+			};
 		default:
-			return { icon: "•", label: status, color: colors.muted, spinner: SPINNER_CIRCLE };
+			return {
+				icon: "•",
+				label: status,
+				color: colors.muted,
+				spinner: SPINNER_CIRCLE,
+			};
 	}
 }
 
-function useSpinnerFrame(spinnerFrames: string[] | undefined, active: boolean): string {
-	const { exit } = useApp();
+function useSpinnerFrame(
+	spinnerFrames: string[] | undefined,
+	active: boolean,
+): string {
 	const [frame, setFrame] = useState(0);
 	const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -85,7 +165,7 @@ function useSpinnerFrame(spinnerFrames: string[] | undefined, active: boolean): 
 		return () => {
 			if (intervalRef.current) clearInterval(intervalRef.current);
 		};
-	}, [active, spinnerFrames, exit]);
+	}, [active, spinnerFrames]);
 
 	if (!active || !spinnerFrames || spinnerFrames.length === 0) {
 		return "";
@@ -111,7 +191,9 @@ export const ActivityBar = React.memo(function ActivityBar({
 		const label = error ? "failed" : "done";
 		return (
 			<Box gap={1}>
-				<Text color={doneColor} bold>{doneIcon}</Text>
+				<Text color={doneColor} bold>
+					{doneIcon}
+				</Text>
 				<Text color={doneColor}>{label}</Text>
 				{toolName && <Text color={colors.textDim}>{toolName}</Text>}
 			</Box>
@@ -122,7 +204,9 @@ export const ActivityBar = React.memo(function ActivityBar({
 
 	return (
 		<Box gap={1}>
-			<Text color={config.color} bold>{displayIcon}</Text>
+			<Text color={config.color} bold>
+				{displayIcon}
+			</Text>
 			<Text color={config.color}>{config.label}</Text>
 			{toolName && <Text color={colors.accent}>{toolName}</Text>}
 			{detail && <Text color={colors.textDim}>{detail}</Text>}

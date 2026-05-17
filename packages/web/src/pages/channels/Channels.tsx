@@ -5,6 +5,7 @@ import { DiscordConfig } from "../../components/channels/DiscordConfig.js";
 import { SlackConfig } from "../../components/channels/SlackConfig.js";
 import { TelegramConfig } from "../../components/channels/TelegramConfig.js";
 import { WhatsAppConfig } from "../../components/channels/WhatsAppConfig.js";
+import { AppIcon } from "../../components/ui/AppIcon.js";
 import { showToast } from "../../components/ui/Toast.js";
 import { useChannels } from "../../hooks/useChannels.js";
 
@@ -12,7 +13,7 @@ function renderChannelConfig(
 	type: string,
 	enabled: boolean,
 	config: Record<string, unknown>,
-	onSave: (cfg: Record<string, unknown>) => void,
+	onSave: (cfg: Record<string, unknown>) => Promise<void>,
 ): React.ReactNode {
 	switch (type) {
 		case "telegram":
@@ -48,8 +49,18 @@ export const ChannelsPage: React.FC = () => {
 
 	const handleToggle = async (name: string) => {
 		const wasEnabled = channels.find((c) => c.name === name)?.enabled;
-		await toggleChannel(name);
-		showToast("success", `${name} ${wasEnabled ? "desactivado" : "activado"}`);
+		try {
+			await toggleChannel(name);
+			showToast(
+				"success",
+				`${name} ${wasEnabled ? "desactivado" : "activado"}`,
+			);
+		} catch (err) {
+			showToast(
+				"error",
+				err instanceof Error ? err.message : "Error al cambiar el canal",
+			);
+		}
 	};
 
 	const handleTest = async (name: string) => {
@@ -80,15 +91,27 @@ export const ChannelsPage: React.FC = () => {
 	};
 
 	return (
-		<div className="page-shell">
+		<div className="page-shell settings-page">
 			<div className="animate-fade-in" style={{ marginBottom: "28px" }}>
+				<div
+					style={{
+						color: "#737373",
+						fontSize: "0.82rem",
+						fontWeight: 850,
+						letterSpacing: "0.08em",
+						textTransform: "uppercase",
+						marginBottom: "8px",
+					}}
+				>
+					Octopus
+				</div>
 				<h1
 					style={{
-						fontSize: "1.6rem",
-						fontWeight: 700,
+						fontSize: "2.1rem",
+						fontWeight: 850,
 						color: "#f4f4f5",
 						margin: "0 0 6px",
-						letterSpacing: "-0.02em",
+						letterSpacing: "-0.04em",
 					}}
 				>
 					Canales
@@ -116,12 +139,14 @@ export const ChannelsPage: React.FC = () => {
 			)}
 
 			{loading ? (
-				<div
-					style={channelGridStyle}
-				>
-					{Array.from({ length: 3 }).map((_, i) => (
+				<div style={channelGridStyle}>
+					{[
+						"channels-skeleton-1",
+						"channels-skeleton-2",
+						"channels-skeleton-3",
+					].map((key) => (
 						<div
-							key={i}
+							key={key}
 							className="skeleton"
 							style={{ height: "180px", borderRadius: "16px" }}
 						/>
@@ -134,19 +159,51 @@ export const ChannelsPage: React.FC = () => {
 							style={{
 								padding: "48px 20px",
 								borderRadius: "16px",
-								border: "1px dashed #3f3f46",
-								background: "rgba(24,24,27,0.5)",
+								border: "1px dashed #242424",
+								background: "#050505",
 								textAlign: "center",
 								color: "#a1a1aa",
 							}}
 						>
-							<div style={{ fontSize: "2rem", marginBottom: 10 }}>📡</div>
-							<div style={{ fontWeight: 700, color: "#f4f4f5", marginBottom: 6 }}>
+							<div
+								style={{
+									width: 42,
+									height: 42,
+									borderRadius: 14,
+									border: "1px solid #242424",
+									background: "#111",
+									display: "inline-flex",
+									alignItems: "center",
+									justifyContent: "center",
+									marginBottom: 12,
+								}}
+							>
+								<AppIcon name="message" size={19} />
+							</div>
+							<div
+								style={{ fontWeight: 700, color: "#f4f4f5", marginBottom: 6 }}
+							>
 								No hay canales registrados
 							</div>
 							<div style={{ fontSize: "0.85rem" }}>
 								Recarga o revisa la configuración del servidor de canales.
 							</div>
+							<button
+								type="button"
+								onClick={reload}
+								style={{
+									marginTop: 16,
+									padding: "8px 14px",
+									borderRadius: 10,
+									border: "1px solid #2a2a2a",
+									background: "#f4f4f5",
+									color: "#050505",
+									fontWeight: 800,
+									cursor: "pointer",
+								}}
+							>
+								Recargar canales
+							</button>
 						</div>
 					)}
 					{/* Active channels */}
@@ -171,12 +228,13 @@ export const ChannelsPage: React.FC = () => {
 										channel={channel}
 										onToggle={handleToggle}
 										onTest={handleTest}
+										canTest={channel.type === "telegram"}
 										testing={testingChannel === channel.name}
 									>
-						{renderChannelConfig(
-							channel.type,
-							true,
-							channel.config,
+										{renderChannelConfig(
+											channel.type,
+											true,
+											channel.config,
 											(cfg) => handleSaveConfig(channel.name, cfg),
 										)}
 									</ChannelCard>
@@ -200,15 +258,14 @@ export const ChannelsPage: React.FC = () => {
 							>
 								Canales disponibles
 							</h2>
-							<div
-								style={channelGridStyle}
-							>
+							<div style={channelGridStyle}>
 								{inactiveChannels.map((channel) => (
 									<ChannelCard
 										key={channel.name}
 										channel={channel}
 										onToggle={handleToggle}
 										onTest={handleTest}
+										canTest={channel.type === "telegram"}
 										testing={testingChannel === channel.name}
 									>
 										{renderChannelConfig(

@@ -8,13 +8,25 @@ type MdBlock =
 	| { type: "code_block"; lang?: string; content: string }
 	| { type: "list_item"; ordered?: boolean; index?: number; content: string }
 	| { type: "blockquote"; content: string }
-	| { type: "table"; headers: string[]; rows: string[][]; aligns: ("left" | "center" | "right")[] }
+	| {
+			type: "table";
+			headers: string[];
+			rows: string[][];
+			aligns: ("left" | "center" | "right")[];
+	  }
 	| { type: "hr" };
 
 type InlinePart = {
 	type: "text" | "bold" | "italic" | "code" | "link" | "strike";
 	content: string;
+	key: string;
 };
+
+function makeUniqueKey(base: string, counts: Map<string, number>): string {
+	const count = counts.get(base) ?? 0;
+	counts.set(base, count + 1);
+	return `${base}:${count}`;
+}
 
 function parseMarkdownBlocks(raw: string): MdBlock[] {
 	const blocks: MdBlock[] = [];
@@ -41,9 +53,15 @@ function parseMarkdownBlocks(raw: string): MdBlock[] {
 			const cells = tableRowMatch[1].split("|").map((c) => c.trim());
 			if (i + 1 < lines.length) {
 				const nextLine = (lines[i + 1] ?? "").trim();
-				const sepMatch = nextLine.match(/^\|?(\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*)\|?$/);
+				const sepMatch = nextLine.match(
+					/^\|?(\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*)\|?$/,
+				);
 				if (sepMatch) {
-					const sepCells = nextLine.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+					const sepCells = nextLine
+						.replace(/^\|/, "")
+						.replace(/\|$/, "")
+						.split("|")
+						.map((c) => c.trim());
 					const aligns = sepCells.map((c) => {
 						if (c.startsWith(":") && c.endsWith(":")) return "center" as const;
 						if (c.endsWith(":")) return "right" as const;
@@ -141,22 +159,61 @@ function parseMarkdownBlocks(raw: string): MdBlock[] {
 
 function parseInline(text: string): InlinePart[] {
 	const parts: InlinePart[] = [];
-	const re = /(\*\*([^*]+)\*\*|`([^`]+)`|\*([^*]+)\*|~~([^~]+)~~|\[([^\]]+)\]\(([^)]+)\))/g;
+	const re =
+		/(\*\*([^*]+)\*\*|`([^`]+)`|\*([^*]+)\*|~~([^~]+)~~|\[([^\]]+)\]\(([^)]+)\))/g;
 	let last = 0;
-	let match: RegExpExecArray | null;
+	let match = re.exec(text);
 
-	while ((match = re.exec(text))) {
-		if (match.index > last) parts.push({ type: "text", content: text.slice(last, match.index) });
-		if (match[2]) parts.push({ type: "bold", content: match[2] });
-		else if (match[3]) parts.push({ type: "code", content: match[3] });
-		else if (match[4]) parts.push({ type: "italic", content: match[4] });
-		else if (match[5]) parts.push({ type: "strike", content: match[5] });
-		else if (match[6]) parts.push({ type: "link", content: match[6] });
+	while (match) {
+		if (match.index > last)
+			parts.push({
+				type: "text",
+				content: text.slice(last, match.index),
+				key: `text:${last}:${match.index}`,
+			});
+		if (match[2])
+			parts.push({
+				type: "bold",
+				content: match[2],
+				key: `bold:${match.index}:${match[0].length}`,
+			});
+		else if (match[3])
+			parts.push({
+				type: "code",
+				content: match[3],
+				key: `code:${match.index}:${match[0].length}`,
+			});
+		else if (match[4])
+			parts.push({
+				type: "italic",
+				content: match[4],
+				key: `italic:${match.index}:${match[0].length}`,
+			});
+		else if (match[5])
+			parts.push({
+				type: "strike",
+				content: match[5],
+				key: `strike:${match.index}:${match[0].length}`,
+			});
+		else if (match[6])
+			parts.push({
+				type: "link",
+				content: match[6],
+				key: `link:${match.index}:${match[0].length}`,
+			});
 		last = match.index + match[0].length;
+		match = re.exec(text);
 	}
 
-	if (last < text.length) parts.push({ type: "text", content: text.slice(last) });
-	return parts.length ? parts : [{ type: "text", content: text }];
+	if (last < text.length)
+		parts.push({
+			type: "text",
+			content: text.slice(last),
+			key: `text:${last}`,
+		});
+	return parts.length
+		? parts
+		: [{ type: "text", content: text, key: "text:0" }];
 }
 
 function wrapText(text: string, width: number): string[] {
@@ -181,18 +238,39 @@ function wrapText(text: string, width: number): string[] {
 function InlineText({ text, dim = false }: { text: string; dim?: boolean }) {
 	return (
 		<Text color={dim ? colors.textDim : colors.text}>
-			{parseInline(text).map((part, index) => {
+			{parseInline(text).map((part) => {
 				switch (part.type) {
 					case "bold":
-						return <Text key={index} bold color={colors.text}>{part.content}</Text>;
+						return (
+							<Text key={part.key} bold color={colors.text}>
+								{part.content}
+							</Text>
+						);
 					case "italic":
-						return <Text key={index} italic color={colors.text}>{part.content}</Text>;
+						return (
+							<Text key={part.key} italic color={colors.text}>
+								{part.content}
+							</Text>
+						);
 					case "code":
-						return <Text key={index} color={colors.coral}>{` ${part.content} `}</Text>;
+						return (
+							<Text
+								key={part.key}
+								color={colors.coral}
+							>{` ${part.content} `}</Text>
+						);
 					case "link":
-						return <Text key={index} underline color={colors.accentBright}>{part.content}</Text>;
+						return (
+							<Text key={part.key} underline color={colors.accentBright}>
+								{part.content}
+							</Text>
+						);
 					case "strike":
-						return <Text key={index} strikethrough color={colors.textDim}>{part.content}</Text>;
+						return (
+							<Text key={part.key} strikethrough color={colors.textDim}>
+								{part.content}
+							</Text>
+						);
 					default:
 						return part.content;
 				}
@@ -201,18 +279,28 @@ function InlineText({ text, dim = false }: { text: string; dim?: boolean }) {
 	);
 }
 
-function CodeBlock({ block, width }: { block: Extract<MdBlock, { type: "code_block" }>; width: number }) {
+function CodeBlock({
+	block,
+	width,
+}: { block: Extract<MdBlock, { type: "code_block" }>; width: number }) {
 	const inner = Math.max(16, width - 4);
 	const header = block.lang ? ` ${block.lang} ` : "";
 	const codeLines = block.content.split("\n");
+	const lineCounts = new Map<string, number>();
+	const codeLineEntries = codeLines.map((line) => ({
+		line,
+		key: makeUniqueKey(`code-line:${line}`, lineCounts),
+	}));
 
 	return (
 		<Box flexDirection="column">
 			<Text color={colors.muted}>{`┌${header.padEnd(inner, "─")}┐`}</Text>
-			{codeLines.map((line, index) => (
-				<Text key={index} color={colors.textDim}>
+			{codeLineEntries.map(({ line, key }) => (
+				<Text key={key} color={colors.textDim}>
 					<Text color={colors.muted}>│ </Text>
-					{line.length > inner - 2 ? `${line.slice(0, inner - 3)}…` : line.padEnd(inner - 2)}
+					{line.length > inner - 2
+						? `${line.slice(0, inner - 3)}…`
+						: line.padEnd(inner - 2)}
 					<Text color={colors.muted}> │</Text>
 				</Text>
 			))}
@@ -237,7 +325,8 @@ function charWidth(char: string): number {
 	if (
 		(codePoint >= 0x300 && codePoint <= 0x36f) ||
 		(codePoint >= 0xfe00 && codePoint <= 0xfe0f)
-	) return 0;
+	)
+		return 0;
 	if (
 		(codePoint >= 0x1100 && codePoint <= 0x115f) ||
 		(codePoint >= 0x2329 && codePoint <= 0x232a) ||
@@ -249,7 +338,8 @@ function charWidth(char: string): number {
 		(codePoint >= 0xff00 && codePoint <= 0xff60) ||
 		(codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
 		(codePoint >= 0x1f300 && codePoint <= 0x1faff)
-	) return 2;
+	)
+		return 2;
 	return 1;
 }
 
@@ -306,7 +396,9 @@ function normalizedTableRows(block: Extract<MdBlock, { type: "table" }>): {
 		...block.rows.map((row) => row.length),
 	);
 	const normalize = (row: string[]) =>
-		Array.from({ length: colCount }, (_, index) => stripMarkdown(row[index] ?? ""));
+		Array.from({ length: colCount }, (_, index) =>
+			stripMarkdown(row[index] ?? ""),
+		);
 	return {
 		colCount,
 		headers: normalize(block.headers),
@@ -324,7 +416,9 @@ function getTableColumnWidths(
 		const values = [headers[col] ?? "", ...rows.map((row) => row[col] ?? "")];
 		return Math.max(4, ...values.map(visibleWidth));
 	});
-	const minWidths = headers.map((header) => Math.max(4, Math.min(12, visibleWidth(header))));
+	const minWidths = headers.map((header) =>
+		Math.max(4, Math.min(12, visibleWidth(header))),
+	);
 
 	while (widths.reduce((sum, value) => sum + value, 0) > maxContentWidth) {
 		let largestIndex = 0;
@@ -338,72 +432,122 @@ function getTableColumnWidths(
 	return widths;
 }
 
-function MdTable({ block, width }: { block: Extract<MdBlock, { type: "table" }>; width: number }) {
+function MdTable({
+	block,
+	width,
+}: { block: Extract<MdBlock, { type: "table" }>; width: number }) {
 	const available = Math.max(20, width - 2);
 	const { headers, rows } = normalizedTableRows(block);
 	const colWidths = getTableColumnWidths(block, available);
 	const border = (left: string, join: string, right: string) =>
 		`${left}${colWidths.map((colWidth) => "─".repeat(colWidth + 2)).join(join)}${right}`;
-	const renderRow = (row: string[], color: string, bold = false) => (
-		<Text>
-			<Text color={colors.muted}>│</Text>
-			{colWidths.map((colWidth, ci) => (
-				<Text key={`${row[ci] ?? ""}-${ci}`} color={color} bold={bold}>
-					{" "}
-					{alignVisible(row[ci] ?? "", block.aligns[ci] ?? "left", colWidth)}
-					{" "}
-					<Text color={colors.muted}>│</Text>
-				</Text>
-			))}
-		</Text>
-	);
+	const renderRow = (row: string[], color: string, bold = false) => {
+		const cellCounts = new Map<string, number>();
+		const cells = colWidths.map((colWidth, ci) => {
+			const value = row[ci] ?? "";
+			return {
+				colWidth,
+				value,
+				align: block.aligns[ci] ?? "left",
+				key: makeUniqueKey(`cell:${value}:${colWidth}`, cellCounts),
+			};
+		});
+
+		return (
+			<Text>
+				<Text color={colors.muted}>│</Text>
+				{cells.map(({ colWidth, value, align, key }) => (
+					<Text key={key} color={color} bold={bold}>
+						{" "}
+						{alignVisible(value, align, colWidth)}{" "}
+						<Text color={colors.muted}>│</Text>
+					</Text>
+				))}
+			</Text>
+		);
+	};
+	const rowCounts = new Map<string, number>();
+	const rowEntries = rows.map((row) => ({
+		row,
+		key: makeUniqueKey(`row:${row.join("|")}`, rowCounts),
+	}));
 
 	return (
 		<Box flexDirection="column">
 			<Text color={colors.muted}>{border("┌", "┬", "┐")}</Text>
 			{renderRow(headers, colors.accent, true)}
 			<Text color={colors.muted}>{border("├", "┼", "┤")}</Text>
-			{rows.map((row, ri) => (
-				<React.Fragment key={`${ri}-${row.join("|")}`}>
-					{renderRow(row, colors.text)}
-				</React.Fragment>
+			{rowEntries.map(({ row, key }) => (
+				<React.Fragment key={key}>{renderRow(row, colors.text)}</React.Fragment>
 			))}
 			<Text color={colors.muted}>{border("└", "┴", "┘")}</Text>
 		</Box>
 	);
 }
 
-export function MarkdownText({ text, width }: { text: string; width?: number }) {
+export function MarkdownText({
+	text,
+	width,
+}: { text: string; width?: number }) {
 	const w = Math.max(20, width ?? 80);
 	const blocks = React.useMemo(() => parseMarkdownBlocks(text), [text]);
+	const blockCounts = new Map<string, number>();
 
 	return (
 		<Box flexDirection="column">
-			{blocks.map((block, index) => {
+			{blocks.map((block) => {
+				const blockKey = makeUniqueKey(
+					`block:${block.type}:${"content" in block ? block.content : JSON.stringify(block)}`,
+					blockCounts,
+				);
 				if (block.type === "hr") {
-					return <Text key={index} color={colors.muted}>{"─".repeat(Math.max(10, w - 2))}</Text>;
+					return (
+						<Text key={blockKey} color={colors.muted}>
+							{"─".repeat(Math.max(10, w - 2))}
+						</Text>
+					);
 				}
 				if (block.type === "heading") {
-					return <Text key={index} bold color={colors.accent}>{`${"#".repeat(block.level)} ${block.content}`}</Text>;
+					return (
+						<Text
+							key={blockKey}
+							bold
+							color={colors.accent}
+						>{`${"#".repeat(block.level)} ${block.content}`}</Text>
+					);
 				}
 				if (block.type === "code_block") {
-					return <CodeBlock key={index} block={block} width={w} />;
+					return <CodeBlock key={blockKey} block={block} width={w} />;
 				}
 				if (block.type === "table") {
-					return <MdTable key={index} block={block} width={w} />;
+					return <MdTable key={blockKey} block={block} width={w} />;
 				}
 
-				const prefix = block.type === "list_item"
-					? block.ordered ? `${block.index ?? 1}. ` : "• "
-					: block.type === "blockquote" ? "│ " : "";
+				const prefix =
+					block.type === "list_item"
+						? block.ordered
+							? `${block.index ?? 1}. `
+							: "• "
+						: block.type === "blockquote"
+							? "│ "
+							: "";
 				const available = Math.max(10, w - prefix.length);
 				const lines = wrapText(block.content, available);
+				const lineCounts = new Map<string, number>();
+				const lineEntries = lines.map((line) => ({
+					line,
+					key: makeUniqueKey(`line:${line}`, lineCounts),
+				}));
 
 				return (
-					<Box key={index} flexDirection="column">
-						{lines.map((line, lineIndex) => (
-							<Text key={lineIndex}>
-								{prefix && lineIndex === 0 ? <Text color={colors.accent}>{prefix}</Text> : prefix ? <Text>{" ".repeat(prefix.length)}</Text> : null}
+					<Box key={blockKey} flexDirection="column">
+						{lineEntries.map(({ line, key }, lineIndex) => (
+							<Text key={key}>
+								{prefix && lineIndex === 0 ? (
+									<Text color={colors.accent}>{prefix}</Text>
+								) : prefix ? (
+									<Text>{" ".repeat(prefix.length)}</Text>
+								) : null}
 								<InlineText text={line} dim={block.type === "blockquote"} />
 							</Text>
 						))}

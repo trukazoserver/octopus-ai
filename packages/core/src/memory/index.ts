@@ -22,13 +22,22 @@ export { MemoryDecayEngine } from "./decay.js";
 export { FTSSearchEngine } from "./fts-search.js";
 export type { FTSSearchConfig, FTSResult } from "./fts-search.js";
 export { UserProfileManager } from "./user-profile.js";
-export type { UserProfile, UserModelingConfig, UserDecision, WorkflowPattern } from "./user-profile.js";
+export type {
+	UserProfile,
+	UserModelingConfig,
+	UserDecision,
+	WorkflowPattern,
+} from "./user-profile.js";
 
 export { GlobalDailyMemory } from "./daily.js";
 export type { GlobalDailyMemoryConfig } from "./daily.js";
 
 export { EmbeddingProvider } from "./embedding-provider.js";
-export type { EmbeddingProviderConfig, EmbeddingResult, EmbeddingApiType } from "./embedding-provider.js";
+export type {
+	EmbeddingProviderConfig,
+	EmbeddingResult,
+	EmbeddingApiType,
+} from "./embedding-provider.js";
 
 export { WorkingMemory } from "./working-memory.js";
 export type { WorkingState } from "./working-memory.js";

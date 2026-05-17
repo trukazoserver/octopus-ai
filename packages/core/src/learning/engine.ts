@@ -2,11 +2,11 @@ import { nanoid } from "nanoid";
 import type { LLMRouter } from "../ai/router.js";
 import type { LongTermMemory } from "../memory/ltm.js";
 import type { EmbeddingFunction, MemoryItem } from "../memory/types.js";
-import type { DatabaseAdapter } from "../storage/database.js";
 import type { SkillForge } from "../skills/forge.js";
-import type { SkillRegistry } from "../skills/registry.js";
 import type { SkillImprover } from "../skills/improver.js";
+import type { SkillRegistry } from "../skills/registry.js";
 import type { SkillUsage } from "../skills/types.js";
+import type { DatabaseAdapter } from "../storage/database.js";
 import type {
 	ExperienceRecord,
 	ExperienceRecordInput,
@@ -80,11 +80,21 @@ export class LearningEngine {
 		this.config = { ...DEFAULT_CONFIG, ...options.config };
 	}
 
+	updateConfig(config: Partial<LearningEngineConfig>): void {
+		this.config = { ...this.config, ...config };
+	}
+
+	isEnabled(): boolean {
+		return this.config.enabled;
+	}
+
 	async initialize(): Promise<void> {
 		await this.ensureTables();
 	}
 
-	async recordExperience(input: ExperienceRecordInput): Promise<ExperienceRecord> {
+	async recordExperience(
+		input: ExperienceRecordInput,
+	): Promise<ExperienceRecord> {
 		await this.ensureTables();
 		const assessed = this.assessExperience(input);
 		const experience: ExperienceRecord = {
@@ -103,6 +113,8 @@ export class LearningEngine {
 			metadata: { ...input.metadata, assessmentReasons: assessed.reasons },
 			createdAt: new Date(),
 		};
+
+		if (!this.config.enabled) return experience;
 
 		await this.db.run(
 			`INSERT INTO experiences (id, conversation_id, task_id, agent_id, channel_id, user_request, final_response, status, confidence, tools_used, skills_used, duration_ms, metadata, created_at)
@@ -143,10 +155,22 @@ export class LearningEngine {
 		);
 		const scored = rows.map((row) => {
 			const insight = this.deserializeInsight(row);
-			const similarity = this.cosineSimilarity(queryEmbedding, insight.embedding);
-			const keywordOverlap = insight.keywords.filter((k) => queryKeywords.has(k)).length;
-			const keywordScore = insight.keywords.length > 0 ? keywordOverlap / insight.keywords.length : 0;
-			const score = similarity * 0.5 + keywordScore * 0.25 + insight.confidence * 0.15 + insight.importance * 0.1;
+			const similarity = this.cosineSimilarity(
+				queryEmbedding,
+				insight.embedding,
+			);
+			const keywordOverlap = insight.keywords.filter((k) =>
+				queryKeywords.has(k),
+			).length;
+			const keywordScore =
+				insight.keywords.length > 0
+					? keywordOverlap / insight.keywords.length
+					: 0;
+			const score =
+				similarity * 0.5 +
+				keywordScore * 0.25 +
+				insight.confidence * 0.15 +
+				insight.importance * 0.1;
 			return { insight, score };
 		});
 
@@ -162,22 +186,51 @@ export class LearningEngine {
 			selected.push(item.insight);
 		}
 
-		if (selected.length > 0) await this.markInsightsUsed(selected.map((i) => i.id));
+		if (selected.length > 0)
+			await this.markInsightsUsed(selected.map((i) => i.id));
 		return selected;
 	}
 
-	async listInsights(options: { limit?: number; type?: LearningInsightType } = {}): Promise<LearningInsight[]> {
+	async listInsights(
+		options: { limit?: number; type?: LearningInsightType } = {},
+	): Promise<LearningInsight[]> {
 		await this.ensureTables();
 		const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
 		const rows = options.type
-			? await this.db.all<InsightRow>("SELECT * FROM learning_insights WHERE type = ? ORDER BY created_at DESC LIMIT ?", [options.type, limit])
-			: await this.db.all<InsightRow>("SELECT * FROM learning_insights ORDER BY created_at DESC LIMIT ?", [limit]);
+			? await this.db.all<InsightRow>(
+					"SELECT * FROM learning_insights WHERE type = ? ORDER BY created_at DESC LIMIT ?",
+					[options.type, limit],
+				)
+			: await this.db.all<InsightRow>(
+					"SELECT * FROM learning_insights ORDER BY created_at DESC LIMIT ?",
+					[limit],
+				);
 		return rows.map((row) => this.deserializeInsight(row));
+	}
+
+	async listExperiences(
+		options: { limit?: number; status?: ExperienceStatus } = {},
+	): Promise<ExperienceRecord[]> {
+		await this.ensureTables();
+		const limit = Math.max(1, Math.min(options.limit ?? 30, 100));
+		const rows = options.status
+			? await this.db.all<ExperienceRow>(
+					"SELECT * FROM experiences WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+					[options.status, limit],
+				)
+			: await this.db.all<ExperienceRow>(
+					"SELECT * FROM experiences ORDER BY created_at DESC LIMIT ?",
+					[limit],
+				);
+		return rows.map((row) => this.deserializeExperience(row));
 	}
 
 	async forgetInsight(id: string): Promise<boolean> {
 		await this.ensureTables();
-		const existing = await this.db.get<{ id: string }>("SELECT id FROM learning_insights WHERE id = ?", [id]);
+		const existing = await this.db.get<{ id: string }>(
+			"SELECT id FROM learning_insights WHERE id = ?",
+			[id],
+		);
 		if (!existing) return false;
 		await this.db.run("DELETE FROM learning_insights WHERE id = ?", [id]);
 		return true;
@@ -186,27 +239,89 @@ export class LearningEngine {
 	async addFeedback(feedback: LearningFeedbackInput): Promise<void> {
 		await this.ensureTables();
 		const target = feedback.experienceId
-			? await this.db.get<ExperienceRow>("SELECT * FROM experiences WHERE id = ?", [feedback.experienceId])
+			? await this.db.get<ExperienceRow>(
+					"SELECT * FROM experiences WHERE id = ?",
+					[feedback.experienceId],
+				)
 			: feedback.conversationId
-				? await this.db.get<ExperienceRow>("SELECT * FROM experiences WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1", [feedback.conversationId])
+				? await this.db.get<ExperienceRow>(
+						"SELECT * FROM experiences WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
+						[feedback.conversationId],
+					)
 				: undefined;
 		if (!target) return;
-		const positive = typeof feedback.rating === "number" ? feedback.rating > 0 : feedback.rating === "positive";
-		const metadata = this.safeJson<Record<string, unknown>>(target.metadata, {});
-		const feedbackItems = Array.isArray(metadata.feedback) ? metadata.feedback : [];
-		feedbackItems.push({ rating: feedback.rating, comment: feedback.comment, at: new Date().toISOString(), messageId: feedback.messageId });
-		await this.db.run("UPDATE experiences SET status = ?, confidence = ?, metadata = ? WHERE id = ?", [
-			positive ? "succeeded" : "failed",
-			positive ? Math.max(target.confidence, 0.85) : Math.max(target.confidence, 0.75),
-			JSON.stringify({ ...metadata, feedback: feedbackItems }),
-			target.id,
-		]);
+		const positive =
+			typeof feedback.rating === "number"
+				? feedback.rating > 0
+				: feedback.rating === "positive";
+		const metadata = this.safeJson<Record<string, unknown>>(
+			target.metadata,
+			{},
+		);
+		const feedbackItems = Array.isArray(metadata.feedback)
+			? metadata.feedback
+			: [];
+		feedbackItems.push({
+			rating: feedback.rating,
+			comment: feedback.comment,
+			at: new Date().toISOString(),
+			messageId: feedback.messageId,
+		});
+		await this.db.run(
+			"UPDATE experiences SET status = ?, confidence = ?, metadata = ? WHERE id = ?",
+			[
+				positive ? "succeeded" : "failed",
+				positive
+					? Math.max(target.confidence, 0.85)
+					: Math.max(target.confidence, 0.75),
+				JSON.stringify({ ...metadata, feedback: feedbackItems }),
+				target.id,
+			],
+		);
+
+		if (!this.config.enabled) return;
+		const updatedExperience = this.deserializeExperience({
+			...target,
+			status: positive ? "succeeded" : "failed",
+			confidence: positive
+				? Math.max(target.confidence, 0.85)
+				: Math.max(target.confidence, 0.75),
+			metadata: JSON.stringify({ ...metadata, feedback: feedbackItems }),
+		});
+		const content = positive
+			? `User confirmed this approach worked: ${this.compact(updatedExperience.finalResponse, 450)}`
+			: `User marked this approach as failed${feedback.comment ? `: ${feedback.comment}` : ""}. Avoid repeating it without correction: ${this.compact(updatedExperience.finalResponse, 350)}`;
+		const keywords = this.extractKeywords(
+			`${updatedExperience.userRequest} ${feedback.comment ?? ""} ${updatedExperience.finalResponse}`,
+		);
+		const type: LearningInsightType = positive ? "what_worked" : "what_failed";
+		const insight: LearningInsight = {
+			id: nanoid(),
+			experienceId: updatedExperience.id,
+			type,
+			domain: this.detectDomain(keywords, updatedExperience.userRequest),
+			keywords,
+			content,
+			evidence:
+				feedback.comment ?? this.compact(updatedExperience.userRequest, 300),
+			confidence: positive ? 0.9 : 0.85,
+			importance: positive ? 0.8 : 0.9,
+			embedding: await this.embedFn(`${type} ${keywords.join(" ")} ${content}`),
+			useCount: 0,
+			createdAt: new Date(),
+		};
+		await this.storeInsight(insight);
+		await this.recordSkillUsage(updatedExperience, feedback);
+		if (positive) await this.maybeCreateSkill(updatedExperience, [insight]);
 	}
 
-	private async extractInsights(experience: ExperienceRecord): Promise<LearningInsight[]> {
+	private async extractInsights(
+		experience: ExperienceRecord,
+	): Promise<LearningInsight[]> {
 		if (!this.config.enabled) return [];
 		if (experience.confidence < this.config.minConfidenceToStore) return [];
-		if (experience.status === "failed" && !this.config.retainFailedInsights) return [];
+		if (experience.status === "failed" && !this.config.retainFailedInsights)
+			return [];
 
 		const local = await this.extractLocalInsights(experience);
 		if (!this.config.autoReflect || !this.options.router) return local;
@@ -219,17 +334,24 @@ export class LearningEngine {
 		}
 	}
 
-	private async extractLocalInsights(experience: ExperienceRecord): Promise<LearningInsight[]> {
-		const insights: Array<Omit<LearningInsight, "id" | "embedding" | "createdAt" | "useCount">> = [];
-		const keywords = this.extractKeywords(`${experience.userRequest} ${experience.finalResponse}`);
+	private async extractLocalInsights(
+		experience: ExperienceRecord,
+	): Promise<LearningInsight[]> {
+		const insights: Array<
+			Omit<LearningInsight, "id" | "embedding" | "createdAt" | "useCount">
+		> = [];
+		const keywords = this.extractKeywords(
+			`${experience.userRequest} ${experience.finalResponse}`,
+		);
 		const domain = this.detectDomain(keywords, experience.userRequest);
 		const successfulTools = experience.toolsUsed.filter((tool) => tool.success);
 		const failedTools = experience.toolsUsed.filter((tool) => !tool.success);
 
 		if (experience.status === "succeeded" || experience.status === "partial") {
-			const toolText = successfulTools.length > 0
-				? ` Tools that produced progress: ${[...new Set(successfulTools.map((t) => t.name))].join(", ")}.`
-				: "";
+			const toolText =
+				successfulTools.length > 0
+					? ` Tools that produced progress: ${[...new Set(successfulTools.map((t) => t.name))].join(", ")}.`
+					: "";
 			insights.push({
 				experienceId: experience.id,
 				type: "procedure",
@@ -249,7 +371,13 @@ export class LearningEngine {
 				type: "tool_strategy",
 				domain,
 				keywords,
-				content: `Useful tool strategy for similar tasks: ${successfulTools.map((t) => `${t.name}${t.summary ? ` (${this.compact(t.summary, 120)})` : ""}`).slice(0, 5).join(" -> ")}.`,
+				content: `Useful tool strategy for similar tasks: ${successfulTools
+					.map(
+						(t) =>
+							`${t.name}${t.summary ? ` (${this.compact(t.summary, 120)})` : ""}`,
+					)
+					.slice(0, 5)
+					.join(" -> ")}.`,
 				evidence: this.compact(experience.userRequest, 300),
 				confidence: Math.min(0.95, experience.confidence + 0.05),
 				importance: 0.75,
@@ -257,7 +385,11 @@ export class LearningEngine {
 			});
 		}
 
-		if (failedTools.length > 0 || experience.status === "failed" || experience.status === "partial") {
+		if (
+			failedTools.length > 0 ||
+			experience.status === "failed" ||
+			experience.status === "partial"
+		) {
 			const repeatedFailures = [...new Set(failedTools.map((t) => t.name))];
 			insights.push({
 				experienceId: experience.id,
@@ -265,7 +397,10 @@ export class LearningEngine {
 				domain,
 				keywords,
 				content: `Avoid this pattern in similar tasks: ${repeatedFailures.length > 0 ? `do not keep repeating failed tools (${repeatedFailures.join(", ")}) without new evidence` : "do not assume success when the result is partial"}. Verify progress before continuing.`,
-				evidence: failedTools.map((t) => t.error || t.summary || t.name).slice(0, 3).join(" | "),
+				evidence: failedTools
+					.map((t) => t.error || t.summary || t.name)
+					.slice(0, 3)
+					.join(" | "),
 				confidence: Math.max(0.65, experience.confidence),
 				importance: experience.status === "failed" ? 0.8 : 0.7,
 				lastUsedAt: undefined,
@@ -274,7 +409,9 @@ export class LearningEngine {
 
 		const result: LearningInsight[] = [];
 		for (const insight of insights) {
-			const embedding = await this.embedFn(`${insight.type} ${insight.domain ?? ""} ${insight.keywords.join(" ")} ${insight.content}`);
+			const embedding = await this.embedFn(
+				`${insight.type} ${insight.domain ?? ""} ${insight.keywords.join(" ")} ${insight.content}`,
+			);
 			result.push({
 				...insight,
 				id: nanoid(),
@@ -286,7 +423,9 @@ export class LearningEngine {
 		return result;
 	}
 
-	private async extractLlmInsights(experience: ExperienceRecord): Promise<LearningInsight[]> {
+	private async extractLlmInsights(
+		experience: ExperienceRecord,
+	): Promise<LearningInsight[]> {
 		if (!this.options.router) return [];
 		const response = await this.options.router.chat({
 			model: "default",
@@ -295,7 +434,8 @@ export class LearningEngine {
 			messages: [
 				{
 					role: "system",
-					content: "Extract only specific reusable learnings from an assistant task. Respond valid JSON: {\"insights\":[{\"type\":\"procedure|anti_pattern|tool_strategy|what_worked|what_failed|skill_candidate\",\"content\":\"...\",\"keywords\":[\"...\"],\"domain\":\"...\",\"confidence\":0.0}]}. Do not include generic advice.",
+					content:
+						'Extract only specific reusable learnings from an assistant task. Respond valid JSON: {"insights":[{"type":"procedure|anti_pattern|tool_strategy|what_worked|what_failed|skill_candidate","content":"...","keywords":["..."],"domain":"...","confidence":0.0}]}. Do not include generic advice.',
 				},
 				{
 					role: "user",
@@ -306,20 +446,34 @@ export class LearningEngine {
 
 		const jsonMatch = response.content.match(/\{[\s\S]*\}/);
 		if (!jsonMatch) return [];
-		const parsed = JSON.parse(jsonMatch[0]) as { insights?: Array<Record<string, unknown>> };
+		const parsed = JSON.parse(jsonMatch[0]) as {
+			insights?: Array<Record<string, unknown>>;
+		};
 		const raw = Array.isArray(parsed.insights) ? parsed.insights : [];
 		const result: LearningInsight[] = [];
 		for (const item of raw.slice(0, 5)) {
-			const content = typeof item.content === "string" ? item.content.trim() : "";
+			const content =
+				typeof item.content === "string" ? item.content.trim() : "";
 			if (content.length < 30) continue;
 			const type = this.normalizeInsightType(item.type);
-			const confidence = this.clamp(typeof item.confidence === "number" ? item.confidence : experience.confidence);
+			const confidence = this.clamp(
+				typeof item.confidence === "number"
+					? item.confidence
+					: experience.confidence,
+			);
 			if (confidence < this.config.minConfidenceToStore) continue;
 			const keywords = Array.isArray(item.keywords)
-				? item.keywords.filter((k): k is string => typeof k === "string").slice(0, 12)
+				? item.keywords
+						.filter((k): k is string => typeof k === "string")
+						.slice(0, 12)
 				: this.extractKeywords(content);
-			const domain = typeof item.domain === "string" ? item.domain : this.detectDomain(keywords, content);
-			const embedding = await this.embedFn(`${type} ${domain ?? ""} ${keywords.join(" ")} ${content}`);
+			const domain =
+				typeof item.domain === "string"
+					? item.domain
+					: this.detectDomain(keywords, content);
+			const embedding = await this.embedFn(
+				`${type} ${domain ?? ""} ${keywords.join(" ")} ${content}`,
+			);
 			result.push({
 				id: nanoid(),
 				experienceId: experience.id,
@@ -359,7 +513,17 @@ export class LearningEngine {
 			],
 		);
 
-		if (this.options.ltm && insight.confidence >= Math.max(0.8, this.config.minConfidenceToStore) && ["procedure", "anti_pattern", "tool_strategy"].includes(insight.type)) {
+		if (
+			this.options.ltm &&
+			insight.confidence >= Math.max(0.8, this.config.minConfidenceToStore) &&
+			[
+				"procedure",
+				"anti_pattern",
+				"tool_strategy",
+				"what_worked",
+				"what_failed",
+			].includes(insight.type)
+		) {
 			const memory: MemoryItem = {
 				id: `learn_${insight.id}`,
 				type: "procedural",
@@ -371,67 +535,127 @@ export class LearningEngine {
 				createdAt: new Date(),
 				associations: [],
 				source: { taskId: insight.experienceId },
-				metadata: { source: "learning_engine", insightId: insight.id, type: insight.type, confidence: insight.confidence },
+				metadata: {
+					source: "learning_engine",
+					insightId: insight.id,
+					type: insight.type,
+					confidence: insight.confidence,
+				},
 			};
 			await this.options.ltm.store(memory).catch(() => {});
 		}
 	}
 
-	private async recordSkillUsage(experience: ExperienceRecord): Promise<void> {
-		if (!this.options.skillRegistry || experience.skillsUsed.length === 0) return;
+	private async recordSkillUsage(
+		experience: ExperienceRecord,
+		feedback?: LearningFeedbackInput,
+	): Promise<void> {
+		if (!this.options.skillRegistry || experience.skillsUsed.length === 0)
+			return;
+		const feedbackRating = feedback
+			? typeof feedback.rating === "number"
+				? String(feedback.rating)
+				: feedback.rating === "positive"
+					? "5"
+					: "1"
+			: undefined;
 		for (const skill of experience.skillsUsed) {
 			const usage: SkillUsage = {
 				id: nanoid(),
 				skillId: skill.id,
 				task: experience.userRequest,
 				success: experience.status === "succeeded",
-				failureReason: experience.status === "failed" ? this.compact(experience.finalResponse, 300) : undefined,
-				successReason: experience.status === "succeeded" ? "Task completed with usable final response" : undefined,
+				failureReason:
+					experience.status === "failed"
+						? (feedback?.comment ?? this.compact(experience.finalResponse, 300))
+						: undefined,
+				userFeedback: feedbackRating,
+				successReason:
+					experience.status === "succeeded"
+						? (feedback?.comment ?? "Task completed with usable final response")
+						: undefined,
 				timestamp: experience.createdAt,
 			};
 			await this.options.skillRegistry.recordUsage(usage).catch(() => {});
 			await this.options.skillRegistry.updateMetrics(skill.id).catch(() => {});
 		}
 		if (this.options.skillImprover) {
-			const candidates = await this.options.skillRegistry.findSkillsNeedingImprovement().catch(() => []);
+			const candidates = await this.options.skillRegistry
+				.findSkillsNeedingImprovement()
+				.catch(() => []);
 			for (const skill of candidates.slice(0, 2)) {
-				const history = await this.options.skillRegistry.getUsageHistory(skill.id, 50).catch(() => []);
-				if (history.length >= 3) await this.options.skillImprover.improveSkill(skill, history).catch(() => {});
+				const history = await this.options.skillRegistry
+					.getUsageHistory(skill.id, 50)
+					.catch(() => []);
+				if (history.length >= 3)
+					await this.options.skillImprover
+						.improveSkill(skill, history)
+						.catch(() => {});
 			}
 		}
 	}
 
-	private async maybeCreateSkill(experience: ExperienceRecord, insights: LearningInsight[]): Promise<void> {
+	private async maybeCreateSkill(
+		experience: ExperienceRecord,
+		insights: LearningInsight[],
+	): Promise<void> {
 		if (!this.config.autoCreateSkills || !this.options.skillForge) return;
 		if (experience.status !== "succeeded") return;
-		if (!insights.some((i) => i.type === "procedure" || i.type === "skill_candidate")) return;
+		if (
+			!insights.some(
+				(i) =>
+					i.type === "procedure" ||
+					i.type === "skill_candidate" ||
+					i.type === "what_worked",
+			)
+		)
+			return;
 		const keywords = this.extractKeywords(experience.userRequest);
 		if (keywords.length < 3) return;
 		const like = `%${keywords[0] ?? ""}%`;
-		const similar = await this.db.all<{ cnt: number }>(
-			"SELECT COUNT(*) as cnt FROM experiences WHERE status = 'succeeded' AND user_request LIKE ?",
-			[like],
-		).catch(() => [{ cnt: 0 }]);
-		if ((similar[0]?.cnt ?? 0) < this.config.minSimilarSuccessesForSkill) return;
+		const similar = await this.db
+			.all<{ cnt: number }>(
+				"SELECT COUNT(*) as cnt FROM experiences WHERE status = 'succeeded' AND user_request LIKE ?",
+				[like],
+			)
+			.catch(() => [{ cnt: 0 }]);
+		if ((similar[0]?.cnt ?? 0) < this.config.minSimilarSuccessesForSkill)
+			return;
 
 		const domain = this.detectDomain(keywords, experience.userRequest);
-		await this.options.skillForge.createSkill(
-			{
-				description: experience.userRequest,
-				complexity: 0.7,
-				domains: domain ? [domain] : [],
-				keywords,
-			},
-			{
-				summary: this.compact(experience.finalResponse, 400),
-				whatWorked: insights.filter((i) => i.type !== "what_failed" && i.type !== "anti_pattern").map((i) => i.content).join("\n"),
-				whatCouldImprove: insights.filter((i) => i.type === "what_failed" || i.type === "anti_pattern").map((i) => i.content).join("\n"),
-				patterns: insights.map((i) => i.content).slice(0, 5),
-			},
-		).catch(() => {});
+		await this.options.skillForge
+			.createSkill(
+				{
+					description: experience.userRequest,
+					complexity: 0.7,
+					domains: domain ? [domain] : [],
+					keywords,
+				},
+				{
+					summary: this.compact(experience.finalResponse, 400),
+					whatWorked: insights
+						.filter(
+							(i) => i.type !== "what_failed" && i.type !== "anti_pattern",
+						)
+						.map((i) => i.content)
+						.join("\n"),
+					whatCouldImprove: insights
+						.filter(
+							(i) => i.type === "what_failed" || i.type === "anti_pattern",
+						)
+						.map((i) => i.content)
+						.join("\n"),
+					patterns: insights.map((i) => i.content).slice(0, 5),
+				},
+			)
+			.catch(() => {});
 	}
 
-	private assessExperience(input: ExperienceRecordInput): { status: ExperienceStatus; confidence: number; reasons: string[] } {
+	private assessExperience(input: ExperienceRecordInput): {
+		status: ExperienceStatus;
+		confidence: number;
+		reasons: string[];
+	} {
 		const reasons: string[] = [];
 		const final = input.finalResponse.toLowerCase();
 		const tools = input.toolsUsed ?? [];
@@ -448,30 +672,48 @@ export class LearningEngine {
 			confidence += 0.1;
 			reasons.push("successful_tools");
 		}
-		if (/completed successfully|finished successfully|he completado|completad[ao]|listo|done/i.test(input.finalResponse)) {
+		if (
+			/completed successfully|finished successfully|he completado|completad[ao]|listo|done/i.test(
+				input.finalResponse,
+			)
+		) {
 			confidence += 0.1;
 			status = "succeeded";
 			reasons.push("completion_marker");
 		}
-		if (/error|failed|fall[oó]|bloque|captcha|limit|l[ií]mite/i.test(final) || failedTools > successfulTools) {
+		if (
+			/error|failed|fall[oó]|bloque|captcha|limit|l[ií]mite/i.test(final) ||
+			failedTools > successfulTools
+		) {
 			confidence += 0.05;
 			status = successfulTools > 0 ? "partial" : "failed";
 			reasons.push("failure_or_blocker_marker");
 		}
-		if (status === "unknown") status = failedTools > 0 && successfulTools === 0 ? "failed" : "succeeded";
+		if (status === "unknown")
+			status =
+				failedTools > 0 && successfulTools === 0 ? "failed" : "succeeded";
 		return { status, confidence: this.clamp(confidence), reasons };
 	}
 
 	private async markInsightsUsed(ids: string[]): Promise<void> {
 		const now = new Date().toISOString();
 		for (const id of ids) {
-			await this.db.run("UPDATE learning_insights SET use_count = use_count + 1, last_used_at = ? WHERE id = ?", [now, id]).catch(() => {});
+			await this.db
+				.run(
+					"UPDATE learning_insights SET use_count = use_count + 1, last_used_at = ? WHERE id = ?",
+					[now, id],
+				)
+				.catch(() => {});
 		}
 	}
 
 	private async ensureTables(): Promise<void> {
-		await this.db.run(`CREATE TABLE IF NOT EXISTS experiences (id TEXT PRIMARY KEY, conversation_id TEXT, task_id TEXT, agent_id TEXT, channel_id TEXT, user_request TEXT NOT NULL, final_response TEXT NOT NULL, status TEXT NOT NULL, confidence REAL NOT NULL, tools_used TEXT NOT NULL, skills_used TEXT NOT NULL, duration_ms INTEGER, metadata TEXT NOT NULL, created_at TEXT NOT NULL)`);
-		await this.db.run(`CREATE TABLE IF NOT EXISTS learning_insights (id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, type TEXT NOT NULL, domain TEXT, keywords TEXT NOT NULL, content TEXT NOT NULL, evidence TEXT, confidence REAL NOT NULL, importance REAL NOT NULL, embedding TEXT NOT NULL, use_count INTEGER NOT NULL DEFAULT 0, last_used_at TEXT, created_at TEXT NOT NULL)`);
+		await this.db.run(
+			"CREATE TABLE IF NOT EXISTS experiences (id TEXT PRIMARY KEY, conversation_id TEXT, task_id TEXT, agent_id TEXT, channel_id TEXT, user_request TEXT NOT NULL, final_response TEXT NOT NULL, status TEXT NOT NULL, confidence REAL NOT NULL, tools_used TEXT NOT NULL, skills_used TEXT NOT NULL, duration_ms INTEGER, metadata TEXT NOT NULL, created_at TEXT NOT NULL)",
+		);
+		await this.db.run(
+			"CREATE TABLE IF NOT EXISTS learning_insights (id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, type TEXT NOT NULL, domain TEXT, keywords TEXT NOT NULL, content TEXT NOT NULL, evidence TEXT, confidence REAL NOT NULL, importance REAL NOT NULL, embedding TEXT NOT NULL, use_count INTEGER NOT NULL DEFAULT 0, last_used_at TEXT, created_at TEXT NOT NULL)",
+		);
 	}
 
 	private deserializeInsight(row: InsightRow): LearningInsight {
@@ -492,9 +734,37 @@ export class LearningEngine {
 		};
 	}
 
+	private deserializeExperience(row: ExperienceRow): ExperienceRecord {
+		return {
+			id: row.id,
+			conversationId: row.conversation_id ?? undefined,
+			taskId: row.task_id ?? undefined,
+			agentId: row.agent_id ?? undefined,
+			channelId: row.channel_id ?? undefined,
+			userRequest: row.user_request,
+			finalResponse: row.final_response,
+			status: row.status,
+			confidence: row.confidence,
+			toolsUsed: this.safeJson(row.tools_used, []),
+			skillsUsed: this.safeJson(row.skills_used, []),
+			durationMs: row.duration_ms ?? undefined,
+			metadata: this.safeJson<Record<string, unknown>>(row.metadata, {}),
+			createdAt: new Date(row.created_at),
+		};
+	}
+
 	private normalizeInsightType(value: unknown): LearningInsightType {
-		const allowed: LearningInsightType[] = ["what_worked", "what_failed", "procedure", "anti_pattern", "tool_strategy", "skill_candidate"];
-		return allowed.includes(value as LearningInsightType) ? value as LearningInsightType : "procedure";
+		const allowed: LearningInsightType[] = [
+			"what_worked",
+			"what_failed",
+			"procedure",
+			"anti_pattern",
+			"tool_strategy",
+			"skill_candidate",
+		];
+		return allowed.includes(value as LearningInsightType)
+			? (value as LearningInsightType)
+			: "procedure";
 	}
 
 	private dedupeInsights(insights: LearningInsight[]): LearningInsight[] {
@@ -510,14 +780,51 @@ export class LearningEngine {
 	}
 
 	private extractKeywords(text: string): string[] {
-		const stop = new Set(["the", "and", "for", "with", "that", "this", "from", "para", "que", "con", "una", "unos", "las", "los", "del", "como", "por", "pero", "when", "what", "how", "hacer", "algo"]);
-		return [...new Set(text.toLowerCase().replace(/[^a-z0-9áéíóúñ\s-]/gi, " ").split(/\s+/).map((w) => w.trim()).filter((w) => w.length > 3 && !stop.has(w)))].slice(0, 16);
+		const stop = new Set([
+			"the",
+			"and",
+			"for",
+			"with",
+			"that",
+			"this",
+			"from",
+			"para",
+			"que",
+			"con",
+			"una",
+			"unos",
+			"las",
+			"los",
+			"del",
+			"como",
+			"por",
+			"pero",
+			"when",
+			"what",
+			"how",
+			"hacer",
+			"algo",
+		]);
+		return [
+			...new Set(
+				text
+					.toLowerCase()
+					.replace(/[^a-z0-9áéíóúñ\s-]/gi, " ")
+					.split(/\s+/)
+					.map((w) => w.trim())
+					.filter((w) => w.length > 3 && !stop.has(w)),
+			),
+		].slice(0, 16);
 	}
 
 	private detectDomain(keywords: string[], text: string): string | undefined {
 		const source = `${keywords.join(" ")} ${text}`.toLowerCase();
-		if (/code|codigo|typescript|javascript|python|test|build|api|bug/.test(source)) return "coding";
-		if (/browser|web|scrap|etsy|pagina|imagen|producto/.test(source)) return "browser-automation";
+		if (
+			/code|codigo|typescript|javascript|python|test|build|api|bug/.test(source)
+		)
+			return "coding";
+		if (/browser|web|scrap|etsy|pagina|imagen|producto/.test(source))
+			return "browser-automation";
 		if (/document|write|redact|texto|resumen/.test(source)) return "writing";
 		if (/research|investig|buscar|compare/.test(source)) return "research";
 		return undefined;
@@ -547,7 +854,9 @@ export class LearningEngine {
 
 	private compact(value: string, max: number): string {
 		const normalized = value.replace(/\s+/g, " ").trim();
-		return normalized.length > max ? `${normalized.slice(0, max - 3).trimEnd()}...` : normalized;
+		return normalized.length > max
+			? `${normalized.slice(0, max - 3).trimEnd()}...`
+			: normalized;
 	}
 
 	private clamp(value: number): number {

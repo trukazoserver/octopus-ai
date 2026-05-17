@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ChatManager } from "../chat/manager.js";
 import {
-	createDatabaseAdapter,
 	type DatabaseAdapter,
+	createDatabaseAdapter,
 } from "../storage/database.js";
 
 describe("ChatManager", () => {

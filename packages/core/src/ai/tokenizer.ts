@@ -12,7 +12,10 @@ export class TokenCounter {
 		let total = 0;
 		for (const message of messages) {
 			total += 4;
-			const contentStr = typeof message.content === "string" ? message.content : (message.content.find(p => p.type === "text") as any)?.text ?? "";
+			const contentStr =
+				typeof message.content === "string"
+					? message.content
+					: (message.content.find((p) => p.type === "text")?.text ?? "");
 			total += encoding.encode(contentStr).length;
 			total += encoding.encode(message.role).length;
 			if (message.toolCalls) {

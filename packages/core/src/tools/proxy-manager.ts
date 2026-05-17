@@ -147,9 +147,10 @@ export class ProxyManager {
 			score -= entry.stats.consecutiveFailures * 30;
 
 			// Penalización por tasa de bloqueo
-			const blockRate = entry.stats.totalRequests > 0
-				? entry.stats.blockedRequests / entry.stats.totalRequests
-				: 0;
+			const blockRate =
+				entry.stats.totalRequests > 0
+					? entry.stats.blockedRequests / entry.stats.totalRequests
+					: 0;
 			score -= blockRate * 100;
 
 			// Bonus por menor uso reciente (balanceo de carga)
@@ -168,7 +169,11 @@ export class ProxyManager {
 	/**
 	 * Reportar el resultado de un request con el proxy actual.
 	 */
-	reportResult(success: boolean, responseTimeMs: number, responseContent?: string): void {
+	reportResult(
+		success: boolean,
+		responseTimeMs: number,
+		responseContent?: string,
+	): void {
 		if (!this.currentProxy) return;
 		const entry = this.proxies.get(this.currentProxy);
 		if (!entry) return;
@@ -243,7 +248,9 @@ export class ProxyManager {
 	 * Obtener proxies habilitados.
 	 */
 	private getEnabledProxies(): Array<[string, ProxyEntry]> {
-		return Array.from(this.proxies.entries()).filter(([, entry]) => entry.enabled);
+		return Array.from(this.proxies.entries()).filter(
+			([, entry]) => entry.enabled,
+		);
 	}
 
 	/**
@@ -283,12 +290,14 @@ export class ProxyManager {
 			type: entry.config.type,
 			country: entry.config.country,
 			enabled: entry.enabled,
-			successRate: entry.stats.totalRequests > 0
-				? entry.stats.successfulRequests / entry.stats.totalRequests
-				: 1,
-			blockRate: entry.stats.totalRequests > 0
-				? entry.stats.blockedRequests / entry.stats.totalRequests
-				: 0,
+			successRate:
+				entry.stats.totalRequests > 0
+					? entry.stats.successfulRequests / entry.stats.totalRequests
+					: 1,
+			blockRate:
+				entry.stats.totalRequests > 0
+					? entry.stats.blockedRequests / entry.stats.totalRequests
+					: 0,
 			avgResponseMs: entry.stats.avgResponseTimeMs,
 			totalRequests: entry.stats.totalRequests,
 		}));
@@ -299,7 +308,9 @@ export class ProxyManager {
 	 */
 	toProxyUrl(config: ProxyConfig): string {
 		const protocol = config.type === "socks5" ? "socks5" : "http";
-		const auth = config.username ? `${config.username}:${config.password || ""}@` : "";
+		const auth = config.username
+			? `${config.username}:${config.password || ""}@`
+			: "";
 		return `${protocol}://${auth}${config.host}:${config.port}`;
 	}
 

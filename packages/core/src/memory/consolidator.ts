@@ -66,24 +66,7 @@ export class MemoryConsolidator {
 
 		if (turns.length === 0 && !activeTask) return result;
 
-		try {
-			const columns: any[] | undefined = await this.db.all("PRAGMA table_info(memory_associations)");
-			if (columns && columns.length > 0 && !columns.find(c => c.name === "id")) {
-				await this.db.run("DROP TABLE memory_associations");
-			}
-		} catch (e) {
-			// ignore migration errors
-		}
-
-		await this.db.run(
-			`CREATE TABLE IF NOT EXISTS memory_associations (
-        id TEXT PRIMARY KEY,
-        source_id TEXT NOT NULL,
-        target_id TEXT NOT NULL,
-        strength REAL NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      )`,
-		);
+		await this.ensureAssociationTable();
 
 		let allItems: (PartialMemoryItem & { importance: number })[] = [];
 
@@ -139,11 +122,82 @@ export class MemoryConsolidator {
 		return result;
 	}
 
+	private async ensureAssociationTable(): Promise<void> {
+		const columns = await this.db.all<{ name: string }>(
+			"PRAGMA table_info(memory_associations)",
+		);
+		const hasTable = columns.length > 0;
+		const hasId = columns.some((column) => column.name === "id");
+		const hasLegacyColumns =
+			columns.some((column) => column.name === "from_id") &&
+			columns.some((column) => column.name === "to_id");
+		const strengthSelect = columns.some((column) => column.name === "strength")
+			? "strength"
+			: "1 as strength";
+		const createdAtSelect = columns.some(
+			(column) => column.name === "created_at",
+		)
+			? "created_at"
+			: "NULL as created_at";
+		let legacyRows: Array<{
+			from_id: string;
+			to_id: string;
+			strength?: number;
+			created_at?: string;
+		}> = [];
+
+		if (hasTable && !hasId && hasLegacyColumns) {
+			legacyRows = await this.db.all(
+				`SELECT from_id, to_id, ${strengthSelect}, ${createdAtSelect} FROM memory_associations`,
+			);
+			await this.db.run("DROP TABLE memory_associations");
+		} else if (hasTable && !hasId) {
+			await this.db.run("DROP TABLE memory_associations");
+		}
+
+		await this.db.run(
+			`CREATE TABLE IF NOT EXISTS memory_associations (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        relation TEXT NOT NULL DEFAULT 'associated',
+        strength REAL NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+		);
+
+		const currentColumns = await this.db.all<{ name: string }>(
+			"PRAGMA table_info(memory_associations)",
+		);
+		if (!currentColumns.some((column) => column.name === "relation")) {
+			await this.db.run(
+				"ALTER TABLE memory_associations ADD COLUMN relation TEXT NOT NULL DEFAULT 'associated'",
+			);
+		}
+
+		for (const row of legacyRows) {
+			await this.db.run(
+				`INSERT INTO memory_associations (id, source_id, target_id, relation, strength, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+				[
+					nanoid(),
+					row.from_id,
+					row.to_id,
+					"associated",
+					row.strength ?? 1,
+					row.created_at ?? new Date().toISOString(),
+				],
+			);
+		}
+	}
+
 	/**
 	 * Try LLM-based extraction for higher quality fact capture.
 	 * Returns empty array if LLM is not configured or fails.
 	 */
-	private async tryLLMExtraction(turns: ConversationTurn[]): Promise<PartialMemoryItem[]> {
+	private async tryLLMExtraction(
+		turns: ConversationTurn[],
+	): Promise<PartialMemoryItem[]> {
 		if (!this.llmExtractor) return [];
 
 		try {
@@ -352,7 +406,7 @@ export class MemoryConsolidator {
 			const turn = turns[i];
 			if (turn.role === "assistant" && i > 0) {
 				const prevTurn = turns[i - 1];
-				
+
 				// Conversation Summary
 				if (prevTurn.role === "user" && turn.content.length > 20) {
 					// Detect if this is a significant interaction (e.g. tool usage, media, deep answers)
@@ -364,12 +418,14 @@ export class MemoryConsolidator {
 						turn.content.length > 200;
 
 					if (isSignificant) {
-						let summary = `User asked: "${prevTurn.content.substring(0, 150)}..." Assistant replied: "${turn.content.substring(0, 150)}..."`;
-						
+						const summary = `User asked: "${prevTurn.content.substring(0, 150)}..." Assistant replied: "${turn.content.substring(0, 150)}..."`;
+
 						// Try to extract channel ID from metadata
-						const channelId = prevTurn.metadata?.conversationId as string | undefined;
+						const channelId = prevTurn.metadata?.conversationId as
+							| string
+							| undefined;
 						const sourceInfo = channelId ? `[Channel: ${channelId}] ` : "";
-						
+
 						events.push({
 							type: "episodic",
 							content: `${sourceInfo}Interaction summary: ${summary}`,
@@ -377,9 +433,12 @@ export class MemoryConsolidator {
 							accessCount: 0,
 							lastAccessed: turn.timestamp,
 							source: {
-								...(channelId ? { channelId, conversationId: channelId } : {})
+								...(channelId ? { channelId, conversationId: channelId } : {}),
 							},
-							metadata: { extractedFrom: "conversation_summary", role: "system" },
+							metadata: {
+								extractedFrom: "conversation_summary",
+								role: "system",
+							},
 						});
 					}
 				}
@@ -632,10 +691,8 @@ export class MemoryConsolidator {
 		const total = await this.ltm.count();
 		if (total === 0) return { compressed: 0, forgotten: 0 };
 
-		const allResults = await await this.ltm.search(
-			"",
-			async () => new Array(384).fill(0),
-			{},
+		const allResults = await this.ltm.listAll(
+			Math.max(total, this.config.batchSize),
 		);
 
 		const now = Date.now();

@@ -38,3 +38,4 @@ packages/plugins/*/dist/
 # Accidental artifacts
 $null
 -p/
+.playwright-mcp/

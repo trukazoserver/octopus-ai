@@ -59,6 +59,10 @@ export class DockerSandbox {
 		this.validateCommands = config.validateCommands ?? true;
 	}
 
+	setImage(image: string): void {
+		this.image = image;
+	}
+
 	/**
 	 * Check if Docker is available
 	 */

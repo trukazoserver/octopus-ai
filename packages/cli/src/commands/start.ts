@@ -4,6 +4,7 @@ import { platform as getPlatform } from "node:os";
 import * as readline from "node:readline";
 import {
 	ChannelManager,
+	ChatExecutionManager,
 	ConfigLoader,
 	InputFile,
 	MessageType,
@@ -316,734 +317,608 @@ type TelegramBotLike = {
 export async function runStart(options: StartOptions): Promise<void> {
 	if (await handleExistingServer(options)) return;
 
-			console.log(chalk.cyan.bold("\n🐙 Starting Octopus AI Server...\n"));
-			let system: Awaited<ReturnType<typeof bootstrap>> | null = null;
-			let server: TransportServer | null = null;
-			let channelManager: ChannelManager | null = null;
-			const shutdown = async (signal: string) => {
-				console.log(chalk.yellow(`\nReceived ${signal}, shutting down...`));
-				if (channelManager) {
-					await channelManager.stopAll();
-					console.log(chalk.green("  ✓ Channels stopped"));
-				}
-				if (server) {
-					await server.stop();
-					console.log(chalk.green("  ✓ Transport server stopped"));
-				}
-				if (system) {
-					await system.shutdown();
-					console.log(chalk.green("  ✓ Systems shut down"));
-				}
-				console.log(chalk.green("\nGoodbye! 👋\n"));
-				process.exit(0);
-			};
-			process.on("SIGINT", () => shutdown("SIGINT"));
-			process.on("SIGTERM", () => shutdown("SIGTERM"));
+	console.log(chalk.cyan.bold("\n🐙 Starting Octopus AI Server...\n"));
+	let system: Awaited<ReturnType<typeof bootstrap>> | null = null;
+	let server: TransportServer | null = null;
+	let channelManager: ChannelManager | null = null;
+	const shutdown = async (signal: string) => {
+		console.log(chalk.yellow(`\nReceived ${signal}, shutting down...`));
+		if (channelManager) {
+			await channelManager.stopAll();
+			console.log(chalk.green("  ✓ Channels stopped"));
+		}
+		if (server) {
+			await server.stop();
+			console.log(chalk.green("  ✓ Transport server stopped"));
+		}
+		if (system) {
+			await system.shutdown();
+			console.log(chalk.green("  ✓ Systems shut down"));
+		}
+		console.log(chalk.green("\nGoodbye! 👋\n"));
+		process.exit(0);
+	};
+	process.on("SIGINT", () => shutdown("SIGINT"));
+	process.on("SIGTERM", () => shutdown("SIGTERM"));
+	try {
+		system = await bootstrap();
+		await system.automationRunner.initialize();
+
+		const enabledChannels: string[] = [];
+		const channels = system.config.channels;
+		channelManager = new ChannelManager(system.connectionManager);
+		const activeChannelManager = channelManager;
+		for (const [name, ch] of Object.entries(channels)) {
+			if (!ch.enabled) continue;
+			if (options.channel && options.channel !== name) continue;
+			enabledChannels.push(name);
 			try {
-				system = await bootstrap();
-				await system.automationRunner.initialize();
-
-				const enabledChannels: string[] = [];
-				const channels = system.config.channels;
-				channelManager = new ChannelManager(system.connectionManager);
-				const activeChannelManager = channelManager;
-				for (const [name, ch] of Object.entries(channels)) {
-					if (!ch.enabled) continue;
-					if (options.channel && options.channel !== name) continue;
-					enabledChannels.push(name);
-					try {
-						if (name === "telegram") {
-							const botToken = (ch as Record<string, unknown>).botToken as
-								| string
-								| undefined;
-							if (botToken) {
-								activeChannelManager.register(
-									new TelegramChannel("telegram", botToken),
-								);
-								console.log(chalk.green("  ✓ Telegram channel registered"));
-							} else {
-								console.log(
-									chalk.yellow(
-										"  ⚠ Telegram enabled but no botToken configured",
-									),
-								);
-							}
-						} else {
-							system.connectionManager.registerChannel(name);
-						}
-					} catch (err) {
-						console.log(
-							chalk.red(`  ✗ Failed to register channel ${name}: ${err}`),
+				if (name === "telegram") {
+					const botToken = (ch as Record<string, unknown>).botToken as
+						| string
+						| undefined;
+					if (botToken) {
+						activeChannelManager.register(
+							new TelegramChannel("telegram", botToken),
 						);
+						console.log(chalk.green("  ✓ Telegram channel registered"));
+					} else {
+						console.log(
+							chalk.yellow("  ⚠ Telegram enabled but no botToken configured"),
+						);
+					}
+				} else {
+					system.connectionManager.registerChannel(name);
+				}
+			} catch (err) {
+				console.log(
+					chalk.red(`  ✗ Failed to register channel ${name}: ${err}`),
+				);
+			}
+		}
+
+		// Bridge: channel messages with persistent conversation memory
+		const channelProcessingQueues = new Map<string, Promise<void>>();
+		activeChannelManager.onMessage(async (msg: ChannelMessage) => {
+			if (!system) return;
+			const targetAgent = system.agentRuntime;
+			const chatManager = system.chatManager;
+			const channel = activeChannelManager.get(msg.channelId);
+			const channelLabel = channel?.type ?? msg.channelId;
+			const queueKey = `${channelLabel}:${msg.senderId}`;
+			const previousProcessing =
+				channelProcessingQueues.get(queueKey) ?? Promise.resolve();
+			let releaseProcessing!: () => void;
+			const currentProcessing = new Promise<void>((resolve) => {
+				releaseProcessing = resolve;
+			});
+			const queuedProcessing = previousProcessing
+				.catch(() => {})
+				.then(() => currentProcessing);
+			channelProcessingQueues.set(queueKey, queuedProcessing);
+			await previousProcessing.catch(() => {});
+			let typingInterval: ReturnType<typeof setInterval> | undefined;
+			let activeConvId: string | undefined;
+			let accumulated = "";
+			let assistantCheckpointId: string | undefined;
+			let lastCheckpointAt = 0;
+			if (channel?.type === "telegram") {
+				const tg = channel as TelegramChannel;
+				await tg.sendTyping(msg.senderId).catch(() => {});
+				typingInterval = setInterval(
+					() => void tg.sendTyping(msg.senderId).catch(() => {}),
+					4000,
+				);
+			}
+			try {
+				// Find or create persistent conversation
+				const convKey = queueKey;
+				const allConvs = await chatManager.listConversations({
+					limit: 100,
+				});
+				let conv = allConvs.find((c) => c.channel === convKey);
+				if (!conv) {
+					const label = msg.senderName
+						? `${msg.senderName} (${channelLabel})`
+						: convKey;
+					conv = await chatManager.createConversation({
+						title: label,
+						channel: convKey,
+					});
+				}
+				const convId = conv.id;
+				activeConvId = convId;
+				// Save user message
+				await chatManager.addMessage(convId, "user", msg.content, {
+					metadata: {
+						source: channelLabel,
+						senderId: msg.senderId,
+						senderName: msg.senderName,
+					},
+				});
+				// Load history into STM for context
+				targetAgent.stm.clear();
+				const history = await chatManager.getConversationMessages(convId, {
+					limit: CONVERSATION_HISTORY_LIMIT,
+					recent: true,
+				});
+				const prevMsgs = history.slice(0, -1);
+				for (const m of prevMsgs) {
+					if (m.role === "user" || m.role === "assistant") {
+						targetAgent.stm.add({
+							role: m.role,
+							content: m.content,
+							timestamp: new Date(m.timestamp),
+							metadata: { conversationId: convId },
+						});
 					}
 				}
-
-				// Bridge: channel messages with persistent conversation memory
-				const channelProcessingQueues = new Map<string, Promise<void>>();
-				activeChannelManager.onMessage(async (msg: ChannelMessage) => {
-					if (!system) return;
-					const targetAgent = system.agentRuntime;
-					const chatManager = system.chatManager;
-					const channel = activeChannelManager.get(msg.channelId);
-					const channelLabel = channel?.type ?? msg.channelId;
-					const queueKey = `${channelLabel}:${msg.senderId}`;
-					const previousProcessing =
-						channelProcessingQueues.get(queueKey) ?? Promise.resolve();
-					let releaseProcessing!: () => void;
-					const currentProcessing = new Promise<void>((resolve) => {
-						releaseProcessing = resolve;
-					});
-					const queuedProcessing = previousProcessing
-						.catch(() => {})
-						.then(() => currentProcessing);
-					channelProcessingQueues.set(queueKey, queuedProcessing);
-					await previousProcessing.catch(() => {});
-					let typingInterval: ReturnType<typeof setInterval> | undefined;
-					let activeConvId: string | undefined;
-					let accumulated = "";
-					let assistantCheckpointId: string | undefined;
-					let lastCheckpointAt = 0;
-					if (channel?.type === "telegram") {
-						const tg = channel as TelegramChannel;
-						await tg.sendTyping(msg.senderId).catch(() => {});
-						typingInterval = setInterval(
-							() => void tg.sendTyping(msg.senderId).catch(() => {}),
-							4000,
+				// Stream response
+				let lastSentLength = 0;
+				let lastMessageId: string | undefined;
+				const saveAssistantCheckpoint = async (
+					status: "streaming" | "completed",
+				) => {
+					if (!accumulated.trim()) return;
+					const metadata = {
+						source: channelLabel,
+						partial: status !== "completed",
+						status,
+						channelMessageId: msg.id,
+					};
+					if (assistantCheckpointId) {
+						await chatManager.updateMessage(
+							assistantCheckpointId,
+							accumulated,
+							{ metadata },
 						);
-					}
-					try {
-						// Find or create persistent conversation
-						const convKey = queueKey;
-						const allConvs = await chatManager.listConversations({
-							limit: 100,
-						});
-						let conv = allConvs.find((c) => c.channel === convKey);
-						if (!conv) {
-							const label = msg.senderName
-								? `${msg.senderName} (${channelLabel})`
-								: convKey;
-							conv = await chatManager.createConversation({
-								title: label,
-								channel: convKey,
-							});
-						}
-						const convId = conv.id;
-						activeConvId = convId;
-						// Save user message
-						await chatManager.addMessage(convId, "user", msg.content, {
-							metadata: {
-								source: channelLabel,
-								senderId: msg.senderId,
-								senderName: msg.senderName,
-							},
-						});
-						// Load history into STM for context
-						targetAgent.stm.clear();
-						const history = await chatManager.getConversationMessages(
+					} else {
+						const saved = await chatManager.addMessage(
 							convId,
-							{ limit: CONVERSATION_HISTORY_LIMIT, recent: true },
+							"assistant",
+							accumulated,
+							{ metadata },
 						);
-						const prevMsgs = history.slice(0, -1);
-						for (const m of prevMsgs) {
-							if (m.role === "user" || m.role === "assistant") {
-								targetAgent.stm.add({
-									role: m.role,
-									content: m.content,
-									timestamp: new Date(m.timestamp),
-									metadata: { conversationId: convId },
-								});
-							}
+						assistantCheckpointId = saved.id;
+					}
+					lastCheckpointAt = Date.now();
+				};
+				for await (const chunk of targetAgent.processMessageStream(
+					msg.content,
+					convId,
+				)) {
+					const statusMatch = chunk.match(
+						/^\0STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\0$/,
+					);
+					if (statusMatch) {
+						if (channel?.type === "telegram") {
+							const tgBot = (channel as unknown as TelegramBotLike).bot;
+							let action = "typing";
+							if (statusMatch[2]?.includes("image")) action = "upload_photo";
+							else if (
+								statusMatch[2]?.includes("voice") ||
+								statusMatch[2]?.includes("audio")
+							)
+								action = "record_voice";
+
+							tgBot.api.sendChatAction(msg.senderId, action).catch(() => {});
 						}
-						// Stream response
-						let lastSentLength = 0;
-						let lastMessageId: string | undefined;
-						const saveAssistantCheckpoint = async (
-							status: "streaming" | "completed",
-						) => {
-							if (!accumulated.trim()) return;
-							const metadata = {
-								source: channelLabel,
-								partial: status !== "completed",
-								status,
-								channelMessageId: msg.id,
-							};
-							if (assistantCheckpointId) {
-								await chatManager.updateMessage(
-									assistantCheckpointId,
-									accumulated,
-									{ metadata },
+						continue;
+					}
+					accumulated += chunk;
+					if (Date.now() - lastCheckpointAt >= STREAM_CHECKPOINT_INTERVAL_MS) {
+						await saveAssistantCheckpoint("streaming");
+					}
+					const telegramFlushText =
+						channel?.type === "telegram"
+							? getTelegramStreamFlushText(accumulated, lastSentLength)
+							: null;
+					if (telegramFlushText) {
+						const tgBot = (channel as unknown as TelegramBotLike).bot;
+						try {
+							const safe = markdownToTelegramHtml(telegramFlushText);
+							if (lastMessageId) {
+								await tgBot.api.editMessageText(
+									msg.senderId,
+									Number(lastMessageId),
+									safe,
+									{ parse_mode: "HTML" },
 								);
 							} else {
-								const saved = await chatManager.addMessage(
-									convId,
-									"assistant",
-									accumulated,
-									{ metadata },
-								);
-								assistantCheckpointId = saved.id;
+								const sent = await tgBot.api.sendMessage(msg.senderId, safe, {
+									parse_mode: "HTML",
+								});
+								lastMessageId = String(sent.message_id);
 							}
-							lastCheckpointAt = Date.now();
-						};
-						for await (const chunk of targetAgent.processMessageStream(
-							msg.content,
-							convId,
-						)) {
-							const statusMatch = chunk.match(
-								/^\0STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\0$/,
-							);
-							if (statusMatch) {
-								if (channel?.type === "telegram") {
-									const tgBot = (channel as unknown as TelegramBotLike).bot;
-									let action = "typing";
-									if (statusMatch[2]?.includes("image"))
-										action = "upload_photo";
-									else if (
-										statusMatch[2]?.includes("voice") ||
-										statusMatch[2]?.includes("audio")
-									)
-										action = "record_voice";
-
-									tgBot.api
-										.sendChatAction(msg.senderId, action)
-										.catch(() => {});
+							lastSentLength = telegramFlushText.length;
+						} catch {
+							try {
+								if (lastMessageId) {
+									await tgBot.api.editMessageText(
+										msg.senderId,
+										Number(lastMessageId),
+										telegramFlushText,
+									);
+								} else {
+									const sent = await tgBot.api.sendMessage(
+										msg.senderId,
+										telegramFlushText,
+									);
+									lastMessageId = String(sent.message_id);
 								}
-								continue;
+								lastSentLength = telegramFlushText.length;
+							} catch {}
+						}
+					}
+				}
+				// Save assistant response, upgrading any streaming checkpoint in-place.
+				await saveAssistantCheckpoint("completed");
+				// Final formatted response
+				if (channel?.type === "telegram") {
+					const tgBot = (channel as unknown as TelegramBotLike).bot;
+					accumulated = stripToolMarkers(accumulated);
+
+					const mediaUrls: {
+						url: string;
+						alt: string;
+						buffer?: Buffer;
+						mimeType?: string;
+					}[] = [];
+					if (accumulated.includes("/api/media/file/")) {
+						const imgRegex =
+							/!\[([^\]]*)\]\((https?:\/\/[^\s)]+|\/api\/media\/file\/[^\s)]+)\)/g;
+						let match: RegExpExecArray | null = imgRegex.exec(accumulated);
+						while (match !== null) {
+							mediaUrls.push({ alt: match[1], url: match[2] });
+							match = imgRegex.exec(accumulated);
+						}
+						accumulated = accumulated.replace(imgRegex, "").trim();
+
+						for (const media of mediaUrls) {
+							if (!media.url.startsWith("/api/media/file/")) continue;
+							try {
+								const resolved = await mediaContext.resolve(media.url);
+								media.buffer = resolved.buffer;
+								media.mimeType = resolved.mimeType;
+							} catch (err) {
+								console.warn(`Could not resolve media url: ${media.url}`);
 							}
-							accumulated += chunk;
-							if (
-								Date.now() - lastCheckpointAt >=
-								STREAM_CHECKPOINT_INTERVAL_MS
-							) {
-								await saveAssistantCheckpoint("streaming");
-							}
-							const telegramFlushText =
-								channel?.type === "telegram"
-									? getTelegramStreamFlushText(accumulated, lastSentLength)
-									: null;
-							if (telegramFlushText) {
-								const tgBot = (channel as unknown as TelegramBotLike).bot;
+						}
+					}
+
+					if (accumulated.length > 0) {
+						const parts = splitTelegramMessage(accumulated, 4096);
+						for (let i = 0; i < parts.length; i++) {
+							const part = parts[i];
+							if (!part) continue;
+							const safe = markdownToTelegramHtml(part);
+							try {
+								if (i === 0 && lastMessageId) {
+									await tgBot.api.editMessageText(
+										msg.senderId,
+										Number(lastMessageId),
+										safe,
+										{ parse_mode: "HTML" },
+									);
+								} else {
+									await tgBot.api.sendMessage(msg.senderId, safe, {
+										parse_mode: "HTML",
+										reply_parameters:
+											i === 0 ? { message_id: Number(msg.id) } : undefined,
+									});
+								}
+							} catch {
 								try {
-									const safe = markdownToTelegramHtml(telegramFlushText);
-									if (lastMessageId) {
+									if (i === 0 && lastMessageId) {
 										await tgBot.api.editMessageText(
 											msg.senderId,
 											Number(lastMessageId),
-											safe,
-											{ parse_mode: "HTML" },
+											part,
 										);
 									} else {
-										const sent = await tgBot.api.sendMessage(
-											msg.senderId,
-											safe,
-											{ parse_mode: "HTML" },
-										);
-										lastMessageId = String(sent.message_id);
+										await tgBot.api.sendMessage(msg.senderId, part);
 									}
-									lastSentLength = telegramFlushText.length;
-								} catch {
-									try {
-										if (lastMessageId) {
-											await tgBot.api.editMessageText(
-												msg.senderId,
-												Number(lastMessageId),
-												telegramFlushText,
-											);
-										} else {
-											const sent = await tgBot.api.sendMessage(
-												msg.senderId,
-												telegramFlushText,
-											);
-											lastMessageId = String(sent.message_id);
-										}
-										lastSentLength = telegramFlushText.length;
-									} catch {}
-								}
+								} catch {}
 							}
 						}
-						// Save assistant response, upgrading any streaming checkpoint in-place.
-						await saveAssistantCheckpoint("completed");
-						// Final formatted response
-						if (channel?.type === "telegram") {
-							const tgBot = (channel as unknown as TelegramBotLike).bot;
-							accumulated = stripToolMarkers(accumulated);
-
-							const mediaUrls: {
-								url: string;
-								alt: string;
-								buffer?: Buffer;
-								mimeType?: string;
-							}[] = [];
-							if (accumulated.includes("/api/media/file/")) {
-								const imgRegex =
-									/!\[([^\]]*)\]\((https?:\/\/[^\s)]+|\/api\/media\/file\/[^\s)]+)\)/g;
-								let match: RegExpExecArray | null = imgRegex.exec(accumulated);
-								while (match !== null) {
-									mediaUrls.push({ alt: match[1], url: match[2] });
-									match = imgRegex.exec(accumulated);
-								}
-								accumulated = accumulated.replace(imgRegex, "").trim();
-
-								for (const media of mediaUrls) {
-									if (!media.url.startsWith("/api/media/file/")) continue;
-									try {
-										const resolved = await mediaContext.resolve(media.url);
-										media.buffer = resolved.buffer;
-										media.mimeType = resolved.mimeType;
-									} catch (err) {
-										console.warn(`Could not resolve media url: ${media.url}`);
-									}
-								}
-							}
-
-							if (accumulated.length > 0) {
-								const parts = splitTelegramMessage(accumulated, 4096);
-								for (let i = 0; i < parts.length; i++) {
-									const part = parts[i];
-									if (!part) continue;
-									const safe = markdownToTelegramHtml(part);
-									try {
-										if (i === 0 && lastMessageId) {
-											await tgBot.api.editMessageText(
-												msg.senderId,
-												Number(lastMessageId),
-												safe,
-												{ parse_mode: "HTML" },
-											);
-										} else {
-											await tgBot.api.sendMessage(msg.senderId, safe, {
-												parse_mode: "HTML",
-												reply_parameters:
-													i === 0 ? { message_id: Number(msg.id) } : undefined,
-											});
-										}
-									} catch {
-										try {
-											if (i === 0 && lastMessageId) {
-												await tgBot.api.editMessageText(
-													msg.senderId,
-													Number(lastMessageId),
-													part,
-												);
-											} else {
-												await tgBot.api.sendMessage(msg.senderId, part);
-											}
-										} catch {}
-									}
-								}
-							}
-
-							for (const media of mediaUrls) {
-								if (!media.buffer) continue;
-								const inputFile = new InputFile(media.buffer);
-								try {
-									if (media.mimeType?.startsWith("audio/")) {
-										await tgBot.api.sendAudio(msg.senderId, inputFile, {
-											caption: media.alt,
-										});
-									} else if (media.mimeType?.startsWith("video/")) {
-										await tgBot.api.sendVideo(msg.senderId, inputFile, {
-											caption: media.alt,
-										});
-									} else {
-										await tgBot.api.sendPhoto(msg.senderId, inputFile, {
-											caption: media.alt,
-										});
-									}
-								} catch (err) {
-									console.error("Error sending media to telegram", err);
-								}
-							}
-						} else {
-							await activeChannelManager.send(
-								msg.channelId,
-								msg.senderId,
-								accumulated,
-								{ replyTo: msg.id },
-							);
-						}
-					} catch (err) {
-						if (activeConvId && accumulated.trim()) {
-							try {
-								const metadata = {
-									source: channelLabel,
-									partial: true,
-									status: "interrupted",
-									channelMessageId: msg.id,
-									error: err instanceof Error ? err.message : String(err),
-								};
-								if (assistantCheckpointId) {
-									await chatManager.updateMessage(
-										assistantCheckpointId,
-										accumulated,
-										{ metadata },
-									);
-								} else {
-									await chatManager.addMessage(
-										activeConvId,
-										"assistant",
-										accumulated,
-										{ metadata },
-									);
-								}
-							} catch (checkpointErr) {
-								console.error("Error saving channel checkpoint:", checkpointErr);
-							}
-						}
-						console.error("Error processing channel message:", err);
-					} finally {
-						if (typingInterval) clearInterval(typingInterval);
-						releaseProcessing();
-						if (channelProcessingQueues.get(queueKey) === queuedProcessing) {
-							channelProcessingQueues.delete(queueKey);
-						}
-						try {
-							targetAgent
-								.runConsolidation()
-								.catch((e) => console.error("LTM consolidation error:", e));
-						} catch {}
 					}
-				});
 
-				await activeChannelManager.startAll();
-				server = new TransportServer({
-					port: system.config.server.port,
-					host: system.config.server.host,
-				});
-				server.setSystemContext({
-					config: system.config,
-					router: system.router,
-					ltm: system.ltm,
-					memoryConsolidator: system.memoryConsolidator,
-					skillRegistry: system.skillRegistry,
-					pluginRegistry: system.pluginRegistry,
-					codeExecutor: system.codeExecutor,
-					chatManager: system.chatManager,
-					agentManager: system.agentManager,
-					taskManager: system.taskManager,
-					automationManager: system.automationManager,
-					envVarManager: system.envVarManager,
-					mcpManager: system.mcpManager,
-					refreshBrowserTools: system.refreshBrowserTools,
-					embedFn: system.embedFn,
-					userProfileManager: system.userProfileManager,
-					learningEngine: system.learningEngine,
-					agentRuntime: system.agentRuntime,
-					toolRegistry: system.toolRegistry,
-					dailyMemory: system.dailyMemory,
-				});
-				server.onMessage((clientId, message) => {
-					let conversationId: string | undefined;
-					void (async () => {
-						if (!system || !server) return;
+					for (const media of mediaUrls) {
+						if (!media.buffer) continue;
+						const inputFile = new InputFile(media.buffer);
 						try {
-							const payload = message.payload as {
-								message?: string;
-								channelId?: string;
-								stream?: boolean;
-								conversationId?: string;
-								agentId?: string;
-							};
-							if (!payload?.message) return;
-							conversationId = payload.conversationId;
-							const autoTitle =
-								payload.message.length > 50
-									? `${payload.message.substring(0, 50).trimEnd()}...`
-									: payload.message;
-							if (!conversationId) {
-								const conv = await system.chatManager.createConversation({
-									agentId: payload.agentId ?? undefined,
-									title: autoTitle,
+							if (media.mimeType?.startsWith("audio/")) {
+								await tgBot.api.sendAudio(msg.senderId, inputFile, {
+									caption: media.alt,
 								});
-								conversationId = conv.id;
-							} else {
-								const existing =
-									await system.chatManager.getConversation(conversationId);
-								if (!existing) {
-									const conv = await system.chatManager.createConversation({
-										agentId: payload.agentId ?? undefined,
-										title: autoTitle,
-									});
-									conversationId = conv.id;
-								}
-							}
-							await system.chatManager.addMessage(
-								conversationId,
-								"user",
-								payload.message,
-							);
-							const targetAgent =
-								payload.agentId && system.agentManager
-									? (system.agentManager.getRuntime(payload.agentId) ??
-										system.agentRuntime)
-									: system.agentRuntime;
-
-							targetAgent.stm.clear();
-							const history = await system.chatManager.getConversationMessages(
-								conversationId,
-								{ limit: CONVERSATION_HISTORY_LIMIT, recent: true },
-							);
-							// Don't include the very last one because processMessageStream adds it, wait actually addMessage was just called!
-							// So the last message is the user message! We should slice(0, -1) if we let processMessageStream add the user message.
-							// Yes, processMessageStream does `this.stm.add(userTurn);` with the new message.
-							const prevMsgs = history.slice(0, -1);
-							for (const m of prevMsgs) {
-								if (m.role === "user" || m.role === "assistant") {
-									targetAgent.stm.add({
-										role: m.role,
-										content: m.content,
-										timestamp: new Date(m.timestamp),
-										metadata: { conversationId },
-									});
-								}
-							}
-
-							if (payload.stream) {
-								const streamConversationId = conversationId;
-								if (!streamConversationId) {
-									throw new Error("Conversation was not initialized for stream");
-								}
-								const chatManager = system.chatManager;
-								let fullText = "";
-								let assistantMessageId: string | undefined;
-								let lastCheckpointAt = 0;
-								const saveAssistantCheckpoint = async (
-									status: "streaming" | "completed" | "interrupted",
-									force = false,
-								) => {
-									if (!fullText.trim()) return;
-									const now = Date.now();
-									if (
-										!force &&
-										assistantMessageId &&
-										now - lastCheckpointAt < STREAM_CHECKPOINT_INTERVAL_MS
-									) {
-										return;
-									}
-									const metadata = {
-										status,
-										partial: status !== "completed",
-										checkpointedAt: new Date(now).toISOString(),
-										source: "stream",
-									};
-									if (assistantMessageId) {
-										await chatManager.updateMessage(
-											assistantMessageId,
-											fullText,
-											{ metadata },
-										);
-									} else {
-										const msg = await chatManager.addMessage(
-											streamConversationId,
-											"assistant",
-											fullText,
-											{ metadata },
-										);
-										assistantMessageId = msg.id;
-									}
-									lastCheckpointAt = now;
-								};
-								const stream = targetAgent.processMessageStream(
-									payload.message,
-									conversationId,
-								);
-								try {
-									for await (const chunk of stream) {
-										const statusMatch = chunk.match(
-											/^\0STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\0$/,
-										);
-										if (statusMatch) {
-											let activityDetail: string | null = null;
-											if (statusMatch[4]) {
-												try {
-													activityDetail = Buffer.from(
-														statusMatch[4],
-														"base64",
-													).toString("utf8");
-												} catch {
-													activityDetail = null;
-												}
-											}
-											server.send(clientId, {
-												id: message.id,
-												type: MessageType.event,
-												channel: message.channel,
-												payload: {
-													agentStatus: statusMatch[1],
-													toolName: statusMatch[2] || null,
-													uiIconB64: statusMatch[3] || null,
-													activityDetail,
-													conversationId,
-												},
-												timestamp: Date.now(),
-											});
-											continue;
-										}
-										fullText += chunk;
-										await saveAssistantCheckpoint("streaming");
-										const sent = server.send(clientId, {
-											id: message.id,
-											type: MessageType.stream,
-											channel: message.channel,
-											payload: { content: chunk, conversationId },
-											timestamp: Date.now(),
-										});
-										// if (!sent) break; // Removed to allow background execution
-									}
-								} catch (streamErr) {
-									await saveAssistantCheckpoint("interrupted", true);
-									throw streamErr;
-								}
-								if (fullText.trim().length > 0) {
-									await saveAssistantCheckpoint("completed", true);
-								}
-								server.send(clientId, {
-									id: message.id,
-									type: MessageType.stream_end,
-									channel: message.channel,
-									payload: { done: true, conversationId },
-									timestamp: Date.now(),
+							} else if (media.mimeType?.startsWith("video/")) {
+								await tgBot.api.sendVideo(msg.senderId, inputFile, {
+									caption: media.alt,
 								});
 							} else {
-								const response = await targetAgent.processMessage(
-									payload.message,
-									conversationId,
-								);
-								await system.chatManager.addMessage(
-									conversationId,
-									"assistant",
-									response,
-								);
-								server.send(clientId, {
-									id: message.id,
-									type: MessageType.response,
-									channel: message.channel,
-									payload: { content: response, conversationId },
-									timestamp: Date.now(),
+								await tgBot.api.sendPhoto(msg.senderId, inputFile, {
+									caption: media.alt,
 								});
 							}
-
-							try {
-								targetAgent
-									.runConsolidation()
-									.catch((e) =>
-										console.error("LTM consolidation error (web):", e),
-									);
-							} catch {}
 						} catch (err) {
-							const errorMessage =
+							console.error("Error sending media to telegram", err);
+						}
+					}
+				} else {
+					await activeChannelManager.send(
+						msg.channelId,
+						msg.senderId,
+						accumulated,
+						{ replyTo: msg.id },
+					);
+				}
+			} catch (err) {
+				if (activeConvId && accumulated.trim()) {
+					try {
+						const metadata = {
+							source: channelLabel,
+							partial: true,
+							status: "interrupted",
+							channelMessageId: msg.id,
+							error: err instanceof Error ? err.message : String(err),
+						};
+						if (assistantCheckpointId) {
+							await chatManager.updateMessage(
+								assistantCheckpointId,
+								accumulated,
+								{ metadata },
+							);
+						} else {
+							await chatManager.addMessage(
+								activeConvId,
+								"assistant",
+								accumulated,
+								{ metadata },
+							);
+						}
+					} catch (checkpointErr) {
+						console.error("Error saving channel checkpoint:", checkpointErr);
+					}
+				}
+				console.error("Error processing channel message:", err);
+			} finally {
+				if (typingInterval) clearInterval(typingInterval);
+				releaseProcessing();
+				if (channelProcessingQueues.get(queueKey) === queuedProcessing) {
+					channelProcessingQueues.delete(queueKey);
+				}
+				try {
+					targetAgent
+						.runConsolidation()
+						.catch((e) => console.error("LTM consolidation error:", e));
+				} catch {}
+			}
+		});
+
+		await activeChannelManager.startAll();
+		const runningSystem = system;
+		if (!runningSystem) throw new Error("System not initialized");
+		server = new TransportServer({
+			port: runningSystem.config.server.port,
+			host: runningSystem.config.server.host,
+		});
+		const chatExecutionManager = new ChatExecutionManager({
+			chatManager: runningSystem.chatManager,
+			conversationHistoryLimit: CONVERSATION_HISTORY_LIMIT,
+			streamCheckpointIntervalMs: STREAM_CHECKPOINT_INTERVAL_MS,
+			getAgentRuntime: (agentId?: string) =>
+				agentId && runningSystem.agentManager
+					? (runningSystem.agentManager.getRuntime(agentId) ??
+						runningSystem.agentRuntime)
+					: runningSystem.agentRuntime,
+			emit: (event) => {
+				if (!server) return;
+				const type =
+					event.type === "event"
+						? MessageType.event
+						: event.type === "stream"
+							? MessageType.stream
+							: event.type === "stream_end"
+								? MessageType.stream_end
+								: event.type === "error"
+									? MessageType.error
+									: event.type === "response"
+										? MessageType.response
+										: MessageType.event;
+				server.sendToConversation(event.conversationId, {
+					id: event.requestId ?? event.executionId,
+					type,
+					channel: "chat",
+					payload: event.payload,
+					timestamp: Date.now(),
+				});
+			},
+		});
+		await chatExecutionManager.initialize();
+		server.setSystemContext({
+			config: system.config,
+			router: system.router,
+			ltm: system.ltm,
+			memoryConsolidator: system.memoryConsolidator,
+			skillRegistry: system.skillRegistry,
+			pluginRegistry: system.pluginRegistry,
+			codeExecutor: system.codeExecutor,
+			chatManager: system.chatManager,
+			chatExecutionManager,
+			agentManager: system.agentManager,
+			taskManager: system.taskManager,
+			automationManager: system.automationManager,
+			envVarManager: system.envVarManager,
+			mcpManager: system.mcpManager,
+			refreshBrowserTools: system.refreshBrowserTools,
+			reloadDynamicTool: system.reloadDynamicTool,
+			embedFn: system.embedFn,
+			userProfileManager: system.userProfileManager,
+			learningEngine: system.learningEngine,
+			agentRuntime: system.agentRuntime,
+			toolRegistry: system.toolRegistry,
+			dailyMemory: system.dailyMemory,
+		});
+		server.onMessage((clientId, message) => {
+			void (async () => {
+				if (!system || !server) return;
+				try {
+					if (message.channel === "chat.control") {
+						const payload = message.payload as {
+							action?: string;
+							conversationId?: string;
+							executionId?: string;
+						};
+						if (payload.action === "subscribe" && payload.conversationId) {
+							server.subscribeConversation(clientId, payload.conversationId);
+							return;
+						}
+						if (payload.action === "unsubscribe" && payload.conversationId) {
+							server.unsubscribeConversation(clientId, payload.conversationId);
+							return;
+						}
+						if (payload.action === "cancel") {
+							if (payload.executionId) {
+								await chatExecutionManager.cancel(payload.executionId);
+							} else if (payload.conversationId) {
+								await chatExecutionManager.cancelByConversation(
+									payload.conversationId,
+								);
+							}
+						}
+						return;
+					}
+
+					const payload = message.payload as {
+						message?: string;
+						stream?: boolean;
+						conversationId?: string;
+						agentId?: string;
+					};
+					if (message.channel !== "chat" || !payload?.message) return;
+					if (payload.conversationId) {
+						server.subscribeConversation(clientId, payload.conversationId);
+					}
+					const execution = await chatExecutionManager.start({
+						requestId: message.id,
+						message: payload.message,
+						stream: payload.stream,
+						conversationId: payload.conversationId,
+						agentId: payload.agentId,
+					});
+					server.subscribeConversation(clientId, execution.conversation_id);
+					server.send(clientId, {
+						id: message.id,
+						type: MessageType.event,
+						channel: "chat",
+						payload: {
+							execution,
+							agentStatus: execution.current_status ?? "thinking",
+							conversationId: execution.conversation_id,
+							executionId: execution.id,
+						},
+						timestamp: Date.now(),
+					});
+				} catch (err) {
+					server?.send(clientId, {
+						id: message.id,
+						type: MessageType.error,
+						channel: message.channel,
+						payload: {
+							error:
 								err instanceof Error
 									? err.message
-									: "Failed to process message";
-							if (conversationId) {
-								await system.chatManager.addMessage(
-									conversationId,
-									"assistant",
-									`⚠️ Error: ${errorMessage}`,
-								);
-							}
-							server.send(clientId, {
-								id: message.id,
-								type: MessageType.error,
-								channel: message.channel,
-								payload: {
-									error: errorMessage,
-									conversationId,
-								},
-								timestamp: Date.now(),
-							});
-						}
-					})();
-				});
-				await server.start();
-				system.connectionManager.startHealthMonitor(async () => true);
-				const toolCount = system.toolRegistry.list().length;
-				const webUrl = getWebUrl(
-					system.config.server.host,
-					system.config.server.port,
-				);
-				console.log(chalk.green("  ✓ Systems initialized"));
-				console.log(chalk.green("  ✓ Transport server started"));
-				console.log(chalk.green("  ✓ Health monitoring active"));
-				console.log(chalk.green(`  ✓ ${toolCount} tools registered`));
-				console.log(chalk.cyan("\n  Server Info:"));
-				console.log(
-					chalk.gray(`    Port:        ${system.config.server.port}`),
-				);
-				console.log(
-					chalk.gray(`    Host:        ${system.config.server.host}`),
-				);
-				console.log(
-					chalk.gray(`    Transport:   ${system.config.server.transport}`),
-				);
-				console.log(chalk.gray(`    AI Provider: ${system.config.ai.default}`));
-				console.log(chalk.gray(`    Tools:       ${toolCount} available`));
-				console.log(
-					chalk.gray(
-						enabledChannels.length > 0
-							? `    Channels:    ${enabledChannels.join(", ")}`
-							: "    Channels:    none enabled",
-					),
-				);
-				console.log(
-					chalk.green(
-						`\n  Server running at ws://${system.config.server.host}:${system.config.server.port}`,
-					),
-				);
-				console.log(chalk.green(`  Web interface: ${webUrl}`));
-
-				let mode: InterfaceMode = "server";
-				if (options.open) {
-					mode = "web";
-				} else if (options.console) {
-					mode = "console";
-				} else if (
-					options.choice !== false &&
-					process.stdin.isTTY &&
-					!options.channel
-				) {
-					mode = await chooseInterfaceMode(webUrl);
+									: "Failed to process message",
+						},
+						timestamp: Date.now(),
+					});
 				}
+			})();
+		});
+		await server.start();
+		system.connectionManager.startHealthMonitor(async () => true);
+		const toolCount = system.toolRegistry.list().length;
+		const webUrl = getWebUrl(
+			system.config.server.host,
+			system.config.server.port,
+		);
+		console.log(chalk.green("  ✓ Systems initialized"));
+		console.log(chalk.green("  ✓ Transport server started"));
+		console.log(chalk.green("  ✓ Health monitoring active"));
+		console.log(chalk.green(`  ✓ ${toolCount} tools registered`));
+		console.log(chalk.cyan("\n  Server Info:"));
+		console.log(chalk.gray(`    Port:        ${system.config.server.port}`));
+		console.log(chalk.gray(`    Host:        ${system.config.server.host}`));
+		console.log(
+			chalk.gray(`    Transport:   ${system.config.server.transport}`),
+		);
+		console.log(chalk.gray(`    AI Provider: ${system.config.ai.default}`));
+		console.log(chalk.gray(`    Tools:       ${toolCount} available`));
+		console.log(
+			chalk.gray(
+				enabledChannels.length > 0
+					? `    Channels:    ${enabledChannels.join(", ")}`
+					: "    Channels:    none enabled",
+			),
+		);
+		console.log(
+			chalk.green(
+				`\n  Server running at ws://${system.config.server.host}:${system.config.server.port}`,
+			),
+		);
+		console.log(chalk.green(`  Web interface: ${webUrl}`));
 
-				if (mode === "web") {
-					openUrl(webUrl);
-					console.log(chalk.green("  ✓ Web interface opened"));
-				} else if (mode === "console") {
-					console.log(
-						chalk.gray(
-							"\n  Console mode active. Use /exit to return to the server process.\n",
-						),
-					);
-					await runOctopusTui(createLocalConsoleSession(system, webUrl));
-				}
+		let mode: InterfaceMode = "server";
+		if (options.open) {
+			mode = "web";
+		} else if (options.console) {
+			mode = "console";
+		} else if (
+			options.choice !== false &&
+			process.stdin.isTTY &&
+			!options.channel
+		) {
+			mode = await chooseInterfaceMode(webUrl);
+		}
 
-				console.log(
-					chalk.gray("  Server remains active. Press Ctrl+C to stop\n"),
-				);
-				await new Promise(() => {});
-			} catch (err) {
-				if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
-					console.error(
-						chalk.red(
-							`\n✗ Port ${system?.config.server.host ?? "127.0.0.1"}:${system?.config.server.port ?? 18789} is already in use.`,
-						),
-					);
-					console.log(
-						chalk.gray(
-							"  If Octopus is already running, open http://127.0.0.1:18789",
-						),
-					);
-					console.log(chalk.gray("  Windows: netstat -ano | findstr :18789"));
-					console.log(chalk.gray("  Stop PID: taskkill /PID <pid> /F\n"));
-				} else {
-					console.error(
-						chalk.red("\n✗ Failed to start server:"),
-						err instanceof Error ? err.stack : String(err),
-					);
-				}
-				if (server) await server.stop();
-				if (system) await system.shutdown();
-				process.exit(1);
-			}
+		if (mode === "web") {
+			openUrl(webUrl);
+			console.log(chalk.green("  ✓ Web interface opened"));
+		} else if (mode === "console") {
+			console.log(
+				chalk.gray(
+					"\n  Console mode active. Use /exit to return to the server process.\n",
+				),
+			);
+			await runOctopusTui(createLocalConsoleSession(system, webUrl));
+		}
+
+		console.log(chalk.gray("  Server remains active. Press Ctrl+C to stop\n"));
+		await new Promise(() => {});
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
+			console.error(
+				chalk.red(
+					`\n✗ Port ${system?.config.server.host ?? "127.0.0.1"}:${system?.config.server.port ?? 18789} is already in use.`,
+				),
+			);
+			console.log(
+				chalk.gray(
+					"  If Octopus is already running, open http://127.0.0.1:18789",
+				),
+			);
+			console.log(chalk.gray("  Windows: netstat -ano | findstr :18789"));
+			console.log(chalk.gray("  Stop PID: taskkill /PID <pid> /F\n"));
+		} else {
+			console.error(
+				chalk.red("\n✗ Failed to start server:"),
+				err instanceof Error ? err.stack : String(err),
+			);
+		}
+		if (server) await server.stop();
+		if (system) await system.shutdown();
+		process.exit(1);
+	}
 }
 
 export function createStartCommand(): Command {

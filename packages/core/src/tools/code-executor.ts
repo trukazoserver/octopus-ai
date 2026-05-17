@@ -9,6 +9,7 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
+import { mediaContext } from "./media.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
 const execAsync = promisify(exec);
@@ -21,6 +22,12 @@ export interface CodeExecutionResult {
 	executionTime: number;
 	language: string;
 	artifacts: string[];
+	media?: Array<{
+		filename: string;
+		url: string;
+		mimetype: string;
+		size: number;
+	}>;
 }
 
 export interface CodeExecutorConfig {
@@ -33,14 +40,45 @@ export interface CodeExecutorConfig {
 	sandboxMode: "docker" | "local" | "isolated";
 }
 
+export interface CodeExecutorHooks {
+	onToolCreated?: (tool: {
+		name: string;
+		toolDir: string;
+		codePath: string;
+		manifestPath: string;
+	}) => Promise<void> | void;
+}
+
 const DEFAULT_CODE_CONFIG: CodeExecutorConfig = {
 	enabled: true,
 	timeout: 30000,
 	maxOutputBytes: 1024 * 1024,
-	allowedLanguages: ["javascript", "typescript", "python", "bash", "sql", "powershell"],
+	allowedLanguages: [
+		"javascript",
+		"typescript",
+		"python",
+		"bash",
+		"sql",
+		"powershell",
+	],
 	workspaceDir: "~/.octopus/workspace",
 	tempDir: "~/.octopus/tmp",
 	sandboxMode: "local",
+};
+
+const ARTIFACT_MIME_TYPES: Record<string, string> = {
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+	".svg": "image/svg+xml",
+	".mp3": "audio/mpeg",
+	".wav": "audio/wav",
+	".ogg": "audio/ogg",
+	".m4a": "audio/mp4",
+	".mp4": "video/mp4",
+	".webm": "video/webm",
 };
 
 const LANGUAGE_CONFIG: Record<
@@ -79,10 +117,15 @@ const LANGUAGE_CONFIG: Record<
 
 export class CodeExecutor {
 	private config: CodeExecutorConfig;
+	private hooks: CodeExecutorHooks;
 	private tempCounter = 0;
 
-	constructor(config?: Partial<CodeExecutorConfig>) {
+	constructor(
+		config?: Partial<CodeExecutorConfig>,
+		hooks: CodeExecutorHooks = {},
+	) {
 		this.config = { ...DEFAULT_CODE_CONFIG, ...config };
+		this.hooks = hooks;
 	}
 
 	async initialize(): Promise<void> {
@@ -90,6 +133,10 @@ export class CodeExecutor {
 		const workspaceDir = this.resolvePath(this.config.workspaceDir);
 		await mkdirAsync(tempDir, { recursive: true });
 		await mkdirAsync(workspaceDir, { recursive: true });
+	}
+
+	setHooks(hooks: CodeExecutorHooks): void {
+		this.hooks = hooks;
 	}
 
 	async executeCode(
@@ -227,6 +274,7 @@ export class CodeExecutor {
 			const executionTime = Date.now() - startTime;
 
 			const artifacts = await this.detectArtifacts(sessionDir, fileName);
+			const media = await this.saveMediaArtifacts(artifacts);
 
 			if (result.stdout.length > this.config.maxOutputBytes) {
 				result.stdout = `${result.stdout.slice(0, this.config.maxOutputBytes)}\n... [output truncated at ${this.config.maxOutputBytes} bytes]`;
@@ -238,6 +286,7 @@ export class CodeExecutor {
 				executionTime,
 				language: normalizedLang,
 				artifacts,
+				media,
 			};
 		} finally {
 			await this.cleanup(sessionDir);
@@ -332,7 +381,18 @@ export class CodeExecutor {
 				output += `\n[Execution: ${result.executionTime}ms, exit code: ${result.exitCode}]`;
 
 				if (result.artifacts.length > 0) {
-					output += `\n[Artifacts: ${result.artifacts.join(", ")}]`;
+					output += `\n[Artifacts: ${result.artifacts.map((artifact) => path.basename(artifact)).join(", ")}]`;
+				}
+
+				if (result.media && result.media.length > 0) {
+					output += `\n[Saved media]\n${result.media
+						.map(
+							(item) =>
+								`- ${item.filename} (${item.mimetype}, ${item.size} bytes): ${item.url}`,
+						)
+						.join(
+							"\n",
+						)}\nUse these URLs directly in your response, for example: ![description](${result.media[0].url})`;
 				}
 
 				return {
@@ -344,6 +404,7 @@ export class CodeExecutor {
 						exitCode: result.exitCode,
 						language: result.language,
 						artifacts: result.artifacts,
+						media: result.media ?? [],
 					},
 				};
 			},
@@ -429,7 +490,8 @@ export class CodeExecutor {
 				},
 				uiIcon: {
 					type: "string",
-					description: "An SVG markup string for the tool's icon. Should include CSS animation (e.g. style='animation: pulse 2s infinite ease-in-out') to make it look dynamic.",
+					description:
+						"An SVG markup string for the tool's icon. Should include CSS animation (e.g. style='animation: pulse 2s infinite ease-in-out') to make it look dynamic.",
 				},
 				code: {
 					type: "string",
@@ -505,9 +567,21 @@ export class CodeExecutor {
 					"utf-8",
 				);
 
+				let runtimeMessage =
+					"The tool will be available after restart or via dynamic loading.";
+				if (this.hooks.onToolCreated) {
+					await this.hooks.onToolCreated({
+						name,
+						toolDir,
+						codePath,
+						manifestPath,
+					});
+					runtimeMessage = "The tool was registered in the current runtime.";
+				}
+
 				return {
 					success: true,
-					output: `Tool '${name}' created successfully at ${toolDir}\n\nFiles created:\n- ${codePath}\n- ${manifestPath}\n\nThe tool will be available after restart or via dynamic loading.`,
+					output: `Tool '${name}' created successfully at ${toolDir}\n\nFiles created:\n- ${codePath}\n- ${manifestPath}\n\n${runtimeMessage}`,
 					metadata: { toolName: name, path: toolDir },
 				};
 			},
@@ -668,6 +742,38 @@ export class CodeExecutor {
 			/* ignore */
 		}
 		return artifacts;
+	}
+
+	private async saveMediaArtifacts(
+		artifacts: string[],
+	): Promise<NonNullable<CodeExecutionResult["media"]>> {
+		const saved: NonNullable<CodeExecutionResult["media"]> = [];
+
+		for (const artifact of artifacts) {
+			const filename = path.basename(artifact);
+			const mimetype =
+				ARTIFACT_MIME_TYPES[path.extname(filename).toLowerCase()];
+			if (!mimetype) continue;
+
+			try {
+				const buffer = await readFile(artifact);
+				const item = await mediaContext.save(
+					buffer,
+					mimetype,
+					`Generated by execute_code: ${filename}`,
+				);
+				saved.push({
+					filename,
+					url: item.url,
+					mimetype,
+					size: buffer.length,
+				});
+			} catch {
+				// Artifact saving should never make code execution fail.
+			}
+		}
+
+		return saved;
 	}
 
 	private async cleanup(dir: string): Promise<void> {

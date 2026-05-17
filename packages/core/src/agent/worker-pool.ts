@@ -3,7 +3,7 @@
  *
  * Cada worker es un AgentRuntime ligero con:
  * - Su propio contexto aislado (evita context collapse)
- * - Acceso restringido a solo las herramientas de su toolScope
+ * - Acceso completo a herramientas registradas, MCPs y contexto compartido
  * - Timeout y presupuesto de herramientas independientes
  * - Streaming de progreso en tiempo real al EventStream
  */
@@ -11,9 +11,9 @@
 import type { LLMRouter } from "../ai/router.js";
 import type { LLMMessage, LLMRequest, LLMToolCall } from "../ai/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
-import type { ToolRegistry, ToolDefinition } from "../tools/registry.js";
+import type { ToolDefinition, ToolRegistry } from "../tools/registry.js";
+import type { AgentEvent, EventStream } from "./event-stream.js";
 import type { AgentConfig } from "./types.js";
-import type { EventStream, AgentEvent } from "./event-stream.js";
 
 export interface SubTask {
 	id: string;
@@ -34,6 +34,11 @@ export interface WorkerConfig {
 	model?: string;
 	temperature?: number;
 	systemPromptOverride?: string;
+	sharedContext?: LLMMessage[];
+	runId?: string;
+	channelId?: string;
+	usesZaiVisionToolForImages?: boolean;
+	signal?: AbortSignal;
 }
 
 interface WorkerState {
@@ -52,6 +57,17 @@ const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	timeoutMs: 120_000, // 2 minutos
 	temperature: 0.3,
 };
+
+function summarizeVisibleWorkerText(content: string, maxChars = 420): string {
+	const cleaned = content
+		.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!cleaned) return "Planificando el siguiente paso.";
+	return cleaned.length > maxChars
+		? `${cleaned.slice(0, maxChars).trimEnd()}...`
+		: cleaned;
+}
 
 export class WorkerPool {
 	private workers: Map<string, WorkerState> = new Map();
@@ -82,9 +98,14 @@ export class WorkerPool {
 	private buildWorkerSystemPrompt(task: SubTask, config: WorkerConfig): string {
 		if (config.systemPromptOverride) return config.systemPromptOverride;
 
-		const toolList = task.toolScope.length > 0
-			? `Tienes acceso SOLO a estas herramientas: ${task.toolScope.join(", ")}.`
-			: "Tienes acceso a todas las herramientas disponibles.";
+		const availableTools = this.toolRegistry
+			.list()
+			.map((tool) => `- ${tool.name}: ${tool.description}`)
+			.join("\n");
+		const recommendedTools =
+			task.toolScope.length > 0
+				? `\nHerramientas sugeridas por el orquestador para esta subtarea: ${task.toolScope.join(", ")}. Estas son sugerencias, NO restricciones.`
+				: "";
 
 		const fileScope = task.fileScope?.length
 			? `\nSolo puedes operar en estos archivos/directorios: ${task.fileScope.join(", ")}.`
@@ -94,12 +115,17 @@ export class WorkerPool {
 			`Eres un worker especializado con el rol de "${task.role}".`,
 			`Tu tarea específica es: ${task.description}`,
 			"",
-			toolList,
+			"Tienes acceso completo a todas las herramientas registradas del sistema, incluyendo herramientas locales, MCPs, media, navegador y ejecución de código.",
+			"La memoria, el perfil del usuario, aprendizajes operativos y skills relevantes se inyectan como contexto compartido cuando están disponibles. Si existe una herramienta explícita para consultar memoria o skills, puedes usarla; si no existe, usa el contexto proporcionado.",
+			`Herramientas disponibles:\n${availableTools || "- No hay herramientas registradas."}`,
+			recommendedTools,
 			fileScope,
 			"",
 			"Reglas:",
 			"- Enfócate SOLO en tu tarea asignada.",
 			"- Sé eficiente: usa el mínimo de herramientas necesarias.",
+			"- Si generas imágenes, audio o video con execute_code, guarda el archivo en el directorio actual del script con una extensión normal (.png, .jpg, .mp4, etc.). execute_code lo guardará automáticamente en la librería de media y devolverá una URL /api/media/file/...; usa esa URL directamente en tu resultado.",
+			"- No instales dependencias pesadas para imágenes simples; prefiere SVG, Python estándar, PIL si ya está disponible, o código ligero.",
 			"- Reporta tu resultado de forma concisa cuando termines.",
 			`- Tienes un presupuesto máximo de ${config.maxToolIterations} iteraciones de herramientas.`,
 			"- Si encuentras un bloqueo que no puedes resolver, reporta el error inmediatamente.",
@@ -107,13 +133,12 @@ export class WorkerPool {
 	}
 
 	/**
-	 * Filtrar herramientas disponibles según el toolScope del worker.
+	 * Devolver todas las herramientas disponibles.
+	 * toolScope se conserva como señal de recomendación para el prompt, no como restricción.
 	 */
-	private getScopedTools(toolScope: string[]): ToolDefinition[] {
+	private getScopedTools(_toolScope: string[]): ToolDefinition[] {
 		const allTools = this.toolRegistry.list();
-		if (toolScope.length === 0) return allTools;
-		const scopeSet = new Set(toolScope);
-		return allTools.filter((t: ToolDefinition) => scopeSet.has(t.name));
+		return allTools;
 	}
 
 	/**
@@ -126,6 +151,11 @@ export class WorkerPool {
 		const fullConfig = { ...DEFAULT_WORKER_CONFIG, ...config };
 		const workerId = this.nextWorkerId();
 		const abortController = new AbortController();
+		if (fullConfig.signal?.aborted) abortController.abort();
+		const abortFromParent = () => abortController.abort();
+		fullConfig.signal?.addEventListener("abort", abortFromParent, {
+			once: true,
+		});
 
 		const state: WorkerState = {
 			id: workerId,
@@ -144,10 +174,13 @@ export class WorkerPool {
 
 		// Emitir evento de inicio
 		this.eventStream.append({
+			runId: fullConfig.runId,
 			workerId,
 			taskId: task.id,
 			type: "task_claimed",
-			data: { message: `Worker ${workerId} iniciando tarea: ${task.description.slice(0, 200)}` },
+			data: {
+				message: `Worker ${workerId} iniciando tarea: ${task.description.slice(0, 200)}`,
+			},
 		});
 
 		const systemPrompt = this.buildWorkerSystemPrompt(task, fullConfig);
@@ -155,20 +188,42 @@ export class WorkerPool {
 
 		state.messages = [
 			{ role: "system", content: systemPrompt },
+			...(fullConfig.sharedContext ?? []),
 			{ role: "user", content: task.description },
 		];
 
 		try {
 			const result = await this.runWorkerLoop(state, scopedTools, fullConfig);
+			if (abortController.signal.aborted || result.startsWith("[Cancelado]")) {
+				state.status = "cancelled";
+				task.status = "cancelled";
+				this.eventStream.append({
+					runId: fullConfig.runId,
+					workerId,
+					taskId: task.id,
+					type: "cancelled",
+					data: {
+						message: "Worker cancelado.",
+						durationMs: Date.now() - state.startedAt,
+						toolIterations: state.toolIterations,
+					},
+				});
+				return result;
+			}
 			state.status = "done";
 			task.status = "done";
 			task.result = result;
 
 			this.eventStream.append({
+				runId: fullConfig.runId,
 				workerId,
 				taskId: task.id,
 				type: "result",
-				data: { message: result.slice(0, 2000) },
+				data: {
+					message: result.slice(0, 2000),
+					durationMs: Date.now() - state.startedAt,
+					toolIterations: state.toolIterations,
+				},
 			});
 
 			return result;
@@ -178,14 +233,20 @@ export class WorkerPool {
 			const errorMsg = err instanceof Error ? err.message : String(err);
 
 			this.eventStream.append({
+				runId: fullConfig.runId,
 				workerId,
 				taskId: task.id,
 				type: "error",
-				data: { error: errorMsg },
+				data: {
+					error: errorMsg,
+					durationMs: Date.now() - state.startedAt,
+					toolIterations: state.toolIterations,
+				},
 			});
 
 			return `Error en tarea "${task.description}": ${errorMsg}`;
 		} finally {
+			fullConfig.signal?.removeEventListener("abort", abortFromParent);
 			this.workers.delete(workerId);
 		}
 	}
@@ -225,9 +286,23 @@ export class WorkerPool {
 			}
 
 			// Verificar cancelación
-			if (state.abortController.signal.aborted) {
+			if (state.abortController.signal.aborted || config.signal?.aborted) {
 				return "[Cancelado] La tarea fue cancelada por el orquestador.";
 			}
+
+			this.eventStream.append({
+				runId: config.runId,
+				workerId: state.id,
+				taskId: state.task.id,
+				type: "thinking",
+				data: {
+					message: `Agente ${state.id} analizando la subtarea y decidiendo acciones.`,
+					progress: Math.min(
+						90,
+						Math.round((state.toolIterations / config.maxToolIterations) * 100),
+					),
+				},
+			});
 
 			const request: LLMRequest = {
 				model: config.model || this.baseConfig.model || "default",
@@ -244,6 +319,24 @@ export class WorkerPool {
 				return response.content || "[Sin respuesta del modelo]";
 			}
 
+			if (response.content?.trim()) {
+				this.eventStream.append({
+					runId: config.runId,
+					workerId: state.id,
+					taskId: state.task.id,
+					type: "thinking",
+					data: {
+						message: summarizeVisibleWorkerText(response.content),
+						progress: Math.min(
+							90,
+							Math.round(
+								(state.toolIterations / config.maxToolIterations) * 100,
+							),
+						),
+					},
+				});
+			}
+
 			// Procesar tool calls
 			state.messages.push({
 				role: "assistant",
@@ -255,13 +348,19 @@ export class WorkerPool {
 				state.toolIterations++;
 
 				this.eventStream.append({
+					runId: config.runId,
 					workerId: state.id,
 					taskId: state.task.id,
 					type: "tool_used",
 					data: {
 						toolName: toolCall.function.name,
 						message: `Usando ${toolCall.function.name}`,
-						progress: Math.min(95, Math.round((state.toolIterations / config.maxToolIterations) * 100)),
+						progress: Math.min(
+							95,
+							Math.round(
+								(state.toolIterations / config.maxToolIterations) * 100,
+							),
+						),
 					},
 				});
 
@@ -271,7 +370,18 @@ export class WorkerPool {
 					const result = await this.toolExecutor.execute(
 						toolCall.function.name,
 						params,
-						{ model: config.model || this.baseConfig.model },
+						{
+							model: config.model || this.baseConfig.model,
+							usesZaiVisionToolForImages: config.usesZaiVisionToolForImages,
+							workerId: state.id,
+							taskId: state.task.id,
+							role: state.task.role,
+							channelId: config.channelId,
+							runId: config.runId,
+							toolScope: state.task.toolScope,
+							fileScope: state.task.fileScope,
+							abortSignal: state.abortController.signal,
+						},
 					);
 					resultContent = result.output || "[Sin resultado]";
 				} catch (err) {
@@ -285,12 +395,19 @@ export class WorkerPool {
 				});
 
 				this.eventStream.append({
+					runId: config.runId,
 					workerId: state.id,
 					taskId: state.task.id,
 					type: "tool_result",
 					data: {
 						toolName: toolCall.function.name,
 						toolResult: resultContent.slice(0, 500),
+						progress: Math.min(
+							95,
+							Math.round(
+								(state.toolIterations / config.maxToolIterations) * 100,
+							),
+						),
 					},
 				});
 			}
@@ -299,7 +416,8 @@ export class WorkerPool {
 		// Budget agotado — pedir respuesta final
 		state.messages.push({
 			role: "system",
-			content: "Has agotado tu presupuesto de herramientas. Responde ahora con lo que hayas conseguido.",
+			content:
+				"Has agotado tu presupuesto de herramientas. Responde ahora con lo que hayas conseguido.",
 		});
 
 		const finalResponse = await this.llmRouter.chat({
@@ -361,11 +479,17 @@ export class WorkerPool {
 			const stillPending: SubTask[] = [];
 
 			for (const task of pending) {
-				const depsCompleted = task.dependsOn!.every((dep) => completedTaskIds.has(dep));
+				const dependsOn = task.dependsOn ?? [];
+				const depsCompleted = dependsOn.every((dep) =>
+					completedTaskIds.has(dep),
+				);
 				if (depsCompleted) {
 					// Inyectar resultados de dependencias en la descripción
-					const depResults = task.dependsOn!
-						.map((dep) => `[Resultado de tarea ${dep}]: ${results.get(dep)?.slice(0, 500) || "sin resultado"}`)
+					const depResults = dependsOn
+						.map(
+							(dep) =>
+								`[Resultado de tarea ${dep}]: ${results.get(dep)?.slice(0, 500) || "sin resultado"}`,
+						)
 						.join("\n");
 					task.description = `${task.description}\n\nContexto de tareas previas:\n${depResults}`;
 					nowReady.push(task);
@@ -378,7 +502,15 @@ export class WorkerPool {
 				// Dependencias irresolubles
 				for (const task of stillPending) {
 					task.status = "failed";
-					results.set(task.id, `[Bloqueado] Dependencias no resueltas: ${task.dependsOn?.join(", ")}`);
+					const message = `[Bloqueado] Dependencias no resueltas: ${task.dependsOn?.join(", ")}`;
+					results.set(task.id, message);
+					this.eventStream.append({
+						runId: config.runId,
+						workerId: task.assignedWorkerId ?? "unassigned",
+						taskId: task.id,
+						type: "blocked",
+						data: { message, error: message },
+					});
 				}
 				break;
 			}
@@ -404,6 +536,7 @@ export class WorkerPool {
 		worker.status = "cancelled";
 		worker.task.status = "cancelled";
 		this.eventStream.append({
+			runId: worker.config.runId,
 			workerId,
 			taskId: worker.task.id,
 			type: "cancelled",

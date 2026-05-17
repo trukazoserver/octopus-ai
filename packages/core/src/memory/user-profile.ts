@@ -1,5 +1,5 @@
-import type { LLMRouter } from "../ai/router.js";
 import type { ConversationTurn } from "../agent/types.js";
+import type { LLMRouter } from "../ai/router.js";
 import type { DatabaseAdapter } from "../storage/database.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -218,7 +218,7 @@ export class UserProfileManager {
 	getProfileContext(profile: UserProfile): string {
 		const parts: string[] = [];
 
-		parts.push(`## User Profile`);
+		parts.push("## User Profile");
 
 		if (profile.displayName) {
 			parts.push(`Name: ${profile.displayName}`);
@@ -232,7 +232,7 @@ export class UserProfileManager {
 			.sort(([, a], [, b]) => b - a);
 
 		if (expertiseEntries.length > 0) {
-			parts.push(`\nExpertise areas:`);
+			parts.push("\nExpertise areas:");
 			for (const [area, confidence] of expertiseEntries.slice(0, 10)) {
 				const level =
 					confidence >= 0.8
@@ -246,7 +246,7 @@ export class UserProfileManager {
 
 		const prefEntries = Object.entries(profile.preferences);
 		if (prefEntries.length > 0) {
-			parts.push(`\nPreferences:`);
+			parts.push("\nPreferences:");
 			for (const [key, value] of prefEntries.slice(0, 15)) {
 				parts.push(`- ${key}: ${value}`);
 			}
@@ -283,13 +283,17 @@ export class UserProfileManager {
 					{ role: "system", content: PROFILE_EXTRACTION_PROMPT },
 					{
 						role: "user",
-						content: `Existing profile:\n${JSON.stringify({
-							style: profile.communicationStyle,
-							language: profile.preferredLanguage,
-							expertise: profile.expertiseAreas,
-							preferences: profile.preferences,
-							traits: profile.traits,
-						}, null, 2)}\n\nNew conversation:\n${conversation}`,
+						content: `Existing profile:\n${JSON.stringify(
+							{
+								style: profile.communicationStyle,
+								language: profile.preferredLanguage,
+								expertise: profile.expertiseAreas,
+								preferences: profile.preferences,
+								traits: profile.traits,
+							},
+							null,
+							2,
+						)}\n\nNew conversation:\n${conversation}`,
 					},
 				],
 				maxTokens: 1000,
@@ -297,17 +301,19 @@ export class UserProfileManager {
 			});
 
 			const extracted = this.parseExtraction(response.content);
-			return this.mergeIntoProfile(profile, extracted);
+			return await this.mergeIntoProfile(profile, extracted);
 		} catch (err) {
-			logger.error(`LLM profile extraction failed, using heuristics: ${String(err)}`);
-			return this.updateWithHeuristics(profile, turns);
+			logger.error(
+				`LLM profile extraction failed, using heuristics: ${String(err)}`,
+			);
+			return await this.updateWithHeuristics(profile, turns);
 		}
 	}
 
-	private updateWithHeuristics(
+	private async updateWithHeuristics(
 		profile: UserProfile,
 		turns: ConversationTurn[],
-	): UserProfile {
+	): Promise<UserProfile> {
 		const updated = { ...profile };
 		const userContent = turns
 			.filter((t) => t.role === "user")
@@ -315,8 +321,10 @@ export class UserProfileManager {
 			.join(" ");
 
 		// Detect language
-		const spanishIndicators = /\b(hola|quiero|puedes|necesito|cómo|está|gracias|por favor)\b/gi;
-		const englishIndicators = /\b(hello|want|can you|need|how|please|thanks)\b/gi;
+		const spanishIndicators =
+			/\b(hola|quiero|puedes|necesito|cómo|está|gracias|por favor)\b/gi;
+		const englishIndicators =
+			/\b(hello|want|can you|need|how|please|thanks)\b/gi;
 		const spanishCount = (userContent.match(spanishIndicators) ?? []).length;
 		const englishCount = (userContent.match(englishIndicators) ?? []).length;
 
@@ -341,7 +349,10 @@ export class UserProfileManager {
 
 		// Detect expertise from technical terms
 		const techPatterns: [RegExp, string][] = [
-			[/\b(typescript|javascript|node\.js|react|vue|angular)\b/gi, "JavaScript/TypeScript"],
+			[
+				/\b(typescript|javascript|node\.js|react|vue|angular)\b/gi,
+				"JavaScript/TypeScript",
+			],
 			[/\b(python|django|flask|fastapi)\b/gi, "Python"],
 			[/\b(docker|kubernetes|k8s|devops|ci\/cd)\b/gi, "DevOps"],
 			[/\b(sql|database|postgres|mysql|sqlite)\b/gi, "Databases"],
@@ -361,7 +372,7 @@ export class UserProfileManager {
 		updated.conversationCount += 1;
 		updated.updatedAt = new Date().toISOString();
 
-		this.saveProfile(updated);
+		await this.saveProfile(updated);
 		this.profileCache.set(updated.userId, updated);
 		return updated;
 	}
@@ -376,10 +387,10 @@ export class UserProfileManager {
 		}
 	}
 
-	private mergeIntoProfile(
+	private async mergeIntoProfile(
 		profile: UserProfile,
 		extracted: Record<string, unknown>,
-	): UserProfile {
+	): Promise<UserProfile> {
 		const updated = { ...profile };
 
 		if (typeof extracted.communicationStyle === "string") {
@@ -390,11 +401,8 @@ export class UserProfileManager {
 		}
 
 		// Merge expertise areas (keep max confidence)
-		if (
-			extracted.expertiseAreas &&
-			typeof extracted.expertiseAreas === "object"
-		) {
-			const areas = extracted.expertiseAreas as Record<string, number>;
+		if (this.isRecord(extracted.expertiseAreas)) {
+			const areas = this.sanitizeExpertiseAreas(extracted.expertiseAreas);
 			for (const [area, confidence] of Object.entries(areas)) {
 				const current = updated.expertiseAreas[area] ?? 0;
 				updated.expertiseAreas[area] = Math.max(current, confidence);
@@ -402,8 +410,8 @@ export class UserProfileManager {
 		}
 
 		// Merge preferences (new values override)
-		if (extracted.preferences && typeof extracted.preferences === "object") {
-			const prefs = extracted.preferences as Record<string, string>;
+		if (this.isRecord(extracted.preferences)) {
+			const prefs = this.sanitizeStringRecord(extracted.preferences);
 			for (const [key, value] of Object.entries(prefs)) {
 				updated.preferences[key] = value;
 			}
@@ -412,54 +420,54 @@ export class UserProfileManager {
 		// Append decisions (trim to max)
 		if (Array.isArray(extracted.decisions)) {
 			const newDecisions = extracted.decisions
-				.filter(
-					(d: Record<string, unknown>) =>
-						d && typeof d.description === "string",
-				)
-				.map((d: Record<string, string>) => ({
-					description: d.description,
-					choice: d.choice ?? "",
-					reasoning: d.reasoning ?? "",
+				.filter(this.isRecord)
+				.filter((d) => typeof d.description === "string")
+				.map((d) => ({
+					description: String(d.description),
+					choice: typeof d.choice === "string" ? d.choice : "",
+					reasoning: typeof d.reasoning === "string" ? d.reasoning : "",
 					timestamp: new Date().toISOString(),
 				}));
-			updated.decisions = [
-				...updated.decisions,
-				...newDecisions,
-			].slice(-this.config.maxDecisions);
+			updated.decisions = [...updated.decisions, ...newDecisions].slice(
+				-this.config.maxDecisions,
+			);
 		}
 
 		// Append workflow patterns
-		if (Array.isArray(extracted.workflowSteps) && extracted.workflowSteps.length >= 2) {
-			const steps = extracted.workflowSteps as string[];
-			const existingPattern = updated.workflowPatterns.find(
-				(wp) => wp.steps.length === steps.length &&
-					wp.steps.every((s, i) => s === steps[i]),
-			);
+		if (Array.isArray(extracted.workflowSteps)) {
+			const steps = this.sanitizeStringArray(extracted.workflowSteps);
+			if (steps.length >= 2) {
+				const existingPattern = updated.workflowPatterns.find(
+					(wp) =>
+						wp.steps.length === steps.length &&
+						wp.steps.every((s, i) => s === steps[i]),
+				);
 
-			if (existingPattern) {
-				existingPattern.frequency += 1;
-				existingPattern.lastUsed = new Date().toISOString();
-			} else {
-				updated.workflowPatterns.push({
-					name: steps.slice(0, 3).join(" → "),
-					steps,
-					frequency: 1,
-					lastUsed: new Date().toISOString(),
-				});
-				// Trim to max
-				if (updated.workflowPatterns.length > this.config.maxWorkflows) {
-					updated.workflowPatterns.sort((a, b) => b.frequency - a.frequency);
-					updated.workflowPatterns = updated.workflowPatterns.slice(
-						0,
-						this.config.maxWorkflows,
-					);
+				if (existingPattern) {
+					existingPattern.frequency += 1;
+					existingPattern.lastUsed = new Date().toISOString();
+				} else {
+					updated.workflowPatterns.push({
+						name: steps.slice(0, 3).join(" → "),
+						steps,
+						frequency: 1,
+						lastUsed: new Date().toISOString(),
+					});
+					// Trim to max
+					if (updated.workflowPatterns.length > this.config.maxWorkflows) {
+						updated.workflowPatterns.sort((a, b) => b.frequency - a.frequency);
+						updated.workflowPatterns = updated.workflowPatterns.slice(
+							0,
+							this.config.maxWorkflows,
+						);
+					}
 				}
 			}
 		}
 
 		// Merge traits (deduplicate)
 		if (Array.isArray(extracted.traits)) {
-			const newTraits = extracted.traits as string[];
+			const newTraits = this.sanitizeStringArray(extracted.traits);
 			const allTraits = new Set([...updated.traits, ...newTraits]);
 			updated.traits = Array.from(allTraits).slice(0, 20);
 		}
@@ -467,9 +475,45 @@ export class UserProfileManager {
 		updated.conversationCount += 1;
 		updated.updatedAt = new Date().toISOString();
 
-		this.saveProfile(updated);
+		await this.saveProfile(updated);
 		this.profileCache.set(updated.userId, updated);
 		return updated;
+	}
+
+	private isRecord(value: unknown): value is Record<string, unknown> {
+		return !!value && typeof value === "object" && !Array.isArray(value);
+	}
+
+	private sanitizeExpertiseAreas(
+		areas: Record<string, unknown>,
+	): Record<string, number> {
+		const sanitized: Record<string, number> = {};
+		for (const [area, confidence] of Object.entries(areas)) {
+			if (
+				typeof area === "string" &&
+				typeof confidence === "number" &&
+				Number.isFinite(confidence) &&
+				confidence >= 0 &&
+				confidence <= 1
+			) {
+				sanitized[area] = confidence;
+			}
+		}
+		return sanitized;
+	}
+
+	private sanitizeStringRecord(
+		value: Record<string, unknown>,
+	): Record<string, string> {
+		const sanitized: Record<string, string> = {};
+		for (const [key, entry] of Object.entries(value)) {
+			if (typeof entry === "string") sanitized[key] = entry;
+		}
+		return sanitized;
+	}
+
+	private sanitizeStringArray(values: unknown[]): string[] {
+		return values.filter((value): value is string => typeof value === "string");
 	}
 
 	private async saveProfile(profile: UserProfile): Promise<void> {

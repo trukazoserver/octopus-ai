@@ -2,7 +2,7 @@ import React from "react";
 
 export const ConfigSection: React.FC<{
 	title: string;
-	icon: string;
+	icon: React.ReactNode;
 	description?: string;
 	defaultOpen?: boolean;
 	children: React.ReactNode;
@@ -11,12 +11,12 @@ export const ConfigSection: React.FC<{
 	return (
 		<div
 			style={{
-				marginBottom: "16px",
-				borderRadius: "12px",
-				background: "#18181b",
-				border: "1px solid #27272a",
+				marginBottom: "14px",
+				borderRadius: "18px",
+				background: "#050505",
+				border: "1px solid #151515",
 				overflow: "hidden",
-				boxShadow: "0 4px 6px rgba(0, 0, 0, 0.2)",
+				boxShadow: "0 14px 34px rgba(0, 0, 0, 0.24)",
 			}}
 		>
 			<button
@@ -24,28 +24,36 @@ export const ConfigSection: React.FC<{
 				onClick={() => setOpen(!open)}
 				style={{
 					width: "100%",
-					padding: "16px 20px",
+					padding: "16px 18px",
 					display: "flex",
 					alignItems: "center",
 					gap: "12px",
-					background: open ? "rgba(99, 102, 241, 0.05)" : "transparent",
+					background: open ? "#0b0b0b" : "transparent",
 					border: "none",
 					color: "#f4f4f5",
 					cursor: "pointer",
-					fontSize: "1rem",
-					fontWeight: 600,
+					fontSize: "0.96rem",
+					fontWeight: 800,
 					textAlign: "left",
-					borderBottom: open ? "1px solid #27272a" : "none",
+					borderBottom: open ? "1px solid #151515" : "none",
 					transition: "background 0.2s",
 				}}
-				onMouseOver={(e) => {
-					if (!open) e.currentTarget.style.background = "#27272a";
-				}}
-				onMouseOut={(e) => {
-					if (!open) e.currentTarget.style.background = "transparent";
-				}}
 			>
-				<span style={{ fontSize: "1.2rem" }}>{icon}</span>
+				<span
+					style={{
+						fontSize: "1.08rem",
+						width: "30px",
+						height: "30px",
+						borderRadius: "12px",
+						background: "#111",
+						border: "1px solid #202020",
+						display: "inline-flex",
+						alignItems: "center",
+						justifyContent: "center",
+					}}
+				>
+					{icon}
+				</span>
 				<span style={{ flex: 1, letterSpacing: "-0.01em" }}>{title}</span>
 				<span
 					style={{
@@ -59,12 +67,12 @@ export const ConfigSection: React.FC<{
 				</span>
 			</button>
 			{open && (
-				<div style={{ padding: "20px" }}>
+				<div style={{ padding: "18px" }}>
 					{description && (
 						<p
 							style={{
 								margin: "0 0 16px",
-								color: "#a1a1aa",
+								color: "#8f8f94",
 								fontSize: "0.85rem",
 								lineHeight: "1.5",
 							}}
@@ -96,25 +104,36 @@ export const Toggle: React.FC<{
 		}}
 	>
 		<div>
-			<div style={{ fontSize: "0.95rem", color: "#f4f4f5", fontWeight: 500 }}>
+			<div style={{ fontSize: "0.95rem", color: "#f4f4f5", fontWeight: 700 }}>
 				{label}
 			</div>
 			{description && (
-				<div style={{ fontSize: "0.8rem", color: "#71717a", marginTop: "4px" }}>
+				<div
+					style={{
+						fontSize: "0.8rem",
+						color: "#737373",
+						marginTop: "5px",
+						lineHeight: 1.45,
+					}}
+				>
 					{description}
 				</div>
 			)}
 		</div>
-		<div
+		<button
+			type="button"
+			aria-pressed={value}
 			onClick={() => onChange(!value)}
 			style={{
 				width: "44px",
 				height: "24px",
 				borderRadius: "12px",
 				cursor: "pointer",
-				background: value ? "#6366f1" : "#3f3f46",
+				background: value ? "#2f2f2f" : "#171717",
+				border: `1px solid ${value ? "#4a4a4a" : "#2a2a2a"}`,
 				position: "relative",
 				transition: "background 0.2s ease",
+				padding: 0,
 			}}
 		>
 			<div
@@ -122,15 +141,15 @@ export const Toggle: React.FC<{
 					width: "20px",
 					height: "20px",
 					borderRadius: "50%",
-					background: "#fff",
+					background: value ? "#f4f4f5" : "#737373",
 					position: "absolute",
 					top: "2px",
 					left: value ? "22px" : "2px",
 					transition: "left 0.2s cubic-bezier(0.4, 0.0, 0.2, 1)",
-					boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
+					boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
 				}}
 			/>
-		</div>
+		</button>
 	</div>
 );
 
@@ -152,14 +171,19 @@ export const Field: React.FC<{
 					fontSize: "0.85rem",
 					color: "#a1a1aa",
 					marginBottom: "6px",
-					fontWeight: 500,
+					fontWeight: 700,
 				}}
 			>
 				{label}
 			</label>
 			{description && (
 				<div
-					style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: "8px" }}
+					style={{
+						fontSize: "0.76rem",
+						color: "#737373",
+						marginBottom: "9px",
+						lineHeight: 1.45,
+					}}
 				>
 					{description}
 				</div>
@@ -174,10 +198,10 @@ export const Field: React.FC<{
 				autoComplete="off"
 				style={{
 					width: "100%",
-					padding: "10px 14px",
-					borderRadius: "8px",
-					border: "1px solid #3f3f46",
-					background: "#09090b",
+					padding: "12px 14px",
+					borderRadius: "12px",
+					border: "1px solid #202020",
+					background: "#000",
 					color: "#f4f4f5",
 					fontSize: "0.95rem",
 					outline: "none",
@@ -188,8 +212,12 @@ export const Field: React.FC<{
 					transition: "border-color 0.2s",
 					boxSizing: "border-box",
 				}}
-				onFocus={(e) => (e.target.style.borderColor = "#6366f1")}
-				onBlur={(e) => (e.target.style.borderColor = "#3f3f46")}
+				onFocus={(e) => {
+					e.target.style.borderColor = "#4a4a4a";
+				}}
+				onBlur={(e) => {
+					e.target.style.borderColor = "#202020";
+				}}
 			/>
 		</div>
 	);
@@ -212,14 +240,19 @@ export const Select: React.FC<{
 					fontSize: "0.85rem",
 					color: "#a1a1aa",
 					marginBottom: "6px",
-					fontWeight: 500,
+					fontWeight: 700,
 				}}
 			>
 				{label}
 			</label>
 			{description && (
 				<div
-					style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: "8px" }}
+					style={{
+						fontSize: "0.76rem",
+						color: "#737373",
+						marginBottom: "9px",
+						lineHeight: 1.45,
+					}}
 				>
 					{description}
 				</div>
@@ -231,10 +264,10 @@ export const Select: React.FC<{
 				onChange={(e) => onChange(e.target.value)}
 				style={{
 					width: "100%",
-					padding: "10px 14px",
-					borderRadius: "8px",
-					border: "1px solid #3f3f46",
-					background: "#09090b",
+					padding: "12px 14px",
+					borderRadius: "12px",
+					border: "1px solid #202020",
+					background: "#000",
 					color: "#f4f4f5",
 					fontSize: "0.95rem",
 					outline: "none",
@@ -247,8 +280,12 @@ export const Select: React.FC<{
 					backgroundSize: "16px",
 					boxSizing: "border-box",
 				}}
-				onFocus={(e) => (e.target.style.borderColor = "#6366f1")}
-				onBlur={(e) => (e.target.style.borderColor = "#3f3f46")}
+				onFocus={(e) => {
+					e.target.style.borderColor = "#4a4a4a";
+				}}
+				onBlur={(e) => {
+					e.target.style.borderColor = "#202020";
+				}}
 			>
 				{options.map((opt) => (
 					<option key={opt} value={opt}>
@@ -266,25 +303,20 @@ export const SaveButton: React.FC<{
 	label?: string;
 }> = ({ onClick, saving, label = "Guardar" }) => (
 	<button
+		type="button"
 		onClick={onClick}
 		disabled={saving}
 		style={{
-			padding: "10px 24px",
-			borderRadius: "8px",
-			border: "none",
-			background: saving ? "#3f3f46" : "#6366f1",
-			color: saving ? "#a1a1aa" : "#fff",
+			padding: "11px 22px",
+			borderRadius: "12px",
+			border: "1px solid #2a2a2a",
+			background: saving ? "#121212" : "#f4f4f5",
+			color: saving ? "#a1a1aa" : "#050505",
 			cursor: saving ? "not-allowed" : "pointer",
 			fontWeight: 600,
 			fontSize: "0.95rem",
 			transition: "all 0.2s",
-			boxShadow: saving ? "none" : "0 2px 4px rgba(99, 102, 241, 0.2)",
-		}}
-		onMouseOver={(e) => {
-			if (!saving) e.currentTarget.style.background = "#4f46e5";
-		}}
-		onMouseOut={(e) => {
-			if (!saving) e.currentTarget.style.background = "#6366f1";
+			boxShadow: saving ? "none" : "0 10px 24px rgba(0,0,0,.22)",
 		}}
 	>
 		{saving ? "Guardando..." : label}
@@ -301,12 +333,12 @@ export const StatusBadge: React.FC<{ ok: boolean; text: string }> = ({
 			alignItems: "center",
 			gap: "6px",
 			padding: "4px 10px",
-			borderRadius: "12px",
+			borderRadius: "999px",
 			fontSize: "0.75rem",
 			fontWeight: 500,
-			background: ok ? "rgba(16, 185, 129, 0.1)" : "rgba(255, 255, 255, 0.05)",
+			background: ok ? "rgba(16, 185, 129, 0.11)" : "#111",
 			color: ok ? "#10b981" : "#a1a1aa",
-			border: `1px solid ${ok ? "rgba(16, 185, 129, 0.2)" : "rgba(255, 255, 255, 0.1)"}`,
+			border: `1px solid ${ok ? "rgba(16, 185, 129, 0.25)" : "#242424"}`,
 		}}
 	>
 		<span

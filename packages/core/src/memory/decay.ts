@@ -32,10 +32,8 @@ export class MemoryDecayEngine {
 
 			if (newImportance < 0.1) {
 				await this.db.run("DELETE FROM memory_items WHERE id = ?", [item.id]);
-				await this.db.run(
-					"DELETE FROM memory_associations WHERE source_id = ? OR target_id = ?",
-					[item.id, item.id],
-				);
+				await this.removeFromFts(item.id);
+				await this.deleteAssociations(item.id);
 			} else if (newImportance !== item.importance) {
 				await this.db.run(
 					"UPDATE memory_items SET importance = ? WHERE id = ?",
@@ -59,13 +57,33 @@ export class MemoryDecayEngine {
 		let compressed = 0;
 		for (const item of oldEpisodicItems) {
 			await this.db.run("DELETE FROM memory_items WHERE id = ?", [item.id]);
-			await this.db.run(
-				"DELETE FROM memory_associations WHERE source_id = ? OR target_id = ?",
-				[item.id, item.id],
-			);
+			await this.removeFromFts(item.id);
+			await this.deleteAssociations(item.id);
 			compressed++;
 		}
 
 		return compressed;
+	}
+
+	private async removeFromFts(id: string): Promise<void> {
+		await this.db
+			.run("DELETE FROM memory_fts WHERE id = ?", [id])
+			.catch(() => {});
+	}
+
+	private async deleteAssociations(id: string): Promise<void> {
+		await this.db
+			.run(
+				"DELETE FROM memory_associations WHERE source_id = ? OR target_id = ?",
+				[id, id],
+			)
+			.catch(async () => {
+				await this.db
+					.run(
+						"DELETE FROM memory_associations WHERE from_id = ? OR to_id = ?",
+						[id, id],
+					)
+					.catch(() => {});
+			});
 	}
 }

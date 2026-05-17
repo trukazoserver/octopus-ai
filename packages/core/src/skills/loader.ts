@@ -3,33 +3,40 @@ import type { EmbeddingFunction } from "../memory/types.js";
 import type { SkillRegistry } from "./registry.js";
 import type { LoadedSkill, Skill, TaskNeeds } from "./types.js";
 
+export interface SkillLoaderConfig {
+	enabled: boolean;
+	maxTokenBudget: number;
+	progressiveLevels: boolean;
+	autoUnload: boolean;
+	searchThreshold: number;
+}
+
 export class SkillLoader {
 	private registry: SkillRegistry;
 	private embedFn: EmbeddingFunction;
-	private config: {
-		maxTokenBudget: number;
-		progressiveLevels: boolean;
-		autoUnload: boolean;
-		searchThreshold: number;
-	};
+	private config: SkillLoaderConfig;
 	private loaded: Map<string, LoadedSkill> = new Map();
 
 	constructor(
 		registry: SkillRegistry,
 		embedFn: EmbeddingFunction,
-		config: {
-			maxTokenBudget: number;
-			progressiveLevels: boolean;
-			autoUnload: boolean;
-			searchThreshold: number;
-		},
+		config: Omit<SkillLoaderConfig, "enabled"> & { enabled?: boolean },
 	) {
 		this.registry = registry;
 		this.embedFn = embedFn;
-		this.config = config;
+		this.config = { enabled: true, ...config };
+	}
+
+	updateConfig(config: Partial<SkillLoaderConfig>): void {
+		this.config = { ...this.config, ...config };
+		if (config.enabled === false || config.autoUnload === true) {
+			this.unloadSkills();
+		}
 	}
 
 	async resolveSkillsForTask(task: TaskDescription): Promise<LoadedSkill[]> {
+		if (!this.config.enabled) return [];
+
 		const taskNeeds = this.analyzeTaskNeeds(task);
 
 		if (!taskNeeds.needsSkill) {
@@ -56,6 +63,7 @@ export class SkillLoader {
 			if (usedTokens >= budget) break;
 
 			const skill = match.skill;
+			if (skill.tags.includes("disabled")) continue;
 			const level = this.config.progressiveLevels
 				? this.determineLevel(skill, budget - usedTokens)
 				: 4;
@@ -74,6 +82,10 @@ export class SkillLoader {
 		}
 
 		return loadedSkills;
+	}
+
+	async listSkills(): Promise<Skill[]> {
+		return this.registry.list();
 	}
 
 	unloadSkills(): void {

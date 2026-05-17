@@ -1,0 +1,1098 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MEDUSA: La Historia Nunca Contada — Storyboard Final</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=Inter:wght@300;400;500;600&display=swap');
+
+        :root {
+            --gold: #c9a84c;
+            --gold-light: #e8d48b;
+            --gold-dark: #8a6d2b;
+            --dark-bg: #0a0a0f;
+            --dark-card: #12121a;
+            --dark-card-alt: #16161f;
+            --text-primary: #e8e6e0;
+            --text-secondary: #9a978e;
+            --text-accent: #c9a84c;
+            --border-subtle: rgba(201,168,76,0.15);
+            --border-strong: rgba(201,168,76,0.4);
+            --scene-gap: #1a1a25;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background-color: var(--dark-bg);
+            color: var(--text-primary);
+            font-family: 'Crimson Text', Georgia, serif;
+            line-height: 1.7;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* HEADER */
+        .header {
+            text-align: center;
+            padding: 80px 20px 60px;
+            background: linear-gradient(180deg, #0d0d15 0%, var(--dark-bg) 100%);
+            border-bottom: 1px solid var(--border-subtle);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: radial-gradient(ellipse at center top, rgba(201,168,76,0.08) 0%, transparent 60%);
+            pointer-events: none;
+        }
+
+        .header-subtitle {
+            font-family: 'Inter', sans-serif;
+            font-size: 11px;
+            letter-spacing: 6px;
+            text-transform: uppercase;
+            color: var(--gold);
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+
+        .header h1 {
+            font-family: 'Cinzel', serif;
+            font-size: clamp(36px, 6vw, 64px);
+            font-weight: 900;
+            color: var(--gold);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            text-shadow: 0 0 40px rgba(201,168,76,0.2);
+        }
+
+        .header h2 {
+            font-family: 'Cinzel', serif;
+            font-size: clamp(16px, 3vw, 24px);
+            font-weight: 400;
+            color: var(--text-secondary);
+            letter-spacing: 2px;
+            font-style: italic;
+            margin-bottom: 40px;
+        }
+
+        .header-meta {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            flex-wrap: wrap;
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+        }
+
+        .header-meta span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .header-meta .label {
+            color: var(--gold-dark);
+            text-transform: uppercase;
+            font-weight: 600;
+            font-size: 10px;
+            letter-spacing: 2px;
+        }
+
+        /* CHARACTER SHEETS SECTION */
+        .characters-section {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 60px 20px;
+        }
+
+        .section-title {
+            font-family: 'Cinzel', serif;
+            font-size: 14px;
+            letter-spacing: 6px;
+            text-transform: uppercase;
+            color: var(--gold);
+            text-align: center;
+            margin-bottom: 40px;
+            font-weight: 700;
+        }
+
+        .section-title::after {
+            content: '';
+            display: block;
+            width: 60px;
+            height: 1px;
+            background: var(--gold-dark);
+            margin: 15px auto 0;
+        }
+
+        .characters-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 20px;
+        }
+
+        .char-card {
+            text-align: center;
+            padding: 20px 15px;
+            background: var(--dark-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            transition: border-color 0.3s;
+        }
+
+        .char-card:hover {
+            border-color: var(--border-strong);
+        }
+
+        .char-card img {
+            width: 100%;
+            aspect-ratio: 9/16;
+            object-fit: cover;
+            border-radius: 6px;
+            margin-bottom: 12px;
+        }
+
+        .char-card .char-name {
+            font-family: 'Cinzel', serif;
+            font-size: 13px;
+            color: var(--gold);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .char-card .char-role {
+            font-family: 'Inter', sans-serif;
+            font-size: 10px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+            margin-top: 4px;
+        }
+
+        .char-variation {
+            border-color: rgba(100, 180, 100, 0.2);
+        }
+
+        .char-variation .char-role {
+            color: #7ab87a;
+        }
+
+        /* STORYBOARD SCENES */
+        .storyboard {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px 80px;
+        }
+
+        .scene {
+            margin-bottom: 0;
+            border-bottom: 1px solid var(--border-subtle);
+            padding: 40px 0;
+        }
+
+        .scene:last-child {
+            border-bottom: none;
+        }
+
+        .scene-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .scene-number {
+            font-family: 'Cinzel', serif;
+            font-size: 13px;
+            font-weight: 900;
+            color: var(--dark-bg);
+            background: var(--gold);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .scene-number.large {
+            width: 48px;
+            height: 48px;
+            font-size: 16px;
+        }
+
+        .scene-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .scene-act {
+            font-family: 'Inter', sans-serif;
+            font-size: 10px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: var(--gold-dark);
+            font-weight: 600;
+        }
+
+        .scene-title {
+            font-family: 'Cinzel', serif;
+            font-size: 18px;
+            color: var(--text-primary);
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+
+        .scene-timecode {
+            font-family: 'Inter', sans-serif;
+            font-size: 11px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+        }
+
+        /* SCRIPT TEXT */
+        .script-block {
+            margin-bottom: 24px;
+            padding: 20px 24px;
+            background: linear-gradient(135deg, rgba(201,168,76,0.04) 0%, rgba(201,168,76,0.01) 100%);
+            border-left: 3px solid var(--gold-dark);
+            border-radius: 0 8px 8px 0;
+        }
+
+        .script-text {
+            font-family: 'Crimson Text', serif;
+            font-size: 19px;
+            line-height: 1.8;
+            color: var(--text-primary);
+            font-style: italic;
+        }
+
+        .script-text .highlight {
+            color: var(--gold);
+            font-style: normal;
+            font-weight: 600;
+        }
+
+        /* IMAGE */
+        .scene-image {
+            width: 100%;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .scene-image img {
+            width: 100%;
+            display: block;
+            border-radius: 8px;
+        }
+
+        .scene-image .image-caption {
+            font-family: 'Inter', sans-serif;
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-align: right;
+            padding: 8px 4px 0;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        /* ACT DIVIDER */
+        .act-divider {
+            text-align: center;
+            padding: 50px 20px;
+            position: relative;
+        }
+
+        .act-divider::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 50%;
+            transform: translateX(-50%);
+            width: 1px;
+            height: 30px;
+            background: var(--gold-dark);
+        }
+
+        .act-divider .act-label {
+            font-family: 'Cinzel', serif;
+            font-size: 12px;
+            letter-spacing: 8px;
+            text-transform: uppercase;
+            color: var(--gold);
+            font-weight: 700;
+        }
+
+        .act-divider .act-name {
+            font-family: 'Cinzel', serif;
+            font-size: 22px;
+            color: var(--text-primary);
+            margin-top: 8px;
+            letter-spacing: 3px;
+        }
+
+        /* FOOTER */
+        .footer {
+            text-align: center;
+            padding: 60px 20px;
+            border-top: 1px solid var(--border-subtle);
+            font-family: 'Inter', sans-serif;
+            font-size: 11px;
+            color: var(--text-secondary);
+            letter-spacing: 2px;
+        }
+
+        .footer .total {
+            font-family: 'Cinzel', serif;
+            font-size: 16px;
+            color: var(--gold);
+            margin-bottom: 8px;
+            letter-spacing: 4px;
+        }
+
+        /* RESPONSIVE */
+        @media (max-width: 768px) {
+            .header { padding: 50px 16px 40px; }
+            .header-meta { gap: 20px; }
+            .characters-grid { grid-template-columns: repeat(3, 1fr); gap: 12px; }
+            .char-card { padding: 12px 8px; }
+            .scene { padding: 24px 0; }
+            .script-text { font-size: 16px; }
+            .script-block { padding: 14px 16px; }
+        }
+
+        @media (max-width: 480px) {
+            .characters-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ============================================ -->
+<!-- HEADER -->
+<!-- ============================================ -->
+<header class="header">
+    <div class="header-subtitle">Storyboard de Producci&oacute;n</div>
+    <h1>MEDUSA</h1>
+    <h2>La Historia Nunca Contada</h2>
+    <div class="header-meta">
+        <span><span class="label">Formato</span> 9:16 Vertical (Reel / TikTok)</span>
+        <span><span class="label">Duraci&oacute;n</span> ~1 min 40 seg</span>
+        <span><span class="label">Escenas</span> 32 cortes</span>
+        <span><span class="label">Estilo</span> Fotorrealista / Cinematogr&aacute;fico</span>
+    </div>
+</header>
+
+<!-- ============================================ -->
+<!-- CHARACTER SHEETS -->
+<!-- ============================================ -->
+<section class="characters-section">
+    <div class="section-title">Character Sheets &mdash; Referencia de Personajes</div>
+    <div class="characters-grid">
+        <div class="char-card">
+            <img src="/api/media/file/c2661dce-cbb2-4e83-ab20-38c938e4417c.png" alt="Medusa Bella">
+            <div class="char-name">Medusa</div>
+            <div class="char-role">Bella (Base)</div>
+        </div>
+        <div class="char-card char-variation">
+            <img src="/api/media/file/fd5f598e-3f3f-400e-9018-83656b2fe3b2.png" alt="Medusa Monstruo">
+            <div class="char-name">Medusa</div>
+            <div class="char-role">Variaci&oacute;n: Monstruo (edit desde Base)</div>
+        </div>
+        <div class="char-card">
+            <img src="/api/media/file/cefabf98-2df9-4445-86b0-e73c7039f91a.png" alt="Atenea">
+            <div class="char-name">Atenea</div>
+            <div class="char-role">Diosa de la Sabidur&iacute;a</div>
+        </div>
+        <div class="char-card">
+            <img src="/api/media/file/f1a9a5e1-1deb-406e-a3cc-d8e46dd34b88.png" alt="Poseid&oacute;n">
+            <div class="char-name">Poseid&oacute;n</div>
+            <div class="char-role">Dios del Mar</div>
+        </div>
+        <div class="char-card">
+            <img src="/api/media/file/2ae9ec8b-60ee-4fb7-ab1f-420f8b2541b5.png" alt="Perseo">
+            <div class="char-name">Perseo</div>
+            <div class="char-role">Semidi&oacute;s, hijo de Zeus</div>
+        </div>
+        <div class="char-card">
+            <img src="/api/media/file/b89b7431-f1b4-482e-afbe-4147fe3cdff8.png" alt="Pegaso">
+            <div class="char-name">Pegaso</div>
+            <div class="char-role">Caballo Alado</div>
+        </div>
+    </div>
+</section>
+
+<!-- ============================================ -->
+<!-- STORYBOARD -->
+<!-- ============================================ -->
+<section class="storyboard">
+
+    <!-- ACT I -->
+    <div class="act-divider">
+        <div class="act-label">Acto I</div>
+        <div class="act-name">La Belleza y la Devoci&oacute;n</div>
+    </div>
+
+    <!-- ESCENA 1 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">1</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto I &mdash; La Belleza</div>
+                <div class="scene-title">Establishing Shot de Grecia</div>
+                <div class="scene-timecode">0:00 &mdash; ~2s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;Hubo un tiempo en que Medusa fue la mujer m&aacute;s bella de toda Grecia.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/0944fcd9-5b16-4dbf-91f7-984f2df66e75.png" alt="Escena 1 - Grecia antigua">
+            <div class="image-caption">Escena 1 &mdash; Establishing: la Grecia cl&aacute;sica</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 2 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">2</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto I &mdash; La Belleza</div>
+                <div class="scene-title">Medusa caminando entre la gente</div>
+                <div class="scene-timecode">0:02 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Su cabello oscuro como la noche</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/e43e1350-9279-444f-9282-921815bc23b2.png" alt="Escena 2 - Medusa caminando">
+            <div class="image-caption">Escena 2 &mdash; Medusa bella caminando entre la gente</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 3 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">3</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto I &mdash; La Belleza</div>
+                <div class="scene-title">Close-up del rostro de Medusa</div>
+                <div class="scene-timecode">0:05 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">y sus ojos verdes cautivaban a dioses y mortales por igual.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/7edb90a6-1a92-4b9e-bda4-48bcc4c04cf1.png" alt="Escena 3 - Close-up Medusa">
+            <div class="image-caption">Escena 3 &mdash; Close-up: ojos verdes de Medusa</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 4 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">4</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto I &mdash; La Sacerdotisa</div>
+                <div class="scene-title">Interior del templo de Atenea</div>
+                <div class="scene-timecode">0:08 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;Consagrada como sacerdotisa en el templo de Atenea, diosa de la sabidur&iacute;a,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/3e749a53-0dee-4225-bed1-9811e56eb1d9.png" alt="Escena 4 - Templo de Atenea">
+            <div class="image-caption">Escena 4 &mdash; Interior del templo de Atenea</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 5 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">5</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto I &mdash; La Sacerdotisa</div>
+                <div class="scene-title">Medusa sacerdotisa rezando</div>
+                <div class="scene-timecode">0:11 &mdash; ~4s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Medusa dedic&oacute; su vida a los dioses,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/17944c0d-ad7b-4c92-afa9-5ee5d34f85a0.png" alt="Escena 5 - Medusa sacerdotisa">
+            <div class="image-caption">Escena 5 &mdash; Medusa rezando como sacerdotisa</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 6 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">6</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto I &mdash; La Sacerdotisa</div>
+                <div class="scene-title">Medusa haciendo su juramento sagrado</div>
+                <div class="scene-timecode">0:15 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">jurando castidad eterna y servidumbre sagrada en los templos.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/6bf7b527-0c7d-4ca2-ac57-9bb87367e644.png" alt="Escena 6 - Juramento sagrado">
+            <div class="image-caption">Escena 6 &mdash; Juramento sagrado de Medusa</div>
+        </div>
+    </div>
+
+    <!-- ACT II -->
+    <div class="act-divider">
+        <div class="act-label">Acto II</div>
+        <div class="act-name">El Crimen y la Maldici&oacute;n</div>
+    </div>
+
+    <!-- ESCENA 7 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">7</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Violaci&oacute;n</div>
+                <div class="scene-title">Poseid&oacute;n observando con obsesi&oacute;n</div>
+                <div class="scene-timecode">0:18 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;Pero Poseid&oacute;n, dios del mar, consumido por la obsesi&oacute;n,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/c1cf3004-0a55-473b-9a99-7307b23d973a.png" alt="Escena 7 - Poseid&oacute;n obsesionado">
+            <div class="image-caption">Escena 7 &mdash; Poseid&oacute;n consumido por la obsesi&oacute;n</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 8 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">8</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Violaci&oacute;n</div>
+                <div class="scene-title">Poseid&oacute;n entrando al templo de noche</div>
+                <div class="scene-timecode">0:21 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">la viol&oacute; dentro del mism&iacute;simo templo sagrado de Atenea.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/60997111-86af-4eca-a3fa-602658c5644d.png" alt="Escena 8 - Poseid&oacute;n en el templo">
+            <div class="image-caption">Escena 8 &mdash; Poseid&oacute;n entra al templo de noche</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 9 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">9</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Violaci&oacute;n</div>
+                <div class="scene-title">El templo profanado</div>
+                <div class="scene-timecode">0:24 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Un acto sacr&iacute;lego que sellar&iacute;a el destino de Medusa para siempre jam&aacute;s.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/9cb1c173-e88d-44c6-88a8-297f6de2ad26.png" alt="Escena 9 - Templo profanado">
+            <div class="image-caption">Escena 9 &mdash; El templo profanado</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 10 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">10</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Maldici&oacute;n</div>
+                <div class="scene-title">Atenea descendiendo furiosa</div>
+                <div class="scene-timecode">0:27 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;Atenea, en vez de castigar a Poseid&oacute;n,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/c058caec-aa02-4063-a315-0679cffaa999.png" alt="Escena 10 - Atenea furiosa">
+            <div class="image-caption">Escena 10 &mdash; Atenea desciende furiosa</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 11 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">11</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Maldici&oacute;n</div>
+                <div class="scene-title">Atenea se&ntilde;alando a Medusa con energ&iacute;a divina</div>
+                <div class="scene-timecode">0:30 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">descarg&oacute; toda su furia sobre Medusa.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/6275b863-a76e-4529-a9ac-85add8fba3f4.png" alt="Escena 11 - Atenea maldice a Medusa">
+            <div class="image-caption">Escena 11 &mdash; Atenea descarga su furia sobre Medusa</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 12 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">12</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Maldici&oacute;n</div>
+                <div class="scene-title">La transformaci&oacute;n comienza: cabello en serpientes</div>
+                <div class="scene-timecode">0:33 &mdash; ~2s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">La maldijo convirtiendo su cabello en serpientes venenosas</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/a740f53e-2f66-40ca-9b8e-c32afdcfc1d2.png" alt="Escena 12 - Transformaci&oacute;n cabello">
+            <div class="image-caption">Escena 12 &mdash; El cabello se transforma en serpientes</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 13 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">13</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Maldici&oacute;n</div>
+                <div class="scene-title">Medusa completamente transformada</div>
+                <div class="scene-timecode">0:35 &mdash; ~2s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">y su mirada en un arma que convertir&iacute;a a cualquier ser vivo en piedra eterna.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/6d446c97-a87a-4303-b195-4a37affbc188.png" alt="Escena 13 - Medusa transformada">
+            <div class="image-caption">Escena 13 &mdash; Medusa completamente transformada</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 14 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">14</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Mirada Mortal</div>
+                <div class="scene-title">Medusa viendo su reflejo monstruoso</div>
+                <div class="scene-timecode">0:37 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;Su belleza se convirti&oacute; en terror.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/d2eb132e-dcad-4dfe-b030-a1cb9906da1c.png" alt="Escena 14 - Reflejo monstruoso">
+            <div class="image-caption">Escena 14 &mdash; Medusa ve su reflejo monstruoso</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 15 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">15</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Mirada Mortal</div>
+                <div class="scene-title">Un soldado siendo petrificado</div>
+                <div class="scene-timecode">0:40 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Serpientes vivas sustituyeron su cabello. Sus ojos, antes dulces,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/fa1b1b9f-09c2-4af3-9535-b1bce98301f5.png" alt="Escena 15 - Soldado petrific&aacute;ndose">
+            <div class="image-caption">Escena 15 &mdash; Un soldado es petrificado por la mirada</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 16 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">16</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto II &mdash; La Mirada Mortal</div>
+                <div class="scene-title">Estatua completa del soldado petrificado</div>
+                <div class="scene-timecode">0:43 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">ahora convert&iacute;an en piedra a todo aquel que osara mirarla directamente al rostro.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/acffcb28-67a0-4733-962b-db43883a6f1b.png" alt="Escena 16 - Estatua de piedra">
+            <div class="image-caption">Escena 16 &mdash; Estatua del soldado completamente petrificado</div>
+        </div>
+    </div>
+
+    <!-- ACT III -->
+    <div class="act-divider">
+        <div class="act-label">Acto III</div>
+        <div class="act-name">El Exilio y la Soledad</div>
+    </div>
+
+    <!-- ESCENA 17 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">17</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto III &mdash; El Exilio</div>
+                <div class="scene-title">Isla remota y desolada</div>
+                <div class="scene-timecode">0:46 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;Desterrada a una isla remota,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/ab2e066a-744e-4a35-8947-547a02ed9022.png" alt="Escena 17 - Isla desolada">
+            <div class="image-caption">Escena 17 &mdash; Isla remota y desolada</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 18 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">18</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto III &mdash; El Exilio</div>
+                <div class="scene-title">Medusa caminando entre estatuas de guerreros</div>
+                <div class="scene-timecode">0:49 &mdash; ~4s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Medusa vivi&oacute; en soledad, rodeada de las estatuas de los guerreros que intentaron matarla.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/dce87cb1-b10b-4df2-95de-d73225aca683.png" alt="Escena 18 - Medusa entre estatuas">
+            <div class="image-caption">Escena 18 &mdash; Medusa camina entre estatuas de guerreros</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 19 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">19</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto III &mdash; El Exilio</div>
+                <div class="scene-title">Medusa llorando sola en la cueva</div>
+                <div class="scene-timecode">0:53 &mdash; ~5s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">V&iacute;ctima convertida en monstruo, lloraba la vida que le fue arrebatada injustamente por los dioses.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/8f9c750d-838b-4edf-82f4-d476333afc47.png" alt="Escena 19 - Medusa llorando">
+            <div class="image-caption">Escena 19 &mdash; Medusa llora sola en la cueva</div>
+        </div>
+    </div>
+
+    <!-- ACT IV -->
+    <div class="act-divider">
+        <div class="act-label">Acto IV</div>
+        <div class="act-name">La Misi&oacute;n de Perseo</div>
+    </div>
+
+    <!-- ESCENA 20 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">20</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto IV &mdash; Perseo</div>
+                <div class="scene-title">Perseo recibe la misi&oacute;n imposible</div>
+                <div class="scene-timecode">0:58 &mdash; ~4s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;El semidi&oacute;s Perseo, hijo de Zeus, fue enviado en una misi&oacute;n suicida para decapitar a Medusa.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/df490a1d-f621-41aa-93d9-d43bfa146ffc.png" alt="Escena 20 - Perseo recibe misi&oacute;n">
+            <div class="image-caption">Escena 20 &mdash; Perseo recibe la misi&oacute;n imposible</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 21 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">21</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto IV &mdash; Perseo</div>
+                <div class="scene-title">Atenea entrega el escudo espejo</div>
+                <div class="scene-timecode">1:02 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Los dioses le otorgaron armas divinas: un escudo espejo de Atenea,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/fa533e51-2e5f-4f55-b4f7-6e5e4e740639.png" alt="Escena 21 - Atenea entrega escudo">
+            <div class="image-caption">Escena 21 &mdash; Atenea entrega el escudo espejo</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 22 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">22</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto IV &mdash; Perseo</div>
+                <div class="scene-title">Hermes entrega espada y sandalias aladas</div>
+                <div class="scene-timecode">1:05 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">una espada de Hermes y sandalias aladas para poder volar.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/ec1814d1-cd3e-433a-a48d-d4b68518dbf1.png" alt="Escena 22 - Hermes entrega armas">
+            <div class="image-caption">Escena 22 &mdash; Hermes entrega espada y sandalias aladas</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 23 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">23</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto IV &mdash; Perseo</div>
+                <div class="scene-title">Perseo volando sobre el mar hacia la isla</div>
+                <div class="scene-timecode">1:08 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/c3841ad1-e973-4eeb-97d4-fc6f4ab1f89b.png" alt="Escena 23 - Perseo volando">
+            <div class="image-caption">Escena 23 &mdash; Perseo vuela hacia la isla con sandalias aladas</div>
+        </div>
+    </div>
+
+    <!-- ACT V -->
+    <div class="act-divider">
+        <div class="act-label">Acto V</div>
+        <div class="act-name">El Combate en la Cueva</div>
+    </div>
+
+    <!-- ESCENA 24 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">24</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto V &mdash; El Combate</div>
+                <div class="scene-title">Oscuridad de la cueva, estatuas por todas partes</div>
+                <div class="scene-timecode">1:11 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;En la oscuridad de la cueva,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/06f750d9-f5ca-4da2-9d48-9bd769da576b.png" alt="Escena 24 - Cueva oscura">
+            <div class="image-caption">Escena 24 &mdash; Oscuridad de la cueva con estatuas</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 25 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">25</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto V &mdash; El Combate</div>
+                <div class="scene-title">Perseo usando el escudo como espejo</div>
+                <div class="scene-timecode">1:14 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Perseo us&oacute; el escudo como espejo para no mirarla directamente.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/01223377-09c0-426a-a213-c2e87cdde2c1.png" alt="Escena 25 - Escudo espejo">
+            <div class="image-caption">Escena 25 &mdash; Perseo usa el escudo como espejo</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 26 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">26</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto V &mdash; El Combate</div>
+                <div class="scene-title">Medusa dormida inocentemente</div>
+                <div class="scene-timecode">1:17 &mdash; ~3s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Encontr&oacute; a Medusa dormida</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/e14f543e-beef-4a9e-9bf1-21c7696b26c3.png" alt="Escena 26 - Medusa dormida">
+            <div class="image-caption">Escena 26 &mdash; Medusa duerme inocentemente</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 27 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">27</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto V &mdash; El Combate</div>
+                <div class="scene-title">Perseo levanta la espada divina</div>
+                <div class="scene-timecode">1:20 &mdash; ~2s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">y, con un solo corte de la espada divina,</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/ce7742c6-f719-4f83-aab8-ce99aa07b715.png" alt="Escena 27 - Espada levantada">
+            <div class="image-caption">Escena 27 &mdash; Perseo levanta la espada divina</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 28 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">28</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto V &mdash; El Combate</div>
+                <div class="scene-title">El corte de la espada</div>
+                <div class="scene-timecode">1:22 &mdash; ~2s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">le separ&oacute; la cabeza de su cuerpo mientras dorm&iacute;a inocentemente.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/7a5e61fd-21e0-44a5-afd7-b6d6358afbd3.png" alt="Escena 28 - Corte de espada">
+            <div class="image-caption">Escena 28 &mdash; El corte mortal de la espada divina</div>
+        </div>
+    </div>
+
+    <!-- ACT VI -->
+    <div class="act-divider">
+        <div class="act-label">Acto VI</div>
+        <div class="act-name">El Legado</div>
+    </div>
+
+    <!-- ESCENA 29 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">29</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto VI &mdash; El Legado</div>
+                <div class="scene-title">Pegaso emergiendo de la sangre dorada</div>
+                <div class="scene-timecode">1:24 &mdash; ~4s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">&laquo;De la sangre de Medusa naci&oacute; Pegaso, el caballo alado.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/ea3a5ea2-b0de-4f5b-af11-a5dfc99878cc.png" alt="Escena 29 - Pegaso nace">
+            <div class="image-caption">Escena 29 &mdash; Pegaso emerge de la sangre dorada</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 30 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">30</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto VI &mdash; El Legado</div>
+                <div class="scene-title">Perseo sosteniendo la cabeza de Medusa</div>
+                <div class="scene-timecode">1:28 &mdash; ~4s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Su cabeza sigui&oacute; petrificando enemigos incluso despu&eacute;s de muerta.</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/85aff47b-a5c2-464a-95dc-bb4e4dc940f4.png" alt="Escena 30 - Cabeza de Medusa">
+            <div class="image-caption">Escena 30 &mdash; Perseo sostiene la cabeza de Medusa</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 31 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">31</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto VI &mdash; El Legado</div>
+                <div class="scene-title">Pegaso volando hacia la libertad</div>
+                <div class="scene-timecode">1:32 &mdash; ~4s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Pero la verdadera historia se perdi&oacute;:</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/fece361a-9d0e-4482-8e5b-15ca9f1e691b.png" alt="Escena 31 - Pegaso vuela">
+            <div class="image-caption">Escena 31 &mdash; Pegaso vuela hacia la libertad</div>
+        </div>
+    </div>
+
+    <!-- ESCENA 32 -->
+    <div class="scene">
+        <div class="scene-header">
+            <div class="scene-number">32</div>
+            <div class="scene-meta">
+                <div class="scene-act">Acto VI &mdash; El Legado</div>
+                <div class="scene-title">Silueta fantasmal de la verdadera Medusa</div>
+                <div class="scene-timecode">1:36 &mdash; ~4s</div>
+            </div>
+        </div>
+        <div class="script-block">
+            <div class="script-text">Medusa no fue un monstruo, fue una v&iacute;ctima condenada por los dioses que deb&iacute;an haberla protegido.&raquo;</div>
+        </div>
+        <div class="scene-image">
+            <img src="/api/media/file/77c0f2cc-317e-48d3-9476-e8f4d4e62733.png" alt="Escena 32 - Fantasma de Medusa">
+            <div class="image-caption">Escena 32 &mdash; El esp&iacute;ritu de la verdadera Medusa</div>
+        </div>
+    </div>
+
+</section>
+
+<!-- FOOTER -->
+<footer class="footer">
+    <div class="total">32 ESCENAS &bull; 6 ACTOS &bull; ~1:40 DURACI&Oacute;N</div>
+    <p>MEDUSA: La Historia Nunca Contada &mdash; Storyboard de Producci&oacute;n v2.0</p>
+    <p style="margin-top: 8px; font-size: 10px; color: var(--gold-dark);">Formato 9:16 Vertical &bull; Estilo Fotorrealista Cinematogr&aacute;fico &bull; 6 Character Sheets con variaciones consistentes</p>
+</footer>
+
+</body>
+</html>

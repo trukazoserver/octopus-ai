@@ -20,7 +20,10 @@ export class CohereProvider extends BaseLLMProvider {
 		let systemMsg = "";
 
 		for (const m of request.messages) {
-			const textContent = typeof m.content === "string" ? m.content : (m.content.find((p) => p.type === "text") as any)?.text ?? "";
+			const textContent =
+				typeof m.content === "string"
+					? m.content
+					: (m.content.find((p) => p.type === "text")?.text ?? "");
 			if (m.role === "system") {
 				systemMsg = textContent;
 			} else if (m.role === "user") {
@@ -188,15 +191,23 @@ export class CohereProvider extends BaseLLMProvider {
 			for (const line of lines) {
 				const trimmed = line.trim();
 				if (!trimmed) continue;
-				let event: any;
+				let event: {
+					error?: { message?: string } | string;
+					type?: string;
+					delta?: { message?: { content?: { text?: string } } };
+				};
 				try {
-					event = JSON.parse(trimmed);
+					event = JSON.parse(trimmed) as typeof event;
 				} catch {
 					continue; // ignore malformed chunks
 				}
 
 				if (event.error) {
-					throw new Error(event.error.message || JSON.stringify(event.error));
+					throw new Error(
+						typeof event.error === "string"
+							? event.error
+							: event.error.message || JSON.stringify(event.error),
+					);
 				}
 
 				if (

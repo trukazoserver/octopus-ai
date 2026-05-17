@@ -60,7 +60,8 @@ function setNestedValue(
 	const keys = keyPath.split(".");
 	let current: Record<string, unknown> = obj;
 	for (let i = 0; i < keys.length - 1; i++) {
-		const key = keys[i]!;
+		const key = keys[i];
+		if (key === undefined) return;
 		if (
 			!(key in current) ||
 			typeof current[key] !== "object" ||
@@ -70,7 +71,8 @@ function setNestedValue(
 		}
 		current = current[key] as Record<string, unknown>;
 	}
-	const lastKey = keys[keys.length - 1]!;
+	const lastKey = keys.at(-1);
+	if (lastKey === undefined) return;
 
 	try {
 		const parsed = JSON.parse(value);

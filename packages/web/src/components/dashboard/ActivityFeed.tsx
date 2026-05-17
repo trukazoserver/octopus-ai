@@ -1,12 +1,13 @@
 import type React from "react";
 import type { ActivityItem } from "../../hooks/useDashboard.js";
+import { AppIcon, type AppIconName } from "../ui/AppIcon.js";
 
-const TYPE_CONFIG: Record<string, { icon: string; color: string }> = {
-	message: { icon: "💬", color: "#818cf8" },
-	task: { icon: "✅", color: "#10b981" },
-	skill: { icon: "⚡", color: "#f59e0b" },
-	agent: { icon: "🤖", color: "#6366f1" },
-	system: { icon: "⚙️", color: "#71717a" },
+const TYPE_CONFIG: Record<string, { icon: AppIconName; color: string }> = {
+	message: { icon: "chat", color: "#818cf8" },
+	task: { icon: "check", color: "#10b981" },
+	skill: { icon: "spark", color: "#f59e0b" },
+	agent: { icon: "agent", color: "#6366f1" },
+	system: { icon: "settings", color: "#71717a" },
 };
 
 function timeAgo(ts: number): string {
@@ -32,7 +33,15 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({ items }) => {
 					fontSize: "0.85rem",
 				}}
 			>
-				No hay actividad reciente
+				<div style={{ color: "#71717a", marginBottom: 8 }}>
+					<AppIcon name="activity" size={28} />
+				</div>
+				<div style={{ color: "#a1a1aa", fontWeight: 700 }}>
+					No hay actividad reciente
+				</div>
+				<div style={{ marginTop: 4 }}>
+					La actividad de conversaciones, tareas y sistema aparecerá aquí.
+				</div>
 			</div>
 		);
 	}
@@ -63,7 +72,9 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({ items }) => {
 							e.currentTarget.style.background = "transparent";
 						}}
 					>
-						<span style={{ fontSize: "1rem", flexShrink: 0 }}>{cfg.icon}</span>
+						<span style={{ color: cfg.color, flexShrink: 0 }}>
+							<AppIcon name={cfg.icon} size={16} />
+						</span>
 						<div style={{ flex: 1, minWidth: 0 }}>
 							<div
 								style={{

@@ -55,17 +55,18 @@ export class ContextManager {
 	 * Agregar un mensaje al contexto, aplicando compresión si es necesario.
 	 */
 	async addMessage(message: LLMMessage): Promise<void> {
+		let messageToAdd = message;
 		// Comprimir resultados de herramientas
 		if (message.role === "tool" && typeof message.content === "string") {
-			message = {
+			messageToAdd = {
 				...message,
 				content: this.compressToolResult(message.content),
 			};
 		}
 
-		this.currentSegment.messages.push(message);
+		this.currentSegment.messages.push(messageToAdd);
 
-		if (message.role === "user" || message.role === "assistant") {
+		if (messageToAdd.role === "user" || messageToAdd.role === "assistant") {
 			this.currentSegment.turnCount++;
 		}
 
@@ -88,8 +89,8 @@ export class ContextManager {
 
 		// Resúmenes de segmentos anteriores
 		const summaries = this.segments
-			.filter((s) => s.summary)
-			.map((s) => s.summary!);
+			.map((s) => s.summary)
+			.filter((summary): summary is string => Boolean(summary));
 
 		if (summaries.length > 0) {
 			messages.push({
@@ -167,8 +168,16 @@ export class ContextManager {
 		const relevantContent = messages
 			.filter((m) => m.role !== "system")
 			.map((m) => {
-				const role = m.role === "user" ? "Usuario" : m.role === "assistant" ? "Asistente" : "Herramienta";
-				const content = typeof m.content === "string" ? m.content.slice(0, 500) : "[contenido complejo]";
+				const role =
+					m.role === "user"
+						? "Usuario"
+						: m.role === "assistant"
+							? "Asistente"
+							: "Herramienta";
+				const content =
+					typeof m.content === "string"
+						? m.content.slice(0, 500)
+						: "[contenido complejo]";
 				return `${role}: ${content}`;
 			})
 			.join("\n");
@@ -179,7 +188,8 @@ export class ContextManager {
 				messages: [
 					{
 						role: "system",
-						content: "Resume esta conversación en 2-4 oraciones. Incluye: decisiones tomadas, resultados clave, y cualquier URL/ruta/dato importante. Sé conciso pero preciso.",
+						content:
+							"Resume esta conversación en 2-4 oraciones. Incluye: decisiones tomadas, resultados clave, y cualquier URL/ruta/dato importante. Sé conciso pero preciso.",
 					},
 					{ role: "user", content: relevantContent },
 				],
@@ -200,7 +210,9 @@ export class ContextManager {
 	private fallbackSummary(messages: LLMMessage[]): string {
 		const userMessages = messages
 			.filter((m) => m.role === "user")
-			.map((m) => (typeof m.content === "string" ? m.content.slice(0, 100) : ""))
+			.map((m) =>
+				typeof m.content === "string" ? m.content.slice(0, 100) : "",
+			)
 			.filter(Boolean);
 
 		const toolsUsed = messages
@@ -211,9 +223,13 @@ export class ContextManager {
 
 		return [
 			`El usuario pidió: ${userMessages.join("; ").slice(0, 300)}`,
-			uniqueTools.length > 0 ? `Herramientas usadas: ${uniqueTools.join(", ")}` : "",
+			uniqueTools.length > 0
+				? `Herramientas usadas: ${uniqueTools.join(", ")}`
+				: "",
 			`(${messages.length} mensajes en total)`,
-		].filter(Boolean).join(". ");
+		]
+			.filter(Boolean)
+			.join(". ");
 	}
 
 	/**
@@ -237,10 +253,13 @@ export class ContextManager {
 		return messages.reduce((total, m) => {
 			if (typeof m.content === "string") return total + m.content.length;
 			if (Array.isArray(m.content)) {
-				return total + m.content.reduce((sum, part) => {
-					if (part.type === "text") return sum + (part.text?.length || 0);
-					return sum + 100; // Estimación para imágenes
-				}, 0);
+				return (
+					total +
+					m.content.reduce((sum, part) => {
+						if (part.type === "text") return sum + (part.text?.length || 0);
+						return sum + 100; // Estimación para imágenes
+					}, 0)
+				);
 			}
 			return total + 100;
 		}, 0);

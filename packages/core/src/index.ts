@@ -191,6 +191,7 @@ export {
 	createAutomationTools,
 	createTeamTools,
 	createSandboxTools,
+	createTeamCommTools,
 	ProxyManager,
 	HumanBehavior,
 } from "./tools/index.js";
@@ -199,6 +200,7 @@ export type {
 	ToolResult,
 	CodeExecutionResult,
 	CodeExecutorConfig,
+	CodeExecutorHooks,
 	HumanTypingOptions,
 	HumanMouseOptions,
 	HumanScrollOptions,
@@ -243,12 +245,8 @@ export { Scheduler } from "./tasks/cron.js";
 export { WebhookServer } from "./tasks/webhooks.js";
 
 export { PermissionManager } from "./team/permissions.js";
-export { DelegationManager } from "./team/delegation.js";
-export type {
-	DelegationConfig,
-	DelegationTask,
-	DelegationPlan,
-} from "./team/delegation.js";
+export { TeamBlackboard } from "./team/blackboard.js";
+export type { BlackboardEvent } from "./team/blackboard.js";
 
 export { MetricsCollector } from "./utils/metrics.js";
 export type {
@@ -292,7 +290,18 @@ export type {
 } from "./agent/types.js";
 
 export { ChatManager } from "./chat/manager.js";
-export type { Conversation, ChatMessage } from "./chat/manager.js";
+export { ChatExecutionManager } from "./chat/execution-manager.js";
+export type {
+	ChatExecutionEvent,
+	ChatExecutionStartInput,
+} from "./chat/execution-manager.js";
+export type {
+	ChatExecution,
+	ChatExecutionActivity,
+	ChatExecutionStatus,
+	Conversation,
+	ChatMessage,
+} from "./chat/manager.js";
 
 export { TaskManager } from "./tasks/manager.js";
 export type { Task, CreateTaskInput } from "./tasks/manager.js";

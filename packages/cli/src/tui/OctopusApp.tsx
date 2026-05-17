@@ -1,16 +1,24 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Skill, ToolDefinition } from "@octopus-ai/core";
 import {
+	type MascotProfile,
 	getMascotById,
 	getMascotOptions,
-	type MascotProfile,
 } from "@octopus-ai/core/mascots/index";
 import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import TextInput from "ink-text-input";
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import { fileURLToPath } from "node:url";
-import fs from "node:fs";
-import path from "node:path";
 import { PNG } from "pngjs";
+import React, {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useReducer,
+	useRef,
+	useState,
+} from "react";
 import type {
 	ConsoleSession,
 	ConsoleStatus,
@@ -22,7 +30,10 @@ import { MarkdownText } from "./components/MarkdownText.js";
 import { colors } from "./theme.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_MASCOT_IMAGE_PATH = path.join(__dirname, "../assets/mascota-octopus.png");
+const DEFAULT_MASCOT_IMAGE_PATH = path.join(
+	__dirname,
+	"../assets/mascota-octopus.png",
+);
 
 function getMascotImagePath(mascot: MascotProfile): string {
 	return path.join(__dirname, "../assets/mascotas", mascot.fileName);
@@ -65,9 +76,12 @@ type StreamAction =
 
 function streamReducer(state: StreamState, action: StreamAction): StreamState {
 	switch (action.type) {
-		case "SET_RESPONSE": return { ...state, liveResponse: action.text };
-		case "SET_ACTIVITY": return { ...state, activity: action.activity };
-		case "RESET": return { liveResponse: "", activity: null };
+		case "SET_RESPONSE":
+			return { ...state, liveResponse: action.text };
+		case "SET_ACTIVITY":
+			return { ...state, activity: action.activity };
+		case "RESET":
+			return { liveResponse: "", activity: null };
 	}
 }
 
@@ -240,7 +254,11 @@ function maxLineLength(lines: string[]): number {
 	return lines.reduce((max, line) => Math.max(max, line.trimEnd().length), 0);
 }
 
-function proportionalArt(lines: string[], maxWidth: number, maxRows: number): string[] {
+function proportionalArt(
+	lines: string[],
+	maxWidth: number,
+	maxRows: number,
+): string[] {
 	const sourceWidth = maxLineLength(lines);
 	const source = lines.map((line) => line.padEnd(sourceWidth));
 	const ratio = Math.min(1, maxWidth / sourceWidth, maxRows / source.length);
@@ -326,6 +344,12 @@ function useTerminalSize(): { columns: number; rows: number } {
 	return size;
 }
 
+function makeUniqueKey(base: string, counts: Map<string, number>): string {
+	const count = counts.get(base) ?? 0;
+	counts.set(base, count + 1);
+	return `${base}:${count}`;
+}
+
 function PixelHeader({ layout }: { layout: DashboardLayout }) {
 	const width = layout.width;
 	const inner = width - 2;
@@ -341,7 +365,9 @@ function PixelHeader({ layout }: { layout: DashboardLayout }) {
 				{fit(`${"     ◌  ○  ◌".padEnd(inner - 10, " ")}◌  ○  ◌`, inner)}
 			</Text>
 			{canRenderTitle ? (
-				<Text color={colors.accentBright} bold>{titleBlock}</Text>
+				<Text color={colors.accentBright} bold>
+					{titleBlock}
+				</Text>
 			) : (
 				<Text color={colors.accentBright} bold>
 					{center("OCTOPUS-AGENT", inner)}
@@ -354,21 +380,24 @@ function PixelHeader({ layout }: { layout: DashboardLayout }) {
 	);
 }
 
-
-
-function MascotPixel({ char, index }: { char: string; index: number }) {
-	if ("@%#*+".includes(char)) return <Text key={index} color={colors.coral}>{char}</Text>;
-	if ("=-:".includes(char)) return <Text key={index} color={colors.accent}>{char}</Text>;
-	if (char === ".") return <Text key={index} color={colors.accentBright}>{char}</Text>;
-	return <Text key={index}> </Text>;
+function MascotPixel({ char }: { char: string }) {
+	if ("@%#*+".includes(char)) return <Text color={colors.coral}>{char}</Text>;
+	if ("=-:".includes(char)) return <Text color={colors.accent}>{char}</Text>;
+	if (char === ".") return <Text color={colors.accentBright}>{char}</Text>;
+	return <Text> </Text>;
 }
 
 function MascotLine({ line, width }: { line: string; width: number }) {
 	const padded = center(line, width);
+	const charCounts = new Map<string, number>();
+	const chars = [...padded].map((char) => ({
+		char,
+		key: makeUniqueKey(`mascot:${char}`, charCounts),
+	}));
 	return (
 		<Text>
-			{[...padded].map((char, index) => (
-				<MascotPixel key={`${index}-${char}`} char={char} index={index} />
+			{chars.map(({ char, key }) => (
+				<MascotPixel key={key} char={char} />
 			))}
 		</Text>
 	);
@@ -377,7 +406,10 @@ function MascotLine({ line, width }: { line: string; width: number }) {
 type PixelBlock = { char: string; color?: string; bgColor?: string };
 type ImageLine = PixelBlock[];
 
-const pngDimensionsCache = new Map<string, { width: number; height: number } | null>();
+const pngDimensionsCache = new Map<
+	string,
+	{ width: number; height: number } | null
+>();
 const mascotPixelsCache = new Map<string, ImageLine[] | null>();
 const MAX_MASCOT_PIXEL_CACHE = 24;
 
@@ -385,11 +417,18 @@ function rgbHex(r: number, g: number, b: number): string {
 	return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
 }
 
-function loadMascotPixels(imagePath: string, targetWidth: number, targetHeight: number): ImageLine[] | null {
+function loadMascotPixels(
+	imagePath: string,
+	targetWidth: number,
+	targetHeight: number,
+): ImageLine[] | null {
 	const cacheKey = `${imagePath}:${targetWidth}x${targetHeight}`;
-	if (mascotPixelsCache.has(cacheKey)) return mascotPixelsCache.get(cacheKey) ?? null;
+	if (mascotPixelsCache.has(cacheKey))
+		return mascotPixelsCache.get(cacheKey) ?? null;
 	try {
-		const resolvedPath = fs.existsSync(imagePath) ? imagePath : DEFAULT_MASCOT_IMAGE_PATH;
+		const resolvedPath = fs.existsSync(imagePath)
+			? imagePath
+			: DEFAULT_MASCOT_IMAGE_PATH;
 		if (!fs.existsSync(resolvedPath)) return null;
 		const raw = fs.readFileSync(resolvedPath);
 		const png = PNG.sync.read(raw);
@@ -400,7 +439,10 @@ function loadMascotPixels(imagePath: string, targetWidth: number, targetHeight: 
 			return data[(y * srcW + x) * 4 + 3] > 30;
 		};
 
-		let minX = srcW, minY = srcH, maxX = 0, maxY = 0;
+		let minX = srcW;
+		let minY = srcH;
+		let maxX = 0;
+		let maxY = 0;
 		for (let y = 0; y < srcH; y++) {
 			for (let x = 0; x < srcW; x++) {
 				if (isOpaque(x, y)) {
@@ -422,9 +464,18 @@ function loadMascotPixels(imagePath: string, targetWidth: number, targetHeight: 
 			const line: PixelBlock[] = [];
 			let hasContent = false;
 			for (let col = 0; col < targetWidth; col++) {
-				const sx = Math.min(minX + Math.floor(col * cropW / targetWidth), srcW - 1);
-				const sy1 = Math.min(minY + Math.floor(row * 2 * cropH / (halfH * 2)), srcH - 1);
-				const sy2 = Math.min(minY + Math.floor((row * 2 + 1) * cropH / (halfH * 2)), srcH - 1);
+				const sx = Math.min(
+					minX + Math.floor((col * cropW) / targetWidth),
+					srcW - 1,
+				);
+				const sy1 = Math.min(
+					minY + Math.floor((row * 2 * cropH) / (halfH * 2)),
+					srcH - 1,
+				);
+				const sy2 = Math.min(
+					minY + Math.floor(((row * 2 + 1) * cropH) / (halfH * 2)),
+					srcH - 1,
+				);
 
 				const i1 = (sy1 * srcW + sx) * 4;
 				const i2 = (sy2 * srcW + sx) * 4;
@@ -454,12 +505,16 @@ function loadMascotPixels(imagePath: string, targetWidth: number, targetHeight: 
 			if (hasContent) lines.push(line);
 		}
 
-		while (lines.length > 0 && lines[lines.length - 1].every((px) => px.char === " ")) {
+		while (
+			lines.length > 0 &&
+			lines[lines.length - 1].every((px) => px.char === " ")
+		) {
 			lines.pop();
 		}
 
 		const result = lines.length > 0 ? lines : null;
-		if (mascotPixelsCache.size >= MAX_MASCOT_PIXEL_CACHE) mascotPixelsCache.clear();
+		if (mascotPixelsCache.size >= MAX_MASCOT_PIXEL_CACHE)
+			mascotPixelsCache.clear();
 		mascotPixelsCache.set(cacheKey, result);
 		return result;
 	} catch {
@@ -478,16 +533,29 @@ function ImageLine({ line }: { line: ImageLine }) {
 			groups.push({ color: px.color, bgColor: px.bgColor, text: px.char });
 		}
 	}
+	const groupCounts = new Map<string, number>();
+	const groupEntries = groups.map((group) => ({
+		group,
+		key: makeUniqueKey(
+			`image-group:${group.color ?? ""}:${group.bgColor ?? ""}:${group.text}`,
+			groupCounts,
+		),
+	}));
 	return (
 		<Text>
-			{groups.map((g, i) => (
-				<Text key={i} color={g.color} backgroundColor={g.bgColor}>{g.text}</Text>
+			{groupEntries.map(({ group, key }) => (
+				<Text key={key} color={group.color} backgroundColor={group.bgColor}>
+					{group.text}
+				</Text>
 			))}
 		</Text>
 	);
 }
 
-function CenteredImageLine({ line, width }: { line: ImageLine; width: number }) {
+function CenteredImageLine({
+	line,
+	width,
+}: { line: ImageLine; width: number }) {
 	const left = Math.max(0, Math.floor((width - line.length) / 2));
 	const right = Math.max(0, width - line.length - left);
 	return (
@@ -499,10 +567,15 @@ function CenteredImageLine({ line, width }: { line: ImageLine; width: number }) 
 	);
 }
 
-function getPngDimensions(imagePath: string): { width: number; height: number } | null {
-	if (pngDimensionsCache.has(imagePath)) return pngDimensionsCache.get(imagePath) ?? null;
+function getPngDimensions(
+	imagePath: string,
+): { width: number; height: number } | null {
+	if (pngDimensionsCache.has(imagePath))
+		return pngDimensionsCache.get(imagePath) ?? null;
 	try {
-		const resolvedPath = fs.existsSync(imagePath) ? imagePath : DEFAULT_MASCOT_IMAGE_PATH;
+		const resolvedPath = fs.existsSync(imagePath)
+			? imagePath
+			: DEFAULT_MASCOT_IMAGE_PATH;
 		if (!fs.existsSync(resolvedPath)) return null;
 		const raw = fs.readFileSync(resolvedPath);
 		const png = PNG.sync.read(raw);
@@ -515,7 +588,10 @@ function getPngDimensions(imagePath: string): { width: number; height: number } 
 	}
 }
 
-function MascotPanel({ layout, mascot }: { layout: DashboardLayout; mascot: MascotProfile }) {
+function MascotPanel({
+	layout,
+	mascot,
+}: { layout: DashboardLayout; mascot: MascotProfile }) {
 	const panelWidth = layout.mascotWidth;
 	const innerWidth = panelWidth - 2;
 	const maxH = layout.maxMascotRows - 2;
@@ -536,27 +612,50 @@ function MascotPanel({ layout, mascot }: { layout: DashboardLayout; mascot: Masc
 		}
 		return Math.min(maxH, Math.floor(imgWidth * 1.0));
 	}, [dims, imgWidth, maxH]);
-	const pixels = useMemo(() => loadMascotPixels(imagePath, imgWidth, imgHeight), [imagePath, imgWidth, imgHeight]);
+	const pixels = useMemo(
+		() => loadMascotPixels(imagePath, imgWidth, imgHeight),
+		[imagePath, imgWidth, imgHeight],
+	);
 
 	if (pixels) {
+		const pixelLineCounts = new Map<string, number>();
+		const pixelLineEntries = pixels.map((line) => ({
+			line,
+			key: makeUniqueKey(
+				`pixel-line:${line.map((px) => `${px.char}:${px.color ?? ""}:${px.bgColor ?? ""}`).join("")}`,
+				pixelLineCounts,
+			),
+		}));
 		return (
 			<Box flexDirection="column" width={panelWidth} paddingX={1}>
-				{pixels.map((line, i) => (
-					<CenteredImageLine key={`px-${i}`} line={line} width={innerWidth} />
+				{pixelLineEntries.map(({ line, key }) => (
+					<CenteredImageLine key={key} line={line} width={innerWidth} />
 				))}
 				<Text color={colors.accent}>
-					{center(`~~~   ${mascot.nombre} · ${mascot.animal}   ~~~`, innerWidth)}
+					{center(
+						`~~~   ${mascot.nombre} · ${mascot.animal}   ~~~`,
+						innerWidth,
+					)}
 				</Text>
 				<Text color={colors.coral}>{center(mascot.tagline, innerWidth)}</Text>
 			</Box>
 		);
 	}
 
-	const art = proportionalArt(MASCOT_FALLBACK, innerWidth, layout.maxMascotRows);
+	const art = proportionalArt(
+		MASCOT_FALLBACK,
+		innerWidth,
+		layout.maxMascotRows,
+	);
+	const artLineCounts = new Map<string, number>();
+	const artLineEntries = art.map((line) => ({
+		line,
+		key: makeUniqueKey(`octopus-line:${line}`, artLineCounts),
+	}));
 	return (
 		<Box flexDirection="column" width={panelWidth} paddingX={1}>
-			{art.map((line, row) => (
-				<MascotLine key={`octopus-${row}`} line={line} width={innerWidth} />
+			{artLineEntries.map(({ line, key }) => (
+				<MascotLine key={key} line={line} width={innerWidth} />
 			))}
 			<Text color={colors.accent}>
 				{center(`~~~   ${mascot.nombre} · ${mascot.animal}   ~~~`, innerWidth)}
@@ -581,7 +680,10 @@ function CapabilityRows({ rows, width }: { rows: string[][]; width: number }) {
 	);
 }
 
-function RuntimeRows({ status, width }: { status?: ConsoleStatus; width: number }) {
+function RuntimeRows({
+	status,
+	width,
+}: { status?: ConsoleStatus; width: number }) {
 	const requests = getRequestCount(status);
 	const usage = status?.usage;
 	const providers = status?.availableProviders?.length
@@ -624,7 +726,10 @@ function ToolsPanel({ tools, width }: { tools: unknown; width: number }) {
 	);
 }
 
-function RuntimePanel({ status, width }: { status?: ConsoleStatus; width: number }) {
+function RuntimePanel({
+	status,
+	width,
+}: { status?: ConsoleStatus; width: number }) {
 	const innerWidth = width - 2;
 
 	return (
@@ -655,7 +760,11 @@ function SkillsPanel({ skills, width }: { skills: unknown; width: number }) {
 	);
 }
 
-function Footer({ layout, sid, status }: { layout: DashboardLayout; sid: string; status?: ConsoleStatus }) {
+function Footer({
+	layout,
+	sid,
+	status,
+}: { layout: DashboardLayout; sid: string; status?: ConsoleStatus }) {
 	const isSmall = layout.width < 80;
 	const containerWidth = layout.width - 4;
 	const tip = isSmall
@@ -669,12 +778,8 @@ function Footer({ layout, sid, status }: { layout: DashboardLayout; sid: string;
 	if (isSmall) {
 		return (
 			<Box flexDirection="column" paddingX={2}>
-				<Text color={colors.accent}>
-					{fit(summary, w)}
-				</Text>
-				<Text color={colors.text}>
-					{fit(`▣ Session: ${sid}`, w)}
-				</Text>
+				<Text color={colors.accent}>{fit(summary, w)}</Text>
+				<Text color={colors.text}>{fit(`▣ Session: ${sid}`, w)}</Text>
 				<Text color={colors.textDim}>{fit(tip, w)}</Text>
 			</Box>
 		);
@@ -685,13 +790,9 @@ function Footer({ layout, sid, status }: { layout: DashboardLayout; sid: string;
 	return (
 		<Box paddingX={1} justifyContent="space-between" width={containerWidth}>
 			<Box flexDirection="column" width={leftWidth}>
-				<Text color={colors.accent}>
-					{fit(summary, leftWidth)}
-				</Text>
+				<Text color={colors.accent}>{fit(summary, leftWidth)}</Text>
 				<Text color={colors.text}>{fit(`▣ ${process.cwd()}`, leftWidth)}</Text>
-				<Text color={colors.text}>
-					{fit(`⌕ Session: ${sid}`, leftWidth)}
-				</Text>
+				<Text color={colors.text}>{fit(`⌕ Session: ${sid}`, leftWidth)}</Text>
 			</Box>
 			<Box
 				borderStyle="single"
@@ -699,9 +800,7 @@ function Footer({ layout, sid, status }: { layout: DashboardLayout; sid: string;
 				paddingX={1}
 				width={tipWidth}
 			>
-				<Text color={colors.textDim}>
-					{fit(tip, tipWidth - 4)}
-				</Text>
+				<Text color={colors.textDim}>{fit(tip, tipWidth - 4)}</Text>
 			</Box>
 		</Box>
 	);
@@ -725,7 +824,19 @@ function Dashboard({
 	const borderW = layout.width - 2;
 	const innerW = borderW - 2;
 	const topDividerHeight = Math.max(layout.maxMascotRows + 2, 12);
-	const capabilityDividerHeight = Math.max(TOOL_ROWS.length, SKILL_ROWS.length) + 3;
+	const capabilityDividerHeight =
+		Math.max(TOOL_ROWS.length, SKILL_ROWS.length) + 3;
+	const topDividerCounts = new Map<string, number>();
+	const topDividerRows = Array.from({ length: topDividerHeight }, () => ({
+		key: makeUniqueKey("top-divider", topDividerCounts),
+	}));
+	const capabilityDividerCounts = new Map<string, number>();
+	const capabilityDividerRows = Array.from(
+		{ length: capabilityDividerHeight },
+		() => ({
+			key: makeUniqueKey("capability-divider", capabilityDividerCounts),
+		}),
+	);
 
 	return (
 		<Box flexDirection="column" paddingX={1} width={layout.width}>
@@ -740,8 +851,8 @@ function Dashboard({
 						<Box>
 							<MascotPanel layout={layout} mascot={mascot} />
 							<Box flexDirection="column">
-								{Array.from({ length: topDividerHeight }, (_, index) => (
-									<Text key={`top-divider-${index}`} color={colors.accent}>
+								{topDividerRows.map(({ key }) => (
+									<Text key={key} color={colors.accent}>
 										│
 									</Text>
 								))}
@@ -754,13 +865,13 @@ function Dashboard({
 								<ToolsPanel tools={tools} width={layout.mascotWidth} />
 							</Box>
 							<Box flexDirection="column">
-								{Array.from({ length: capabilityDividerHeight }, (_, index) => (
-								<Text key={`capability-divider-${index}`} color={colors.accent}>
-									│
-								</Text>
-							))}
-						</Box>
-						<SkillsPanel skills={skills} width={layout.infoWidth} />
+								{capabilityDividerRows.map(({ key }) => (
+									<Text key={key} color={colors.accent}>
+										│
+									</Text>
+								))}
+							</Box>
+							<SkillsPanel skills={skills} width={layout.infoWidth} />
 						</Box>
 					</Box>
 				) : (
@@ -784,7 +895,10 @@ function Dashboard({
 const MemoPixelHeader = React.memo(PixelHeader);
 const MemoDashboard = React.memo(Dashboard);
 
-function CompactHeader({ layout, busy }: { layout: DashboardLayout; busy: boolean }) {
+function CompactHeader({
+	layout,
+	busy,
+}: { layout: DashboardLayout; busy: boolean }) {
 	const width = layout.width;
 	const inner = width - 4;
 	return (
@@ -800,7 +914,12 @@ function CompactHeader({ layout, busy }: { layout: DashboardLayout; busy: boolea
 				</Text>
 				<Text color={colors.textDim}> </Text>
 				<Text color={colors.textDim}>
-					{fit(busy ? "modo trabajo: dashboard pausado para rendimiento" : `v${VERSION}`, Math.max(12, inner - 20))}
+					{fit(
+						busy
+							? "modo trabajo: dashboard pausado para rendimiento"
+							: `v${VERSION}`,
+						Math.max(12, inner - 20),
+					)}
 				</Text>
 			</Box>
 		</Box>
@@ -920,7 +1039,10 @@ const ACTIVITY_LABELS: Record<string, string> = {
 	closing: "Cerrando sesión",
 };
 
-function useSpinnerFrame(spinnerFrames: string[] | undefined, active: boolean): string {
+function useSpinnerFrame(
+	spinnerFrames: string[] | undefined,
+	active: boolean,
+): string {
 	const [frame, setFrame] = useState(0);
 	const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -955,21 +1077,29 @@ function AnimatedActivity({
 	const isThinking = status === "thinking";
 	const isCode = status === "code";
 	const isBrowsing = status === "browsing" || status === "searching";
-	const isMemory = status === "memory" || status === "retrieving" || status === "embedding";
-	const isTool = status === "tool" || status === "reading" || status === "writing";
+	const isMemory =
+		status === "memory" || status === "retrieving" || status === "embedding";
+	const isTool =
+		status === "tool" || status === "reading" || status === "writing";
 	const isDone = status === "tool_done";
 	const isError = status === "tool_error";
 	const isSkipped = status === "tool_skipped";
 	const innerWidth = width - 4;
 
 	if (isDone || isError || isSkipped) {
-		const doneColor = isError ? colors.error : isSkipped ? colors.warn : colors.good;
+		const doneColor = isError
+			? colors.error
+			: isSkipped
+				? colors.warn
+				: colors.good;
 		const icon = isError ? "✗" : isSkipped ? "○" : "✓";
 		const msg = isError ? "Error" : isSkipped ? "Omitido" : "Completado";
 		return (
 			<Box flexDirection="column" paddingX={2} width={width}>
 				<Box gap={1}>
-					<Text color={doneColor} bold>{icon}</Text>
+					<Text color={doneColor} bold>
+						{icon}
+					</Text>
 					<Text color={doneColor}>{msg}</Text>
 					{toolName && <Text color={colors.textDim}>{toolName}</Text>}
 					{detail && <Text color={colors.textDim}> — {detail}</Text>}
@@ -996,18 +1126,18 @@ function AnimatedActivity({
 				width={innerWidth}
 			>
 				<Box gap={1}>
-					<Text color={topColor} bold>{spinnerChar}</Text>
-					<Text color={topColor} bold>{label}</Text>
+					<Text color={topColor} bold>
+						{spinnerChar}
+					</Text>
+					<Text color={topColor} bold>
+						{label}
+					</Text>
 				</Box>
 				{toolName && (
-					<Text color={colors.accent}>
-						{fit(toolName, innerWidth - 2)}
-					</Text>
+					<Text color={colors.accent}>{fit(toolName, innerWidth - 2)}</Text>
 				)}
 				{detail && (
-					<Text color={colors.textDim}>
-						{fit(detail, innerWidth - 2)}
-					</Text>
+					<Text color={colors.textDim}>{fit(detail, innerWidth - 2)}</Text>
 				)}
 				{isThinking && (
 					<Text color={colors.textDim}>
@@ -1037,18 +1167,45 @@ function StreamingBlock({
 	busy,
 	hasContent,
 	maxLines,
-}: { text: string; width: number; busy: boolean; hasContent: boolean; maxLines: number }) {
-	const barFrames = ["▏", "▎", "▍", "▌", "▋", "▊", "▉", "▊", "▋", "▌", "▍", "▎"];
+}: {
+	text: string;
+	width: number;
+	busy: boolean;
+	hasContent: boolean;
+	maxLines: number;
+}) {
+	const barFrames = [
+		"▏",
+		"▎",
+		"▍",
+		"▌",
+		"▋",
+		"▊",
+		"▉",
+		"▊",
+		"▋",
+		"▌",
+		"▍",
+		"▎",
+	];
 	const barChar = useSpinnerFrame(barFrames, busy);
-	const trimmedText = maxLines > 0 ? text.split("\n").slice(-maxLines).join("\n") : text;
+	const trimmedText =
+		maxLines > 0 ? text.split("\n").slice(-maxLines).join("\n") : text;
 
 	return (
 		<Box flexDirection="column" paddingX={2} width={width}>
 			<Box gap={1}>
-				<Text color={colors.coral} bold>octopus</Text>
-				<Text color={colors.muted}>{!hasContent ? "thinking" : "streaming"}</Text>
+				<Text color={colors.coral} bold>
+					octopus
+				</Text>
+				<Text color={colors.muted}>
+					{!hasContent ? "thinking" : "streaming"}
+				</Text>
 				{busy && <Text color={colors.accentBright}>{barChar}</Text>}
-				<Text color={colors.coral} bold> &gt;</Text>
+				<Text color={colors.coral} bold>
+					{" "}
+					&gt;
+				</Text>
 			</Box>
 			<MarkdownText text={trimmedText} width={width - 4} />
 			{busy && <BlinkCursor color={colors.accent} />}
@@ -1097,7 +1254,9 @@ const InputArea = React.memo(function InputArea({
 			>
 				{isRawModeSupported ? (
 					<Box>
-						<Text color={colors.coral} bold>{">"}</Text>
+						<Text color={colors.coral} bold>
+							{">"}
+						</Text>
 						<Text color={colors.textDim}> </Text>
 						<TextInput
 							value={input}
@@ -1110,7 +1269,10 @@ const InputArea = React.memo(function InputArea({
 						/>
 						{!input && !busy && (
 							<Text color={colors.muted}>
-								{fit("Escribe tu mensaje o /help para ver comandos...", innerWidth - 2)}
+								{fit(
+									"Escribe tu mensaje o /help para ver comandos...",
+									innerWidth - 2,
+								)}
 							</Text>
 						)}
 					</Box>
@@ -1130,12 +1292,26 @@ const InputArea = React.memo(function InputArea({
 const TOOL_HTML_RE = /<!-- tool:[\w.-]+:(?:ok|error) -->/g;
 const CONTINUATION_CHECKPOINT_RE =
 	/<!-- octopus-continuation-checkpoint[\s\S]*?-->\n?/g;
-const XML_TAGS = ["environment_details", "thinking", "observation", "tool_call", "tool_response", "tool_result", "attempt", "scratchpad", "system_prompt", "antml", "thinking_block"];
-const TAGGED_LINE_RE = /^\s*<(?:environment_details|thinking|observation|tool_call|tool_response|tool_result|attempt|scratchpad|system_prompt|antml|thinking_block)[\s>\/]/i;
-const CLOSE_TAG_RE = /^\s*<\/(?:environment_details|thinking|observation|tool_call|tool_response|tool_result|attempt|scratchpad|system_prompt|antml|thinking_block)\s*>/i;
+const XML_TAGS = [
+	"environment_details",
+	"thinking",
+	"observation",
+	"tool_call",
+	"tool_response",
+	"tool_result",
+	"attempt",
+	"scratchpad",
+	"system_prompt",
+	"antml",
+	"thinking_block",
+];
+const TAGGED_LINE_RE =
+	/^\s*<(?:environment_details|thinking|observation|tool_call|tool_response|tool_result|attempt|scratchpad|system_prompt|antml|thinking_block)[\s>\/]/i;
+const CLOSE_TAG_RE =
+	/^\s*<\/(?:environment_details|thinking|observation|tool_call|tool_response|tool_result|attempt|scratchpad|system_prompt|antml|thinking_block)\s*>/i;
 
 function cleanStreamText(raw: string): string {
-	let cleaned = raw
+	const cleaned = raw
 		.replace(TOOL_HTML_RE, "")
 		.replace(CONTINUATION_CHECKPOINT_RE, "");
 	const lines = cleaned.split("\n");
@@ -1152,7 +1328,10 @@ function cleanStreamText(raw: string): string {
 			}
 			continue;
 		}
-		if (/<[a-zA-Z][\w.-]*[\s>\/]/.test(line) && XML_TAGS.some(tag => line.includes(`<${tag}`))) {
+		if (
+			/<[a-zA-Z][\w.-]*[\s>\/]/.test(line) &&
+			XML_TAGS.some((tag) => line.includes(`<${tag}`))
+		) {
 			continue;
 		}
 		result.push(line);
@@ -1168,7 +1347,9 @@ export function OctopusApp({ session, onExit }: AppProps) {
 	const [skills, setSkills] = useState<unknown>([]);
 	const [busy, setBusy] = useState(false);
 	const [messages, setMessages] = useState<Message[]>([]);
-	const [mascot, setMascot] = useState<MascotProfile>(() => getMascotById("pulpo-octavio"));
+	const [mascot, setMascot] = useState<MascotProfile>(() =>
+		getMascotById("pulpo-octavio"),
+	);
 	const [stream, dispatchStream] = useReducer(streamReducer, {
 		liveResponse: "",
 		activity: null,
@@ -1195,7 +1376,9 @@ export function OctopusApp({ session, onExit }: AppProps) {
 			setSkills(nextSkills);
 			setToolsReady(nextTools);
 			setSkillsReady(nextSkills);
-			setMascot(getMascotById(typeof mascotId === "string" ? mascotId : undefined));
+			setMascot(
+				getMascotById(typeof mascotId === "string" ? mascotId : undefined),
+			);
 		});
 	}, [session]);
 
@@ -1211,7 +1394,8 @@ export function OctopusApp({ session, onExit }: AppProps) {
 	const requestDetachRef = useRef<(() => void) | null>(null);
 	const currentActivityRef = useRef<StreamState["activity"]>(null);
 	const [backgroundStreams, setBackgroundStreams] = useState(0);
-	const [backgroundActivity, setBackgroundActivity] = useState<StreamState["activity"]>(null);
+	const [backgroundActivity, setBackgroundActivity] =
+		useState<StreamState["activity"]>(null);
 	const flushStream = useCallback(() => {
 		const text = streamBuffer.current;
 		if (text) dispatchStream({ type: "SET_RESPONSE", text });
@@ -1232,7 +1416,11 @@ export function OctopusApp({ session, onExit }: AppProps) {
 
 		setMessages((m) => [
 			...m,
-			{ id: messageId, role: initialText ? "assistant" : "system", content: initialContent },
+			{
+				id: messageId,
+				role: initialText ? "assistant" : "system",
+				content: initialContent,
+			},
 		]);
 		if (streamRaf.current) {
 			clearTimeout(streamRaf.current);
@@ -1253,7 +1441,9 @@ export function OctopusApp({ session, onExit }: AppProps) {
 			let nextResult = pendingNext;
 			try {
 				while (true) {
-					const result = nextResult ? await nextResult : await streamIter.next();
+					const result = nextResult
+						? await nextResult
+						: await streamIter.next();
 					nextResult = undefined;
 					if (result.done) break;
 					const event = result.value;
@@ -1274,7 +1464,8 @@ export function OctopusApp({ session, onExit }: AppProps) {
 							? {
 									id: messageId,
 									role: "assistant",
-									content: finalText || "El agente terminó sin contenido adicional.",
+									content:
+										finalText || "El agente terminó sin contenido adicional.",
 								}
 							: message,
 					),
@@ -1358,7 +1549,10 @@ export function OctopusApp({ session, onExit }: AppProps) {
 					id: uid(),
 					role: "system",
 					content: getMascotOptions()
-						.map((item) => `${item.id} - ${item.nombre} (${item.animal}): ${item.tagline}`)
+						.map(
+							(item) =>
+								`${item.id} - ${item.nombre} (${item.animal}): ${item.tagline}`,
+						)
 						.join("\n"),
 				},
 			]);
@@ -1373,16 +1567,23 @@ export function OctopusApp({ session, onExit }: AppProps) {
 					{
 						id: uid(),
 						role: "system",
-						content: `Uso: /mascot <id>\nDisponibles: ${getMascotOptions().map((item) => item.id).join(", ")}`,
+						content: `Uso: /mascot <id>\nDisponibles: ${getMascotOptions()
+							.map((item) => item.id)
+							.join(", ")}`,
 					},
 				]);
 				return;
 			}
-			if (session.setConfig) await session.setConfig("mascots.defaultId", nextMascot.id);
+			if (session.setConfig)
+				await session.setConfig("mascots.defaultId", nextMascot.id);
 			setMascot(nextMascot);
 			setMessages((m) => [
 				...m,
-				{ id: uid(), role: "system", content: `Mascota activa: ${nextMascot.nombre} (${nextMascot.animal})` },
+				{
+					id: uid(),
+					role: "system",
+					content: `Mascota activa: ${nextMascot.nombre} (${nextMascot.animal})`,
+				},
 			]);
 			return;
 		}
@@ -1441,53 +1642,54 @@ export function OctopusApp({ session, onExit }: AppProps) {
 		]);
 	}
 
-const RETRYABLE_PATTERNS = /(?:500|502|503|504|network error|timeout|idle|ECONNRESET|ECONNREFUSED)/i;
+	const RETRYABLE_PATTERNS =
+		/(?:500|502|503|504|network error|timeout|idle|ECONNRESET|ECONNREFUSED)/i;
 
-function getPositiveIntEnv(name: string, fallback: number): number {
-	const raw = process.env[name];
-	if (!raw) return fallback;
-	const parsed = Number.parseInt(raw, 10);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-const MAX_RETRIES = getPositiveIntEnv("OCTOPUS_TUI_MAX_RETRIES", 3);
-const INITIAL_IDLE_TIMEOUT_MS = getPositiveIntEnv(
-	"OCTOPUS_TUI_INITIAL_IDLE_TIMEOUT_MS",
-	15 * 60 * 1000,
-);
-const CONTENT_IDLE_TIMEOUT_MS = getPositiveIntEnv(
-	"OCTOPUS_TUI_CONTENT_IDLE_TIMEOUT_MS",
-	15 * 60 * 1000,
-);
-const STREAM_TIMEOUT_MS = getPositiveIntEnv(
-	"OCTOPUS_TUI_STREAM_TIMEOUT_MS",
-	4 * 60 * 60 * 1000,
-);
-
-function isRetryableError(err: unknown): boolean {
-	const msg = err instanceof Error ? err.message : String(err);
-	return RETRYABLE_PATTERNS.test(msg);
-}
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-class StreamIdleTimeoutError extends Error {
-	constructor(public pendingNext: Promise<IteratorResult<StreamEvent>>) {
-		super("Stream idle timeout");
-		this.name = "StreamIdleTimeoutError";
+	function getPositiveIntEnv(name: string, fallback: number): number {
+		const raw = process.env[name];
+		if (!raw) return fallback;
+		const parsed = Number.parseInt(raw, 10);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 	}
-}
 
-class StreamDetachRequestedError extends Error {
-	constructor(public pendingNext: Promise<IteratorResult<StreamEvent>>) {
-		super("Stream detached by user");
-		this.name = "StreamDetachRequestedError";
+	const MAX_RETRIES = getPositiveIntEnv("OCTOPUS_TUI_MAX_RETRIES", 3);
+	const INITIAL_IDLE_TIMEOUT_MS = getPositiveIntEnv(
+		"OCTOPUS_TUI_INITIAL_IDLE_TIMEOUT_MS",
+		15 * 60 * 1000,
+	);
+	const CONTENT_IDLE_TIMEOUT_MS = getPositiveIntEnv(
+		"OCTOPUS_TUI_CONTENT_IDLE_TIMEOUT_MS",
+		15 * 60 * 1000,
+	);
+	const STREAM_TIMEOUT_MS = getPositiveIntEnv(
+		"OCTOPUS_TUI_STREAM_TIMEOUT_MS",
+		4 * 60 * 60 * 1000,
+	);
+
+	function isRetryableError(err: unknown): boolean {
+		const msg = err instanceof Error ? err.message : String(err);
+		return RETRYABLE_PATTERNS.test(msg);
 	}
-}
 
-async function submit(value: string): Promise<void> {
+	function sleep(ms: number): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
+	class StreamIdleTimeoutError extends Error {
+		constructor(public pendingNext: Promise<IteratorResult<StreamEvent>>) {
+			super("Stream idle timeout");
+			this.name = "StreamIdleTimeoutError";
+		}
+	}
+
+	class StreamDetachRequestedError extends Error {
+		constructor(public pendingNext: Promise<IteratorResult<StreamEvent>>) {
+			super("Stream detached by user");
+			this.name = "StreamDetachRequestedError";
+		}
+	}
+
+	async function submit(value: string): Promise<void> {
 		const trimmed = value.trim();
 		if (!trimmed || busy) return;
 		if (backgroundStreams > 0 && !trimmed.startsWith("/")) {
@@ -1496,7 +1698,8 @@ async function submit(value: string): Promise<void> {
 				{
 					id: uid(),
 					role: "system",
-					content: "Hay una respuesta del agente trabajando en segundo plano. Puedes usar comandos como /status, /tasks o /exit; espera a que termine antes de enviar otro mensaje al agente.",
+					content:
+						"Hay una respuesta del agente trabajando en segundo plano. Puedes usar comandos como /status, /tasks o /exit; espera a que termine antes de enviar otro mensaje al agente.",
 				},
 			]);
 			return;
@@ -1534,7 +1737,10 @@ async function submit(value: string): Promise<void> {
 						};
 
 						if (retrying) {
-							currentActivityRef.current = { status: "thinking", detail: `Reintentando (${lastAttempt}/${MAX_RETRIES})...` };
+							currentActivityRef.current = {
+								status: "thinking",
+								detail: `Reintentando (${lastAttempt}/${MAX_RETRIES})...`,
+							};
 							dispatchStream({
 								type: "SET_ACTIVITY",
 								activity: currentActivityRef.current,
@@ -1565,7 +1771,8 @@ async function submit(value: string): Promise<void> {
 											reject(new StreamDetachRequestedError(pendingNext));
 											return;
 										}
-										detachWake = () => reject(new StreamDetachRequestedError(pendingNext));
+										detachWake = () =>
+											reject(new StreamDetachRequestedError(pendingNext));
 									}),
 								]);
 							} finally {
@@ -1615,7 +1822,10 @@ async function submit(value: string): Promise<void> {
 									}
 								}
 							}
-							if (!streamCompleted && Date.now() - streamStart >= STREAM_TIMEOUT_MS) {
+							if (
+								!streamCompleted &&
+								Date.now() - streamStart >= STREAM_TIMEOUT_MS
+							) {
 								timedOut = true;
 								detachedToBackground = true;
 								requestDetachRef.current = null;
@@ -1626,7 +1836,10 @@ async function submit(value: string): Promise<void> {
 								);
 							}
 						} catch (streamErr) {
-							if (streamErr instanceof StreamIdleTimeoutError || streamErr instanceof StreamDetachRequestedError) {
+							if (
+								streamErr instanceof StreamIdleTimeoutError ||
+								streamErr instanceof StreamDetachRequestedError
+							) {
 								detachedToBackground = true;
 								requestDetachRef.current = null;
 								detachStreamInBackground(
@@ -1645,8 +1858,11 @@ async function submit(value: string): Promise<void> {
 								const cancelStream = streamIter.return?.(undefined);
 								void cancelStream?.catch(() => {});
 								if (isRetryableError(streamErr) && lastAttempt < MAX_RETRIES) {
-									const delay = 2000 * (2 ** (lastAttempt - 1));
-									currentActivityRef.current = { status: "thinking", detail: `Error del servidor. Reintentando en ${delay / 1000}s...` };
+									const delay = 2000 * 2 ** (lastAttempt - 1);
+									currentActivityRef.current = {
+										status: "thinking",
+										detail: `Error del servidor. Reintentando en ${delay / 1000}s...`,
+									};
 									dispatchStream({
 										type: "SET_ACTIVITY",
 										activity: currentActivityRef.current,
@@ -1678,7 +1894,15 @@ async function submit(value: string): Promise<void> {
 						if (cleaned.trim())
 							setMessages((m) => [
 								...m,
-								{ id: uid(), role: "assistant", content: cleaned + (timedOut ? "\n\n⚠️ Stream timed out — partial response shown." : "") },
+								{
+									id: uid(),
+									role: "assistant",
+									content:
+										cleaned +
+										(timedOut
+											? "\n\n⚠️ Stream timed out — partial response shown."
+											: ""),
+								},
 							]);
 						lastErr = null;
 						requestDetachRef.current = null;
@@ -1686,8 +1910,11 @@ async function submit(value: string): Promise<void> {
 					} catch (retryErr) {
 						lastErr = retryErr;
 						if (isRetryableError(retryErr) && lastAttempt < MAX_RETRIES) {
-							const delay = 2000 * (2 ** (lastAttempt - 1));
-							currentActivityRef.current = { status: "thinking", detail: `Error del servidor. Reintentando en ${delay / 1000}s...` };
+							const delay = 2000 * 2 ** (lastAttempt - 1);
+							currentActivityRef.current = {
+								status: "thinking",
+								detail: `Error del servidor. Reintentando en ${delay / 1000}s...`,
+							};
 							dispatchStream({
 								type: "SET_ACTIVITY",
 								activity: currentActivityRef.current,
@@ -1749,13 +1976,24 @@ async function submit(value: string): Promise<void> {
 			) : (
 				<>
 					<MemoPixelHeader layout={layout} />
-					<MemoDashboard tools={toolsReady} skills={skillsReady} layout={layout} sid={sid} mascot={mascot} status={status} />
+					<MemoDashboard
+						tools={toolsReady}
+						skills={skillsReady}
+						layout={layout}
+						sid={sid}
+						mascot={mascot}
+						status={status}
+					/>
 				</>
 			)}
 			{visibleMessages.length > 0 && (
 				<Box flexDirection="column" paddingX={2} width={layout.width - 2}>
 					{visibleMessages.map((message) => (
-						<MemoChatLine key={message.id} msg={message} width={layout.width - 4} />
+						<MemoChatLine
+							key={message.id}
+							msg={message}
+							width={layout.width - 4}
+						/>
 					))}
 				</Box>
 			)}
@@ -1774,7 +2012,8 @@ async function submit(value: string): Promise<void> {
 					/>
 					<Box paddingX={2} width={layout.width - 2}>
 						<Text color={colors.warn}>
-							Input desbloqueado: puedes usar comandos mientras Octopus termina esta tarea.
+							Input desbloqueado: puedes usar comandos mientras Octopus termina
+							esta tarea.
 						</Text>
 					</Box>
 				</>

@@ -38,11 +38,21 @@ export async function up(db: DatabaseAdapter): Promise<void> {
 		)
 	`);
 
-	await db.run("CREATE INDEX IF NOT EXISTS idx_experiences_status ON experiences (status)");
-	await db.run("CREATE INDEX IF NOT EXISTS idx_experiences_created_at ON experiences (created_at)");
-	await db.run("CREATE INDEX IF NOT EXISTS idx_learning_insights_type ON learning_insights (type)");
-	await db.run("CREATE INDEX IF NOT EXISTS idx_learning_insights_importance ON learning_insights (importance)");
-	await db.run("CREATE INDEX IF NOT EXISTS idx_learning_insights_created_at ON learning_insights (created_at)");
+	await db.run(
+		"CREATE INDEX IF NOT EXISTS idx_experiences_status ON experiences (status)",
+	);
+	await db.run(
+		"CREATE INDEX IF NOT EXISTS idx_experiences_created_at ON experiences (created_at)",
+	);
+	await db.run(
+		"CREATE INDEX IF NOT EXISTS idx_learning_insights_type ON learning_insights (type)",
+	);
+	await db.run(
+		"CREATE INDEX IF NOT EXISTS idx_learning_insights_importance ON learning_insights (importance)",
+	);
+	await db.run(
+		"CREATE INDEX IF NOT EXISTS idx_learning_insights_created_at ON learning_insights (created_at)",
+	);
 }
 
 export async function down(db: DatabaseAdapter): Promise<void> {

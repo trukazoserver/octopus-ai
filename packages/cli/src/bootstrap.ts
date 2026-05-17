@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import * as os from "node:os";
 import { join } from "node:path";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	AgentManager,
 	AgentMessageBus,
@@ -14,6 +15,7 @@ import {
 	CodeExecutor,
 	ConfigLoader,
 	ConnectionManager,
+	EmbeddingProvider,
 	EnvVarManager,
 	GlobalDailyMemory,
 	LLMRouter,
@@ -32,6 +34,7 @@ import {
 	SkillMarketplace,
 	SkillRegistry,
 	TaskManager,
+	TeamBlackboard,
 	TokenCounter,
 	ToolExecutor,
 	ToolRegistry,
@@ -43,11 +46,11 @@ import {
 	createMediaTools,
 	createSandboxTools,
 	createShellTool,
+	createTeamCommTools,
 	createTeamTools,
 	createVectorStore,
 	expandTildePath,
 	getZaiMCPConfigs,
-	EmbeddingProvider,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
@@ -57,6 +60,7 @@ import type {
 	MCPServerConfig,
 	OctopusConfig,
 	ProviderConfig,
+	ToolDefinition,
 } from "@octopus-ai/core";
 
 export interface OctopusSystem {
@@ -93,6 +97,7 @@ export interface OctopusSystem {
 	mcpManager: MCPManager;
 	browserTool: BrowserTool | null;
 	refreshBrowserTools: (nextConfig?: OctopusConfig) => Promise<boolean>;
+	reloadDynamicTool: (name: string) => Promise<boolean>;
 	embedFn: EmbeddingFunction;
 	shutdown: () => Promise<void>;
 }
@@ -101,6 +106,34 @@ type DynamicToolParameter = {
 	type: string;
 	description: string;
 	required?: boolean;
+};
+
+type OptionalProviderConfig = {
+	apiKey?: string;
+	baseUrl?: string;
+};
+
+type BrowserRuntimeConfig = {
+	provider?: "auto" | "embedded" | "brightdata" | "decodo" | string;
+	headless?: boolean;
+	chromiumSandbox?: boolean;
+	brightDataEnabled?: boolean;
+	brightDataWsUrl?: string;
+	decodoEnabled?: boolean;
+	decodoProxyUrl?: string;
+	solveCaptchas?: boolean;
+	captchaProvider?: string;
+	captchaTimeoutMs?: number;
+	persistCookies?: boolean;
+	sessionStorageDir?: string;
+	sessionTtlHours?: number;
+	autoFallbackOnBlock?: boolean;
+	blockFallbackProvider?: string;
+	confirmBlockWithVision?: boolean;
+	blockResources?: string[];
+	blockTrackerDomains?: string[];
+	humanBehavior?: boolean;
+	autoDismissPopups?: boolean;
 };
 
 const JSON_SCHEMA_TYPES = new Set([
@@ -126,14 +159,20 @@ function normalizeSchemaType(value: unknown): string {
 function normalizeDynamicToolParameters(
 	parameters: unknown,
 ): Record<string, DynamicToolParameter> {
-	if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
+	if (
+		!parameters ||
+		typeof parameters !== "object" ||
+		Array.isArray(parameters)
+	) {
 		return {};
 	}
 
 	const schema = parameters as Record<string, unknown>;
 	const requiredFields = new Set(
 		Array.isArray(schema.required)
-			? schema.required.filter((field): field is string => typeof field === "string")
+			? schema.required.filter(
+					(field): field is string => typeof field === "string",
+				)
 			: [],
 	);
 	const source =
@@ -158,7 +197,8 @@ function normalizeDynamicToolParameters(
 		const param = value as Record<string, unknown>;
 		normalized[key] = {
 			type: normalizeSchemaType(param.type),
-			description: typeof param.description === "string" ? param.description : "",
+			description:
+				typeof param.description === "string" ? param.description : "",
 			required:
 				typeof param.required === "boolean"
 					? param.required
@@ -167,6 +207,95 @@ function normalizeDynamicToolParameters(
 	}
 
 	return normalized;
+}
+
+function createDynamicToolDefinition(
+	toolDir: string,
+	manifest: Record<string, unknown>,
+	fallbackName: string,
+): ToolDefinition {
+	const toolName = String(manifest.name || fallbackName);
+	const language = String(manifest.language || "javascript");
+	const ext = language === "typescript" ? "mts" : "mjs";
+	const codePath = join(toolDir, `index.${ext}`);
+	const toolDesc = String(manifest.description || `Dynamic tool: ${toolName}`);
+	const toolParams = normalizeDynamicToolParameters(manifest.parameters);
+	let handlerFn:
+		| ((
+				params: Record<string, unknown>,
+				context?: unknown,
+		  ) => Promise<{
+				success: boolean;
+				output?: string;
+				error?: string;
+				metadata?: Record<string, unknown>;
+		  }>)
+		| null = null;
+	let handlerMtimeMs = -1;
+
+	return {
+		name: toolName,
+		description: toolDesc,
+		uiIcon: typeof manifest.uiIcon === "string" ? manifest.uiIcon : undefined,
+		parameters: toolParams,
+		metadata: { source: "dynamic", path: codePath },
+		handler: async (params: Record<string, unknown>, context) => {
+			try {
+				const mtimeMs = statSync(codePath).mtimeMs;
+				if (!handlerFn || handlerMtimeMs !== mtimeMs) {
+					const url = pathToFileURL(codePath);
+					url.searchParams.set("mtime", String(mtimeMs));
+					const mod = await import(url.href);
+					handlerFn = mod.default || mod;
+					handlerMtimeMs = mtimeMs;
+				}
+			} catch (err) {
+				return {
+					success: false,
+					output: "",
+					error: `Failed to load tool "${toolName}": ${err instanceof Error ? err.message : String(err)}`,
+				};
+			}
+
+			try {
+				const result = await handlerFn?.(params, context);
+				return {
+					success: result?.success ?? true,
+					output: result?.output ?? "",
+					error: result?.error,
+					metadata: result?.metadata,
+				};
+			} catch (err) {
+				return {
+					success: false,
+					output: "",
+					error: `Tool "${toolName}" failed: ${err instanceof Error ? err.message : String(err)}`,
+				};
+			}
+		},
+	};
+}
+
+function registerDynamicTool(
+	toolRegistry: ToolRegistry,
+	toolDir: string,
+	fallbackName: string,
+): string | null {
+	const manifestPath = join(toolDir, "manifest.json");
+	if (!existsSync(manifestPath)) return null;
+
+	const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<
+		string,
+		unknown
+	>;
+	const language = String(manifest.language || "javascript");
+	const ext = language === "typescript" ? "mts" : "mjs";
+	const codePath = join(toolDir, `index.${ext}`);
+	if (!existsSync(codePath)) return null;
+
+	const tool = createDynamicToolDefinition(toolDir, manifest, fallbackName);
+	toolRegistry.register(tool);
+	return tool.name;
 }
 
 // --- Real Embedding Provider (Multi-Provider) ---
@@ -182,6 +311,10 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 
 	// Priority chain: zhipu → openai → google → deepseek → mistral → xai → cohere → ollama
 	const providers = config.ai.providers;
+	const optionalProviders = providers as Record<
+		string,
+		OptionalProviderConfig | undefined
+	>;
 
 	// 1. Zhipu/Z.ai (OpenAI-compatible)
 	if (!apiKey && providers.zhipu?.apiKey) {
@@ -215,10 +348,11 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	}
 
 	// 4. DeepSeek (OpenAI-compatible)
-	if (!apiKey && (providers as Record<string, any>).deepseek?.apiKey) {
-		const ds = (providers as Record<string, any>).deepseek;
-		apiKey = ds.apiKey;
-		baseUrl = ds.baseUrl || "https://api.deepseek.com/v1";
+	const deepseek = optionalProviders.deepseek;
+	const deepseekApiKey = deepseek?.apiKey;
+	if (!apiKey && deepseekApiKey) {
+		apiKey = deepseekApiKey;
+		baseUrl = deepseek.baseUrl || "https://api.deepseek.com/v1";
 		model = "deepseek-embed";
 		apiType = "openai";
 		dimensions = 1024;
@@ -226,10 +360,11 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	}
 
 	// 5. Mistral (OpenAI-compatible)
-	if (!apiKey && (providers as Record<string, any>).mistral?.apiKey) {
-		const ms = (providers as Record<string, any>).mistral;
-		apiKey = ms.apiKey;
-		baseUrl = ms.baseUrl || "https://api.mistral.ai/v1";
+	const mistral = optionalProviders.mistral;
+	const mistralApiKey = mistral?.apiKey;
+	if (!apiKey && mistralApiKey) {
+		apiKey = mistralApiKey;
+		baseUrl = mistral.baseUrl || "https://api.mistral.ai/v1";
 		model = "mistral-embed";
 		apiType = "openai";
 		dimensions = 1024;
@@ -237,10 +372,11 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	}
 
 	// 6. xAI/Grok (OpenAI-compatible)
-	if (!apiKey && (providers as Record<string, any>).xai?.apiKey) {
-		const xai = (providers as Record<string, any>).xai;
-		apiKey = xai.apiKey;
-		baseUrl = xai.baseUrl || "https://api.x.ai/v1";
+	const xaiProvider = optionalProviders.xai;
+	const xaiApiKey = xaiProvider?.apiKey;
+	if (!apiKey && xaiApiKey) {
+		apiKey = xaiApiKey;
+		baseUrl = xaiProvider.baseUrl || "https://api.x.ai/v1";
 		model = "v1";
 		apiType = "openai";
 		dimensions = 1024;
@@ -248,10 +384,11 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	}
 
 	// 7. Cohere (native API)
-	if (!apiKey && (providers as Record<string, any>).cohere?.apiKey) {
-		const co = (providers as Record<string, any>).cohere;
-		apiKey = co.apiKey;
-		baseUrl = co.baseUrl || "https://api.cohere.com";
+	const cohere = optionalProviders.cohere;
+	const cohereApiKey = cohere?.apiKey;
+	if (!apiKey && cohereApiKey) {
+		apiKey = cohereApiKey;
+		baseUrl = cohere.baseUrl || "https://api.cohere.com";
 		model = "embed-multilingual-v3.0";
 		apiType = "cohere";
 		dimensions = 1024;
@@ -270,7 +407,7 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	}
 
 	const provider = new EmbeddingProvider({
-		apiKey: apiKey === "ollama" ? "" : apiKey, // Ollama needs empty key
+		apiKey: apiKey === "ollama" ? "nokey" : apiKey,
 		baseUrl,
 		model,
 		apiType,
@@ -280,25 +417,22 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 		cacheSize: 500,
 	});
 
-	// Ollama needs the key set but empty works for auth-less endpoints
-	if (apiKey === "ollama") {
-		// Override: Ollama doesn't use auth headers
-		(provider as any).config.apiKey = "nokey";
-	}
-
 	if (apiKey) {
-		console.log(`  ✓ Embedding provider: ${model} via ${providerName} (${apiType})`);
+		console.log(
+			`  ✓ Embedding provider: ${model} via ${providerName} (${apiType})`,
+		);
 	} else {
-		console.log("  ⚠ No embedding API — using hash fallback (semantic search limited)");
+		console.log(
+			"  ⚠ No embedding API — using hash fallback (semantic search limited)",
+		);
 	}
 
 	return provider;
 }
 
-
-
-
-function normalizeBrowserWsUrl(...values: Array<string | undefined | null>): string | undefined {
+function normalizeBrowserWsUrl(
+	...values: Array<string | undefined | null>
+): string | undefined {
 	for (const value of values) {
 		if (typeof value === "string" && /^wss?:\/\//i.test(value.trim())) {
 			return value.trim();
@@ -307,9 +441,14 @@ function normalizeBrowserWsUrl(...values: Array<string | undefined | null>): str
 	return undefined;
 }
 
-function normalizeBrowserProxyUrl(...values: Array<string | undefined | null>): string | undefined {
+function normalizeBrowserProxyUrl(
+	...values: Array<string | undefined | null>
+): string | undefined {
 	for (const value of values) {
-		if (typeof value === "string" && /^(https?|socks5):\/\//i.test(value.trim())) {
+		if (
+			typeof value === "string" &&
+			/^(https?|socks5):\/\//i.test(value.trim())
+		) {
 			return value.trim();
 		}
 	}
@@ -367,7 +506,10 @@ export async function bootstrap(options?: {
 
 	const providers: Record<string, ProviderConfig & { mode?: string }> = {};
 	const providerEntries = Object.entries(config.ai.providers) as Array<
-		[string, { apiKey?: string; baseUrl?: string; models?: string[]; mode?: string }]
+		[
+			string,
+			{ apiKey?: string; baseUrl?: string; models?: string[]; mode?: string },
+		]
 	>;
 	for (const [name, pConfig] of providerEntries) {
 		if (name === "local") {
@@ -394,13 +536,16 @@ export async function bootstrap(options?: {
 	// Wire STM condensation callback — uses LLM to summarize before evicting
 	stm.setCondensationCallback(async (turns) => {
 		try {
-			const text = turns.map((t) => `[${t.role}]: ${t.content.slice(0, 300)}`).join("\n");
+			const text = turns
+				.map((t) => `[${t.role}]: ${t.content.slice(0, 300)}`)
+				.join("\n");
 			const response = await router.chat({
 				model: config.ai.default,
 				messages: [
 					{
 						role: "system",
-						content: "Extract a brief summary (max 150 words) preserving: user goals, decisions made, errors encountered, file paths, URLs, and key data points. Output ONLY the summary, nothing else.",
+						content:
+							"Extract a brief summary (max 150 words) preserving: user goals, decisions made, errors encountered, file paths, URLs, and key data points. Output ONLY the summary, nothing else.",
 					},
 					{ role: "user", content: text },
 				],
@@ -434,7 +579,12 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 				maxTokens: 500,
 				temperature: 0.1,
 			});
-			const parsed = JSON.parse(response.content.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+			const parsed = JSON.parse(
+				response.content
+					.replace(/```json?\n?/g, "")
+					.replace(/```/g, "")
+					.trim(),
+			);
 			return {
 				facts: Array.isArray(parsed.facts) ? parsed.facts : [],
 				decisions: Array.isArray(parsed.decisions) ? parsed.decisions : [],
@@ -466,6 +616,11 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		autoUnload: config.skills.loading.autoUnload,
 		searchThreshold: config.skills.loading.searchThreshold,
 	});
+	(
+		skillLoader as unknown as {
+			updateConfig?: (config: { enabled: boolean }) => void;
+		}
+	).updateConfig?.({ enabled: config.skills.enabled });
 
 	const skillForge = new SkillForge(skillRegistry, embedFn, {
 		complexityThreshold: config.skills.forge.complexityThreshold,
@@ -483,6 +638,11 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		abTestMajorChanges: config.skills.improvement.abTestMajorChanges,
 		abTestSampleSize: config.skills.improvement.abTestSampleSize,
 	});
+	(
+		skillImprover as unknown as {
+			updateConfig?: (config: { enabled: boolean }) => void;
+		}
+	).updateConfig?.({ enabled: config.skills.autoImprove });
 
 	const learningEngine = new LearningEngine(db, embedFn, {
 		ltm,
@@ -490,16 +650,18 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		skillRegistry,
 		skillForge,
 		skillImprover,
-		config: config.learning,
+		config: {
+			...config.learning,
+			autoCreateSkills:
+				config.learning.autoCreateSkills && config.skills.autoCreate,
+		},
 	});
 	await learningEngine.initialize();
-
-	const codeExecutor = new CodeExecutor();
-	await codeExecutor.initialize();
 
 	const chatManager = new ChatManager(db);
 	const agentManager = new AgentManager(db);
 	const agentMessageBus = new AgentMessageBus();
+	const teamBlackboard = new TeamBlackboard();
 	const envVarManager = new EnvVarManager(db);
 	const managedEnv = await envVarManager.toProcessEnv();
 	for (const [key, value] of Object.entries(managedEnv)) {
@@ -512,6 +674,18 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	const mcpManager = new MCPManager();
 
 	const toolRegistry = new ToolRegistry();
+	const dynamicToolsDir = join(homedir(), ".octopus", "tools");
+	const reloadDynamicTool = async (name: string): Promise<boolean> => {
+		const toolDir = join(dynamicToolsDir, name);
+		return Boolean(registerDynamicTool(toolRegistry, toolDir, name));
+	};
+
+	const codeExecutor = new CodeExecutor(undefined, {
+		onToolCreated: async ({ name }) => {
+			await reloadDynamicTool(name);
+		},
+	});
+	await codeExecutor.initialize();
 	mcpManager.setToolRegistry(toolRegistry);
 
 	mcpManager.setPersistCallback((servers) => {
@@ -528,9 +702,13 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		}
 	});
 
-	const disabledTools = (config as any).tools?.disabled || [];
+	const toolConfig = config.tools as OctopusConfig["tools"] & {
+		disabled?: string[];
+		allowedPaths?: string[];
+	};
+	const disabledTools = toolConfig.disabled || [];
 
-	const registerSystemTool = (tool: any) => {
+	const registerSystemTool = (tool: ToolDefinition) => {
 		if (disabledTools.includes(tool.name)) return;
 		tool.metadata = { ...tool.metadata, source: "system" };
 		toolRegistry.register(tool);
@@ -541,8 +719,10 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		path.join(os.homedir(), ".octopus"),
 		process.cwd(),
 	];
-	const userAllowedPaths = (config as any).tools?.allowedPaths || [];
-	const allowedPaths = [...new Set([...defaultAllowedPaths, ...userAllowedPaths])];
+	const userAllowedPaths = toolConfig.allowedPaths || [];
+	const allowedPaths = [
+		...new Set([...defaultAllowedPaths, ...userAllowedPaths]),
+	];
 
 	const toolExecutor = new ToolExecutor(toolRegistry, {
 		sandboxCommands: true,
@@ -577,8 +757,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		parameters: {
 			action: {
 				type: "string",
-				description:
-					"Action: get, set-defaults, set-tool, or unset-tool.",
+				description: "Action: get, set-defaults, set-tool, or unset-tool.",
 				required: true,
 			},
 			toolName: {
@@ -681,6 +860,12 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	}
 
 	const teamTools = createTeamTools(async (task, role) => {
+		// Obtener contexto de la conversación actual para el worker
+		const contextSummary = agentRuntime.getContextSummary(1500);
+		const contextBlock = contextSummary
+			? `\n\nConversation context from the main agent:\n${contextSummary}`
+			: "";
+
 		const workerStm = new ShortTermMemory({
 			maxTokens: config.memory?.shortTerm?.maxTokens ?? 16000,
 			scratchPadSize: config.memory?.shortTerm?.scratchPadSize ?? 10,
@@ -688,12 +873,13 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			tokenCounter: new TokenCounter(),
 		});
 
+		const workerId = `worker-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 		const workerRuntime = new AgentRuntime(
 			{
 				...agentConfig,
-				id: `worker-${Date.now()}`,
+				id: workerId,
 				name: `Worker (${role})`,
-				systemPrompt: `You are a specialist worker deployed by Octopus Manager. Your role is: ${role}. Solve the task directly and report back concisely. Respond ONLY with the final result, no small talk.`,
+				systemPrompt: `You are a specialist worker deployed by Octopus Manager. Your role is: ${role}. Solve the task directly and report back concisely. Respond ONLY with the final result, no small talk.${contextBlock}`,
 			},
 			router,
 			workerStm,
@@ -701,13 +887,34 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			memoryConsolidator,
 			skillLoader,
 		);
-		workerRuntime.setToolSystem(toolRegistry, toolExecutor);
+
+		// Workers get tools but NOT delegate_task to prevent infinite recursion
+		const workerToolRegistry = new ToolRegistry();
+		for (const tool of toolRegistry.list()) {
+			if (tool.name !== "delegate_task") {
+				workerToolRegistry.register(tool);
+			}
+		}
+		const workerToolExecutor = new ToolExecutor(workerToolRegistry, {
+			sandboxCommands: true,
+			allowedPaths,
+			timeouts: config.tools.timeouts,
+		});
+		workerRuntime.setToolSystem(workerToolRegistry, workerToolExecutor);
 		workerRuntime.setLearningEngine(learningEngine);
+
+		teamBlackboard.registerWorker(workerId, workerRuntime);
 
 		return await workerRuntime.processMessage(task, "system_worker");
 	});
 
 	for (const tool of teamTools) {
+		registerSystemTool(tool);
+	}
+
+	// Register team communication tools globally
+	const teamCommTools = createTeamCommTools(teamBlackboard, "main_agent");
+	for (const tool of teamCommTools) {
 		registerSystemTool(tool);
 	}
 
@@ -734,44 +941,56 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		nextConfig?: OctopusConfig,
 	): Promise<boolean> => {
 		if (nextConfig) config = nextConfig;
-		const browserCfg = (config as any).browser || { provider: "auto" };
+		const browserCfg = (
+			config as OctopusConfig & { browser?: BrowserRuntimeConfig }
+		).browser || { provider: "auto" };
 		const brightDataEnabled = browserCfg.brightDataEnabled !== false;
 		const brightDataWsUrl = brightDataEnabled
 			? normalizeBrowserWsUrl(
-				browserCfg.brightDataWsUrl,
-				process.env.BRIGHTDATA_WS_URL,
-			)
+					browserCfg.brightDataWsUrl,
+					process.env.BRIGHTDATA_WS_URL,
+				)
 			: undefined;
 		const decodoEnabled = browserCfg.decodoEnabled !== false;
 		const decodoProxyUrl = decodoEnabled
 			? normalizeBrowserProxyUrl(
-				browserCfg.decodoProxyUrl,
-				process.env.DECODO_PROXY_URL,
-				process.env.DECODO_PROXY_SERVER,
-			)
+					browserCfg.decodoProxyUrl,
+					process.env.DECODO_PROXY_URL,
+					process.env.DECODO_PROXY_SERVER,
+				)
 			: undefined;
-		const isEmbedded = browserCfg.provider === "embedded" && detectedBrowserPath;
-		const isBrightData = browserCfg.provider === "brightdata" && brightDataWsUrl;
+		const isEmbedded =
+			browserCfg.provider === "embedded" && detectedBrowserPath;
+		const isBrightData =
+			browserCfg.provider === "brightdata" && brightDataWsUrl;
 		const hasDecodoProxy = Boolean(
 			decodoProxyUrl ||
-			browserCfg.decodoProxyUrl ||
-			process.env.DECODO_PROXY_SERVER ||
-			process.env.DECODO_PROXY_USERNAME ||
-			process.env.DECODO_PROXY_USER,
+				browserCfg.decodoProxyUrl ||
+				process.env.DECODO_PROXY_SERVER ||
+				process.env.DECODO_PROXY_USERNAME ||
+				process.env.DECODO_PROXY_USER,
 		);
-		const isDecodo = browserCfg.provider === "decodo" && detectedBrowserPath && decodoEnabled && hasDecodoProxy;
+		const isDecodo =
+			browserCfg.provider === "decodo" &&
+			detectedBrowserPath &&
+			decodoEnabled &&
+			hasDecodoProxy;
 		const isAuto =
-			browserCfg.provider === "auto" && (detectedBrowserPath || brightDataWsUrl);
+			browserCfg.provider === "auto" &&
+			(detectedBrowserPath || brightDataWsUrl);
 		const toolConfig = {
 			executablePath: detectedBrowserPath,
 			headless: browserCfg.headless,
+			chromiumSandbox: browserCfg.chromiumSandbox,
 			provider: browserCfg.provider,
 			brightDataEnabled,
 			brightDataWsUrl,
 			decodoEnabled,
 			decodoProxyUrl,
-			decodoProxyUsername: process.env.DECODO_PROXY_USERNAME || process.env.DECODO_PROXY_USER,
-			decodoProxyPassword: process.env.DECODO_PROXY_PASSWORD || process.env.DECODO_PROXY_PASS,
+			decodoProxyUsername:
+				process.env.DECODO_PROXY_USERNAME || process.env.DECODO_PROXY_USER,
+			decodoProxyPassword:
+				process.env.DECODO_PROXY_PASSWORD || process.env.DECODO_PROXY_PASS,
 			decodoProxyCountry: process.env.DECODO_PROXY_COUNTRY,
 			decodoProxyCity: process.env.DECODO_PROXY_CITY,
 			decodoProxyState: process.env.DECODO_PROXY_STATE,
@@ -794,12 +1013,12 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		};
 
 		if (!(isEmbedded || isBrightData || isDecodo || isAuto)) {
-			if (browserTool) await (browserTool as any).updateConfig(toolConfig);
+			if (browserTool) await browserTool.updateConfig(toolConfig);
 			return false;
 		}
 
 		if (browserTool) {
-			await (browserTool as any).updateConfig(toolConfig);
+			await browserTool.updateConfig(toolConfig);
 		} else {
 			browserTool = new BrowserTool(toolConfig);
 			for (const tool of browserTool.createTools()) {
@@ -807,7 +1026,13 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			}
 		}
 
-		const mode = isBrightData ? "Bright Data" : isDecodo ? "Decodo" : isEmbedded ? "Embedded" : "Auto";
+		const mode = isBrightData
+			? "Bright Data"
+			: isDecodo
+				? "Decodo"
+				: isEmbedded
+					? "Embedded"
+					: "Auto";
 		console.log(`  ✓ Browser tools enabled (${mode})`);
 		return true;
 	};
@@ -875,7 +1100,36 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 					const isSecret = params.isSecret !== false; // default true
 					await envVarManager.set(key, value, { isSecret });
 					process.env[key] = value;
-					if (["BRIGHTDATA_WS_URL", "TWOCAPTCHA_API_KEY", "TWO_CAPTCHA_API_KEY", "TWOCAPTCHA_PROXY_ADDRESS", "TWOCAPTCHA_PROXY_PORT", "TWOCAPTCHA_PROXY_LOGIN", "TWOCAPTCHA_PROXY_PASSWORD", "DECODO_PROXY_URL", "DECODO_PROXY_SERVER", "DECODO_PROXY_PROTOCOL", "DECODO_PROXY_USERNAME", "DECODO_PROXY_USER", "DECODO_PROXY_PASSWORD", "DECODO_PROXY_PASS", "DECODO_PROXY_COUNTRY", "DECODO_PROXY_CITY", "DECODO_PROXY_STATE", "DECODO_PROXY_ZIP", "DECODO_PROXY_SESSION", "DECODO_PROXY_SESSION_DURATION", "DECODO_SCRAPER_TOKEN", "DECODO_API_TOKEN", "DECODO_SCRAPER_USERNAME", "DECODO_API_USERNAME", "DECODO_SCRAPER_PASSWORD", "DECODO_API_PASSWORD"].includes(key)) {
+					if (
+						[
+							"BRIGHTDATA_WS_URL",
+							"TWOCAPTCHA_API_KEY",
+							"TWO_CAPTCHA_API_KEY",
+							"TWOCAPTCHA_PROXY_ADDRESS",
+							"TWOCAPTCHA_PROXY_PORT",
+							"TWOCAPTCHA_PROXY_LOGIN",
+							"TWOCAPTCHA_PROXY_PASSWORD",
+							"DECODO_PROXY_URL",
+							"DECODO_PROXY_SERVER",
+							"DECODO_PROXY_PROTOCOL",
+							"DECODO_PROXY_USERNAME",
+							"DECODO_PROXY_USER",
+							"DECODO_PROXY_PASSWORD",
+							"DECODO_PROXY_PASS",
+							"DECODO_PROXY_COUNTRY",
+							"DECODO_PROXY_CITY",
+							"DECODO_PROXY_STATE",
+							"DECODO_PROXY_ZIP",
+							"DECODO_PROXY_SESSION",
+							"DECODO_PROXY_SESSION_DURATION",
+							"DECODO_SCRAPER_TOKEN",
+							"DECODO_API_TOKEN",
+							"DECODO_SCRAPER_USERNAME",
+							"DECODO_API_USERNAME",
+							"DECODO_SCRAPER_PASSWORD",
+							"DECODO_API_PASSWORD",
+						].includes(key)
+					) {
 						await refreshBrowserTools();
 					}
 					return {
@@ -887,7 +1141,36 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 					const deleted = await envVarManager.delete(key);
 					if (deleted) {
 						delete process.env[key];
-						if (["BRIGHTDATA_WS_URL", "TWOCAPTCHA_API_KEY", "TWO_CAPTCHA_API_KEY", "TWOCAPTCHA_PROXY_ADDRESS", "TWOCAPTCHA_PROXY_PORT", "TWOCAPTCHA_PROXY_LOGIN", "TWOCAPTCHA_PROXY_PASSWORD", "DECODO_PROXY_URL", "DECODO_PROXY_SERVER", "DECODO_PROXY_PROTOCOL", "DECODO_PROXY_USERNAME", "DECODO_PROXY_USER", "DECODO_PROXY_PASSWORD", "DECODO_PROXY_PASS", "DECODO_PROXY_COUNTRY", "DECODO_PROXY_CITY", "DECODO_PROXY_STATE", "DECODO_PROXY_ZIP", "DECODO_PROXY_SESSION", "DECODO_PROXY_SESSION_DURATION", "DECODO_SCRAPER_TOKEN", "DECODO_API_TOKEN", "DECODO_SCRAPER_USERNAME", "DECODO_API_USERNAME", "DECODO_SCRAPER_PASSWORD", "DECODO_API_PASSWORD"].includes(key)) {
+						if (
+							[
+								"BRIGHTDATA_WS_URL",
+								"TWOCAPTCHA_API_KEY",
+								"TWO_CAPTCHA_API_KEY",
+								"TWOCAPTCHA_PROXY_ADDRESS",
+								"TWOCAPTCHA_PROXY_PORT",
+								"TWOCAPTCHA_PROXY_LOGIN",
+								"TWOCAPTCHA_PROXY_PASSWORD",
+								"DECODO_PROXY_URL",
+								"DECODO_PROXY_SERVER",
+								"DECODO_PROXY_PROTOCOL",
+								"DECODO_PROXY_USERNAME",
+								"DECODO_PROXY_USER",
+								"DECODO_PROXY_PASSWORD",
+								"DECODO_PROXY_PASS",
+								"DECODO_PROXY_COUNTRY",
+								"DECODO_PROXY_CITY",
+								"DECODO_PROXY_STATE",
+								"DECODO_PROXY_ZIP",
+								"DECODO_PROXY_SESSION",
+								"DECODO_PROXY_SESSION_DURATION",
+								"DECODO_SCRAPER_TOKEN",
+								"DECODO_API_TOKEN",
+								"DECODO_SCRAPER_USERNAME",
+								"DECODO_API_USERNAME",
+								"DECODO_SCRAPER_PASSWORD",
+								"DECODO_API_PASSWORD",
+							].includes(key)
+						) {
 							await refreshBrowserTools();
 						}
 					}
@@ -906,69 +1189,19 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	});
 
 	// Load dynamic tools from ~/.octopus/tools/
-	const dynamicToolsDir = join(homedir(), ".octopus", "tools");
 	if (existsSync(dynamicToolsDir)) {
-		const { pathToFileURL } = await import("node:url");
 		try {
 			const toolDirs = readdirSync(dynamicToolsDir, { withFileTypes: true });
 			for (const entry of toolDirs) {
 				if (!entry.isDirectory()) continue;
-				const manifestPath = join(dynamicToolsDir, entry.name, "manifest.json");
-				const codePath = join(dynamicToolsDir, entry.name, "index.mjs");
-				if (!existsSync(manifestPath) || !existsSync(codePath)) continue;
 				try {
-					const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-					const toolName: string = manifest.name || entry.name;
-					const toolDesc: string =
-						manifest.description || `Dynamic tool: ${toolName}`;
-					const toolParams = normalizeDynamicToolParameters(manifest.parameters);
-					let handlerFn:
-						| ((
-								params: Record<string, unknown>,
-								context?: unknown,
-						  ) => Promise<{
-								success: boolean;
-								output?: string;
-								error?: string;
-								metadata?: Record<string, unknown>;
-						  }>)
-						| null = null;
-					toolRegistry.register({
-						name: toolName,
-						description: toolDesc,
-						parameters: toolParams,
-						metadata: { source: "dynamic", path: codePath },
-						handler: async (params: Record<string, unknown>, context) => {
-							if (!handlerFn) {
-								try {
-									const mod = await import(pathToFileURL(codePath).href);
-									handlerFn = mod.default || mod;
-								} catch (err) {
-									return {
-										success: false,
-										output: "",
-										error: `Failed to load tool "${toolName}": ${err instanceof Error ? err.message : String(err)}`,
-									};
-								}
-							}
-							try {
-								const result = await handlerFn?.(params, context);
-								return {
-									success: result?.success ?? true,
-									output: result?.output ?? "",
-									error: result?.error,
-									metadata: result?.metadata,
-								};
-							} catch (err) {
-								return {
-									success: false,
-									output: "",
-									error: `Tool "${toolName}" failed: ${err instanceof Error ? err.message : String(err)}`,
-								};
-							}
-						},
-					});
-					console.log(`  Loaded dynamic tool: ${toolName}`);
+					const toolDir = join(dynamicToolsDir, entry.name);
+					const toolName = registerDynamicTool(
+						toolRegistry,
+						toolDir,
+						entry.name,
+					);
+					if (toolName) console.log(`  Loaded dynamic tool: ${toolName}`);
 				} catch (err) {
 					console.error(
 						`  Failed to load dynamic tool from ${entry.name}:`,
@@ -992,7 +1225,9 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		const officialZaiConfigs = getZaiMCPConfigs(zhipuApiKey);
 		config.mcp = config.mcp ?? { servers: {}, autoDisabled: [] };
 		config.mcp.servers = config.mcp.servers ?? {};
-		for (const [serverName, officialConfig] of Object.entries(officialZaiConfigs)) {
+		for (const [serverName, officialConfig] of Object.entries(
+			officialZaiConfigs,
+		)) {
 			if (mcpAutoDisabled.includes(serverName)) continue;
 			const previousEnabled = config.mcp.servers[serverName]?.enabled;
 			config.mcp.servers[serverName] = {
@@ -1140,6 +1375,7 @@ Always be concise, helpful, and thorough.`,
 		complexityThreshold: 5,
 	});
 	await agentRuntime.initialize();
+	teamBlackboard.registerOrchestrator(agentRuntime);
 
 	const mainAgentRecord: AgentRecord = {
 		id: agentConfig.id,
@@ -1201,7 +1437,11 @@ Always be concise, helpful, and thorough.`,
 		automationManager,
 		async (actionType, actionConfig) => {
 			if (actionType === "agent_prompt") {
-				const prompt = String(actionConfig.prompt) || "Tick";
+				const promptConfig =
+					typeof actionConfig === "object" && actionConfig !== null
+						? (actionConfig as Record<string, unknown>)
+						: {};
+				const prompt = String(promptConfig.prompt ?? "") || "Tick";
 				console.log(
 					`[CronRunner] Spawning background prompt to Agent: ${prompt}`,
 				);
@@ -1293,6 +1533,7 @@ Always be concise, helpful, and thorough.`,
 		mcpManager,
 		browserTool,
 		refreshBrowserTools,
+		reloadDynamicTool,
 		toolExecutor,
 		embedFn,
 		shutdown: async () => {

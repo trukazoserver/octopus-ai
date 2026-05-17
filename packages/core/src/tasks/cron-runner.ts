@@ -1,14 +1,18 @@
-import type { AutomationManager, Automation } from "./automation-manager.js";
+import type { Automation, AutomationManager } from "./automation-manager.js";
 import { Scheduler } from "./cron.js";
 
-type ActionExecutor = (actionType: string, actionConfig: any, automation: Automation) => Promise<void>;
+type ActionExecutor = (
+	actionType: string,
+	actionConfig: unknown,
+	automation: Automation,
+) => Promise<void>;
 
 export class AutomationRunner {
 	private scheduler: Scheduler;
 
 	constructor(
 		private manager: AutomationManager,
-		private executor: ActionExecutor
+		private executor: ActionExecutor,
 	) {
 		this.scheduler = new Scheduler();
 	}
@@ -22,34 +26,40 @@ export class AutomationRunner {
 
 	scheduleAutomation(automation: Automation): void {
 		if (automation.trigger_type !== "cron") return;
-		
-		let triggerConfig: any;
+
+		let triggerConfig: { expression?: string };
 		try {
-			triggerConfig = JSON.parse(automation.trigger_config);
+			triggerConfig = JSON.parse(
+				automation.trigger_config,
+			) as typeof triggerConfig;
 		} catch {
 			console.error(`Invalid trigger config for automation ${automation.id}`);
 			return;
 		}
 
 		if (!triggerConfig.expression) return;
-		
+
 		const taskId = `automation-${automation.id}`;
-		
+
 		try {
 			this.scheduler.schedule(taskId, triggerConfig.expression, async () => {
-				console.log(`[AutomationRunner] Triggering automation ${automation.name} (${automation.id})`);
+				console.log(
+					`[AutomationRunner] Triggering automation ${automation.name} (${automation.id})`,
+				);
 				await this.manager.recordRun(automation.id);
-				
-				let actionConfig: any;
+
+				let actionConfig: unknown;
 				try {
 					actionConfig = JSON.parse(automation.action_config);
 				} catch {
 					actionConfig = {};
 				}
-				
+
 				await this.executor(automation.action_type, actionConfig, automation);
 			});
-			console.log(`[AutomationRunner] Scheduled cron ${taskId} with expression ${triggerConfig.expression}`);
+			console.log(
+				`[AutomationRunner] Scheduled cron ${taskId} with expression ${triggerConfig.expression}`,
+			);
 		} catch (err) {
 			console.error(`[AutomationRunner] Failed to schedule ${taskId}:`, err);
 		}
@@ -59,11 +69,11 @@ export class AutomationRunner {
 		const taskId = `automation-${id}`;
 		this.scheduler.cancel(taskId);
 	}
-	
+
 	async syncAutomation(id: string): Promise<void> {
 		this.cancelAutomation(id);
 		const automation = await this.manager.getAutomation(id);
-		if (automation && automation.enabled) {
+		if (automation?.enabled) {
 			this.scheduleAutomation(automation);
 		}
 	}

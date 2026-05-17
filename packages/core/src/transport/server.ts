@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import { randomUUID } from "node:crypto";
 import {
@@ -21,12 +22,14 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "eventemitter3";
 import WebSocket, { WebSocketServer, type WebSocket as WSWebSocket } from "ws";
-import { getProviderRegistry, type LLMRouter } from "../ai/router.js";
+import { type LLMRouter, getProviderRegistry } from "../ai/router.js";
 import type { UsageStats } from "../ai/types.js";
 import { ConfigLoader } from "../config/loader.js";
 import type { OctopusConfig } from "../config/schema.js";
 import { ConfigValidator } from "../config/validator.js";
+import type { MCPManagedServer } from "../plugins/mcp/manager.js";
 import { getZaiMCPConfigs } from "../plugins/mcp/zai-servers.js";
+import type { Skill } from "../skills/types.js";
 import { MCP_CATALOG } from "./mcp-catalog.js";
 import {
 	MessageType,
@@ -47,8 +50,6 @@ export interface TransportServerOptions {
 	host?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-// biome-ignore lint/suspicious/noExplicitAny: Needed for dynamic context injection
 type SystemContext = {
 	config: OctopusConfig;
 	router?: LLMRouter;
@@ -61,7 +62,9 @@ type SystemContext = {
 const CORS_HEADERS = {
 	"Access-Control-Allow-Origin": "*",
 	"Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, PATCH, OPTIONS",
-	"Access-Control-Allow-Headers": "Content-Type",
+	"Access-Control-Allow-Headers": "Content-Type, Range",
+	"Access-Control-Expose-Headers":
+		"Content-Length, Content-Range, Accept-Ranges",
 };
 
 export interface MediaItem {
@@ -113,6 +116,15 @@ function loadMediaMeta(): MediaItem[] {
 function saveMediaMeta(items: MediaItem[]): void {
 	ensureMediaDir();
 	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
+}
+
+function mediaCreatedAtMs(item: MediaItem): number {
+	const time = Date.parse(item.createdAt);
+	return Number.isFinite(time) ? time : 0;
+}
+
+function sortMediaNewestFirst(items: MediaItem[]): MediaItem[] {
+	return [...items].sort((a, b) => mediaCreatedAtMs(b) - mediaCreatedAtMs(a));
 }
 
 function normalizeBase64Data(data: string): string {
@@ -271,7 +283,9 @@ function describeModelRef(
 		};
 	}
 
-	for (const [provider, providerConfig] of Object.entries(config.ai.providers)) {
+	for (const [provider, providerConfig] of Object.entries(
+		config.ai.providers,
+	)) {
 		const models =
 			"models" in providerConfig && Array.isArray(providerConfig.models)
 				? providerConfig.models
@@ -312,6 +326,7 @@ export class TransportServer {
 	private wss: WebSocketServer | null = null;
 	private emitter = new EventEmitter<ServerEvents>();
 	private clients = new Map<string, WSWebSocket>();
+	private conversationSubscriptions = new Map<string, Set<string>>();
 	private system: SystemContext | null = null;
 
 	constructor(opts: TransportServerOptions = {}) {
@@ -371,7 +386,7 @@ export class TransportServer {
 				}
 
 				if (req.method === "GET" && pathname === "/api/memory/stats") {
-					this.handleMemoryStats(res);
+					void this.handleMemoryStats(res);
 					return;
 				}
 
@@ -393,6 +408,11 @@ export class TransportServer {
 
 				if (req.method === "GET" && pathname === "/api/learning/insights") {
 					void this.handleLearningInsights(res, url.searchParams);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/learning/experiences") {
+					void this.handleLearningExperiences(res, url.searchParams);
 					return;
 				}
 
@@ -555,8 +575,37 @@ export class TransportServer {
 					return;
 				}
 
+				if (req.method === "GET" && pathname === "/api/chat/executions") {
+					void this.handleListActiveChatExecutions(res);
+					return;
+				}
+
 				if (req.method === "POST" && pathname === "/api/conversations") {
 					void this.handleCreateConversation(req, res);
+					return;
+				}
+
+				if (
+					req.method === "GET" &&
+					pathname.startsWith("/api/conversations/") &&
+					pathname.endsWith("/execution")
+				) {
+					const convId = pathname
+						.slice("/api/conversations/".length)
+						.replace(/\/execution$/, "");
+					void this.handleGetConversationExecution(res, convId);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					pathname.startsWith("/api/conversations/") &&
+					pathname.endsWith("/stop")
+				) {
+					const convId = pathname
+						.slice("/api/conversations/".length)
+						.replace(/\/stop$/, "");
+					void this.handleStopConversationExecution(res, convId);
 					return;
 				}
 
@@ -815,9 +864,17 @@ export class TransportServer {
 					void this.handleSaveMedia(req, res);
 					return;
 				}
+				if (
+					req.method === "GET" &&
+					pathname.startsWith("/api/media/thumbnail/")
+				) {
+					const mediaId = pathname.slice("/api/media/thumbnail/".length);
+					this.handleServeMediaThumbnail(res, mediaId);
+					return;
+				}
 				if (req.method === "GET" && pathname.startsWith("/api/media/file/")) {
 					const mediaId = pathname.slice("/api/media/file/".length);
-					this.handleServeMediaFile(res, mediaId);
+					this.handleServeMediaFile(req, res, mediaId);
 					return;
 				}
 				if (
@@ -897,11 +954,13 @@ export class TransportServer {
 
 			ws.on("close", () => {
 				this.clients.delete(clientId);
+				this.unsubscribeClientFromAllConversations(clientId);
 				this.emitter.emit("disconnect", clientId);
 			});
 
 			ws.on("error", () => {
 				this.clients.delete(clientId);
+				this.unsubscribeClientFromAllConversations(clientId);
 				this.emitter.emit("disconnect", clientId);
 			});
 
@@ -1071,6 +1130,30 @@ export class TransportServer {
 						timeouts: this.system.config.tools.timeouts,
 					});
 				}
+				if (keyPath === "learning" || keyPath.startsWith("learning.")) {
+					this.system.learningEngine?.updateConfig?.({
+						...this.system.config.learning,
+						autoCreateSkills:
+							this.system.config.learning.autoCreateSkills &&
+							this.system.config.skills.autoCreate,
+					});
+				}
+				if (keyPath === "skills" || keyPath.startsWith("skills.")) {
+					this.system.skillLoader?.updateConfig?.({
+						enabled: this.system.config.skills.enabled,
+						...this.system.config.skills.loading,
+					});
+					this.system.skillImprover?.updateConfig?.({
+						enabled: this.system.config.skills.autoImprove,
+						...this.system.config.skills.improvement,
+					});
+					this.system.learningEngine?.updateConfig?.({
+						...this.system.config.learning,
+						autoCreateSkills:
+							this.system.config.learning.autoCreateSkills &&
+							this.system.config.skills.autoCreate,
+					});
+				}
 			}
 
 			jsonRes(res, 200, { ok: true, key: keyPath });
@@ -1081,15 +1164,38 @@ export class TransportServer {
 		}
 	}
 
-	private handleMemoryStats(res: ServerResponse): void {
+	private async handleMemoryStats(res: ServerResponse): Promise<void> {
 		try {
 			const config = this.loadConfig();
+			const stm = this.system?.agentRuntime?.stm;
+			const ltmCount = this.system?.ltm?.count
+				? await this.system.ltm.count().catch(() => 0)
+				: 0;
+			const dailyCount = this.system?.dailyMemory?.getMessageCount
+				? await this.system.dailyMemory.getMessageCount().catch(() => 0)
+				: 0;
+			const profile = this.system?.userProfileManager?.getProfile
+				? await this.system.userProfileManager
+						.getProfile("owner")
+						.catch(() => null)
+				: null;
 			jsonRes(res, 200, {
 				enabled: config.memory.enabled,
-				shortTerm: config.memory.shortTerm,
-				longTerm: config.memory.longTerm,
+				shortTerm: {
+					...config.memory.shortTerm,
+					count: stm?.getContext?.().length ?? 0,
+					load: stm?.getLoad?.() ?? 0,
+					tokens: stm?.getTokenCount?.() ?? 0,
+					condensedCount: stm?.getCondensedHistory?.().length ?? 0,
+				},
+				longTerm: { ...config.memory.longTerm, count: ltmCount },
 				consolidation: config.memory.consolidation,
 				retrieval: config.memory.retrieval,
+				daily: { rawMessageCount: dailyCount },
+				profile: {
+					exists: Boolean(profile),
+					conversationCount: profile?.conversationCount ?? 0,
+				},
 			});
 		} catch (err) {
 			jsonRes(res, 500, {
@@ -1099,7 +1205,7 @@ export class TransportServer {
 	}
 
 	private handleMemoryConfigGet(res: ServerResponse): void {
-		this.handleMemoryStats(res);
+		void this.handleMemoryStats(res);
 	}
 
 	private async handleMemorySearch(
@@ -1155,8 +1261,13 @@ export class TransportServer {
 		params: URLSearchParams,
 	): Promise<void> {
 		try {
+			const config = this.loadConfig();
 			if (!this.system?.learningEngine) {
-				jsonRes(res, 200, { enabled: false, insights: [] });
+				jsonRes(res, 200, {
+					enabled: false,
+					config: config.learning,
+					insights: [],
+				});
 				return;
 			}
 			const limit = Number.parseInt(params.get("limit") ?? "50", 10);
@@ -1165,7 +1276,48 @@ export class TransportServer {
 				limit: Number.isFinite(limit) ? limit : 50,
 				...(type ? { type } : {}),
 			});
-			jsonRes(res, 200, { enabled: true, insights });
+			jsonRes(res, 200, {
+				enabled: config.learning.enabled,
+				config: config.learning,
+				insights,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleLearningExperiences(
+		res: ServerResponse,
+		params: URLSearchParams,
+	): Promise<void> {
+		try {
+			const config = this.loadConfig();
+			if (!this.system?.learningEngine) {
+				jsonRes(res, 200, {
+					enabled: false,
+					config: config.learning,
+					experiences: [],
+				});
+				return;
+			}
+			const limit = Number.parseInt(params.get("limit") ?? "30", 10);
+			const rawStatus = params.get("status") ?? undefined;
+			const status = ["succeeded", "failed", "partial", "unknown"].includes(
+				rawStatus ?? "",
+			)
+				? rawStatus
+				: undefined;
+			const experiences = await this.system.learningEngine.listExperiences({
+				limit: Number.isFinite(limit) ? limit : 30,
+				...(status ? { status } : {}),
+			});
+			jsonRes(res, 200, {
+				enabled: config.learning.enabled,
+				config: config.learning,
+				experiences,
+			});
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -1190,10 +1342,20 @@ export class TransportServer {
 				return;
 			}
 			await this.system.learningEngine.addFeedback({
-				experienceId: typeof body.experienceId === "string" ? body.experienceId : undefined,
-				conversationId: typeof body.conversationId === "string" ? body.conversationId : undefined,
-				messageId: typeof body.messageId === "string" ? body.messageId : undefined,
-				rating: typeof body.rating === "number" || body.rating === "positive" || body.rating === "negative" ? body.rating : "positive",
+				experienceId:
+					typeof body.experienceId === "string" ? body.experienceId : undefined,
+				conversationId:
+					typeof body.conversationId === "string"
+						? body.conversationId
+						: undefined,
+				messageId:
+					typeof body.messageId === "string" ? body.messageId : undefined,
+				rating:
+					typeof body.rating === "number" ||
+					body.rating === "positive" ||
+					body.rating === "negative"
+						? body.rating
+						: "positive",
 				comment: typeof body.comment === "string" ? body.comment : undefined,
 			});
 			jsonRes(res, 200, { ok: true });
@@ -1214,7 +1376,11 @@ export class TransportServer {
 				return;
 			}
 			const ok = await this.system.learningEngine.forgetInsight(id);
-			jsonRes(res, ok ? 200 : 404, ok ? { ok: true } : { error: "Insight not found" });
+			jsonRes(
+				res,
+				ok ? 200 : 404,
+				ok ? { ok: true } : { error: "Insight not found" },
+			);
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -1226,9 +1392,20 @@ export class TransportServer {
 		try {
 			const config = this.loadConfig();
 			let dbSkills: unknown[] = [];
-			if (this.system?.skillRegistry?.list) {
+			const skillRegistry = this.system?.skillRegistry;
+			if (skillRegistry?.list) {
 				try {
-					dbSkills = await this.system.skillRegistry.list();
+					const skills = (await skillRegistry.list()) as Skill[];
+					dbSkills = await Promise.all(
+						skills.map(async (skill) => ({
+							...skill,
+							recentUsage: skillRegistry.getUsageHistory
+								? await skillRegistry
+										.getUsageHistory(skill.id, 5)
+										.catch(() => [])
+								: [],
+						})),
+					);
 				} catch {
 					/* table may not exist yet */
 				}
@@ -1237,6 +1414,12 @@ export class TransportServer {
 				enabled: config.skills.enabled,
 				autoCreate: config.skills.autoCreate,
 				autoImprove: config.skills.autoImprove,
+				effectiveAutoCreate:
+					config.skills.enabled &&
+					config.skills.autoCreate &&
+					config.learning.enabled &&
+					config.learning.autoCreateSkills,
+				learningAutoCreateSkills: config.learning.autoCreateSkills,
 				builtinSkills: config.skills.registry.builtinSkills,
 				dbSkills,
 			});
@@ -1252,19 +1435,22 @@ export class TransportServer {
 		skillName: string,
 	): Promise<void> {
 		try {
-			if (this.system?.skillRegistry) {
-				const allSkills = await this.system.skillRegistry.list();
-				const skill = allSkills.find(
-					(s: { name: string }) => s.name === skillName,
-				);
+			if (this.system?.skillRegistry?.save) {
+				const skill = await this.getSkillByName(skillName);
 				if (!skill) {
 					jsonRes(res, 404, { error: `Skill '${skillName}' not found` });
 					return;
 				}
+				const disabled = skill.tags.includes("disabled");
+				const tags = disabled
+					? skill.tags.filter((tag: string) => tag !== "disabled")
+					: Array.from(new Set([...skill.tags, "disabled"]));
+				await this.system.skillRegistry.save({ ...skill, tags });
 				jsonRes(res, 200, {
 					ok: true,
-					skill: { name: skill.name, version: skill.version },
-					message: `Skill '${skillName}' toggled successfully`,
+					enabled: disabled,
+					skill: { name: skill.name, version: skill.version, tags },
+					message: `Skill '${skillName}' ${disabled ? "enabled" : "disabled"}`,
 				});
 			} else {
 				jsonRes(res, 200, {
@@ -1383,6 +1569,10 @@ export class TransportServer {
 						language: parsed.language ?? "javascript",
 						parameters_schema: parsed.parameters_schema,
 					});
+					if (result.success && this.system?.reloadDynamicTool) {
+						const toolName = String(result.metadata?.toolName ?? parsed.name);
+						await this.system.reloadDynamicTool(toolName);
+					}
 					jsonRes(res, 200, result);
 				} else {
 					jsonRes(res, 503, { error: "Create tool handler not available" });
@@ -1399,15 +1589,15 @@ export class TransportServer {
 
 	private handleGetToolsUnified(res: ServerResponse): void {
 		try {
-			const items: any[] = [];
+			const items: Record<string, unknown>[] = [];
 			let systemCount = 0;
 			let dynamicCount = 0;
 			let mcpServerCount = 0;
 			let mcpToolCount = 0;
 
 			// Get disabled tools from config
-			const config = this.loadConfig() as any;
-			const disabledTools = config.tools?.disabled || [];
+			const config = this.loadConfig();
+			const disabledTools = config.tools?.disabled ?? [];
 
 			// 1. Get System & Dynamic Tools from ToolRegistry
 			if (this.system?.toolRegistry) {
@@ -1437,7 +1627,7 @@ export class TransportServer {
 							parameters: t.parameters,
 							origin: metadata,
 							capabilities: {
-								canToggle: source === "dynamic" ? false : true,
+								canToggle: source !== "dynamic",
 								canEdit: source === "dynamic",
 								canDelete: source === "dynamic",
 								canRestart: false,
@@ -1576,9 +1766,8 @@ export class TransportServer {
 	): Promise<void> {
 		try {
 			const loader = new ConfigLoader();
-			const config = loader.load() as any;
-			config.tools = config.tools || { disabled: [] };
-			config.tools.disabled = config.tools.disabled || [];
+			const config = loader.load();
+			config.tools.disabled = config.tools.disabled ?? [];
 
 			let isEnabled = true;
 			if (config.tools.disabled.includes(name)) {
@@ -1660,7 +1849,10 @@ export class TransportServer {
 				writeFileSync(codePath, body.code, "utf-8");
 			}
 
-			jsonRes(res, 200, { ok: true, requiresRestart: true });
+			const reloaded = this.system?.reloadDynamicTool
+				? await this.system.reloadDynamicTool(name)
+				: false;
+			jsonRes(res, 200, { ok: true, requiresRestart: !reloaded, reloaded });
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
@@ -1676,11 +1868,11 @@ export class TransportServer {
 				return;
 			}
 			const loader = new ConfigLoader();
-			const config = loader.load() as any;
+			const config = loader.load();
 			const isAutoManaged = name.startsWith("zai-");
 
 			if (isAutoManaged) {
-				config.mcp = config.mcp || {};
+				config.mcp = config.mcp || { servers: {}, autoDisabled: [] };
 				config.mcp.autoDisabled = config.mcp.autoDisabled || [];
 				let enabled = true;
 				if (config.mcp.autoDisabled.includes(name)) {
@@ -1716,7 +1908,7 @@ export class TransportServer {
 				const currentState = server.config.enabled !== false;
 				const newState = !currentState;
 
-				config.mcp = config.mcp || { servers: {} };
+				config.mcp = config.mcp || { servers: {}, autoDisabled: [] };
 				config.mcp.servers = config.mcp.servers || {};
 				config.mcp.servers[name] = { ...server.config, enabled: newState };
 				loader.save(config);
@@ -1927,20 +2119,17 @@ export class TransportServer {
 				jsonRes(res, 400, { error: "Missing 'name' or 'content'" });
 				return;
 			}
-			if (this.system?.skillRegistry?.store) {
-				await this.system.skillRegistry.store({
+			if (this.system?.skillRegistry?.save) {
+				const skill = await this.buildSkillRecord({
 					name: parsed.name,
 					description: parsed.description ?? "",
 					content: parsed.content,
 					domain: parsed.domain ?? "general",
-					version: 1,
-					successRate: 1,
-					usageCount: 0,
-					createdAt: new Date(),
-					updatedAt: new Date(),
 				});
+				await this.system.skillRegistry.save(skill);
 				jsonRes(res, 200, {
 					ok: true,
+					skill,
 					message: `Skill '${parsed.name}' created`,
 				});
 			} else {
@@ -1965,25 +2154,24 @@ export class TransportServer {
 				content?: string;
 				domain?: string;
 			};
-			if (this.system?.skillRegistry?.store) {
-				const existing = (await this.system.skillRegistry.list()).find(
-					(s: { name: string }) => s.name === skillName,
-				);
+			if (this.system?.skillRegistry?.save) {
+				const existing = await this.getSkillByName(skillName);
 				if (!existing) {
 					jsonRes(res, 404, { error: `Skill '${skillName}' not found` });
 					return;
 				}
-				await this.system.skillRegistry.store({
-					...existing,
-					...(parsed.description !== undefined
-						? { description: parsed.description }
-						: {}),
-					...(parsed.content !== undefined ? { content: parsed.content } : {}),
-					...(parsed.domain !== undefined ? { domain: parsed.domain } : {}),
-					updatedAt: new Date(),
+				const skill = await this.buildSkillRecord({
+					name: existing.name,
+					description: parsed.description ?? existing.description,
+					content: parsed.content ?? existing.instructions,
+					domain:
+						parsed.domain ?? existing.triggerConditions.domains[0] ?? "general",
+					existing,
 				});
+				await this.system.skillRegistry.save(skill);
 				jsonRes(res, 200, {
 					ok: true,
+					skill,
 					message: `Skill '${skillName}' updated`,
 				});
 			} else {
@@ -2002,7 +2190,12 @@ export class TransportServer {
 	): Promise<void> {
 		try {
 			if (this.system?.skillRegistry?.delete) {
-				await this.system.skillRegistry.delete(skillName);
+				const existing = await this.getSkillByName(skillName);
+				if (!existing) {
+					jsonRes(res, 404, { error: `Skill '${skillName}' not found` });
+					return;
+				}
+				await this.system.skillRegistry.delete(existing.id);
 				jsonRes(res, 200, {
 					ok: true,
 					message: `Skill '${skillName}' deleted`,
@@ -2025,28 +2218,120 @@ export class TransportServer {
 		}
 	}
 
+	private async getSkillByName(skillName: string): Promise<Skill | undefined> {
+		if (this.system?.skillRegistry?.getByName) {
+			return this.system.skillRegistry.getByName(skillName);
+		}
+		const allSkills = (await this.system?.skillRegistry?.list?.()) ?? [];
+		return allSkills.find((skill: Skill) => skill.name === skillName);
+	}
+
+	private async buildSkillRecord(input: {
+		name: string;
+		description: string;
+		content: string;
+		domain: string;
+		existing?: Skill;
+	}): Promise<Skill> {
+		const now = new Date().toISOString();
+		const text = `${input.name} ${input.description} ${input.domain} ${input.content}`;
+		const keywords = this.extractSkillKeywords(text);
+		const embedding = await this.embedSkillText(text);
+		const existing = input.existing;
+
+		return {
+			id: existing?.id ?? randomUUID(),
+			name: input.name.trim(),
+			version: existing?.version ?? "1.0.0",
+			description: input.description.trim(),
+			tags: Array.from(new Set([input.domain, ...keywords.slice(0, 8)])),
+			embedding,
+			instructions: input.content.trim(),
+			examples: existing?.examples ?? [],
+			templates: existing?.templates ?? [],
+			triggerConditions: {
+				keywords,
+				taskPatterns: existing?.triggerConditions.taskPatterns ?? [],
+				domains: Array.from(
+					new Set([
+						input.domain,
+						...(existing?.triggerConditions.domains ?? []),
+					]),
+				),
+			},
+			contextEstimate: existing?.contextEstimate ?? {
+				instructions: Math.ceil(input.content.length / 4),
+				perExample: 0,
+				templates: 0,
+			},
+			metrics: existing?.metrics ?? {
+				timesUsed: 0,
+				successRate: 1,
+				avgUserRating: 0,
+				lastUsed: "",
+				improvementsCount: 0,
+				createdAt: now,
+			},
+			quality: existing?.quality ?? {
+				completeness: 0.8,
+				accuracy: 0.8,
+				clarity: 0.8,
+			},
+			dependencies: existing?.dependencies ?? [],
+			related: existing?.related ?? [],
+		};
+	}
+
+	private async embedSkillText(text: string): Promise<number[]> {
+		const embedFn = this.system?.embedFn;
+		if (typeof embedFn !== "function") return [];
+		try {
+			return await embedFn(text);
+		} catch {
+			return [];
+		}
+	}
+
+	private extractSkillKeywords(text: string): string[] {
+		const stop = new Set([
+			"para",
+			"cuando",
+			"con",
+			"los",
+			"las",
+			"una",
+			"the",
+			"and",
+			"that",
+			"this",
+		]);
+		const words = text.toLowerCase().match(/[a-z0-9áéíóúñ_-]{3,}/gi) ?? [];
+		return Array.from(new Set(words.filter((word) => !stop.has(word)))).slice(
+			0,
+			24,
+		);
+	}
+
 	private handleGetSTM(res: ServerResponse): void {
 		try {
 			if (this.system?.agentRuntime?.stm) {
 				const turns = this.system.agentRuntime.stm.getContext();
-				const recentTurns = turns
-					.slice(-30)
-					.map(
-						(t: {
-							role: string;
-							content: string;
-							timestamp: Date;
-							metadata?: Record<string, unknown>;
-						}) => ({
-							role: t.role,
-							content:
-								t.content.length > 500
-									? `${t.content.substring(0, 500)}...`
-									: t.content,
-							timestamp: t.timestamp?.toISOString?.() ?? null,
-							channel: t.metadata?.conversationId ?? null,
-						}),
-					);
+				const recentTurns = turns.slice(-30).map(
+					(t: {
+						role: string;
+						content: string;
+						timestamp: Date;
+						metadata?: Record<string, unknown>;
+					}) => ({
+						role: t.role,
+						content:
+							t.content.length > 500
+								? `${t.content.substring(0, 500)}...`
+								: t.content,
+						timestamp: t.timestamp?.toISOString?.() ?? null,
+						channel: t.metadata?.conversationId ?? null,
+					}),
+				);
 				jsonRes(res, 200, { turns: recentTurns, total: turns.length });
 			} else {
 				jsonRes(res, 200, { turns: [], total: 0 });
@@ -2148,12 +2433,18 @@ export class TransportServer {
 	): Promise<void> {
 		try {
 			const limit = Number.parseInt(url.searchParams.get("limit") ?? "20", 10);
-			if (this.system?.db) {
-				const rows = await this.system.db.all(
-					"SELECT * FROM memories ORDER BY created_at DESC LIMIT ?",
-					[limit],
-				);
-				jsonRes(res, 200, { memories: rows ?? [] });
+			const safeLimit = Number.isFinite(limit) ? limit : 20;
+			if (this.system?.ltm?.listRecent) {
+				const memories = await this.system.ltm.listRecent(safeLimit);
+				jsonRes(res, 200, { memories });
+			} else if (this.system?.db) {
+				const rows = await this.system.db
+					.all(
+						"SELECT id, type, content, importance, access_count, last_accessed, created_at, associations, source, metadata FROM memory_items ORDER BY created_at DESC LIMIT ?",
+						[Math.max(1, Math.min(safeLimit, 500))],
+					)
+					.catch(() => []);
+				jsonRes(res, 200, { memories: rows });
 			} else {
 				jsonRes(res, 200, { memories: [] });
 			}
@@ -2275,10 +2566,10 @@ export class TransportServer {
 					return;
 				}
 			}
-			const conversation = await this.system.chatManager.createConversation(
-				parsed.title,
-				parsed.agentId,
-			);
+			const conversation = await this.system.chatManager.createConversation({
+				title: parsed.title,
+				agentId: parsed.agentId,
+			});
 			jsonRes(res, 201, { conversation });
 		} catch (err) {
 			jsonRes(res, 500, {
@@ -2338,15 +2629,75 @@ export class TransportServer {
 				return;
 			}
 			const body = await readBody(req);
-			let parsed: { title?: string; agent_id?: string } = {};
+			let parsed: { title?: string; agent_id?: string; agentId?: string } = {};
 			try {
 				parsed = JSON.parse(body);
 			} catch {
 				jsonRes(res, 400, { error: "Invalid JSON body" });
 				return;
 			}
-			await this.system.chatManager.updateConversation(id, parsed);
+			await this.system.chatManager.updateConversation(id, {
+				title: parsed.title,
+				agentId: parsed.agentId ?? parsed.agent_id,
+			});
 			jsonRes(res, 200, { ok: true });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleListActiveChatExecutions(
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			if (!this.system?.chatManager) {
+				jsonRes(res, 503, { error: "Chat manager not available" });
+				return;
+			}
+			jsonRes(res, 200, await this.system.chatManager.listActiveExecutions());
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetConversationExecution(
+		res: ServerResponse,
+		id: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.chatManager) {
+				jsonRes(res, 503, { error: "Chat manager not available" });
+				return;
+			}
+			const active =
+				await this.system.chatManager.getActiveExecutionForConversation(id);
+			const latest =
+				active ??
+				(await this.system.chatManager.getLatestExecutionForConversation(id));
+			jsonRes(res, 200, { execution: latest });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleStopConversationExecution(
+		res: ServerResponse,
+		id: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.chatExecutionManager) {
+				jsonRes(res, 503, { error: "Chat execution manager not available" });
+				return;
+			}
+			const execution =
+				await this.system.chatExecutionManager.cancelByConversation(id);
+			jsonRes(res, 200, { ok: true, execution });
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -2678,7 +3029,36 @@ export class TransportServer {
 			});
 			if (body?.key && body?.value !== undefined) {
 				process.env[String(body.key)] = String(body.value);
-				if (["BRIGHTDATA_WS_URL", "TWOCAPTCHA_API_KEY", "TWO_CAPTCHA_API_KEY", "TWOCAPTCHA_PROXY_ADDRESS", "TWOCAPTCHA_PROXY_PORT", "TWOCAPTCHA_PROXY_LOGIN", "TWOCAPTCHA_PROXY_PASSWORD", "DECODO_PROXY_URL", "DECODO_PROXY_SERVER", "DECODO_PROXY_PROTOCOL", "DECODO_PROXY_USERNAME", "DECODO_PROXY_USER", "DECODO_PROXY_PASSWORD", "DECODO_PROXY_PASS", "DECODO_PROXY_COUNTRY", "DECODO_PROXY_CITY", "DECODO_PROXY_STATE", "DECODO_PROXY_ZIP", "DECODO_PROXY_SESSION", "DECODO_PROXY_SESSION_DURATION", "DECODO_SCRAPER_TOKEN", "DECODO_API_TOKEN", "DECODO_SCRAPER_USERNAME", "DECODO_API_USERNAME", "DECODO_SCRAPER_PASSWORD", "DECODO_API_PASSWORD"].includes(String(body.key))) {
+				if (
+					[
+						"BRIGHTDATA_WS_URL",
+						"TWOCAPTCHA_API_KEY",
+						"TWO_CAPTCHA_API_KEY",
+						"TWOCAPTCHA_PROXY_ADDRESS",
+						"TWOCAPTCHA_PROXY_PORT",
+						"TWOCAPTCHA_PROXY_LOGIN",
+						"TWOCAPTCHA_PROXY_PASSWORD",
+						"DECODO_PROXY_URL",
+						"DECODO_PROXY_SERVER",
+						"DECODO_PROXY_PROTOCOL",
+						"DECODO_PROXY_USERNAME",
+						"DECODO_PROXY_USER",
+						"DECODO_PROXY_PASSWORD",
+						"DECODO_PROXY_PASS",
+						"DECODO_PROXY_COUNTRY",
+						"DECODO_PROXY_CITY",
+						"DECODO_PROXY_STATE",
+						"DECODO_PROXY_ZIP",
+						"DECODO_PROXY_SESSION",
+						"DECODO_PROXY_SESSION_DURATION",
+						"DECODO_SCRAPER_TOKEN",
+						"DECODO_API_TOKEN",
+						"DECODO_SCRAPER_USERNAME",
+						"DECODO_API_USERNAME",
+						"DECODO_SCRAPER_PASSWORD",
+						"DECODO_API_PASSWORD",
+					].includes(String(body.key))
+				) {
 					await this.system.refreshBrowserTools?.(this.system.config);
 				}
 			}
@@ -2700,7 +3080,36 @@ export class TransportServer {
 			const ok = await this.system.envVarManager.delete(key);
 			if (ok) {
 				delete process.env[key];
-				if (["BRIGHTDATA_WS_URL", "TWOCAPTCHA_API_KEY", "TWO_CAPTCHA_API_KEY", "TWOCAPTCHA_PROXY_ADDRESS", "TWOCAPTCHA_PROXY_PORT", "TWOCAPTCHA_PROXY_LOGIN", "TWOCAPTCHA_PROXY_PASSWORD", "DECODO_PROXY_URL", "DECODO_PROXY_SERVER", "DECODO_PROXY_PROTOCOL", "DECODO_PROXY_USERNAME", "DECODO_PROXY_USER", "DECODO_PROXY_PASSWORD", "DECODO_PROXY_PASS", "DECODO_PROXY_COUNTRY", "DECODO_PROXY_CITY", "DECODO_PROXY_STATE", "DECODO_PROXY_ZIP", "DECODO_PROXY_SESSION", "DECODO_PROXY_SESSION_DURATION", "DECODO_SCRAPER_TOKEN", "DECODO_API_TOKEN", "DECODO_SCRAPER_USERNAME", "DECODO_API_USERNAME", "DECODO_SCRAPER_PASSWORD", "DECODO_API_PASSWORD"].includes(key)) {
+				if (
+					[
+						"BRIGHTDATA_WS_URL",
+						"TWOCAPTCHA_API_KEY",
+						"TWO_CAPTCHA_API_KEY",
+						"TWOCAPTCHA_PROXY_ADDRESS",
+						"TWOCAPTCHA_PROXY_PORT",
+						"TWOCAPTCHA_PROXY_LOGIN",
+						"TWOCAPTCHA_PROXY_PASSWORD",
+						"DECODO_PROXY_URL",
+						"DECODO_PROXY_SERVER",
+						"DECODO_PROXY_PROTOCOL",
+						"DECODO_PROXY_USERNAME",
+						"DECODO_PROXY_USER",
+						"DECODO_PROXY_PASSWORD",
+						"DECODO_PROXY_PASS",
+						"DECODO_PROXY_COUNTRY",
+						"DECODO_PROXY_CITY",
+						"DECODO_PROXY_STATE",
+						"DECODO_PROXY_ZIP",
+						"DECODO_PROXY_SESSION",
+						"DECODO_PROXY_SESSION_DURATION",
+						"DECODO_SCRAPER_TOKEN",
+						"DECODO_API_TOKEN",
+						"DECODO_SCRAPER_USERNAME",
+						"DECODO_API_USERNAME",
+						"DECODO_SCRAPER_PASSWORD",
+						"DECODO_API_PASSWORD",
+					].includes(key)
+				) {
 					await this.system.refreshBrowserTools?.(this.system.config);
 				}
 			}
@@ -2716,30 +3125,32 @@ export class TransportServer {
 				jsonRes(res, 200, []);
 				return;
 			}
-			const servers = this.system.mcpManager.listServers().map((s: any) => {
-				const maskedEnv: Record<string, string> = {};
-				if (s.config.env) {
-					for (const [k, v] of Object.entries(s.config.env)) {
-						maskedEnv[k] =
-							typeof v === "string" && v.length > 4
-								? `${v.slice(0, 4)}...`
-								: String(v || "");
+			const servers = this.system.mcpManager
+				.listServers()
+				.map((s: MCPManagedServer) => {
+					const maskedEnv: Record<string, string> = {};
+					if (s.config.env) {
+						for (const [k, v] of Object.entries(s.config.env)) {
+							maskedEnv[k] =
+								typeof v === "string" && v.length > 4
+									? `${v.slice(0, 4)}...`
+									: String(v || "");
+						}
 					}
-				}
-				const maskedHeaders: Record<string, string> = {};
-				if (s.config.headers) {
-					for (const [k, v] of Object.entries(s.config.headers)) {
-						maskedHeaders[k] =
-							typeof v === "string" && v.length > 12
-								? `${v.slice(0, 12)}...`
-								: String(v || "");
+					const maskedHeaders: Record<string, string> = {};
+					if (s.config.headers) {
+						for (const [k, v] of Object.entries(s.config.headers)) {
+							maskedHeaders[k] =
+								typeof v === "string" && v.length > 12
+									? `${v.slice(0, 12)}...`
+									: String(v || "");
+						}
 					}
-				}
-				return {
-					...s,
-					config: { ...s.config, env: maskedEnv, headers: maskedHeaders },
-				};
-			});
+					return {
+						...s,
+						config: { ...s.config, env: maskedEnv, headers: maskedHeaders },
+					};
+				});
 			jsonRes(res, 200, servers);
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -2763,6 +3174,7 @@ export class TransportServer {
 				command: body.command,
 				args: body.args ?? [],
 				env: body.env,
+				enabled: body.enabled,
 			});
 			jsonRes(res, 201, server);
 		} catch (err) {
@@ -2945,7 +3357,7 @@ export class TransportServer {
 
 	private handleListMedia(res: ServerResponse): void {
 		try {
-			const items = loadMediaMeta();
+			const items = sortMediaNewestFirst(loadMediaMeta());
 			jsonRes(res, 200, items);
 		} catch (err) {
 			jsonRes(res, 500, {
@@ -3026,7 +3438,11 @@ export class TransportServer {
 			}
 			saveMediaMeta(items);
 			if (saved.length === 1) {
-				const item = saved[0]!;
+				const item = saved[0];
+				if (!item) {
+					jsonRes(res, 500, { error: "Media save failed" });
+					return;
+				}
 				const ext =
 					extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
 				jsonRes(res, 201, { ...item, url: `/api/media/file/${item.id}${ext}` });
@@ -3097,31 +3513,130 @@ export class TransportServer {
 		}
 	}
 
-	private handleServeMediaFile(res: ServerResponse, id: string): void {
+	private resolveMediaFile(id: string): {
+		item: MediaItem;
+		pureId: string;
+		filePath: string;
+		size: number;
+	} | null {
+		// Strip any extension from the id (e.g. "uuid.png" -> "uuid")
+		const pureId = id.replace(/\.[^.]+$/, "");
+		const items = loadMediaMeta();
+		const item = items.find((m) => m.id === pureId);
+		if (!item) return null;
+		const ext = extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
+		const filePath = join(MEDIA_DIR, pureId + ext);
+		if (!existsSync(filePath)) return null;
+		return { item, pureId, filePath, size: statSync(filePath).size };
+	}
+
+	private handleServeMediaThumbnail(res: ServerResponse, id: string): void {
 		try {
-			// Strip any extension from the id (e.g. "uuid.png" -> "uuid")
-			const pureId = id.replace(/\.[^.]+$/, "");
-			const items = loadMediaMeta();
-			const item = items.find((m) => m.id === pureId);
-			if (!item) {
+			const resolved = this.resolveMediaFile(id);
+			if (!resolved) {
 				jsonRes(res, 404, { error: "Media not found" });
 				return;
 			}
-			const ext =
-				extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
-			const filePath = join(MEDIA_DIR, pureId + ext);
-			if (!existsSync(filePath)) {
-				jsonRes(res, 404, { error: "File not found on disk" });
+			if (!resolved.item.mimetype.startsWith("video/")) {
+				jsonRes(res, 400, { error: "Media is not a video" });
 				return;
 			}
-			const stat = statSync(filePath);
+
+			const posterPath = join(MEDIA_DIR, `${resolved.pureId}.poster.jpg`);
+			if (!existsSync(posterPath)) {
+				const result = spawnSync(
+					"ffmpeg",
+					[
+						"-y",
+						"-ss",
+						"0.001",
+						"-i",
+						resolved.filePath,
+						"-frames:v",
+						"1",
+						"-vf",
+						"scale='min(720,iw)':-1",
+						"-q:v",
+						"3",
+						posterPath,
+					],
+					{ stdio: "ignore" },
+				);
+				if (result.status !== 0 || !existsSync(posterPath)) {
+					jsonRes(res, 404, { error: "Video thumbnail unavailable" });
+					return;
+				}
+			}
+
+			const stat = statSync(posterPath);
 			corsHeaders(res);
 			res.writeHead(200, {
-				"Content-Type": item.mimetype,
+				"Content-Type": "image/jpeg",
 				"Content-Length": stat.size,
 				"Cache-Control": "public, max-age=86400",
 			});
-			createReadStream(filePath).pipe(res);
+			createReadStream(posterPath).pipe(res);
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private handleServeMediaFile(
+		req: IncomingMessage,
+		res: ServerResponse,
+		id: string,
+	): void {
+		try {
+			const resolved = this.resolveMediaFile(id);
+			if (!resolved) {
+				jsonRes(res, 404, { error: "Media not found" });
+				return;
+			}
+
+			const range = req.headers.range;
+			const supportsRange =
+				resolved.item.mimetype.startsWith("video/") ||
+				resolved.item.mimetype.startsWith("audio/");
+
+			if (range && supportsRange) {
+				const match = range.match(/^bytes=(\d*)-(\d*)$/);
+				if (!match) {
+					res.writeHead(416, { "Content-Range": `bytes */${resolved.size}` });
+					res.end();
+					return;
+				}
+				const start = match[1] ? Number.parseInt(match[1], 10) : 0;
+				const end = match[2]
+					? Math.min(Number.parseInt(match[2], 10), resolved.size - 1)
+					: resolved.size - 1;
+				if (start >= resolved.size || end < start) {
+					res.writeHead(416, { "Content-Range": `bytes */${resolved.size}` });
+					res.end();
+					return;
+				}
+				const chunkSize = end - start + 1;
+				corsHeaders(res);
+				res.writeHead(206, {
+					"Content-Type": resolved.item.mimetype,
+					"Content-Length": chunkSize,
+					"Content-Range": `bytes ${start}-${end}/${resolved.size}`,
+					"Accept-Ranges": "bytes",
+					"Cache-Control": "public, max-age=86400",
+				});
+				createReadStream(resolved.filePath, { start, end }).pipe(res);
+				return;
+			}
+
+			corsHeaders(res);
+			res.writeHead(200, {
+				"Content-Type": resolved.item.mimetype,
+				"Content-Length": resolved.size,
+				"Accept-Ranges": supportsRange ? "bytes" : "none",
+				"Cache-Control": "public, max-age=86400",
+			});
+			createReadStream(resolved.filePath).pipe(res);
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -3202,6 +3717,48 @@ export class TransportServer {
 		const raw = serializeMessage(msg);
 		for (const [, ws] of this.clients) {
 			if (ws.readyState === WebSocket.OPEN) {
+				ws.send(raw);
+			}
+		}
+	}
+
+	subscribeConversation(clientId: string, conversationId: string): void {
+		if (!this.clients.has(clientId)) return;
+		const subscribers =
+			this.conversationSubscriptions.get(conversationId) ?? new Set<string>();
+		subscribers.add(clientId);
+		this.conversationSubscriptions.set(conversationId, subscribers);
+	}
+
+	unsubscribeConversation(clientId: string, conversationId: string): void {
+		const subscribers = this.conversationSubscriptions.get(conversationId);
+		if (!subscribers) return;
+		subscribers.delete(clientId);
+		if (subscribers.size === 0) {
+			this.conversationSubscriptions.delete(conversationId);
+		}
+	}
+
+	unsubscribeClientFromAllConversations(clientId: string): void {
+		for (const [conversationId, subscribers] of this
+			.conversationSubscriptions) {
+			subscribers.delete(clientId);
+			if (subscribers.size === 0) {
+				this.conversationSubscriptions.delete(conversationId);
+			}
+		}
+	}
+
+	sendToConversation(
+		conversationId: string,
+		message: ProtocolMessage<unknown>,
+	): void {
+		const subscribers = this.conversationSubscriptions.get(conversationId);
+		if (!subscribers || subscribers.size === 0) return;
+		const raw = serializeMessage(message);
+		for (const clientId of subscribers) {
+			const ws = this.clients.get(clientId);
+			if (ws?.readyState === WebSocket.OPEN) {
 				ws.send(raw);
 			}
 		}

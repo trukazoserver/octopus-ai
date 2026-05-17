@@ -16,13 +16,44 @@ export function resolveMCPSpawnCommand(
 	if (platform === "win32" && (command === "npx" || command === "npm")) {
 		return {
 			command: `${command}.cmd`,
-			shell: true,
+			shell: false,
 		};
 	}
 
 	return {
 		command,
 		shell: false,
+	};
+}
+
+function resolveTemplateValue(value: string): string {
+	return value.replace(/\$\{([A-Z0-9_]+)\}/gi, (match, key: string) => {
+		return process.env[key] ?? match;
+	});
+}
+
+function resolveTemplateRecord(
+	record?: Record<string, string>,
+): Record<string, string> | undefined {
+	if (!record) return undefined;
+	return Object.fromEntries(
+		Object.entries(record).map(([key, value]) => [
+			key,
+			resolveTemplateValue(value),
+		]),
+	);
+}
+
+function resolveConfigTemplates(config: MCPServerConfig): MCPServerConfig {
+	return {
+		...config,
+		url: config.url ? resolveTemplateValue(config.url) : config.url,
+		command: config.command
+			? resolveTemplateValue(config.command)
+			: config.command,
+		args: (config.args ?? []).map((arg) => resolveTemplateValue(arg)),
+		env: resolveTemplateRecord(config.env),
+		headers: resolveTemplateRecord(config.headers),
 	};
 }
 
@@ -38,7 +69,7 @@ export class MCPClient {
 	private httpSessionId?: string;
 
 	constructor(config: MCPServerConfig) {
-		this.config = config;
+		this.config = resolveConfigTemplates(config);
 	}
 
 	/**
@@ -210,7 +241,11 @@ export class MCPClient {
 			const id = randomUUID();
 			const timer = setTimeout(() => {
 				this.pendingRequests.delete(id);
-				reject(new Error(`MCP request "${method}" timed out after ${MCP_REQUEST_TIMEOUT_MS}ms`));
+				reject(
+					new Error(
+						`MCP request "${method}" timed out after ${MCP_REQUEST_TIMEOUT_MS}ms`,
+					),
+				);
 			}, MCP_REQUEST_TIMEOUT_MS);
 			this.pendingRequests.set(id, {
 				resolve: (val: unknown) => {
@@ -308,7 +343,9 @@ export class MCPClient {
 				return message.result as T;
 			}
 			if ("code" in message || "msg" in message) {
-				throw new Error(String(message.msg ?? message.code ?? "MCP HTTP error"));
+				throw new Error(
+					String(message.msg ?? message.code ?? "MCP HTTP error"),
+				);
 			}
 		}
 

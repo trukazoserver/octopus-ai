@@ -9,6 +9,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 	},
 	browser: {
 		headless: false,
+		chromiumSandbox: undefined,
 		provider: "auto",
 		brightDataEnabled: true,
 		decodoEnabled: true,

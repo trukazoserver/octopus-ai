@@ -1,8 +1,9 @@
 import type React from "react";
 import type { DashboardStats } from "../../hooks/useDashboard.js";
+import { AppIcon, type AppIconName } from "../ui/AppIcon.js";
 
 interface StatCardProps {
-	icon: string;
+	icon: AppIconName;
 	label: string;
 	value: string | number;
 	sublabel?: string;
@@ -46,7 +47,6 @@ const StatCard: React.FC<StatCardProps> = ({
 	>
 		<div
 			style={{
-				fontSize: "24px",
 				background: bg,
 				color,
 				width: "52px",
@@ -58,7 +58,7 @@ const StatCard: React.FC<StatCardProps> = ({
 				flexShrink: 0,
 			}}
 		>
-			{icon}
+			<AppIcon name={icon} size={24} />
 		</div>
 		<div style={{ minWidth: 0 }}>
 			<div
@@ -90,6 +90,15 @@ interface DashboardStatsProps {
 	loading: boolean;
 }
 
+const STAT_SKELETON_KEYS = [
+	"agents",
+	"conversations",
+	"tools",
+	"tasks",
+	"memory",
+	"model",
+];
+
 export const DashboardStatsGrid: React.FC<DashboardStatsProps> = ({
 	stats,
 	loading,
@@ -103,9 +112,9 @@ export const DashboardStatsGrid: React.FC<DashboardStatsProps> = ({
 					gap: "16px",
 				}}
 			>
-				{Array.from({ length: 6 }).map((_, i) => (
+				{STAT_SKELETON_KEYS.map((key) => (
 					<div
-						key={i}
+						key={key}
 						className="skeleton"
 						style={{ height: "100px", borderRadius: "16px" }}
 					/>
@@ -118,21 +127,21 @@ export const DashboardStatsGrid: React.FC<DashboardStatsProps> = ({
 
 	const cards = [
 		{
-			icon: "🤖",
+			icon: "agent",
 			label: "Agentes activos",
 			value: stats.agents,
 			color: "#818cf8",
 			bg: "rgba(99, 102, 241, 0.1)",
 		},
 		{
-			icon: "💬",
+			icon: "chat",
 			label: "Conversaciones",
 			value: stats.conversations,
 			color: "#10b981",
 			bg: "rgba(16, 185, 129, 0.1)",
 		},
 		{
-			icon: "🔌",
+			icon: "plug",
 			label: "Herramientas",
 			value: stats.tools,
 			sublabel: `${stats.mcp} MCP`,
@@ -140,7 +149,7 @@ export const DashboardStatsGrid: React.FC<DashboardStatsProps> = ({
 			bg: "rgba(52, 211, 153, 0.1)",
 		},
 		{
-			icon: "✅",
+			icon: "check",
 			label: "Tareas",
 			value: stats.tasks,
 			sublabel: `${stats.runningTasks} en ejecución`,
@@ -148,28 +157,28 @@ export const DashboardStatsGrid: React.FC<DashboardStatsProps> = ({
 			bg: "rgba(56, 189, 248, 0.1)",
 		},
 		{
-			icon: "💭",
+			icon: "brain",
 			label: "Base de memoria",
 			value: stats.memories,
 			color: "#fbbf24",
 			bg: "rgba(245, 158, 11, 0.1)",
 		},
 		{
-			icon: "🧠",
+			icon: "spark",
 			label: "Modelo de IA",
 			value: stats.provider.split("/")[1] || stats.provider,
 			color: "#f472b6",
 			bg: "rgba(236, 72, 153, 0.1)",
 		},
 		{
-			icon: stats.status === "online" ? "🟢" : "🟠",
+			icon: "server",
 			label: "Salud del sistema",
 			value: stats.status === "online" ? "Online" : "Degradado",
 			sublabel: `${stats.channels.length} canales activos`,
 			color: "#60a5fa",
 			bg: "rgba(96, 165, 250, 0.1)",
 		},
-	];
+	] satisfies Array<Omit<StatCardProps, "index">>;
 
 	return (
 		<div

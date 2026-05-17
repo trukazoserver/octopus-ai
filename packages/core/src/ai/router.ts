@@ -394,7 +394,10 @@ export class LLMRouter {
 	 * When a request contains images via direct API, we transparently upgrade the model.
 	 * NOTE: zhipu (Coding Plan) is NOT listed here — vision is handled via Z.AI MCP Server.
 	 */
-	private static readonly VISION_MODEL_MAP: Record<string, Record<string, string>> = {
+	private static readonly VISION_MODEL_MAP: Record<
+		string,
+		Record<string, string>
+	> = {
 		// openai, anthropic, google etc. can be added here if needed
 	};
 
@@ -478,7 +481,8 @@ export class LLMRouter {
 						fallbackProviderName,
 					);
 					this.trackRequest(fallbackProviderName);
-					const fallbackResponse = await fallbackProvider.chat(fallbackResolved);
+					const fallbackResponse =
+						await fallbackProvider.chat(fallbackResolved);
 					this.trackUsage(fallbackProviderName, fallbackResponse.usage);
 					return fallbackResponse;
 				} catch {
@@ -570,12 +574,16 @@ export class LLMRouter {
 	 */
 	switchProvider(providerName: string): boolean {
 		if (!this.providers.has(providerName)) {
-			logger.warn(`Cannot switch to provider '${providerName}' — not available`);
+			logger.warn(
+				`Cannot switch to provider '${providerName}' — not available`,
+			);
 			return false;
 		}
 		const previousDefault = this.config.default;
 		this.config.default = providerName;
-		logger.info(`Default provider switched: ${previousDefault} → ${providerName}`);
+		logger.info(
+			`Default provider switched: ${previousDefault} → ${providerName}`,
+		);
 		return true;
 	}
 
@@ -591,7 +599,11 @@ export class LLMRouter {
 	/**
 	 * Get current active provider and model info.
 	 */
-	getActiveConfig(): { defaultProvider: string; availableProviders: string[]; fallback: string | undefined } {
+	getActiveConfig(): {
+		defaultProvider: string;
+		availableProviders: string[];
+		fallback: string | undefined;
+	} {
 		return {
 			defaultProvider: this.config.default,
 			availableProviders: Array.from(this.providers.keys()),
@@ -602,7 +614,10 @@ export class LLMRouter {
 	/**
 	 * Hot-add a new provider at runtime (e.g., user adds API key mid-session).
 	 */
-	async addProviderFromConfig(name: string, config: ProviderConfig): Promise<boolean> {
+	async addProviderFromConfig(
+		name: string,
+		config: ProviderConfig,
+	): Promise<boolean> {
 		const registryEntry = PROVIDER_REGISTRY[name];
 		if (!registryEntry) {
 			logger.warn(`Unknown provider: ${name}`);

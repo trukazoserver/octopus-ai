@@ -247,7 +247,7 @@ describe("AgentRuntime", () => {
 		});
 	});
 
-		describe("processMessage", () => {
+	describe("processMessage", () => {
 		it("should return a string response", async () => {
 			const result = await runtime.processMessage("Hello");
 			expect(typeof result).toBe("string");
@@ -347,9 +347,13 @@ describe("AgentRuntime", () => {
 				.mockResolvedValueOnce(secondResponse);
 
 			const result = await runtime.processMessage("calculate 2+2");
-			expect(mockExecutor.execute).toHaveBeenCalledWith("calculator", {
-				expression: "2+2",
-			}, expect.objectContaining({ usesZaiVisionToolForImages: false }));
+			expect(mockExecutor.execute).toHaveBeenCalledWith(
+				"calculator",
+				{
+					expression: "2+2",
+				},
+				expect.objectContaining({ usesZaiVisionToolForImages: false }),
+			);
 			expect(result).toBe("The answer is 4");
 		});
 
@@ -543,10 +547,103 @@ describe("AgentRuntime", () => {
 			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
 			const memoryMsg = request.messages.find(
 				(m: { role: string; content: string }) =>
-					m.role === "system" && m.content.startsWith("Relevant memories from long-term storage:"),
+					m.role === "system" &&
+					m.content.startsWith("Relevant memories from long-term storage:"),
 			);
 			expect(memoryMsg).toBeDefined();
 			expect(memoryMsg?.content).toContain("User prefers dark mode");
+		});
+
+		it("should include condensed STM context from retrieval in the prompt", async () => {
+			mockMemoryRetrieval = createMockMemoryRetrieval({
+				fromSTM: [
+					{
+						role: "system",
+						content:
+							"## Previous Context (condensed)\nEarlier blocked API decision",
+						timestamp: new Date(),
+					},
+				],
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+
+			await runtime.processMessage("Continue the task");
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+			expect(
+				request.messages.some(
+					(m: { role: string; content: string }) =>
+						m.role === "system" &&
+						m.content.includes("Earlier blocked API decision"),
+				),
+			).toBe(true);
+		});
+
+		it("should carry tool usage into working memory for subsequent turns", async () => {
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-1",
+							type: "function" as const,
+							function: {
+								name: "calculator",
+								arguments: '{"expression":"2+2"}',
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "The answer is 4",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+					finishReason: "stop",
+				})
+				.mockResolvedValueOnce({
+					content: "Next answer",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+					finishReason: "stop",
+				});
+
+			const mockRegistry = createMockToolRegistry([
+				{ name: "calculator", description: "Performs calculations" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			await runtime.processMessage("calculate 2+2");
+			await runtime.processMessage("continue");
+			const request = mockLLMRouter.chat.mock.calls[2]?.[0];
+			expect(request.messages[0]?.content).toContain(
+				"**Tools Used**: calculator",
+			);
+		});
+
+		it("should update working memory before building streaming context", async () => {
+			for await (const _chunk of runtime.processMessageStream(
+				"Please inspect https://example.com/docs",
+			)) {
+				// consume stream
+			}
+			const request = mockLLMRouter.chatStream.mock.calls[0]?.[0];
+			expect(request.messages[0]?.content).toContain("Working Memory");
+			expect(request.messages[0]?.content).toContain(
+				"https://example.com/docs",
+			);
 		});
 
 		it("should inject relevant learning guidance and record the experience", async () => {
@@ -555,15 +652,23 @@ describe("AgentRuntime", () => {
 
 			await runtime.processMessage("Review this code", "conv-1");
 
-			expect(learningEngine.retrieveRelevant).toHaveBeenCalledWith("Review this code");
+			expect(learningEngine.retrieveRelevant).toHaveBeenCalledWith(
+				"Review this code",
+			);
 			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
-			expect(request.messages[0]?.content).toContain("Learned Operating Guidance");
-			expect(request.messages[0]?.content).toContain("Run type checks after code edits.");
-			expect(learningEngine.recordExperience).toHaveBeenCalledWith(expect.objectContaining({
-				conversationId: "conv-1",
-				userRequest: "Review this code",
-				finalResponse: "Hello from assistant",
-			}));
+			expect(request.messages[0]?.content).toContain(
+				"Learned Operating Guidance",
+			);
+			expect(request.messages[0]?.content).toContain(
+				"Run type checks after code edits.",
+			);
+			expect(learningEngine.recordExperience).toHaveBeenCalledWith(
+				expect.objectContaining({
+					conversationId: "conv-1",
+					userRequest: "Review this code",
+					finalResponse: "Hello from assistant",
+				}),
+			);
 		});
 	});
 

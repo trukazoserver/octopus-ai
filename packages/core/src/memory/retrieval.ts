@@ -11,7 +11,7 @@ import type {
 
 export class MemoryRetrieval {
 	private tokenCounter = new TokenCounter();
-	
+
 	constructor(
 		private ltm: LongTermMemory,
 		private stm: ShortTermMemory,
@@ -36,18 +36,7 @@ export class MemoryRetrieval {
 			relevanceWeight: this.config.weights.relevance,
 		});
 
-		const scored: ScoredMemory[] = rawResults.map((r) => {
-			const item = r.item;
-			const recency = this.recencyScore(item);
-			const frequency = this.frequencyScore(item);
-			const combinedScore =
-				r.score * this.config.weights.relevance +
-				recency * this.config.weights.recency +
-				frequency * this.config.weights.frequency;
-			return { item, score: combinedScore };
-		});
-
-		scored.sort((a, b) => b.score - a.score);
+		const scored = rawResults.sort((a, b) => b.score - a.score);
 		const topItems = scored.slice(0, this.config.maxResults);
 
 		const cascaded = await this.cascadeAssociations(topItems, 2);
@@ -62,7 +51,9 @@ export class MemoryRetrieval {
 			truncated.push(sm);
 		}
 
-		const fromSTM = this.stm.getRelevant(userMessage, this.config.maxTokens);
+		const remainingTokens = Math.max(0, this.config.maxTokens - totalTokens);
+		const fromSTM = this.stm.getRelevant(userMessage, remainingTokens);
+		const stmTokens = this.tokenCounter.countMessagesTokens(fromSTM);
 
 		const combined: (ConversationTurn | ScoredMemory)[] = [
 			...fromSTM,
@@ -71,21 +62,10 @@ export class MemoryRetrieval {
 
 		return {
 			memories: truncated,
-			totalTokens,
+			totalTokens: totalTokens + stmTokens,
 			fromSTM,
 			combined,
 		};
-	}
-
-	private recencyScore(item: MemoryItem): number {
-		const now = Date.now();
-		const lastAccessed = item.lastAccessed.getTime();
-		const daysSince = (now - lastAccessed) / (1000 * 60 * 60 * 24);
-		return Math.exp(-0.1 * daysSince);
-	}
-
-	private frequencyScore(item: MemoryItem): number {
-		return Math.log(1 + item.accessCount) / Math.log(1 + 100);
 	}
 
 	private async cascadeAssociations(

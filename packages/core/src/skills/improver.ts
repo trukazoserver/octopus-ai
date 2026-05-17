@@ -7,6 +7,7 @@ export class SkillImprover {
 	private registry: SkillRegistry;
 	private embedFn: EmbeddingFunction;
 	private config: {
+		enabled: boolean;
 		triggerOnSuccessRate: number;
 		triggerOnRating: number;
 		reviewEveryNUses: number;
@@ -27,10 +28,16 @@ export class SkillImprover {
 	) {
 		this.registry = registry;
 		this.embedFn = embedFn;
-		this.config = config;
+		this.config = { enabled: true, ...config };
+	}
+
+	updateConfig(config: Partial<typeof this.config>): void {
+		this.config = { ...this.config, ...config };
 	}
 
 	async improveSkill(skill: Skill, usageHistory: SkillUsage[]): Promise<Skill> {
+		if (!this.config.enabled) return skill;
+
 		const failureAnalysis = this.analyzeFailures(usageHistory);
 
 		const improved: Partial<Skill> = { ...skill };

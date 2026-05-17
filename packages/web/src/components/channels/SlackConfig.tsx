@@ -5,7 +5,7 @@ import { showToast } from "../ui/Toast.js";
 interface SlackConfigProps {
 	enabled: boolean;
 	config: Record<string, unknown>;
-	onSave: (config: Record<string, unknown>) => void;
+	onSave: (config: Record<string, unknown>) => Promise<void>;
 }
 
 export const SlackConfig: React.FC<SlackConfigProps> = ({
@@ -16,11 +16,11 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({
 	const [token, setToken] = useState((config.botToken as string) ?? "");
 	const [saving, setSaving] = useState(false);
 
-	const handleSave = () => {
+	const handleSave = async () => {
 		if (!token.trim()) return;
 		setSaving(true);
 		try {
-			onSave({ botToken: token.trim() });
+			await onSave({ botToken: token.trim() });
 			showToast("success", "Token de Slack guardado");
 		} catch (err) {
 			showToast(
@@ -33,7 +33,13 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({
 	};
 
 	return (
-		<form onSubmit={(e) => { e.preventDefault(); handleSave(); }} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+		<form
+			onSubmit={(e) => {
+				e.preventDefault();
+				void handleSave();
+			}}
+			style={{ display: "flex", flexDirection: "column", gap: "12px" }}
+		>
 			<div>
 				<label
 					htmlFor="slack-bot-token"
@@ -54,48 +60,45 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({
 					value={token}
 					onChange={(e) => setToken(e.target.value)}
 					placeholder="xoxb-..."
-					disabled={!enabled}
 					autoComplete="off"
 					style={{
 						width: "100%",
 						padding: "8px 12px",
 						borderRadius: "8px",
-						border: "1px solid #3f3f46",
-						background: "#18181b",
+						border: "1px solid #202020",
+						background: "#000",
 						color: "#f4f4f5",
 						fontSize: "0.85rem",
 						outline: "none",
 						fontFamily:
 							"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 						boxSizing: "border-box",
-						opacity: enabled ? 1 : 0.5,
+						opacity: 1,
 						transition: "border-color 0.15s",
 					}}
 					onFocus={(e) => {
-						e.target.style.borderColor = "#6366f1";
+						e.target.style.borderColor = "#4a4a4a";
 					}}
 					onBlur={(e) => {
-						e.target.style.borderColor = "#3f3f46";
+						e.target.style.borderColor = "#202020";
 					}}
 				/>
 				<div style={{ fontSize: "0.7rem", color: "#52525b", marginTop: "4px" }}>
 					Obtenlo en api.slack.com → Your Apps → OAuth & Permissions
 				</div>
 			</div>
-				<button
-					type="submit"
-				disabled={!token.trim() || saving || !enabled}
+			<button
+				type="submit"
+				disabled={!token.trim() || saving}
 				style={{
 					padding: "8px 16px",
 					borderRadius: "8px",
-					border: "none",
-					background:
-						!token.trim() || saving || !enabled ? "#27272a" : "#6366f1",
-					color: !token.trim() || saving || !enabled ? "#52525b" : "#fff",
+					border: "1px solid #2a2a2a",
+					background: !token.trim() || saving ? "#111" : "#f4f4f5",
+					color: !token.trim() || saving ? "#52525b" : "#050505",
 					fontSize: "0.8rem",
 					fontWeight: 600,
-					cursor:
-						!token.trim() || saving || !enabled ? "not-allowed" : "pointer",
+					cursor: !token.trim() || saving ? "not-allowed" : "pointer",
 					fontFamily: "inherit",
 					transition: "all 0.15s",
 					alignSelf: "flex-start",

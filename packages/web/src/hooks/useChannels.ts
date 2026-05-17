@@ -70,7 +70,10 @@ export function useChannels() {
 				await apiPost(`/api/channels/${name}/toggle`);
 				await load();
 			} catch (err) {
-				setError(err instanceof Error ? err.message : "Error toggling canal");
+				const message =
+					err instanceof Error ? err.message : "Error toggling canal";
+				setError(message);
+				throw new Error(message);
 			}
 		},
 		[load],
@@ -78,6 +81,13 @@ export function useChannels() {
 
 	const testChannel = useCallback(
 		async (name: string): Promise<{ success: boolean; message: string }> => {
+			if (name !== "telegram") {
+				return {
+					success: false,
+					message:
+						"La prueba automática solo está disponible para Telegram por ahora.",
+				};
+			}
 			try {
 				const result = await apiPost(`/api/channels/${name}/test`);
 				if (result.success) {

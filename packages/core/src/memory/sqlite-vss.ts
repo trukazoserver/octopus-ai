@@ -49,13 +49,19 @@ export class SqliteVectorStore extends VectorStore {
 
 		// Migrations
 		try {
-			await this.db.run("ALTER TABLE memory_items ADD COLUMN associations TEXT NOT NULL DEFAULT '[]'");
+			await this.db.run(
+				"ALTER TABLE memory_items ADD COLUMN associations TEXT NOT NULL DEFAULT '[]'",
+			);
 		} catch {}
 		try {
-			await this.db.run("ALTER TABLE memory_items ADD COLUMN source TEXT NOT NULL DEFAULT '{}'");
+			await this.db.run(
+				"ALTER TABLE memory_items ADD COLUMN source TEXT NOT NULL DEFAULT '{}'",
+			);
 		} catch {}
 		try {
-			await this.db.run("ALTER TABLE memory_items ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'");
+			await this.db.run(
+				"ALTER TABLE memory_items ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+			);
 		} catch {}
 
 		this.initialized = true;
@@ -88,6 +94,7 @@ export class SqliteVectorStore extends VectorStore {
 				JSON.stringify(item.metadata),
 			],
 		);
+		await this.syncFts(item);
 	}
 
 	async search(
@@ -137,6 +144,30 @@ export class SqliteVectorStore extends VectorStore {
 		);
 	}
 
+	async listRecent(limit: number): Promise<MemoryItem[]> {
+		await this.ensureInitialized();
+		const safeLimit = Math.max(1, Math.min(Math.trunc(limit), 500));
+		const rows = await this.db.all<MemoryItemRow>(
+			"SELECT * FROM memory_items ORDER BY created_at DESC LIMIT ?",
+			[safeLimit],
+		);
+		return rows.map((row) =>
+			this.rowToItem(row, this.deserializeEmbedding(row.embedding)),
+		);
+	}
+
+	async listAll(limit = 1000): Promise<MemoryItem[]> {
+		await this.ensureInitialized();
+		const safeLimit = Math.max(1, Math.min(Math.trunc(limit), 5000));
+		const rows = await this.db.all<MemoryItemRow>(
+			"SELECT * FROM memory_items ORDER BY importance DESC, created_at DESC LIMIT ?",
+			[safeLimit],
+		);
+		return rows.map((row) =>
+			this.rowToItem(row, this.deserializeEmbedding(row.embedding)),
+		);
+	}
+
 	async update(item: MemoryItem): Promise<void> {
 		await this.ensureInitialized();
 
@@ -157,12 +188,36 @@ export class SqliteVectorStore extends VectorStore {
 				item.id,
 			],
 		);
+		await this.syncFts(item);
 	}
 
 	async delete(id: string): Promise<void> {
 		await this.ensureInitialized();
 
 		await this.db.run("DELETE FROM memory_items WHERE id = ?", [id]);
+		await this.db
+			.run("DELETE FROM memory_fts WHERE id = ?", [id])
+			.catch(() => {});
+	}
+
+	private async syncFts(item: MemoryItem): Promise<void> {
+		const sourceInfo = [
+			item.source.conversationId ?? "",
+			item.source.channelId ?? "",
+			item.source.taskId ?? "",
+		]
+			.filter(Boolean)
+			.join(" ");
+
+		try {
+			await this.db.run("DELETE FROM memory_fts WHERE id = ?", [item.id]);
+			await this.db.run(
+				"INSERT INTO memory_fts (id, content, type, source_info) VALUES (?, ?, ?, ?)",
+				[item.id, item.content, item.type, sourceInfo],
+			);
+		} catch {
+			// FTS is optional and may not be initialized for this store.
+		}
 	}
 
 	async count(): Promise<number> {

@@ -1,23 +1,45 @@
-import type { ToolDefinition } from "./registry.js";
 import type { AutomationManager } from "../tasks/automation-manager.js";
+import type { ToolDefinition } from "./registry.js";
 
-export function createAutomationTools(manager: AutomationManager): ToolDefinition[] {
+export function createAutomationTools(
+	manager: AutomationManager,
+): ToolDefinition[] {
 	return [
 		{
 			name: "schedule_task",
-			description: "Schedules a recurring task or cron job for the assistant to perform autonomously. Use cron expression format '* * * * *'. Example: '0 8 * * *' for every day at 8 AM.",
+			description:
+				"Schedules a recurring task or cron job for the assistant to perform autonomously. Use cron expression format '* * * * *'. Example: '0 8 * * *' for every day at 8 AM.",
 			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`,
 			parameters: {
-				name: { type: "string", description: "A simple name for the task.", required: true },
-				description: { type: "string", description: "Detailed description of what the task does." },
-				cronExpression: { type: "string", description: "The node-cron expression (e.g. '0 * * * *' for every hour).", required: true },
-				prompt: { type: "string", description: "The exact prompt the agent will execute when this trigger fires.", required: true },
+				name: {
+					type: "string",
+					description: "A simple name for the task.",
+					required: true,
+				},
+				description: {
+					type: "string",
+					description: "Detailed description of what the task does.",
+				},
+				cronExpression: {
+					type: "string",
+					description:
+						"The node-cron expression (e.g. '0 * * * *' for every hour).",
+					required: true,
+				},
+				prompt: {
+					type: "string",
+					description:
+						"The exact prompt the agent will execute when this trigger fires.",
+					required: true,
+				},
 			},
 			handler: async (args) => {
 				const cronExpression = String(args.cronExpression);
 				const prompt = String(args.prompt);
 				const name = String(args.name);
-				const description = args.description ? String(args.description) : undefined;
+				const description = args.description
+					? String(args.description)
+					: undefined;
 
 				const automation = await manager.createAutomation({
 					name,

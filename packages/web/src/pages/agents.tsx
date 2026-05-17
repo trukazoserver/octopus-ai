@@ -1,6 +1,7 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
+import { AppIcon } from "../components/ui/AppIcon.js";
+import { API_BASE, apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 interface AgentRecord {
 	id: string;
@@ -48,8 +49,6 @@ const ROLE_ICONS: Record<string, string> = {
 	analyst: "📊",
 	coordinator: "🎯",
 };
-
-const API_BASE = `http://${window.location.hostname}:18789`;
 
 const EMPTY_FORM: AgentFormData = {
 	name: "",
@@ -259,7 +258,8 @@ export const AgentsPage: React.FC = () => {
 							lineHeight: 1.6,
 						}}
 					>
-						Gestiona tus agentes IA, sus roles, personalidad y prompts del sistema.
+						Gestiona tus agentes IA, sus roles, personalidad y prompts del
+						sistema.
 					</p>
 				</div>
 				<button
@@ -306,7 +306,11 @@ export const AgentsPage: React.FC = () => {
 			)}
 
 			<div className="settings-summary-grid" style={{ marginBottom: "24px" }}>
-				<StatCard label="Agentes totales" value={agents.length} accent="#818cf8" />
+				<StatCard
+					label="Agentes totales"
+					value={agents.length}
+					accent="#818cf8"
+				/>
 				<StatCard label="Agente principal" value={mainCount} accent="#22c55e" />
 				<StatCard
 					label="Roles usados"
@@ -438,7 +442,7 @@ export const AgentsPage: React.FC = () => {
 							}}
 						>
 							{saving
-							? "Guardando..."
+								? "Guardando..."
 								: editingId
 									? "Actualizar agente"
 									: "Crear agente"}
@@ -458,15 +462,34 @@ export const AgentsPage: React.FC = () => {
 						background: "rgba(24, 24, 27, 0.5)",
 					}}
 				>
-					<div style={{ fontSize: "2.5rem", marginBottom: "16px" }}>🤖</div>
+					<div style={{ color: "#818cf8", marginBottom: "16px" }}>
+						<AppIcon name="agent" size={48} strokeWidth={1.5} />
+					</div>
 					<div
 						style={{ fontSize: "1.1rem", fontWeight: 600, color: "#a1a1aa" }}
 					>
 						Aún no hay agentes
 					</div>
 					<div style={{ fontSize: "0.85rem", marginTop: "8px" }}>
-						Crea tu primer agente o conecta una plantilla especializada para empezar.
+						Crea tu primer agente o conecta una plantilla especializada para
+						empezar.
 					</div>
+					<button
+						type="button"
+						onClick={openCreate}
+						style={{
+							marginTop: "18px",
+							padding: "10px 18px",
+							borderRadius: 10,
+							border: "1px solid #3b82f6",
+							background: "#3b82f6",
+							color: "#fff",
+							fontWeight: 700,
+							cursor: "pointer",
+						}}
+					>
+						Crear agente
+					</button>
 				</div>
 			) : (
 				<div
@@ -723,10 +746,10 @@ const AgentCard: React.FC<{
 				) : (
 					<div style={{ display: "flex", gap: "8px" }}>
 						<button type="button" onClick={onEdit} style={actionBtnStyle}>
-						Editar
+							Editar
 						</button>
 						<button type="button" onClick={onDelete} style={dangerBtnStyle}>
-						Eliminar
+							Eliminar
 						</button>
 					</div>
 				)}
@@ -773,7 +796,10 @@ const labelStyle: React.CSSProperties = {
 };
 
 const slugifyLabel = (label: string) =>
-	`agent-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+	`agent-${label
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-|-$/g, "")}`;
 
 const FormInput: React.FC<{
 	label: string;
@@ -784,34 +810,37 @@ const FormInput: React.FC<{
 }> = ({ label, value, onChange, placeholder, type = "text" }) => {
 	const id = slugifyLabel(label);
 	return (
-	<div>
-		<label htmlFor={id} style={labelStyle}>{label}</label>
-		<input
-			id={id}
-			name={id}
-			type={type}
-			value={value}
-			onChange={(e) => onChange(e.target.value)}
-			placeholder={placeholder}
-			style={{
-				...inputStyle,
-				...(type === "color"
-					? {
-							padding: "4px 6px",
-							height: "40px",
-							cursor: "pointer",
-						}
-					: {}),
-			}}
-			onFocus={(e) => {
-				e.currentTarget.style.borderColor = "#3b82f6";
-			}}
-			onBlur={(e) => {
-				e.currentTarget.style.borderColor = "#3f3f46";
-			}}
-		/>
-	</div>
-); };
+		<div>
+			<label htmlFor={id} style={labelStyle}>
+				{label}
+			</label>
+			<input
+				id={id}
+				name={id}
+				type={type}
+				value={value}
+				onChange={(e) => onChange(e.target.value)}
+				placeholder={placeholder}
+				style={{
+					...inputStyle,
+					...(type === "color"
+						? {
+								padding: "4px 6px",
+								height: "40px",
+								cursor: "pointer",
+							}
+						: {}),
+				}}
+				onFocus={(e) => {
+					e.currentTarget.style.borderColor = "#3b82f6";
+				}}
+				onBlur={(e) => {
+					e.currentTarget.style.borderColor = "#3f3f46";
+				}}
+			/>
+		</div>
+	);
+};
 
 const FormSelect: React.FC<{
 	label: string;
@@ -821,27 +850,30 @@ const FormSelect: React.FC<{
 }> = ({ label, value, options, onChange }) => {
 	const id = slugifyLabel(label);
 	return (
-	<div>
-		<label htmlFor={id} style={labelStyle}>{label}</label>
-		<select
-			id={id}
-			name={id}
-			value={value}
-			onChange={(e) => onChange(e.target.value)}
-			style={{
-				...inputStyle,
-				cursor: "pointer",
-				appearance: "auto",
-			}}
-		>
-			{options.map((opt) => (
-				<option key={opt} value={opt}>
-					{ROLE_ICONS[opt] ?? ""} {opt.charAt(0).toUpperCase() + opt.slice(1)}
-				</option>
-			))}
-		</select>
-	</div>
-); };
+		<div>
+			<label htmlFor={id} style={labelStyle}>
+				{label}
+			</label>
+			<select
+				id={id}
+				name={id}
+				value={value}
+				onChange={(e) => onChange(e.target.value)}
+				style={{
+					...inputStyle,
+					cursor: "pointer",
+					appearance: "auto",
+				}}
+			>
+				{options.map((opt) => (
+					<option key={opt} value={opt}>
+						{ROLE_ICONS[opt] ?? ""} {opt.charAt(0).toUpperCase() + opt.slice(1)}
+					</option>
+				))}
+			</select>
+		</div>
+	);
+};
 
 const FormTextarea: React.FC<{
 	label: string;
@@ -852,30 +884,33 @@ const FormTextarea: React.FC<{
 }> = ({ label, value, onChange, placeholder, rows = 3 }) => {
 	const id = slugifyLabel(label);
 	return (
-	<div>
-		<label htmlFor={id} style={labelStyle}>{label}</label>
-		<textarea
-			id={id}
-			name={id}
-			value={value}
-			onChange={(e) => onChange(e.target.value)}
-			placeholder={placeholder}
-			rows={rows}
-			style={{
-				...inputStyle,
-				resize: "vertical",
-				minHeight: "60px",
-				lineHeight: 1.5,
-			}}
-			onFocus={(e) => {
-				e.currentTarget.style.borderColor = "#3b82f6";
-			}}
-			onBlur={(e) => {
-				e.currentTarget.style.borderColor = "#3f3f46";
-			}}
-		/>
-	</div>
-); };
+		<div>
+			<label htmlFor={id} style={labelStyle}>
+				{label}
+			</label>
+			<textarea
+				id={id}
+				name={id}
+				value={value}
+				onChange={(e) => onChange(e.target.value)}
+				placeholder={placeholder}
+				rows={rows}
+				style={{
+					...inputStyle,
+					resize: "vertical",
+					minHeight: "60px",
+					lineHeight: 1.5,
+				}}
+				onFocus={(e) => {
+					e.currentTarget.style.borderColor = "#3b82f6";
+				}}
+				onBlur={(e) => {
+					e.currentTarget.style.borderColor = "#3f3f46";
+				}}
+			/>
+		</div>
+	);
+};
 
 const actionBtnStyle: React.CSSProperties = {
 	padding: "6px 14px",

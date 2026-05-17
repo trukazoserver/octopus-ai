@@ -90,7 +90,10 @@ export const MASCOT_PROFILES: Record<MascotId, MascotProfile> = {
 };
 
 export function getMascotById(id: string | undefined): MascotProfile {
-	return MASCOT_PROFILES[(id as MascotId) ?? DEFAULT_MASCOT_ID] ?? MASCOT_PROFILES[DEFAULT_MASCOT_ID];
+	return (
+		MASCOT_PROFILES[(id as MascotId) ?? DEFAULT_MASCOT_ID] ??
+		MASCOT_PROFILES[DEFAULT_MASCOT_ID]
+	);
 }
 
 export function getMascotOptions(): MascotProfile[] {

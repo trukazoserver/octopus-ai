@@ -1,8 +1,8 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolDefinition, ToolResult, ToolContext } from "./registry.js";
-import type { ToolRegistry } from "./registry.js";
 import { mediaContext } from "./media.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./registry.js";
+import type { ToolRegistry } from "./registry.js";
 
 const DEFAULT_TOOL_TIMEOUT_MS = 45_000;
 const LONG_RUNNING_TOOL_TIMEOUT_MS = 90_000;
@@ -21,6 +21,14 @@ export interface ToolTimeoutConfig {
 export interface ToolExecutionContext {
 	model?: string;
 	usesZaiVisionToolForImages?: boolean;
+	workerId?: string;
+	taskId?: string;
+	role?: string;
+	channelId?: string;
+	runId?: string;
+	toolScope?: string[];
+	fileScope?: string[];
+	abortSignal?: AbortSignal;
 }
 
 export class ToolExecutor {
@@ -66,7 +74,9 @@ export class ToolExecutor {
 			return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 		};
 		const byTool: Record<string, number> = {};
-		for (const [toolName, timeoutMs] of Object.entries(timeouts?.byTool ?? {})) {
+		for (const [toolName, timeoutMs] of Object.entries(
+			timeouts?.byTool ?? {},
+		)) {
 			byTool[toolName] = positive(timeoutMs, DEFAULT_TOOL_TIMEOUT_MS);
 		}
 		return {
@@ -95,7 +105,11 @@ export class ToolExecutor {
 		if (toolName === "decodo_scrape") {
 			return this.timeouts.scrapingMs;
 		}
-		if (toolName.startsWith("browser_") || toolName.includes("web") || toolName.includes("search")) {
+		if (
+			toolName.startsWith("browser_") ||
+			toolName.includes("web") ||
+			toolName.includes("search")
+		) {
 			return this.timeouts.longRunningMs;
 		}
 		return this.timeouts.defaultMs;
@@ -105,9 +119,12 @@ export class ToolExecutor {
 		operation: Promise<T>,
 		timeoutMs: number,
 		label: string,
+		signal?: AbortSignal,
 	): Promise<T> {
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let abortHandler: (() => void) | undefined;
 		try {
+			if (signal?.aborted) throw new Error(`${label} aborted`);
 			return await Promise.race([
 				operation,
 				new Promise<T>((_, reject) => {
@@ -115,11 +132,37 @@ export class ToolExecutor {
 						() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
 						timeoutMs,
 					);
+					if (signal) {
+						abortHandler = () => reject(new Error(`${label} aborted`));
+						signal.addEventListener("abort", abortHandler, { once: true });
+					}
 				}),
 			]);
 		} finally {
 			if (timer) clearTimeout(timer);
+			if (signal && abortHandler)
+				signal.removeEventListener("abort", abortHandler);
 		}
+	}
+
+	private getPathParams(params: Record<string, unknown>): string[] {
+		const pathKeys = [
+			"path",
+			"filePath",
+			"filepath",
+			"dir",
+			"directory",
+			"workdir",
+			"workingDirectory",
+			"outputPath",
+			"inputPath",
+		];
+		return pathKeys
+			.map((key) => params[key])
+			.filter(
+				(value): value is string =>
+					typeof value === "string" && value.trim().length > 0,
+			);
 	}
 
 	async execute(
@@ -127,6 +170,13 @@ export class ToolExecutor {
 		params: Record<string, unknown>,
 		executionContext?: ToolExecutionContext,
 	): Promise<ToolResult> {
+		if (executionContext?.abortSignal?.aborted) {
+			return {
+				success: false,
+				output: "",
+				error: `Tool ${toolName} aborted before execution`,
+			};
+		}
 		const tool = this.registry.get(toolName);
 		if (!tool) {
 			return {
@@ -145,11 +195,11 @@ export class ToolExecutor {
 			};
 		}
 
-		if (params.path && typeof params.path === "string") {
+		for (const pathParam of this.getPathParams(params)) {
 			const resolved = path.resolve(
-				params.path.startsWith("~")
-					? path.join(os.homedir(), params.path.slice(1))
-					: params.path,
+				pathParam.startsWith("~")
+					? path.join(os.homedir(), pathParam.slice(1))
+					: pathParam,
 			);
 			if (
 				this.allowedPaths.length > 0 &&
@@ -195,6 +245,7 @@ export class ToolExecutor {
 				tool.handler(params, context),
 				this.getTimeoutMs(toolName),
 				`Tool ${toolName}`,
+				executionContext?.abortSignal,
 			);
 			return result;
 		} catch (err) {
@@ -209,9 +260,12 @@ export class ToolExecutor {
 
 	async executeMultiple(
 		calls: Array<{ name: string; params: Record<string, unknown> }>,
+		executionContext?: ToolExecutionContext,
 	): Promise<ToolResult[]> {
 		return Promise.all(
-			calls.map((call) => this.execute(call.name, call.params)),
+			calls.map((call) =>
+				this.execute(call.name, call.params, executionContext),
+			),
 		);
 	}
 

@@ -1,11 +1,22 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { API_BASE, apiDelete, apiGet, apiPatch, apiPost } from "../hooks/useApi.js";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { showToast } from "../components/ui/Toast.js";
+import {
+	API_BASE,
+	apiDelete,
+	apiGet,
+	apiPatch,
+	apiPost,
+} from "../hooks/useApi.js";
 
 const WS_URL = `ws://${window.location.hostname}:18789`;
 const ACTIVE_CONVERSATION_STORAGE_KEY = "octopus-active-conversation";
+const INITIAL_VISIBLE_MESSAGES = 20;
+const MESSAGE_PAGE_SIZE = 20;
+const USER_MESSAGE_PREVIEW_WORDS = 180;
+const USER_MESSAGE_PREVIEW_CHARS = 1800;
 
 interface StatusData {
 	provider?: string;
@@ -36,6 +47,10 @@ interface WsPayload {
 	toolName?: string;
 	uiIconB64?: string;
 	activityDetail?: string | null;
+	executionId?: string;
+	execution?: ChatExecution;
+	done?: boolean;
+	cancelled?: boolean;
 }
 
 interface WsMessage {
@@ -48,6 +63,11 @@ interface WsMessage {
 
 type AgentActivityStatus =
 	| "thinking"
+	| "orchestrating"
+	| "worker_start"
+	| "worker_progress"
+	| "worker_done"
+	| "worker_error"
 	| "tool"
 	| "code"
 	| "responding"
@@ -67,8 +87,41 @@ interface AgentActivity {
 	timestamp: number;
 }
 
+type MultiAgentWorkerStatus = "queued" | "running" | "done" | "error";
+
+interface MultiAgentStep {
+	id: string;
+	label: string;
+	detail: string;
+	timestamp: number;
+	status: AgentActivityStatus;
+	toolName?: string | null;
+}
+
+interface MultiAgentWorkerState {
+	id: string;
+	taskId?: string;
+	role?: string;
+	description: string;
+	status: MultiAgentWorkerStatus;
+	progress: number;
+	current: string;
+	steps: MultiAgentStep[];
+}
+
+interface MultiAgentPlanState {
+	count: number;
+	executionPlan?: string;
+	reasoning?: string;
+}
+
 const AGENT_ACTIVITY_STATUSES = new Set<string>([
 	"thinking",
+	"orchestrating",
+	"worker_start",
+	"worker_progress",
+	"worker_done",
+	"worker_error",
 	"tool",
 	"code",
 	"responding",
@@ -93,10 +146,60 @@ interface Conversation {
 	updatedAt?: number;
 }
 
+type ChatExecutionStatus =
+	| "queued"
+	| "running"
+	| "completed"
+	| "failed"
+	| "cancelled"
+	| "interrupted";
+
+interface ChatExecutionActivityWire {
+	id: string;
+	status: string;
+	toolName?: string | null;
+	uiIconB64?: string | null;
+	activityDetail?: string | null;
+	timestamp: number;
+}
+
+interface ChatExecution {
+	id: string;
+	request_id?: string | null;
+	conversation_id: string;
+	agent_id?: string | null;
+	status: ChatExecutionStatus;
+	current_status?: string | null;
+	activities?: string | null;
+	assistant_message_id?: string | null;
+	error?: string | null;
+	started_at?: string;
+	updated_at?: string;
+	completed_at?: string | null;
+}
+
+interface ConversationExecutionState {
+	executionId: string;
+	status: ChatExecutionStatus;
+	currentStatus: AgentStatus;
+	activities: AgentActivity[];
+	error?: string | null;
+	notified?: boolean;
+}
+
 interface Agent {
 	id: string;
 	name: string;
 	description?: string;
+}
+
+interface UserProfileResponse {
+	profile: {
+		displayName: string | null;
+		preferredLanguage?: string;
+		communicationStyle?: string;
+		preferences?: Record<string, string>;
+	} | null;
 }
 
 function nanoid(): string {
@@ -126,6 +229,32 @@ function getActivityCopy(
 				label: "Pensando",
 				detail: "Analizando la solicitud y preparando el siguiente paso.",
 			};
+		case "orchestrating":
+			return {
+				label: "Orquestando agentes",
+				detail:
+					"Dividiendo la tarea, creando workers y preparando el contexto compartido.",
+			};
+		case "worker_start":
+			return {
+				label: `Agente ${toolLabel} iniciado`,
+				detail: "Worker creado y comenzando su subtarea.",
+			};
+		case "worker_progress":
+			return {
+				label: `Agente ${toolLabel} trabajando`,
+				detail: "Worker ejecutando su siguiente paso.",
+			};
+		case "worker_done":
+			return {
+				label: `Agente ${toolLabel} terminado`,
+				detail: "Worker terminó su subtarea y devolvió resultado.",
+			};
+		case "worker_error":
+			return {
+				label: `Agente ${toolLabel} falló`,
+				detail: "Worker reportó un error en su subtarea.",
+			};
 		case "tool":
 			return {
 				label: `Usando ${toolLabel}`,
@@ -149,17 +278,252 @@ function getActivityCopy(
 		case "tool_error":
 			return {
 				label: `${toolLabel} falló`,
-				detail: "La herramienta devolvió un error; el agente continuará si puede.",
+				detail:
+					"La herramienta devolvió un error; el agente continuará si puede.",
 			};
 		case "tool_skipped":
 			return {
 				label: `${toolLabel} omitida`,
-				detail: "Se evitó repetir una acción o exceder el presupuesto de herramientas.",
+				detail:
+					"Se evitó repetir una acción o exceder el presupuesto de herramientas.",
 			};
 	}
 }
 
+function decodeIcon(iconB64?: string | null): string | null {
+	if (!iconB64) return null;
+	try {
+		return atob(iconB64);
+	} catch {
+		return null;
+	}
+}
+
+function parseActivityDetailJson(
+	detail?: string | null,
+): Record<string, unknown> | null {
+	if (!detail) return null;
+	try {
+		const parsed = JSON.parse(detail) as unknown;
+		return parsed && typeof parsed === "object"
+			? (parsed as Record<string, unknown>)
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+function asString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value)
+		? value
+		: undefined;
+}
+
+function cleanAgentWorkText(value: string): string {
+	return value
+		.replace(/<br\s*\/?>/gi, " ")
+		.replace(/\\n/g, " ")
+		.replace(/[`*_#|[\]{}]/g, " ")
+		.replace(/\/api\/media\/file\/[^\s)]+/g, "")
+		.replace(/https?:\/\/\S+/g, "")
+		.replace(/Worker '[^']+' completed the task\. Result:/gi, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function summarizeAgentWork(worker: MultiAgentWorkerState): string {
+	const source = cleanAgentWorkText(
+		worker.status === "done" || worker.status === "error"
+			? worker.description || worker.current
+			: worker.current || worker.description,
+	);
+	const lower = source.toLowerCase();
+	let action = source;
+
+	const sceneMatch = source.match(/escena\s+\d+/i)?.[0];
+	const imageTarget =
+		source.match(/imagen(?:es)?\s+(?:de|para)\s+([^.,;]+)/i)?.[1] ??
+		source.match(/generaci[oó]n\s+de\s+([^.,;]+)/i)?.[1] ??
+		sceneMatch;
+
+	if (
+		lower.includes("imagen") ||
+		lower.includes("png") ||
+		lower.includes("jpg")
+	) {
+		action = imageTarget
+			? `generando imagen de ${imageTarget}`
+			: "generando imagenes";
+	} else if (lower.includes("video") || lower.includes("reel")) {
+		action = sceneMatch
+			? `trabajando video de ${sceneMatch}`
+			: "trabajando en video";
+	} else if (
+		lower.includes("codigo") ||
+		lower.includes("code") ||
+		lower.includes("script")
+	) {
+		action = "ejecutando codigo";
+	} else if (
+		lower.includes("search") ||
+		lower.includes("web") ||
+		lower.includes("scrape")
+	) {
+		action = "buscando informacion";
+	}
+
+	if (worker.status === "done")
+		return action.replace(/^generando\s+/i, "completo ");
+	if (worker.status === "error") return `tuvo un problema: ${action}`;
+	return action.length > 92 ? `${action.slice(0, 92).trimEnd()}...` : action;
+}
+
+function getWorkerToolKind(
+	worker: MultiAgentWorkerState,
+): "image" | "code" | "web" | "video" | "delegate" | "tool" {
+	const lastTool = worker.steps.at(-1)?.toolName?.toLowerCase() ?? "";
+	const haystack =
+		`${lastTool} ${worker.current} ${worker.description}`.toLowerCase();
+	if (
+		haystack.includes("image") ||
+		haystack.includes("imagen") ||
+		haystack.includes("png") ||
+		haystack.includes("jpg") ||
+		haystack.includes("nano-banana")
+	)
+		return "image";
+	if (
+		haystack.includes("video") ||
+		haystack.includes("reel") ||
+		haystack.includes("veo")
+	)
+		return "video";
+	if (
+		haystack.includes("code") ||
+		haystack.includes("codigo") ||
+		haystack.includes("execute_code") ||
+		haystack.includes("shell")
+	)
+		return "code";
+	if (
+		haystack.includes("web") ||
+		haystack.includes("search") ||
+		haystack.includes("browser") ||
+		haystack.includes("scrape")
+	)
+		return "web";
+	if (haystack.includes("delegate")) return "delegate";
+	return "tool";
+}
+
+function ToolBadge({
+	kind,
+	active,
+}: { kind: ReturnType<typeof getWorkerToolKind>; active: boolean }) {
+	const labels = {
+		image: "IMG",
+		code: "CODE",
+		web: "WEB",
+		video: "VID",
+		delegate: "TASK",
+		tool: "TOOL",
+	};
+	const glyphs = {
+		image: "▧",
+		code: "</>",
+		web: "⌕",
+		video: "▶",
+		delegate: "⇄",
+		tool: "⚙",
+	};
+	return (
+		<span
+			className={`worker-tool-badge ${active ? "active" : ""}`}
+			data-kind={kind}
+			data-tooltip={labels[kind]}
+		>
+			{glyphs[kind]}
+		</span>
+	);
+}
+
+function toAgentActivity(
+	activity: ChatExecutionActivityWire,
+): AgentActivity | null {
+	if (!AGENT_ACTIVITY_STATUSES.has(activity.status)) return null;
+	const status = activity.status as AgentActivityStatus;
+	const copy = getActivityCopy(status, activity.toolName);
+	return {
+		id: activity.id,
+		status,
+		label: copy.label,
+		detail: activity.activityDetail?.trim() || copy.detail,
+		toolName: activity.toolName ?? null,
+		iconSvg: decodeIcon(activity.uiIconB64),
+		timestamp: activity.timestamp,
+	};
+}
+
+function parseExecutionActivities(execution: ChatExecution): AgentActivity[] {
+	if (!execution.activities) return [];
+	try {
+		const raw = JSON.parse(execution.activities) as ChatExecutionActivityWire[];
+		return raw
+			.map(toAgentActivity)
+			.filter((item): item is AgentActivity => Boolean(item));
+	} catch {
+		return [];
+	}
+}
+
+function createFallbackAgentActivity(status?: AgentStatus): AgentActivity {
+	const activityStatus: AgentActivityStatus =
+		status && status !== "idle" ? status : "thinking";
+	const copy = getActivityCopy(activityStatus);
+	return {
+		id: "active-execution-fallback",
+		status: activityStatus,
+		label: activityStatus === "thinking" ? "Octopus trabajando" : copy.label,
+		detail:
+			"Octopus sigue trabajando. Esperando el siguiente evento de progreso.",
+		timestamp: Date.now(),
+	};
+}
+
+function executionStateFromRecord(
+	execution: ChatExecution,
+): ConversationExecutionState {
+	const activities = parseExecutionActivities(execution);
+	const currentStatus =
+		execution.current_status &&
+		AGENT_ACTIVITY_STATUSES.has(execution.current_status)
+			? (execution.current_status as AgentActivityStatus)
+			: execution.status === "queued" || execution.status === "running"
+				? "thinking"
+				: "idle";
+	return {
+		executionId: execution.id,
+		status: execution.status,
+		currentStatus,
+		activities,
+		error: execution.error,
+	};
+}
+
+function isExecutionActive(state?: ConversationExecutionState): boolean {
+	return state?.status === "queued" || state?.status === "running";
+}
+
 function activityColor(status: AgentActivityStatus): string {
+	if (status === "orchestrating") return "#a78bfa";
+	if (status === "worker_start" || status === "worker_progress")
+		return "#38bdf8";
+	if (status === "worker_done") return "#34d399";
+	if (status === "worker_error") return "#ef4444";
 	if (status === "tool_skipped") return "#a1a1aa";
 	if (status === "tool" || status === "tool_done") return "#f59e0b";
 	if (status === "code") return "#10b981";
@@ -176,32 +540,104 @@ function AgentActivityIcon({
 	active?: boolean;
 }) {
 	const color = activityColor(activity.status);
-	if (activity.iconSvg && (activity.status === "tool" || activity.status === "code")) {
+	if (
+		activity.iconSvg &&
+		(activity.status === "tool" || activity.status === "code")
+	) {
 		const sanitizedSvg = DOMPurify.sanitize(activity.iconSvg, {
 			USE_PROFILES: { svg: true, svgFilters: true },
-			ADD_TAGS: ["svg", "path", "circle", "line", "polyline", "polygon", "rect", "ellipse", "g", "defs", "use", "animate", "animateTransform"],
-			ADD_ATTR: ["viewBox", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "d", "cx", "cy", "r", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "points", "opacity", "transform", "style"],
+			ADD_TAGS: [
+				"svg",
+				"path",
+				"circle",
+				"line",
+				"polyline",
+				"polygon",
+				"rect",
+				"ellipse",
+				"g",
+				"defs",
+				"use",
+				"animate",
+				"animateTransform",
+			],
+			ADD_ATTR: [
+				"viewBox",
+				"fill",
+				"stroke",
+				"stroke-width",
+				"stroke-linecap",
+				"stroke-linejoin",
+				"d",
+				"cx",
+				"cy",
+				"r",
+				"x",
+				"y",
+				"x1",
+				"y1",
+				"x2",
+				"y2",
+				"width",
+				"height",
+				"points",
+				"opacity",
+				"transform",
+				"style",
+			],
 			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
-			FORBID_TAGS: ["script", "iframe", "object", "embed"],
+			FORBID_TAGS: [
+				"script",
+				"iframe",
+				"object",
+				"embed",
+				"image",
+				"foreignObject",
+			],
 		});
-		return (
-			<span
-				style={{
-					display: "flex",
-					width: 18,
-					height: 18,
-					color,
-					animation: active ? "toolFloat 1.4s infinite ease-in-out" : undefined,
-				}}
-				// biome-ignore lint/security/noDangerouslySetInnerHtml: SVG sanitized via DOMPurify
-				dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
-			/>
-		);
+		const hasRenderableVector =
+			/<svg\b/i.test(sanitizedSvg) &&
+			/<(path|circle|line|polyline|polygon|rect|ellipse|g|use)\b/i.test(
+				sanitizedSvg,
+			);
+		if (hasRenderableVector)
+			return (
+				<span
+					className="agent-activity-icon"
+					style={{
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						width: 18,
+						height: 18,
+						color,
+						flexShrink: 0,
+						lineHeight: 0,
+						overflow: "hidden",
+						position: "relative",
+						animation: active
+							? "toolFloat 1.4s infinite ease-in-out"
+							: undefined,
+					}}
+					// biome-ignore lint/security/noDangerouslySetInnerHtml: SVG sanitized via DOMPurify
+					dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
+				/>
+			);
 	}
 
 	if (activity.status === "tool_done") {
 		return (
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+			<svg
+				aria-hidden="true"
+				width="18"
+				height="18"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke={color}
+				strokeWidth="2.2"
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			>
 				<path d="M20 6 9 17l-5-5" />
 			</svg>
 		);
@@ -209,7 +645,17 @@ function AgentActivityIcon({
 
 	if (activity.status === "tool_error") {
 		return (
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+			<svg
+				aria-hidden="true"
+				width="18"
+				height="18"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke={color}
+				strokeWidth="2.2"
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			>
 				<circle cx="12" cy="12" r="9" />
 				<path d="m15 9-6 6M9 9l6 6" />
 			</svg>
@@ -218,7 +664,17 @@ function AgentActivityIcon({
 
 	if (activity.status === "tool_skipped") {
 		return (
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+			<svg
+				aria-hidden="true"
+				width="18"
+				height="18"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke={color}
+				strokeWidth="2.2"
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			>
 				<path d="M5 12h14" />
 				<path d="M12 5v14" opacity="0.35" />
 			</svg>
@@ -227,64 +683,229 @@ function AgentActivityIcon({
 
 	if (activity.status === "responding") {
 		return (
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: active ? "pulse 1.4s infinite ease-in-out" : undefined }}>
+			<svg
+				aria-hidden="true"
+				width="18"
+				height="18"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke={color}
+				strokeWidth="2"
+				strokeLinecap="round"
+				strokeLinejoin="round"
+				style={{
+					animation: active ? "pulse 1.4s infinite ease-in-out" : undefined,
+				}}
+			>
 				<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
 			</svg>
 		);
 	}
 
 	return (
-		<svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ animation: active ? "spin 1.8s linear infinite" : undefined }}>
-			<circle cx="12" cy="12" r="9" stroke="rgba(255,255,255,0.14)" strokeWidth="2" />
-			<path d="M12 3a9 9 0 0 1 9 9" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
+		<svg
+			aria-hidden="true"
+			width="18"
+			height="18"
+			viewBox="0 0 24 24"
+			fill="none"
+			style={{ animation: active ? "spin 1.8s linear infinite" : undefined }}
+		>
+			<circle
+				cx="12"
+				cy="12"
+				r="9"
+				stroke="rgba(255,255,255,0.14)"
+				strokeWidth="2"
+			/>
+			<path
+				d="M12 3a9 9 0 0 1 9 9"
+				stroke={color}
+				strokeWidth="2.4"
+				strokeLinecap="round"
+			/>
 		</svg>
 	);
 }
 
-function AgentActivityPanel({ activities }: { activities: AgentActivity[] }) {
+function AgentActivityPanel({
+	activities,
+	multiAgentPlan,
+	multiAgentWorkers,
+}: {
+	activities: AgentActivity[];
+	multiAgentPlan?: MultiAgentPlanState | null;
+	multiAgentWorkers?: MultiAgentWorkerState[];
+}) {
 	const latest = activities[activities.length - 1];
 	if (!latest) return null;
 	const recent = activities.slice(-5);
 	const color = activityColor(latest.status);
+	const rawWorkers = multiAgentWorkers ?? [];
+	const workers = rawWorkers.length > 1 ? rawWorkers : [];
+	const activeWorkers = workers.filter(
+		(worker) => worker.status === "running" || worker.status === "queued",
+	).length;
+	const completedWorkers = workers.filter(
+		(worker) => worker.status === "done",
+	).length;
+	const failedWorkers = workers.filter(
+		(worker) => worker.status === "error",
+	).length;
+	let latestCompletedIndex = -1;
+	for (let index = workers.length - 1; index >= 0; index -= 1) {
+		if (workers[index]?.status === "done") {
+			latestCompletedIndex = index;
+			break;
+		}
+	}
+	const latestCompleted =
+		latestCompletedIndex >= 0 ? workers[latestCompletedIndex] : undefined;
+	const showWorkerDetails = workers.length > 0 && workers.length <= 6;
+	const activeGoal =
+		workers.find(
+			(worker) => worker.status === "running" || worker.status === "queued",
+		) ?? workers[0];
+	const goalText = activeGoal
+		? summarizeAgentWork(activeGoal).replace(/^generando\s+/i, "generacion de ")
+		: latest.detail;
+	const mainSummary =
+		workers.length > 0
+			? latest.status === "worker_done" && latestCompleted
+				? `El agente ${latestCompletedIndex + 1} completo ${summarizeAgentWork(latestCompleted).replace(/^completo\s+/i, "")}.`
+				: activeWorkers > 0
+					? `${activeWorkers} de ${workers.length} agentes siguen trabajando en ${goalText}.`
+					: failedWorkers > 0
+						? `${completedWorkers}/${workers.length} agentes completaron su tarea; ${failedWorkers} tuvieron problemas.`
+						: `Los ${workers.length} agentes completaron sus tareas.`
+			: latest.detail;
 
 	return (
 		<div className="agent-activity-row">
 			<div className="agent-activity-avatar">
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-					<path d="M12 3c-3.4 0-6 2.3-6 5.4 0 2.2 1.2 3.7 2.5 4.5" />
-					<path d="M15.5 12.9c1.3-.8 2.5-2.3 2.5-4.5C18 5.3 15.4 3 12 3" />
-					<path d="M8 14c-1.2 1.4-2.3 2.2-4 2.4" />
-					<path d="M10 15c-.7 1.8-1.5 3-3.2 4" />
-					<path d="M14 15c.7 1.8 1.5 3 3.2 4" />
-					<path d="M16 14c1.2 1.4 2.3 2.2 4 2.4" />
-					<circle cx="9.5" cy="8" r=".8" fill="currentColor" stroke="none" />
-					<circle cx="14.5" cy="8" r=".8" fill="currentColor" stroke="none" />
-				</svg>
+				<img src="/logo_Pulpo_octavio.png" alt="Octopus" />
+				<span className="agent-thought-cloud" aria-hidden="true">
+					<span />
+					<span />
+					<span />
+				</span>
 			</div>
-			<div className="agent-activity-card" style={{ borderColor: `${color}55` }}>
+			<div
+				className="agent-activity-card compact"
+				style={{ borderColor: `${color}55` }}
+			>
+				{(multiAgentPlan || workers.length > 0) && (
+					<div className="multi-agent-summary">
+						<div className="multi-agent-summary-top">
+							<span className="multi-agent-pill">
+								{multiAgentPlan?.count ?? workers.length} agentes
+							</span>
+							{workers.length > 0 && (
+								<span className="multi-agent-pill muted">
+									{completedWorkers}/{workers.length} completos
+								</span>
+							)}
+						</div>
+						<div className="multi-agent-live-text">{mainSummary}</div>
+					</div>
+				)}
 				<div className="agent-activity-current">
-					<div className="agent-activity-orb" style={{ background: `${color}22`, boxShadow: `0 0 22px ${color}33` }}>
+					<div
+						className="agent-activity-orb"
+						style={{
+							background: `${color}22`,
+							boxShadow: `0 0 22px ${color}33`,
+						}}
+					>
 						<AgentActivityIcon activity={latest} active />
 					</div>
 					<div style={{ minWidth: 0 }}>
-						<div className="agent-activity-title" style={{ color }}>{latest.label}</div>
-						<div className="agent-activity-detail">{latest.detail}</div>
+						<div className="agent-activity-title" style={{ color }}>
+							{workers.length > 0
+								? "Octopus coordinando agentes"
+								: latest.label}
+						</div>
+						<div className="agent-activity-detail">{mainSummary}</div>
 					</div>
 					<div className="agent-activity-dots" aria-hidden="true">
 						{[0, 1, 2].map((i) => (
-							<span key={i} style={{ animationDelay: `${i * 0.16}s`, background: color }} />
+							<span
+								key={i}
+								style={{ animationDelay: `${i * 0.16}s`, background: color }}
+							/>
 						))}
 					</div>
 				</div>
-				{recent.length > 1 && (
+				{showWorkerDetails && (
+					<div className="multi-agent-workers compact-list">
+						{workers.map((worker, index) => {
+							const workerColor =
+								worker.status === "done"
+									? "#34d399"
+									: worker.status === "error"
+										? "#ef4444"
+										: "#38bdf8";
+							const workText = summarizeAgentWork(worker);
+							const active =
+								worker.status === "running" || worker.status === "queued";
+							const toolKind = getWorkerToolKind(worker);
+							return (
+								<div
+									key={worker.id}
+									className="multi-agent-worker"
+									style={{ borderColor: `${workerColor}44` }}
+								>
+									<div className="multi-agent-worker-head">
+										<span
+											className={`multi-agent-worker-avatar ${active ? "active" : ""}`}
+											style={{ borderColor: `${workerColor}66` }}
+										>
+											<span className="agent-glyph">◎</span>
+											<ToolBadge kind={toolKind} active={active} />
+										</span>
+										<span className="multi-agent-worker-title">
+											Agente {index + 1}
+										</span>
+										<span
+											className="multi-agent-worker-status"
+											style={{ color: workerColor }}
+										>
+											{worker.status}
+										</span>
+									</div>
+									<div className="multi-agent-worker-desc">{workText}</div>
+									<div className="multi-agent-progress">
+										<span
+											style={{
+												width: `${Math.max(4, Math.min(100, worker.progress))}%`,
+												background: workerColor,
+											}}
+										/>
+									</div>
+								</div>
+							);
+						})}
+					</div>
+				)}
+				{workers.length > 6 && (
+					<div className="multi-agent-collapsed-note">
+						Detalle de {workers.length} agentes colapsado. {mainSummary}
+					</div>
+				)}
+				{workers.length === 0 && recent.length > 1 && (
 					<div className="agent-activity-steps">
 						{recent.map((activity, index) => (
 							<div key={activity.id} className="agent-activity-step">
 								<span className="agent-activity-step-line" />
 								<span className="agent-activity-step-icon">
-									<AgentActivityIcon activity={activity} active={index === recent.length - 1} />
+									<AgentActivityIcon
+										activity={activity}
+										active={index === recent.length - 1}
+									/>
 								</span>
-								<span className="agent-activity-step-text">{activity.label}</span>
+								<span className="agent-activity-step-text">
+									{activity.label}
+								</span>
 							</div>
 						))}
 					</div>
@@ -315,17 +936,61 @@ function getMediaType(url: string): "image" | "audio" | "video" | null {
 	return null;
 }
 
+function escapeAttr(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/"/g, "&quot;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
+function getVideoPosterUrl(url: string): string {
+	return url.replace("/api/media/file/", "/api/media/thumbnail/");
+}
+
+function getUserMessagePreview(content: string): {
+	preview: string;
+	truncated: boolean;
+} {
+	let cutIndex = content.length;
+	if (content.length > USER_MESSAGE_PREVIEW_CHARS) {
+		cutIndex = USER_MESSAGE_PREVIEW_CHARS;
+	}
+
+	let wordCount = 0;
+	for (const match of content.matchAll(/\S+/g)) {
+		wordCount += 1;
+		if (wordCount > USER_MESSAGE_PREVIEW_WORDS) {
+			cutIndex = Math.min(cutIndex, match.index ?? cutIndex);
+			break;
+		}
+	}
+
+	if (cutIndex >= content.length) return { preview: content, truncated: false };
+	return {
+		preview: `${content.slice(0, cutIndex).trimEnd()}…`,
+		truncated: true,
+	};
+}
+
 function renderMediaInline(url: string, alt?: string): string {
 	const fullUrl = url.startsWith("http") ? url : MEDIA_BASE + url;
 	const mediaType = getMediaType(url);
 	if (mediaType === "image") {
-		return `<div class="media-embed media-image"><img src="${fullUrl}" alt="${alt || ""}" loading="lazy" style="max-width:100%;border-radius:12px;cursor:pointer" onclick="window.openMediaPreview(this.src)" /></div>`;
+		return `<div class="media-embed media-image"><img src="${fullUrl}" alt="${alt || ""}" loading="lazy" style="max-width:100%;height:auto;border-radius:12px;cursor:pointer" onclick="window.openMediaPreview(this.src)" /></div>`;
 	}
 	if (mediaType === "audio") {
 		return `<div class="media-embed media-audio" style="padding:12px 0"><audio controls src="${fullUrl}" style="width:100%;max-width:500px" preload="metadata"></audio></div>`;
 	}
 	if (mediaType === "video") {
-		return `<div class="media-embed media-video"><video controls src="${fullUrl}" style="max-width:100%;border-radius:12px" preload="metadata"></video></div>`;
+		const safeUrl = escapeAttr(fullUrl);
+		const posterUrl = escapeAttr(getVideoPosterUrl(fullUrl));
+		return `<div class="media-embed media-video video-thumbnail" data-video-src="${safeUrl}" role="button" tabindex="0" aria-label="Cargar video" style="position:relative;width:100%;max-width:100%;border-radius:14px;border:1px solid #27272a;background:#09090b;display:block;cursor:pointer;overflow:hidden">
+			<img src="${posterUrl}" alt="Miniatura del video" loading="lazy" style="display:block;width:100%;height:auto;max-width:100%;pointer-events:none" />
+			<div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.04),rgba(0,0,0,.46));pointer-events:none"></div>
+			<div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:58px;height:58px;border-radius:50%;background:rgba(99,102,241,.9);display:flex;align-items:center;justify-content:center;color:white;font-size:24px;box-shadow:0 10px 30px rgba(99,102,241,.35);padding-left:4px;pointer-events:none">&#9654;</div>
+			<div style="position:absolute;left:14px;bottom:12px;color:#f4f4f5;font-size:.8rem;text-shadow:0 1px 8px rgba(0,0,0,.75);pointer-events:none">Clic para reproducir video</div>
+		</div>`;
 	}
 	return "";
 }
@@ -354,10 +1019,13 @@ function renderMarkdown(text: string): string {
 		let processed = text;
 		// Strip think tags so they aren't displayed in the text bubble
 		processed = processed.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
-		
+
 		// Convert relative markdown images to absolute URLs for rendering
-		processed = processed.replace(/!\[(.*?)\]\(\/api\/media\/file\/([^)]+)\)/g, `![$1](${MEDIA_BASE}/api/media/file/$2)`);
-		
+		processed = processed.replace(
+			/!\[(.*?)\]\(\/api\/media\/file\/([^)]+)\)/g,
+			`![$1](${MEDIA_BASE}/api/media/file/$2)`,
+		);
+
 		// Detect bare media URLs and convert to embeddable media
 		processed = processed.replace(
 			/(?:^|\n)\s*(https?:\/\/[^\s<>"']+\/(?:api\/media\/file\/)?[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|svg|mp3|wav|ogg|m4a|mp4|webm)|\/api\/media\/file\/[^\s<>"']+)/gi,
@@ -379,11 +1047,17 @@ function renderMarkdown(text: string): string {
 			ADD_TAGS: ["img", "audio", "video", "source"],
 			ADD_ATTR: [
 				"src",
+				"alt",
 				"controls",
+				"playsinline",
 				"loading",
 				"preload",
 				"style",
 				"class",
+				"data-video-src",
+				"role",
+				"tabindex",
+				"aria-label",
 			],
 			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
 		});
@@ -392,11 +1066,17 @@ function renderMarkdown(text: string): string {
 			ADD_TAGS: ["img", "audio", "video", "source"],
 			ADD_ATTR: [
 				"src",
+				"alt",
 				"controls",
+				"playsinline",
 				"loading",
 				"preload",
 				"style",
 				"class",
+				"data-video-src",
+				"role",
+				"tabindex",
+				"aria-label",
 			],
 			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
 		});
@@ -418,9 +1098,393 @@ function getPayloadText(payload: WsPayload | string | undefined): string {
 	return JSON.stringify(payload);
 }
 
-const SIDEBAR_WIDTH = 280;
+const ChatMessage = memo(function ChatMessage({
+	msg,
+	collapsed,
+}: { msg: Message; collapsed?: boolean }) {
+	const [showFullUserMessage, setShowFullUserMessage] = useState(false);
+	const [showHeavyMessage, setShowHeavyMessage] = useState(false);
+	const [copied, setCopied] = useState(false);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: Reset expanded state only when a different message is rendered.
+	useEffect(() => {
+		setShowFullUserMessage(false);
+		setShowHeavyMessage(false);
+	}, [msg.id]);
+	const isCollapsed = Boolean(collapsed && !showHeavyMessage);
+	const userPreview = useMemo(
+		() =>
+			msg.role === "user"
+				? getUserMessagePreview(msg.content)
+				: { preview: msg.content, truncated: false },
+		[msg.content, msg.role],
+	);
+	const displayContent =
+		msg.role === "user" && userPreview.truncated && !showFullUserMessage
+			? userPreview.preview
+			: msg.content;
+	const needsMarkdown =
+		msg.role === "assistant" || displayContent.includes("/api/media/file/");
+	const renderedMarkdown = useMemo(
+		() => (needsMarkdown && !isCollapsed ? renderMarkdown(displayContent) : ""),
+		[needsMarkdown, displayContent, isCollapsed],
+	);
+	const bodyRef = useRef<HTMLDivElement>(null);
+	const copyAssistantResponse = useCallback(async () => {
+		if (!msg.content.trim()) return;
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(msg.content);
+			} else {
+				const textarea = document.createElement("textarea");
+				textarea.value = msg.content;
+				textarea.style.position = "fixed";
+				textarea.style.opacity = "0";
+				document.body.appendChild(textarea);
+				textarea.select();
+				document.execCommand("copy");
+				document.body.removeChild(textarea);
+			}
+			setCopied(true);
+			showToast("success", "Respuesta copiada");
+			window.setTimeout(() => setCopied(false), 1400);
+		} catch {
+			showToast("error", "No se pudo copiar la respuesta");
+		}
+	}, [msg.content]);
 
-export const ChatPage: React.FC = () => {
+	// Keep videos as cheap thumbnails until the user explicitly opens one.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: Rebind media handlers after sanitized markdown content is replaced.
+	useEffect(() => {
+		if (isCollapsed || !bodyRef.current) return;
+		const root = bodyRef.current;
+
+		const loadVideo = (el: HTMLElement) => {
+			const src = el.getAttribute("data-video-src");
+			if (!src || el.querySelector("video")) return;
+			const rect = el.getBoundingClientRect();
+			const poster = el.querySelector("img")?.getAttribute("src") ?? "";
+			el.style.display = "block";
+			el.style.width = "100%";
+			el.style.height = `${rect.height}px`;
+			el.style.aspectRatio = `${rect.width} / ${rect.height}`;
+			el.style.background = "#000";
+			el.style.overflow = "hidden";
+			const video = document.createElement("video");
+			video.controls = true;
+			video.src = src;
+			video.preload = "metadata";
+			video.playsInline = true;
+			video.autoplay = true;
+			if (poster) video.poster = poster;
+			video.style.cssText =
+				"display:block;width:100%;height:100%;max-width:100%;object-fit:contain;border-radius:12px;background:#000";
+			video.addEventListener(
+				"loadedmetadata",
+				() => {
+					if (!video.videoWidth || !video.videoHeight) return;
+					el.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+					el.style.height = "";
+				},
+				{ once: true },
+			);
+			el.replaceChildren(video);
+			el.removeAttribute("data-video-src");
+			video.focus();
+			void video.play().catch(() => {
+				// Some browsers block autoplay even after replacement; controls remain visible.
+			});
+		};
+
+		const handleActivate = (event: Event) => {
+			const target = event.target as HTMLElement | null;
+			const el = target?.closest<HTMLElement>("[data-video-src]");
+			if (!el || !root.contains(el)) return;
+			event.preventDefault();
+			loadVideo(el);
+		};
+
+		const handleKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== "Enter" && event.key !== " ") return;
+			const target = event.target as HTMLElement | null;
+			const el = target?.closest<HTMLElement>("[data-video-src]");
+			if (!el || !root.contains(el)) return;
+			event.preventDefault();
+			loadVideo(el);
+		};
+
+		root.addEventListener("click", handleActivate);
+		root.addEventListener("keydown", handleKeyDown);
+
+		return () => {
+			root.removeEventListener("click", handleActivate);
+			root.removeEventListener("keydown", handleKeyDown);
+		};
+	}, [renderedMarkdown, isCollapsed]);
+
+	const renderUserToggle = () => {
+		if (!userPreview.truncated) return null;
+		return (
+			<button
+				type="button"
+				onClick={() => setShowFullUserMessage((value) => !value)}
+				style={{
+					marginTop: "10px",
+					padding: "6px 10px",
+					borderRadius: "999px",
+					border: "1px solid #52525b",
+					background: "rgba(39,39,42,.7)",
+					color: "#a5b4fc",
+					fontSize: "0.78rem",
+					fontWeight: 700,
+					fontFamily: "inherit",
+					cursor: "pointer",
+				}}
+			>
+				{showFullUserMessage ? "Ocultar mensaje largo" : "Ver mensaje completo"}
+			</button>
+		);
+	};
+
+	// Collapsed heavy assistant messages keep the timeline usable without hiding content completely.
+	if (isCollapsed) {
+		const mediaCount = (msg.content.match(/\/api\/media\/file\//g) ?? [])
+			.length;
+		const preview = msg.content
+			.replace(/!\[[^\]]*\]\([^)]*\)/g, "[media]")
+			.replace(/\s+/g, " ")
+			.trim()
+			.slice(0, 520);
+		return (
+			<div
+				style={{
+					marginBottom: "24px",
+					display: "flex",
+					justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+				}}
+			>
+				{msg.role === "assistant" && (
+					<div
+						style={{
+							width: "36px",
+							height: "36px",
+							borderRadius: "10px",
+							background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							marginRight: "16px",
+							flexShrink: 0,
+							fontSize: "18px",
+						}}
+					>
+						{"\uD83D\uDC19"}
+					</div>
+				)}
+				<div
+					style={{
+						maxWidth: msg.role === "user" ? "80%" : "calc(100% - 52px)",
+						fontSize: "0.85rem",
+						color: "#a1a1aa",
+					}}
+				>
+					<span style={{ color: msg.role === "user" ? "#a1a1aa" : "#71717a" }}>
+						{msg.role === "user" ? "Tu" : "Asistente"} -{" "}
+						{formatTime(msg.timestamp)}
+					</span>
+					<div
+						style={{
+							marginTop: "8px",
+							padding: "12px",
+							border: "1px solid #3f3f46",
+							borderRadius: "14px",
+							background: "rgba(24,24,27,.72)",
+							color: "#d4d4d8",
+							lineHeight: 1.55,
+						}}
+					>
+						<div
+							style={{ fontWeight: 800, color: "#e4e4e7", marginBottom: "6px" }}
+						>
+							Respuesta grande contraida para proteger el rendimiento
+						</div>
+						<div style={{ color: "#a1a1aa" }}>
+							{mediaCount > 0 ? `${mediaCount} archivos multimedia. ` : ""}
+							{msg.content.length.toLocaleString()} caracteres.
+						</div>
+						{preview && (
+							<div style={{ marginTop: "8px" }}>
+								{preview}
+								{msg.content.length > preview.length ? "..." : ""}
+							</div>
+						)}
+						<button
+							type="button"
+							onClick={() => setShowHeavyMessage(true)}
+							style={{
+								marginTop: "10px",
+								padding: "8px 12px",
+								borderRadius: "999px",
+								border: "1px solid rgba(99,102,241,.45)",
+								background: "rgba(99,102,241,.14)",
+								color: "#c4b5fd",
+								fontWeight: 800,
+								fontFamily: "inherit",
+								cursor: "pointer",
+							}}
+						>
+							Mostrar respuesta completa
+						</button>
+					</div>
+				</div>
+			</div>
+		);
+	}
+
+	return (
+		<div
+			style={{
+				marginBottom: "32px",
+				display: "flex",
+				justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+			}}
+		>
+			{msg.role === "assistant" && (
+				<div
+					style={{
+						width: "63px",
+						height: "63px",
+						borderRadius: "18px",
+						background: "rgba(24,24,27,.72)",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						marginRight: "16px",
+						flexShrink: 0,
+						boxShadow: "0 8px 22px rgba(255,111,59,.12)",
+						overflow: "hidden",
+					}}
+				>
+					<img
+						src="/logo_Pulpo_octavio.png"
+						alt="Octopus"
+						style={{ width: "54px", height: "54px", objectFit: "contain" }}
+					/>
+				</div>
+			)}
+			<div
+				ref={bodyRef}
+				style={{
+					maxWidth: msg.role === "user" ? "80%" : "calc(100% - 52px)",
+				}}
+			>
+				{msg.role === "user" ? (
+					<div
+						style={{
+							padding: "14px 20px",
+							borderRadius: "20px 20px 4px 20px",
+							background: "#27272a",
+							color: "#f4f4f5",
+							fontSize: "0.95rem",
+							lineHeight: "1.6",
+							border: "1px solid #3f3f46",
+						}}
+					>
+						{needsMarkdown ? (
+							<div
+								className="markdown-body"
+								// biome-ignore lint/security/noDangerouslySetInnerHtml: user-uploaded local media
+								dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
+							/>
+						) : (
+							displayContent
+						)}
+						{renderUserToggle()}
+					</div>
+				) : (
+					<div
+						style={{
+							color: "#e4e4e7",
+							fontSize: "0.95rem",
+							lineHeight: "1.7",
+						}}
+					>
+						<div
+							className="markdown-body"
+							// biome-ignore lint/security/noDangerouslySetInnerHtml: sanitized assistant markdown
+							dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
+						/>
+						{msg.content.trim().length > 0 && (
+							<div
+								style={{
+									display: "flex",
+									justifyContent: "flex-start",
+									marginTop: "12px",
+								}}
+							>
+								<button
+									type="button"
+									onClick={copyAssistantResponse}
+									data-tooltip="Copiar respuesta del agente"
+									aria-label="Copiar respuesta del agente"
+									style={{
+										display: "inline-flex",
+										alignItems: "center",
+										gap: "6px",
+										padding: "6px 10px",
+										borderRadius: "999px",
+										border: "1px solid #3f3f46",
+										background: copied
+											? "rgba(16,185,129,.12)"
+											: "rgba(24,24,27,.78)",
+										color: copied ? "#34d399" : "#a1a1aa",
+										fontSize: "0.74rem",
+										fontWeight: 700,
+										fontFamily: "inherit",
+										cursor: "pointer",
+										transition: "all .18s ease",
+									}}
+								>
+									<svg
+										aria-hidden="true"
+										width="13"
+										height="13"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										strokeWidth="2"
+										strokeLinecap="round"
+										strokeLinejoin="round"
+									>
+										<rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+										<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+									</svg>
+									{copied ? "Copiado" : "Copiar"}
+								</button>
+							</div>
+						)}
+					</div>
+				)}
+				<div
+					style={{
+						fontSize: "0.7rem",
+						color: "#71717a",
+						marginTop: "6px",
+						textAlign: msg.role === "user" ? "right" : "left",
+						paddingLeft: msg.role === "user" ? "0" : "4px",
+					}}
+				>
+					{formatTime(msg.timestamp)}
+				</div>
+			</div>
+		</div>
+	);
+});
+
+const SIDEBAR_WIDTH = 312;
+
+export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
+	onNavigate,
+}) => {
 	const [messages, setMessages] = useState<Message[]>([]);
 	const messagesRef = useRef<Message[]>([]);
 	const [input, setInput] = useState("");
@@ -434,10 +1498,13 @@ export const ChatPage: React.FC = () => {
 	const pendingIdRef = useRef<string>("");
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [isUploadingImage, setIsUploadingImage] = useState(false);
-	const [pendingAttachments, setPendingAttachments] = useState<{url: string, file: File, previewUrl: string}[]>([]);
+	const [pendingAttachments, setPendingAttachments] = useState<
+		{ url: string; file: File; previewUrl: string }[]
+	>([]);
 	const clearPendingAttachments = useCallback(() => {
 		setPendingAttachments((current) => {
-			for (const attachment of current) URL.revokeObjectURL(attachment.previewUrl);
+			for (const attachment of current)
+				URL.revokeObjectURL(attachment.previewUrl);
 			return [];
 		});
 	}, []);
@@ -451,6 +1518,7 @@ export const ChatPage: React.FC = () => {
 
 	const [sidebarOpen, setSidebarOpen] = useState(true);
 	const [conversations, setConversations] = useState<Conversation[]>([]);
+	const [conversationSearch, setConversationSearch] = useState("");
 	const [conversationsLoaded, setConversationsLoaded] = useState(false);
 	const [activeConversationId, setActiveConversationId] = useState<
 		string | null
@@ -463,6 +1531,7 @@ export const ChatPage: React.FC = () => {
 	});
 	const activeConvRef = useRef<string | null>(null);
 	const [agents, setAgents] = useState<Agent[]>([]);
+	const [userDisplayName, setUserDisplayName] = useState("Usuario");
 	const [selectedAgentId, setSelectedAgentId] = useState<string>("");
 	const [streamEnabled, setStreamEnabled] = useState<boolean>(() => {
 		try {
@@ -474,8 +1543,23 @@ export const ChatPage: React.FC = () => {
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle");
 	const [agentActivity, setAgentActivity] = useState<AgentActivity[]>([]);
+	const [multiAgentPlan, setMultiAgentPlan] =
+		useState<MultiAgentPlanState | null>(null);
+	const [multiAgentWorkers, setMultiAgentWorkers] = useState<
+		MultiAgentWorkerState[]
+	>([]);
+	const [executionByConversation, setExecutionByConversation] = useState<
+		Record<string, ConversationExecutionState>
+	>({});
 	const lastActivityKeyRef = useRef<string>("");
+	const hydratedMultiAgentExecutionRef = useRef<string>("");
+	const notifiedExecutionRef = useRef<Set<string>>(new Set());
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
+	const [visibleMessageCount, setVisibleMessageCount] = useState(
+		INITIAL_VISIBLE_MESSAGES,
+	);
+	const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+	const scrollRestoreRef = useRef<{ height: number; top: number } | null>(null);
 	const [editingTitle, setEditingTitle] = useState("");
 	const [mediaPreviewSrc, setMediaPreviewSrc] = useState<string | null>(null);
 
@@ -502,6 +1586,159 @@ export const ChatPage: React.FC = () => {
 		memories: number;
 	} | null>(null);
 
+	const resetAgentTrace = useCallback(() => {
+		setAgentStatus("idle");
+		setAgentActivity([]);
+		setMultiAgentPlan(null);
+		setMultiAgentWorkers([]);
+		lastActivityKeyRef.current = "";
+	}, []);
+
+	const applyMultiAgentEvent = useCallback(
+		(
+			status: AgentActivityStatus,
+			workerId: string | null,
+			detail?: string | null,
+		) => {
+			const parsed = parseActivityDetailJson(detail);
+			if (status === "orchestrating") {
+				if (parsed) {
+					const subtasks = Array.isArray(parsed.subtasks)
+						? parsed.subtasks
+						: [];
+					const count = asNumber(parsed.count) ?? subtasks.length;
+					if (count < 2 && subtasks.length < 2) {
+						setMultiAgentPlan(null);
+						setMultiAgentWorkers([]);
+						return;
+					}
+					if (
+						count > 0 ||
+						subtasks.length > 0 ||
+						parsed.executionPlan ||
+						parsed.reasoning
+					) {
+						setMultiAgentPlan({
+							count,
+							executionPlan: asString(parsed.executionPlan),
+							reasoning: asString(parsed.reasoning),
+						});
+					} else if (
+						parsed.totalMs ||
+						parsed.executionMs ||
+						parsed.synthesisMs
+					) {
+						setMultiAgentPlan((prev) =>
+							prev
+								? {
+										...prev,
+										reasoning: `${prev.reasoning ?? "Ejecución multiagente completada."} Telemetría: ejecución ${asNumber(parsed.executionMs) ?? 0}ms, síntesis ${asNumber(parsed.synthesisMs) ?? 0}ms.`,
+									}
+								: prev,
+						);
+					}
+					if (subtasks.length > 0) {
+						setMultiAgentWorkers(
+							subtasks.map((raw, index) => {
+								const task =
+									raw && typeof raw === "object"
+										? (raw as Record<string, unknown>)
+										: {};
+								const id = asString(task.id) ?? `task_${index + 1}`;
+								return {
+									id,
+									taskId: id,
+									role: asString(task.role),
+									description:
+										asString(task.description) ?? "Subtarea asignada.",
+									status: "queued" as const,
+									progress: 0,
+									current: "Esperando asignación del worker.",
+									steps: [],
+								};
+							}),
+						);
+					}
+				}
+				return;
+			}
+
+			if (!workerId && !parsed) return;
+			const id =
+				asString(parsed?.workerId) ??
+				workerId ??
+				asString(parsed?.taskId) ??
+				"worker";
+			const taskId = asString(parsed?.taskId);
+			const message =
+				asString(parsed?.message) ??
+				asString(parsed?.description) ??
+				asString(parsed?.result) ??
+				asString(parsed?.error) ??
+				detail ??
+				"Actualizando progreso.";
+			const progress = Math.max(
+				0,
+				Math.min(
+					100,
+					asNumber(parsed?.progress) ?? (status === "worker_done" ? 100 : 8),
+				),
+			);
+			const nextStatus: MultiAgentWorkerStatus =
+				status === "worker_done"
+					? "done"
+					: status === "worker_error"
+						? "error"
+						: "running";
+			const copy = getActivityCopy(status, id);
+			const step: MultiAgentStep = {
+				id: nanoid(),
+				label: copy.label,
+				detail: message,
+				timestamp: Date.now(),
+				status,
+				toolName: asString(parsed?.toolName) ?? null,
+			};
+
+			setMultiAgentWorkers((prev) => {
+				const existingIndex = prev.findIndex(
+					(worker) => worker.id === id || worker.taskId === taskId,
+				);
+				if (existingIndex === -1) {
+					return [
+						...prev,
+						{
+							id,
+							taskId,
+							role: asString(parsed?.role),
+							description: asString(parsed?.description) ?? message,
+							status: nextStatus,
+							progress,
+							current: message,
+							steps: [step],
+						},
+					];
+				}
+
+				return prev.map((worker, index) => {
+					if (index !== existingIndex) return worker;
+					return {
+						...worker,
+						id,
+						taskId: taskId ?? worker.taskId,
+						role: asString(parsed?.role) ?? worker.role,
+						description: asString(parsed?.description) ?? worker.description,
+						status: nextStatus,
+						progress: Math.max(worker.progress, progress),
+						current: message,
+						steps: [...worker.steps, step].slice(-8),
+					};
+				});
+			});
+		},
+		[],
+	);
+
 	const addAgentActivity = useCallback(
 		(
 			status: AgentActivityStatus,
@@ -521,21 +1758,56 @@ export const ChatPage: React.FC = () => {
 			lastActivityKeyRef.current = key;
 			const copy = getActivityCopy(status, toolName);
 			const detail = activityDetail?.trim() || copy.detail;
-			setAgentActivity((prev) => [
-				...prev,
-				{
-					id: nanoid(),
-					status,
-					label: copy.label,
-					detail,
-					toolName: toolName ?? null,
-					iconSvg: iconSvg ?? null,
-					timestamp: Date.now(),
-				},
-			].slice(-6));
+			setAgentActivity((prev) =>
+				[
+					...prev,
+					{
+						id: nanoid(),
+						status,
+						label: copy.label,
+						detail,
+						toolName: toolName ?? null,
+						iconSvg: iconSvg ?? null,
+						timestamp: Date.now(),
+					},
+				].slice(-6),
+			);
 		},
 		[],
 	);
+
+	const updateConversationExecution = useCallback(
+		(
+			conversationId: string | undefined | null,
+			updater: (
+				prev: ConversationExecutionState | undefined,
+			) => ConversationExecutionState | undefined,
+		) => {
+			if (!conversationId) return;
+			setExecutionByConversation((prev) => {
+				const nextState = updater(prev[conversationId]);
+				if (!nextState) {
+					const { [conversationId]: _removed, ...rest } = prev;
+					return rest;
+				}
+				return { ...prev, [conversationId]: nextState };
+			});
+		},
+		[],
+	);
+
+	const subscribeConversation = useCallback((conversationId: string | null) => {
+		if (!conversationId || wsRef.current?.readyState !== WebSocket.OPEN) return;
+		wsRef.current.send(
+			JSON.stringify({
+				id: nanoid(),
+				type: "request",
+				channel: "chat.control",
+				payload: { action: "subscribe", conversationId },
+				timestamp: Date.now(),
+			}),
+		);
+	}, []);
 
 	const loadDashboardStats = useCallback(async () => {
 		try {
@@ -572,12 +1844,29 @@ export const ChatPage: React.FC = () => {
 		apiGet<Agent[]>("/api/agents")
 			.then((list) => {
 				setAgents(list);
-				if (list.length > 0 && !selectedAgentId) {
-					setSelectedAgentId(list[0].id);
+				if (list.length > 0) {
+					setSelectedAgentId((current) => current || list[0].id);
 				}
 			})
 			.catch(() => {});
 	}, []);
+
+	useEffect(() => {
+		apiGet<UserProfileResponse>("/api/memory/profile")
+			.then((response) => {
+				const name = response.profile?.displayName?.trim();
+				if (name) setUserDisplayName(name);
+			})
+			.catch(() => {});
+	}, []);
+
+	const visibleConversations = useMemo(() => {
+		const query = conversationSearch.trim().toLowerCase();
+		if (!query) return conversations;
+		return conversations.filter((conversation) =>
+			(conversation.title || "Sin titulo").toLowerCase().includes(query),
+		);
+	}, [conversations, conversationSearch]);
 
 	const loadConversations = useCallback(() => {
 		apiGet<Conversation[]>("/api/conversations")
@@ -595,6 +1884,21 @@ export const ChatPage: React.FC = () => {
 	}, [loadConversations]);
 
 	useEffect(() => {
+		apiGet<ChatExecution[]>("/api/chat/executions")
+			.then((executions) => {
+				setExecutionByConversation((prev) => {
+					const next = { ...prev };
+					for (const execution of executions) {
+						next[execution.conversation_id] =
+							executionStateFromRecord(execution);
+					}
+					return next;
+				});
+			})
+			.catch(() => {});
+	}, []);
+
+	useEffect(() => {
 		// Don't auto-select until conversations have been loaded from the API
 		if (!conversationsLoaded) return;
 
@@ -608,7 +1912,7 @@ export const ChatPage: React.FC = () => {
 		const exists =
 			activeConversationId !== null &&
 			conversations.some((conv) => conv.id === activeConversationId);
-		
+
 		if (!exists) {
 			setActiveConversationId(conversations[0]?.id ?? null);
 		}
@@ -637,6 +1941,54 @@ export const ChatPage: React.FC = () => {
 		}
 	}, []);
 
+	const syncConversationExecution = useCallback(
+		async (conversationId: string, options?: { reloadMessages?: boolean }) => {
+			try {
+				const { execution } = await apiGet<{ execution: ChatExecution | null }>(
+					`/api/conversations/${conversationId}/execution`,
+				);
+				if (!execution) {
+					updateConversationExecution(conversationId, () => undefined);
+					if (conversationId === activeConvRef.current) {
+						setIsLoading(false);
+						setIsStreaming(false);
+						setAgentStatus("idle");
+						setAgentActivity([]);
+						lastActivityKeyRef.current = "";
+						pendingIdRef.current = "";
+						if (options?.reloadMessages)
+							void loadConversationMessages(conversationId);
+					}
+					return;
+				}
+
+				const nextState = executionStateFromRecord(execution);
+				setExecutionByConversation((prev) => ({
+					...prev,
+					[conversationId]: nextState,
+				}));
+				if (
+					conversationId === activeConvRef.current &&
+					!isExecutionActive(nextState)
+				) {
+					setIsLoading(false);
+					setIsStreaming(false);
+					setAgentStatus("idle");
+					setAgentActivity([]);
+					lastActivityKeyRef.current = "";
+					pendingIdRef.current = "";
+					if (options?.reloadMessages)
+						void loadConversationMessages(conversationId);
+					loadConversations();
+					inputRef.current?.focus();
+				}
+			} catch {
+				// Keep the local optimistic state if the recovery request fails.
+			}
+		},
+		[loadConversationMessages, loadConversations, updateConversationExecution],
+	);
+
 	useEffect(() => {
 		activeConvRef.current = activeConversationId;
 		try {
@@ -652,18 +2004,28 @@ export const ChatPage: React.FC = () => {
 			// ignore storage failures
 		}
 
+		setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
 		if (activeConversationId) {
+			subscribeConversation(activeConversationId);
 			void loadConversationMessages(activeConversationId);
+			void syncConversationExecution(activeConversationId);
 		} else {
 			setMessages([]);
 		}
-	}, [activeConversationId, loadConversationMessages]);
+	}, [
+		activeConversationId,
+		loadConversationMessages,
+		subscribeConversation,
+		syncConversationExecution,
+	]);
 
 	const handleSelectConversation = useCallback(
 		(convId: string) => {
+			const executionId = executionByConversation[convId]?.executionId;
+			if (executionId) notifiedExecutionRef.current.delete(executionId);
 			setActiveConversationId(convId);
 		},
-		[],
+		[executionByConversation],
 	);
 
 	const handleNewChat = useCallback(async () => {
@@ -717,17 +2079,63 @@ export const ChatPage: React.FC = () => {
 				}
 			} else {
 				messagesEndRef.current?.scrollIntoView({
-					behavior: instant ? "instant" as ScrollBehavior : "smooth",
+					behavior: instant ? ("instant" as ScrollBehavior) : "smooth",
 					block: "end",
 				});
 			}
+			setShowScrollToBottom(false);
 		};
 		setTimeout(doScroll, 30);
 	}, []);
 
+	const updateScrollToBottomVisibility = useCallback(() => {
+		const container = messagesContainerRef.current;
+		if (!container) {
+			setShowScrollToBottom(false);
+			return;
+		}
+		const distanceFromBottom =
+			container.scrollHeight - container.scrollTop - container.clientHeight;
+		setShowScrollToBottom(distanceFromBottom > 180);
+	}, []);
+
+	const handleMessagesScroll = useCallback(() => {
+		updateScrollToBottomVisibility();
+	}, [updateScrollToBottomVisibility]);
+
 	useEffect(() => {
+		void messages.length;
 		scrollToBottom();
 	}, [messages, scrollToBottom]);
+
+	const revealOlderMessages = useCallback(() => {
+		const container = messagesContainerRef.current;
+		if (container) {
+			scrollRestoreRef.current = {
+				height: container.scrollHeight,
+				top: container.scrollTop,
+			};
+		}
+		setVisibleMessageCount((count) =>
+			Math.min(count + MESSAGE_PAGE_SIZE, messagesRef.current.length),
+		);
+	}, []);
+
+	useEffect(() => {
+		void visibleMessageCount;
+		const restore = scrollRestoreRef.current;
+		if (!restore) return;
+		const container = messagesContainerRef.current;
+		if (!container) {
+			scrollRestoreRef.current = null;
+			return;
+		}
+		requestAnimationFrame(() => {
+			container.scrollTop =
+				restore.top + (container.scrollHeight - restore.height);
+			scrollRestoreRef.current = null;
+		});
+	}, [visibleMessageCount]);
 
 	const handleSaveTitle = async (convId: string) => {
 		if (!editingTitle.trim()) {
@@ -754,6 +2162,24 @@ export const ChatPage: React.FC = () => {
 
 		ws.onopen = () => {
 			setIsConnected(true);
+			if (activeConvRef.current) {
+				const conversationId = activeConvRef.current;
+				ws.send(
+					JSON.stringify({
+						id: nanoid(),
+						type: "request",
+						channel: "chat.control",
+						payload: {
+							action: "subscribe",
+							conversationId,
+						},
+						timestamp: Date.now(),
+					}),
+				);
+				void syncConversationExecution(conversationId, {
+					reloadMessages: true,
+				});
+			}
 		};
 
 		ws.onclose = () => {
@@ -772,6 +2198,16 @@ export const ChatPage: React.FC = () => {
 				if (msg.type === "pong") return;
 
 				const conversationId = msg.payload?.conversationId;
+				const executionId = msg.payload?.executionId;
+				const isActiveConversation =
+					!conversationId || conversationId === activeConvRef.current;
+				if (conversationId && msg.payload?.execution) {
+					const execution = msg.payload.execution;
+					setExecutionByConversation((prev) => ({
+						...prev,
+						[conversationId]: executionStateFromRecord(execution),
+					}));
+				}
 				if (conversationId && !activeConvRef.current) {
 					setActiveConversationId(conversationId);
 					activeConvRef.current = conversationId;
@@ -785,8 +2221,7 @@ export const ChatPage: React.FC = () => {
 								: lastUserMsg.content
 							: "Nueva conversación";
 					setConversations((prev) => {
-						if (prev.some((c) => c.id === conversationId))
-							return prev;
+						if (prev.some((c) => c.id === conversationId)) return prev;
 						return [
 							{
 								id: conversationId,
@@ -806,34 +2241,51 @@ export const ChatPage: React.FC = () => {
 				}
 
 				if (msg.type === "response") {
-					setAgentStatus("idle");
-					setAgentActivity([]);
-					lastActivityKeyRef.current = "";
+					updateConversationExecution(conversationId, (prev) => ({
+						executionId: executionId ?? prev?.executionId ?? msg.id,
+						status: "completed",
+						currentStatus: "idle",
+						activities: prev?.activities ?? [],
+					}));
+					resetAgentTrace();
 					const assistantContent = getPayloadText(msg.payload);
 
-					setMessages((prev) => {
-						const existing = prev.find((m) => m.id === `stream-${msg.id}`);
-						if (existing) {
-							return prev.map((m) =>
-								m.id === `stream-${msg.id}`
-									? {
-											...m,
-											content: assistantContent,
-											role: "assistant" as const,
-										}
-									: m,
-							);
+					if (isActiveConversation) {
+						setMessages((prev) => {
+							const existing = prev.find((m) => m.id === `stream-${msg.id}`);
+							if (existing) {
+								return prev.map((m) =>
+									m.id === `stream-${msg.id}`
+										? {
+												...m,
+												content: assistantContent,
+												role: "assistant" as const,
+											}
+										: m,
+								);
+							}
+							return [
+								...prev,
+								{
+									id: msg.id,
+									role: "assistant",
+									content: assistantContent,
+									timestamp: Date.now(),
+								},
+							];
+						});
+					} else if (
+						executionId &&
+						!notifiedExecutionRef.current.has(executionId)
+					) {
+						notifiedExecutionRef.current.add(executionId);
+						showToast("success", "El agente terminó una tarea en otro chat.");
+						if (Notification.permission === "granted") {
+							new Notification("Octopus AI", {
+								body: "El agente terminó una tarea en otro chat.",
+							});
 						}
-						return [
-							...prev,
-							{
-								id: msg.id,
-								role: "assistant",
-								content: assistantContent,
-								timestamp: Date.now(),
-							},
-						];
-					});
+					}
 					setIsLoading(false);
 					pendingIdRef.current = "";
 					loadConversations();
@@ -841,6 +2293,13 @@ export const ChatPage: React.FC = () => {
 				} else if (msg.type === "stream") {
 					const chunk = getPayloadText(msg.payload);
 					const streamId = `stream-${msg.id}`;
+					updateConversationExecution(conversationId, (prev) => ({
+						executionId: executionId ?? prev?.executionId ?? msg.id,
+						status: "running",
+						currentStatus: "responding",
+						activities: prev?.activities ?? [],
+					}));
+					if (!isActiveConversation) return;
 					setIsStreaming(true);
 					setAgentStatus("responding");
 					addAgentActivity("responding");
@@ -864,20 +2323,47 @@ export const ChatPage: React.FC = () => {
 					// Auto-scroll on each streaming chunk
 					scrollToBottom(true);
 				} else if (msg.type === "stream_end") {
+					updateConversationExecution(conversationId, (prev) => ({
+						executionId: executionId ?? prev?.executionId ?? msg.id,
+						status: msg.payload?.cancelled ? "cancelled" : "completed",
+						currentStatus: "idle",
+						activities: prev?.activities ?? [],
+						error: msg.payload?.error ?? null,
+					}));
+					if (
+						!isActiveConversation &&
+						executionId &&
+						!notifiedExecutionRef.current.has(executionId)
+					) {
+						notifiedExecutionRef.current.add(executionId);
+						showToast(
+							msg.payload?.cancelled ? "warning" : "success",
+							msg.payload?.cancelled
+								? "Una tarea del agente fue detenida."
+								: "El agente terminó una tarea en otro chat.",
+						);
+						if (
+							!msg.payload?.cancelled &&
+							Notification.permission === "granted"
+						) {
+							new Notification("Octopus AI", {
+								body: "El agente terminó una tarea en otro chat.",
+							});
+						}
+					}
+					if (!isActiveConversation) {
+						loadConversations();
+						return;
+					}
 					setIsLoading(false);
 					setIsStreaming(false);
-					setAgentStatus("idle");
-					setAgentActivity([]);
-					lastActivityKeyRef.current = "";
+					resetAgentTrace();
 					pendingIdRef.current = "";
 					loadConversations();
 					inputRef.current?.focus();
 				} else if (msg.type === "event") {
 					const agentStatus = msg.payload?.agentStatus;
-					if (
-						agentStatus &&
-						AGENT_ACTIVITY_STATUSES.has(agentStatus)
-					) {
+					if (agentStatus && AGENT_ACTIVITY_STATUSES.has(agentStatus)) {
 						const nextStatus = agentStatus as AgentActivityStatus;
 						const nextToolName = msg.payload?.toolName || null;
 						const iconB64 = msg.payload?.uiIconB64;
@@ -889,31 +2375,79 @@ export const ChatPage: React.FC = () => {
 								nextIcon = null;
 							}
 						}
-						setAgentStatus(nextStatus);
-						addAgentActivity(
-							nextStatus,
-							nextToolName,
-							nextIcon,
+						const parsedDetail = parseActivityDetailJson(
 							msg.payload?.activityDetail,
 						);
-						scrollToBottom(true);
+						const displayDetail =
+							asString(parsedDetail?.message) ??
+							asString(parsedDetail?.description) ??
+							asString(parsedDetail?.reasoning) ??
+							asString(parsedDetail?.result) ??
+							asString(parsedDetail?.error) ??
+							msg.payload?.activityDetail?.trim();
+						const copy = getActivityCopy(nextStatus, nextToolName);
+						const nextActivity: AgentActivity = {
+							id: nanoid(),
+							status: nextStatus,
+							label: copy.label,
+							detail: displayDetail || copy.detail,
+							toolName: nextToolName,
+							iconSvg: nextIcon,
+							timestamp: Date.now(),
+						};
+						updateConversationExecution(conversationId, (prev) => ({
+							executionId: executionId ?? prev?.executionId ?? msg.id,
+							status: "running",
+							currentStatus: nextStatus,
+							activities: [...(prev?.activities ?? []), nextActivity].slice(
+								-80,
+							),
+						}));
+						if (isActiveConversation) {
+							setAgentStatus(nextStatus);
+							applyMultiAgentEvent(
+								nextStatus,
+								nextToolName,
+								msg.payload?.activityDetail,
+							);
+							addAgentActivity(
+								nextStatus,
+								nextToolName,
+								nextIcon,
+								displayDetail,
+							);
+							scrollToBottom(true);
+						}
 					}
 				} else if (msg.type === "error") {
 					const errMsg = msg.payload?.error || "Error desconocido";
-					setMessages((prev) => [
-						...prev,
-						{
-							id: nanoid(),
-							role: "assistant",
-							content: `⚠️ Error: ${errMsg}`,
-							timestamp: Date.now(),
-						},
-					]);
+					updateConversationExecution(conversationId, (prev) => ({
+						executionId: executionId ?? prev?.executionId ?? msg.id,
+						status: "failed",
+						currentStatus: "idle",
+						activities: prev?.activities ?? [],
+						error: errMsg,
+					}));
+					if (isActiveConversation) {
+						setMessages((prev) => [
+							...prev,
+							{
+								id: nanoid(),
+								role: "assistant",
+								content: `⚠️ Error: ${errMsg}`,
+								timestamp: Date.now(),
+							},
+						]);
+					} else if (
+						executionId &&
+						!notifiedExecutionRef.current.has(executionId)
+					) {
+						notifiedExecutionRef.current.add(executionId);
+						showToast("error", "Una tarea del agente falló en otro chat.");
+					}
 					setIsLoading(false);
 					setIsStreaming(false);
-					setAgentStatus("idle");
-					setAgentActivity([]);
-					lastActivityKeyRef.current = "";
+					resetAgentTrace();
 					pendingIdRef.current = "";
 					loadConversations();
 				}
@@ -923,7 +2457,15 @@ export const ChatPage: React.FC = () => {
 		};
 
 		wsRef.current = ws;
-	}, [addAgentActivity, loadConversations, scrollToBottom]);
+	}, [
+		addAgentActivity,
+		applyMultiAgentEvent,
+		loadConversations,
+		resetAgentTrace,
+		scrollToBottom,
+		syncConversationExecution,
+		updateConversationExecution,
+	]);
 
 	useEffect(() => {
 		connect();
@@ -937,13 +2479,97 @@ export const ChatPage: React.FC = () => {
 		inputRef.current?.focus();
 	}, []);
 
+	useEffect(() => {
+		if ("Notification" in window && Notification.permission === "default") {
+			Notification.requestPermission().catch(() => {});
+		}
+	}, []);
+
+	const activeExecution = activeConversationId
+		? executionByConversation[activeConversationId]
+		: undefined;
+	const activeBusy = isExecutionActive(activeExecution);
+	const visibleAgentActivity =
+		(activeBusy || isStreaming || agentStatus !== "idle") &&
+		agentActivity.length === 0
+			? [createFallbackAgentActivity(agentStatus)]
+			: agentActivity;
+	const latestVisibleAgentActivity =
+		visibleAgentActivity[visibleAgentActivity.length - 1];
+	const shouldShowAgentActivity =
+		(activeBusy || isStreaming || agentStatus !== "idle") &&
+		latestVisibleAgentActivity?.status !== "responding";
+
+	useEffect(() => {
+		const needsRecovery =
+			activeBusy || isLoading || isStreaming || agentStatus !== "idle";
+		if (!activeConversationId || !needsRecovery) return;
+		const timer = window.setInterval(() => {
+			void syncConversationExecution(activeConversationId, {
+				reloadMessages: true,
+			});
+		}, 5000);
+		return () => window.clearInterval(timer);
+	}, [
+		activeConversationId,
+		activeBusy,
+		agentStatus,
+		isLoading,
+		isStreaming,
+		syncConversationExecution,
+	]);
+
+	useEffect(() => {
+		if (!activeExecution || !isExecutionActive(activeExecution)) {
+			if (!isLoading && !isStreaming) {
+				setAgentStatus("idle");
+				setAgentActivity([]);
+			}
+			return;
+		}
+		setAgentStatus(activeExecution.currentStatus);
+		setAgentActivity((prev) =>
+			activeExecution.activities.length > 0 ? activeExecution.activities : prev,
+		);
+	}, [activeExecution, isLoading, isStreaming]);
+
+	useEffect(() => {
+		if (!activeExecution || !isExecutionActive(activeExecution)) {
+			hydratedMultiAgentExecutionRef.current = "";
+			return;
+		}
+		if (
+			hydratedMultiAgentExecutionRef.current === activeExecution.executionId ||
+			activeExecution.activities.length === 0
+		) {
+			return;
+		}
+		hydratedMultiAgentExecutionRef.current = activeExecution.executionId;
+		setMultiAgentPlan(null);
+		setMultiAgentWorkers([]);
+		for (const activity of activeExecution.activities) {
+			applyMultiAgentEvent(
+				activity.status,
+				activity.toolName ?? null,
+				activity.detail,
+			);
+		}
+	}, [activeExecution, applyMultiAgentEvent]);
+
 	const handleSend = () => {
 		const text = input.trim();
-		if ((!text && pendingAttachments.length === 0) || !isConnected || isLoading) return;
+		if (
+			(!text && pendingAttachments.length === 0) ||
+			!isConnected ||
+			activeBusy
+		)
+			return;
 
 		let finalContent = text;
 		if (pendingAttachments.length > 0) {
-			const imagesMd = pendingAttachments.map(a => `![Image](${a.url})`).join("\n");
+			const imagesMd = pendingAttachments
+				.map((a) => `![Image](${a.url})`)
+				.join("\n");
 			finalContent = finalContent ? `${finalContent}\n\n${imagesMd}` : imagesMd;
 		}
 
@@ -958,6 +2584,8 @@ export const ChatPage: React.FC = () => {
 		clearPendingAttachments();
 		setIsLoading(true);
 		setIsStreaming(false);
+		setMultiAgentPlan(null);
+		setMultiAgentWorkers([]);
 		setAgentStatus("thinking");
 		lastActivityKeyRef.current = "";
 		const initialActivityCopy = getActivityCopy("thinking");
@@ -1006,7 +2634,9 @@ export const ChatPage: React.FC = () => {
 				if (targetConvId) {
 					const titleSource = text || "Imagen";
 					const title =
-						titleSource.length > 50 ? `${titleSource.substring(0, 50).trimEnd()}...` : titleSource;
+						titleSource.length > 50
+							? `${titleSource.substring(0, 50).trimEnd()}...`
+							: titleSource;
 					apiPatch(`/api/conversations/${targetConvId}`, { title }).catch(
 						() => {},
 					);
@@ -1051,17 +2681,20 @@ export const ChatPage: React.FC = () => {
 		try {
 			const formData = new FormData();
 			formData.append("file", file);
-			
+
 			const res = await fetch(`${API_BASE}/api/media/upload`, {
 				method: "POST",
 				body: formData,
 			});
-			
+
 			if (!res.ok) throw new Error("Error al subir archivo");
 			const data = await res.json();
-			
+
 			const previewUrl = URL.createObjectURL(file);
-			setPendingAttachments((prev) => [...prev, { url: data.url, file, previewUrl }]);
+			setPendingAttachments((prev) => [
+				...prev,
+				{ url: data.url, file, previewUrl },
+			]);
 			if (inputRef.current) inputRef.current.focus();
 		} catch (error) {
 			console.error("Upload error:", error);
@@ -1081,6 +2714,32 @@ export const ChatPage: React.FC = () => {
 		}
 	};
 
+	const handleStopExecution = async () => {
+		if (!activeConversationId || !activeBusy) return;
+		try {
+			await apiPost(`/api/conversations/${activeConversationId}/stop`);
+			updateConversationExecution(activeConversationId, (prev) =>
+				prev
+					? {
+							...prev,
+							status: "cancelled",
+							currentStatus: "idle",
+							error: "Cancelado por el usuario",
+						}
+					: prev,
+			);
+			setIsLoading(false);
+			setIsStreaming(false);
+			resetAgentTrace();
+			showToast("warning", "Tarea del agente detenida.");
+		} catch (error) {
+			showToast(
+				"error",
+				error instanceof Error ? error.message : "No se pudo detener la tarea.",
+			);
+		}
+	};
+
 	return (
 		<div
 			style={{
@@ -1096,8 +2755,8 @@ export const ChatPage: React.FC = () => {
 					style={{
 						width: SIDEBAR_WIDTH,
 						minWidth: SIDEBAR_WIDTH,
-						background: "#0f0f12",
-						borderRight: "1px solid #27272a",
+						background: "#000",
+						borderRight: "1px solid #151515",
 						display: "flex",
 						flexDirection: "column",
 						overflow: "hidden",
@@ -1105,18 +2764,61 @@ export const ChatPage: React.FC = () => {
 				>
 					<div
 						style={{
-							padding: "16px 16px 12px",
-							borderBottom: "1px solid #27272a",
-							display: "flex",
-							justifyContent: "space-between",
-							alignItems: "center",
+							padding: "20px 18px 14px",
+							borderBottom: "1px solid #111",
 						}}
 					>
-						<span
-							style={{ fontSize: "0.95rem", fontWeight: 600, color: "#f4f4f5" }}
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								marginBottom: "24px",
+							}}
 						>
-							Conversaciones
-						</span>
+							<div
+								style={{
+									fontSize: "1.28rem",
+									fontWeight: 800,
+									color: "#fff",
+									letterSpacing: "-0.02em",
+								}}
+							>
+								Octopus
+							</div>
+							<button
+								type="button"
+								onClick={() => setSidebarOpen(false)}
+								data-tooltip="Ocultar panel"
+								style={{
+									width: "30px",
+									height: "30px",
+									borderRadius: "9px",
+									border: "none",
+									background: "transparent",
+									color: "#a1a1aa",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+								}}
+							>
+								<svg
+									aria-hidden="true"
+									width="20"
+									height="20"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="1.8"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+								>
+									<rect x="4" y="4" width="16" height="16" rx="3" />
+									<path d="M10 4v16" />
+								</svg>
+							</button>
+						</div>
 						<button
 							type="button"
 							onClick={() => {
@@ -1124,26 +2826,32 @@ export const ChatPage: React.FC = () => {
 								inputRef.current?.focus();
 							}}
 							style={{
-								padding: "6px",
-								borderRadius: "8px",
-								border: "1px solid #3f3f46",
-								background: "#18181b",
+								width: "100%",
+								padding: "14px 16px",
+								borderRadius: "14px",
+								border: "none",
+								background: "#2f2f2f",
 								color: "#f4f4f5",
 								cursor: "pointer",
 								display: "flex",
 								alignItems: "center",
-								justifyContent: "center",
-								transition: "background 0.2s",
+								justifyContent: "flex-start",
+								gap: "12px",
+								fontWeight: 700,
+								fontSize: "0.98rem",
+								fontFamily: "inherit",
+								transition: "all 0.2s",
 							}}
-							title="Nueva conversación / Dashboard"
+							data-tooltip="Nuevo chat"
 							onMouseEnter={(e) => {
-								e.currentTarget.style.background = "#27272a";
+								e.currentTarget.style.background = "#383838";
 							}}
 							onMouseLeave={(e) => {
-								e.currentTarget.style.background = "#18181b";
+								e.currentTarget.style.background = "#2f2f2f";
 							}}
 						>
 							<svg
+								aria-hidden="true"
 								width="14"
 								height="14"
 								viewBox="0 0 24 24"
@@ -1156,11 +2864,71 @@ export const ChatPage: React.FC = () => {
 								<line x1="12" y1="5" x2="12" y2="19" />
 								<line x1="5" y1="12" x2="19" y2="12" />
 							</svg>
+							Nuevo chat
 						</button>
+						<label
+							style={{
+								marginTop: "14px",
+								display: "flex",
+								alignItems: "center",
+								gap: "12px",
+								padding: "12px 4px",
+								color: "#f4f4f5",
+							}}
+						>
+							<svg
+								aria-hidden="true"
+								width="20"
+								height="20"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="2"
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							>
+								<circle cx="11" cy="11" r="7" />
+								<path d="m20 20-3.5-3.5" />
+							</svg>
+							<input
+								value={conversationSearch}
+								onChange={(event) => setConversationSearch(event.target.value)}
+								placeholder="Buscar chats"
+								style={{
+									width: "100%",
+									minWidth: 0,
+									border: "none",
+									outline: "none",
+									background: "transparent",
+									color: "#f4f4f5",
+									fontSize: "0.96rem",
+									fontFamily: "inherit",
+								}}
+							/>
+						</label>
 					</div>
 
-					<div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
-						{conversations.length === 0 && (
+					<div
+						style={{
+							flex: 1,
+							overflowY: "auto",
+							overflowX: "hidden",
+							padding: "14px 10px 8px",
+						}}
+					>
+						<div
+							style={{
+								padding: "6px 8px 10px",
+								fontSize: "0.7rem",
+								textTransform: "uppercase",
+								letterSpacing: "0.06em",
+								fontWeight: 800,
+								color: "#71717a",
+							}}
+						>
+							Historial
+						</div>
+						{visibleConversations.length === 0 && (
 							<div
 								style={{
 									padding: "20px 12px",
@@ -1169,27 +2937,28 @@ export const ChatPage: React.FC = () => {
 									fontSize: "0.8rem",
 								}}
 							>
-								No hay conversaciones
+								{conversationSearch.trim()
+									? "Sin resultados"
+									: "No hay conversaciones"}
 							</div>
 						)}
-						{conversations.map((conv) => (
+						{visibleConversations.map((conv) => (
 							<div
 								key={conv.id}
 								style={{
 									display: "flex",
 									alignItems: "center",
-									padding: "10px 12px",
-									borderRadius: "10px",
-									cursor: "pointer",
+									boxSizing: "border-box",
+									width: "100%",
+									maxWidth: "100%",
+									padding: "10px 14px",
+									borderRadius: "13px",
 									marginBottom: "2px",
 									background:
-										activeConversationId === conv.id
-											? "#27272a"
-											: "transparent",
+										activeConversationId === conv.id ? "#111" : "transparent",
 									transition: "background 0.15s",
 									gap: "8px",
 								}}
-								onClick={() => handleSelectConversation(conv.id)}
 								onMouseEnter={(e) => {
 									if (activeConversationId !== conv.id) {
 										e.currentTarget.style.background = "#1c1c22";
@@ -1201,8 +2970,8 @@ export const ChatPage: React.FC = () => {
 									}
 								}}
 							>
-								<div style={{ flex: 1, overflow: "hidden" }}>
-									{editingConvId === conv.id ? (
+								{editingConvId === conv.id ? (
+									<div style={{ flex: 1, overflow: "hidden" }}>
 										<input
 											id={`conversation-title-${conv.id}`}
 											name="conversationTitle"
@@ -1220,40 +2989,89 @@ export const ChatPage: React.FC = () => {
 												background: "#09090b",
 												border: "1px solid #3f3f46",
 												color: "#f4f4f5",
-												fontSize: "0.83rem",
+												fontSize: "0.93rem",
 												padding: "2px 4px",
 												borderRadius: "4px",
 												outline: "none",
 											}}
 										/>
-									) : (
-										<div
+									</div>
+								) : (
+									<button
+										type="button"
+										onClick={() => handleSelectConversation(conv.id)}
+										onDoubleClick={(e) => {
+											e.stopPropagation();
+											setEditingConvId(conv.id);
+											setEditingTitle(conv.title || "Sin título");
+										}}
+										style={{
+											flex: 1,
+											overflow: "hidden",
+											display: "flex",
+											alignItems: "center",
+											gap: 8,
+											padding: 0,
+											border: "none",
+											background: "transparent",
+											fontFamily: "inherit",
+											cursor: "pointer",
+											textAlign: "left",
+										}}
+									>
+										{isExecutionActive(executionByConversation[conv.id]) && (
+											<span
+												data-tooltip="El agente sigue trabajando en este chat"
+												style={{
+													width: "8px",
+													height: "8px",
+													borderRadius: "50%",
+													background: "#6366f1",
+													boxShadow: "0 0 10px rgba(99,102,241,0.8)",
+													animation: "pulse 1.4s infinite",
+													flexShrink: 0,
+												}}
+											/>
+										)}
+										{!isExecutionActive(executionByConversation[conv.id]) &&
+											executionByConversation[conv.id]?.status ===
+												"completed" &&
+											executionByConversation[conv.id]?.executionId &&
+											notifiedExecutionRef.current.has(
+												executionByConversation[conv.id]?.executionId,
+											) && (
+												<span
+													data-tooltip="Tarea terminada"
+													style={{
+														width: "8px",
+														height: "8px",
+														borderRadius: "50%",
+														background: "#10b981",
+														flexShrink: 0,
+													}}
+												/>
+											)}
+										<span
 											style={{
 												fontSize: "0.83rem",
 												color:
-													activeConversationId === conv.id
-														? "#f4f4f5"
-														: "#d4d4d8",
+													activeConversationId === conv.id ? "#fff" : "#d4d4d8",
 												whiteSpace: "nowrap",
 												overflow: "hidden",
 												textOverflow: "ellipsis",
 											}}
-											onDoubleClick={(e) => {
-												e.stopPropagation();
-												setEditingConvId(conv.id);
-												setEditingTitle(conv.title || "Sin título");
-											}}
-											title="Doble clic para editar"
+											data-tooltip="Doble clic para editar"
 										>
 											{conv.title || "Sin título"}
-										</div>
-									)}
-								</div>
+										</span>
+									</button>
+								)}
 								<div
 									style={{
 										display: "flex",
 										gap: "4px",
 										opacity: activeConversationId === conv.id ? 1 : 0.6,
+										flexShrink: 0,
 									}}
 								>
 									<button
@@ -1263,7 +3081,7 @@ export const ChatPage: React.FC = () => {
 											setEditingConvId(conv.id);
 											setEditingTitle(conv.title || "Sin título");
 										}}
-										title="Editar título"
+										data-tooltip="Editar título"
 										style={{
 											background: "none",
 											border: "none",
@@ -1284,6 +3102,7 @@ export const ChatPage: React.FC = () => {
 										}}
 									>
 										<svg
+											aria-hidden="true"
 											width="12"
 											height="12"
 											viewBox="0 0 24 24"
@@ -1303,7 +3122,7 @@ export const ChatPage: React.FC = () => {
 											e.stopPropagation();
 											handleDeleteConversation(conv.id);
 										}}
-										title="Eliminar conversación"
+										data-tooltip="Eliminar conversación"
 										style={{
 											background: "none",
 											border: "none",
@@ -1324,6 +3143,7 @@ export const ChatPage: React.FC = () => {
 										}}
 									>
 										<svg
+											aria-hidden="true"
 											width="14"
 											height="14"
 											viewBox="0 0 24 24"
@@ -1341,6 +3161,165 @@ export const ChatPage: React.FC = () => {
 							</div>
 						))}
 					</div>
+
+					<div
+						style={{
+							padding: "10px 14px 14px",
+							borderTop: "1px solid #111",
+							display: "grid",
+							gap: "10px",
+							overflowX: "hidden",
+							boxSizing: "border-box",
+						}}
+					>
+						<button
+							type="button"
+							onClick={() => onNavigate?.("media")}
+							style={{
+								width: "100%",
+								boxSizing: "border-box",
+								padding: "10px 12px",
+								borderRadius: "12px",
+								border: "none",
+								background: "transparent",
+								color: "#e4e4e7",
+								fontFamily: "inherit",
+								fontWeight: 700,
+								fontSize: "0.92rem",
+								cursor: "pointer",
+								display: "flex",
+								alignItems: "center",
+								gap: "10px",
+								textAlign: "left",
+							}}
+						>
+							<span
+								aria-hidden="true"
+								style={{ display: "flex", color: "#f4f4f5" }}
+							>
+								<svg
+									aria-hidden="true"
+									width="19"
+									height="19"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="1.9"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+								>
+									<rect x="3" y="5" width="18" height="14" rx="3" />
+									<circle
+										cx="8.5"
+										cy="10"
+										r="1.4"
+										fill="currentColor"
+										stroke="none"
+									/>
+									<path d="m5 17 4.2-4.2a1.5 1.5 0 0 1 2.1 0L13 14.5l2.2-2.2a1.5 1.5 0 0 1 2.1 0L21 16" />
+								</svg>
+							</span>
+							<span style={{ flex: 1 }}>Biblioteca de medios</span>
+						</button>
+						<button
+							type="button"
+							onClick={() => onNavigate?.("settings")}
+							style={{
+								width: "100%",
+								boxSizing: "border-box",
+								padding: "10px 12px",
+								borderRadius: "14px",
+								border: "none",
+								background: "transparent",
+								color: "#f4f4f5",
+								fontFamily: "inherit",
+								cursor: "pointer",
+								display: "flex",
+								alignItems: "center",
+								gap: "10px",
+								textAlign: "left",
+							}}
+							data-tooltip="Configuración y resto de secciones"
+						>
+							<span
+								style={{
+									width: "30px",
+									height: "30px",
+									borderRadius: "999px",
+									background: "#27272a",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									flexShrink: 0,
+								}}
+							>
+								<svg
+									aria-hidden="true"
+									width="17"
+									height="17"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="#c4b5fd"
+									strokeWidth="2"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+								>
+									<path d="M20 21a8 8 0 0 0-16 0" />
+									<circle cx="12" cy="8" r="4" />
+								</svg>
+							</span>
+							<span style={{ flex: 1, minWidth: 0 }}>
+								<span
+									style={{
+										display: "block",
+										fontSize: "0.84rem",
+										fontWeight: 800,
+									}}
+								>
+									Usuario Local
+								</span>
+								<span
+									style={{
+										display: "block",
+										fontSize: "0.7rem",
+										color: "#71717a",
+									}}
+								>
+									Auto-hospedado
+								</span>
+							</span>
+							<span
+								aria-hidden="true"
+								style={{
+									width: "34px",
+									height: "34px",
+									borderRadius: "12px",
+									border: "1px solid #2f2f35",
+									background: "#17171b",
+									color: "#d4d4d8",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									flexShrink: 0,
+								}}
+							>
+								<svg
+									aria-hidden="true"
+									width="17"
+									height="17"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="2"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+								>
+									<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+									<path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.08a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.08a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.11.35.39.72 1.55 1H21a2 2 0 1 1 0 4h-.08a1.7 1.7 0 0 0-1.52 1Z" />
+								</svg>
+							</span>
+						</button>
+					</div>
 				</div>
 			)}
 
@@ -1352,6 +3331,7 @@ export const ChatPage: React.FC = () => {
 					flexDirection: "column",
 					height: "100%",
 					minWidth: 0,
+					position: "relative",
 				}}
 			>
 				{/* Top bar */}
@@ -1367,42 +3347,45 @@ export const ChatPage: React.FC = () => {
 						flexWrap: "wrap",
 					}}
 				>
-					<button
-						type="button"
-						onClick={() => setSidebarOpen((v) => !v)}
-						style={{
-							background: "none",
-							border: "1px solid #3f3f46",
-							borderRadius: "8px",
-							color: "#a1a1aa",
-							cursor: "pointer",
-							padding: "6px 8px",
-							display: "flex",
-							alignItems: "center",
-							transition: "border-color 0.2s",
-						}}
-						onMouseEnter={(e) => {
-							e.currentTarget.style.borderColor = "#6366f1";
-						}}
-						onMouseLeave={(e) => {
-							e.currentTarget.style.borderColor = "#3f3f46";
-						}}
-						title={sidebarOpen ? "Ocultar panel" : "Mostrar panel"}
-					>
-						<svg
-							width="16"
-							height="16"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							strokeWidth="2"
-							strokeLinecap="round"
-							strokeLinejoin="round"
+					{!sidebarOpen && (
+						<button
+							type="button"
+							onClick={() => setSidebarOpen((v) => !v)}
+							style={{
+								background: "none",
+								border: "1px solid #3f3f46",
+								borderRadius: "8px",
+								color: "#a1a1aa",
+								cursor: "pointer",
+								padding: "6px 8px",
+								display: "flex",
+								alignItems: "center",
+								transition: "border-color 0.2s",
+							}}
+							onMouseEnter={(e) => {
+								e.currentTarget.style.borderColor = "#6366f1";
+							}}
+							onMouseLeave={(e) => {
+								e.currentTarget.style.borderColor = "#3f3f46";
+							}}
+							data-tooltip={sidebarOpen ? "Ocultar panel" : "Mostrar panel"}
 						>
-							<rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-							<line x1="9" y1="3" x2="9" y2="21" />
-						</svg>
-					</button>
+							<svg
+								aria-hidden="true"
+								width="16"
+								height="16"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="2"
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							>
+								<rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+								<line x1="9" y1="3" x2="9" y2="21" />
+							</svg>
+						</button>
+					)}
 
 					<div
 						style={{
@@ -1477,7 +3460,7 @@ export const ChatPage: React.FC = () => {
 								localStorage.setItem("octopus-stream", String(next));
 							} catch {}
 						}}
-						title={
+						data-tooltip={
 							streamEnabled
 								? "Streaming activado (respuesta en tiempo real)"
 								: "Streaming desactivado (respuesta completa)"
@@ -1500,6 +3483,7 @@ export const ChatPage: React.FC = () => {
 						}}
 					>
 						<svg
+							aria-hidden="true"
 							width="14"
 							height="14"
 							viewBox="0 0 24 24"
@@ -1556,6 +3540,7 @@ export const ChatPage: React.FC = () => {
 				<div
 					ref={messagesContainerRef}
 					className="chat-messages"
+					onScroll={handleMessagesScroll}
 					style={{ flex: 1, overflowY: "auto", padding: "30px 20px" }}
 				>
 					<div
@@ -1563,388 +3548,144 @@ export const ChatPage: React.FC = () => {
 						style={{ maxWidth: "800px", margin: "0 auto" }}
 					>
 						{messages.length === 0 && (
-							<div
-								style={{
-									maxWidth: "700px",
-									margin: "0 auto",
-									padding: "40px 20px",
-								}}
-							>
-								<div style={{ textAlign: "center", marginBottom: "40px" }}>
-									<div
-										style={{
-											fontSize: "64px",
-											marginBottom: "16px",
-											filter: "drop-shadow(0 0 20px rgba(99,102,241,0.3))",
-										}}
-									>
-										🐙
-									</div>
-									<div
-										style={{
-											fontSize: "1.8rem",
-											color: "#f4f4f5",
-											fontWeight: 700,
-											marginBottom: "8px",
-											letterSpacing: "-0.02em",
-										}}
-									>
-										Octopus AI
-									</div>
-									<div style={{ fontSize: "1.05rem", color: "#a1a1aa" }}>
-										Tu sistema autónomo multi-agente está listo.
-									</div>
+							<div className="chat-welcome">
+								<div className="chat-welcome-plan">Plan local · Octopus AI</div>
+								<div className="chat-welcome-title-row">
+									<img
+										src="/logo_Pulpo_octavio.png"
+										alt="Octopus"
+										className="chat-welcome-logo"
+									/>
+									<h1 className="chat-welcome-title">
+										Buenos dias, {userDisplayName}
+									</h1>
 								</div>
-
-								<div
-									style={{
-										display: "grid",
-										gridTemplateColumns: "1fr 1fr",
-										gap: "16px",
-										marginBottom: "40px",
-									}}
-								>
-									<div
-										style={{
-											background: "rgba(39, 39, 42, 0.4)",
-											border: "1px solid rgba(255,255,255,0.05)",
-											borderRadius: "16px",
-											padding: "20px",
-											display: "flex",
-											alignItems: "center",
-											gap: "16px",
-										}}
-									>
-										<div
-											style={{
-												fontSize: "24px",
-												background: "rgba(99, 102, 241, 0.1)",
-												color: "#818cf8",
-												width: "48px",
-												height: "48px",
-												borderRadius: "12px",
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "center",
-											}}
-										>
-											🤖
-										</div>
-										<div>
-											<div
-												style={{
-													fontSize: "1.5rem",
-													fontWeight: 700,
-													color: "#f4f4f5",
-												}}
-											>
-												{stats ? stats.agents : "..."}
-											</div>
-											<div style={{ fontSize: "0.85rem", color: "#a1a1aa" }}>
-												Agentes activos
-											</div>
-										</div>
-									</div>
-									<div
-										style={{
-											background: "rgba(39, 39, 42, 0.4)",
-											border: "1px solid rgba(255,255,255,0.05)",
-											borderRadius: "16px",
-											padding: "20px",
-											display: "flex",
-											alignItems: "center",
-											gap: "16px",
-										}}
-									>
-										<div
-											style={{
-												fontSize: "24px",
-												background: "rgba(16, 185, 129, 0.1)",
-												color: "#10b981",
-												width: "48px",
-												height: "48px",
-												borderRadius: "12px",
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "center",
-											}}
-										>
-											🔌
-										</div>
-										<div>
-											<div
-												style={{
-													fontSize: "1.5rem",
-													fontWeight: 700,
-													color: "#f4f4f5",
-												}}
-											>
-												{stats ? stats.tools : "..."}
-											</div>
-											<div style={{ fontSize: "0.85rem", color: "#a1a1aa" }}>
-												Herramientas ({stats?.mcp} MCP)
-											</div>
-										</div>
-									</div>
-									<div
-										style={{
-											background: "rgba(39, 39, 42, 0.4)",
-											border: "1px solid rgba(255,255,255,0.05)",
-											borderRadius: "16px",
-											padding: "20px",
-											display: "flex",
-											alignItems: "center",
-											gap: "16px",
-										}}
-									>
-										<div
-											style={{
-												fontSize: "24px",
-												background: "rgba(245, 158, 11, 0.1)",
-												color: "#fbbf24",
-												width: "48px",
-												height: "48px",
-												borderRadius: "12px",
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "center",
-											}}
-										>
-											💭
-										</div>
-										<div>
-											<div
-												style={{
-													fontSize: "1.5rem",
-													fontWeight: 700,
-													color: "#f4f4f5",
-												}}
-											>
-												{stats ? (stats.memories > 0 ? "Activa" : "0") : "..."}
-											</div>
-											<div style={{ fontSize: "0.85rem", color: "#a1a1aa" }}>
-												Base de memoria
-											</div>
-										</div>
-									</div>
-									<div
-										style={{
-											background: "rgba(39, 39, 42, 0.4)",
-											border: "1px solid rgba(255,255,255,0.05)",
-											borderRadius: "16px",
-											padding: "20px",
-											display: "flex",
-											alignItems: "center",
-											gap: "16px",
-										}}
-									>
-										<div
-											style={{
-												fontSize: "24px",
-												background: "rgba(236, 72, 153, 0.1)",
-												color: "#f472b6",
-												width: "48px",
-												height: "48px",
-												borderRadius: "12px",
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "center",
-											}}
-										>
-											🧠
-										</div>
-										<div>
-											<div
-												style={{
-													fontSize: "1.5rem",
-													fontWeight: 700,
-													color: "#f4f4f5",
-												}}
-											>
-												{status?.provider?.split("/")[1] || "..."}
-											</div>
-											<div style={{ fontSize: "0.85rem", color: "#a1a1aa" }}>
-												Modelo de IA
-											</div>
-										</div>
-									</div>
-								</div>
-
-								<h3
-									style={{
-										fontSize: "1rem",
-										color: "#f4f4f5",
-										marginBottom: "16px",
-										textAlign: "center",
-									}}
-								>
-									Comienza rápido
-								</h3>
-								<div
-									style={{
-										display: "grid",
-										gridTemplateColumns: "1fr 1fr",
-										gap: "12px",
-									}}
-								>
+								<p className="chat-welcome-subtitle">
+									Como puedo ayudarte hoy?
+								</p>
+								<div className="chat-welcome-chips">
 									{[
-										{
-											icon: "💻",
-											text: "Escribe un script en Python",
-											prompt: "Escribe un script en Python que...",
-										},
-										{
-											icon: "🔍",
-											text: "Busca en la web",
-											prompt: "Busca en internet información reciente sobre...",
-										},
-										{
-											icon: "📁",
-											text: "Lee el archivo de config",
-											prompt:
-												"Lee el archivo config.json en este proyecto y explícame qué hace",
-										},
-										{
-											icon: "📊",
-											text: "Resumen de datos",
-											prompt: "Haz un resumen en viñetas de lo siguiente:\n\n",
-										},
+										{ label: "Escribir", prompt: "Ayudame a escribir " },
+										{ label: "Aprender", prompt: "Explicame paso a paso " },
+										{ label: "Codigo", prompt: "Ayudame con este codigo: " },
+										{ label: "Vida personal", prompt: "Ayudame a organizar " },
+										{ label: "Multimedia", prompt: "Genera una imagen de " },
 									].map((suggestion) => (
 										<button
-											key={suggestion.text}
+											key={suggestion.label}
 											type="button"
+											className="chat-welcome-chip"
 											onClick={() => {
 												setInput(suggestion.prompt);
 												inputRef.current?.focus();
 											}}
-											style={{
-												padding: "16px",
-												background: "rgba(24, 24, 27, 0.5)",
-												border: "1px solid #3f3f46",
-												borderRadius: "12px",
-												color: "#d4d4d8",
-												fontSize: "0.9rem",
-												cursor: "pointer",
-												display: "flex",
-												alignItems: "center",
-												gap: "12px",
-												transition: "all 0.2s",
-											}}
-											onMouseEnter={(e) => {
-												e.currentTarget.style.background = "#27272a";
-												e.currentTarget.style.borderColor = "#52525b";
-											}}
-											onMouseLeave={(e) => {
-												e.currentTarget.style.background =
-													"rgba(24, 24, 27, 0.5)";
-												e.currentTarget.style.borderColor = "#3f3f46";
-											}}
 										>
-											<span style={{ fontSize: "1.4rem" }}>
-												{suggestion.icon}
-											</span>
-											<span style={{ textAlign: "left" }}>
-												{suggestion.text}
-											</span>
+											{suggestion.label}
 										</button>
 									))}
 								</div>
 							</div>
 						)}
-						{messages.map((msg) => (
-							<div
-								key={msg.id}
-								style={{
-									marginBottom: "32px",
-									display: "flex",
-									justifyContent:
-										msg.role === "user" ? "flex-end" : "flex-start",
-								}}
-							>
-								{msg.role === "assistant" && (
-									<div
-										style={{
-											width: "36px",
-											height: "36px",
-											borderRadius: "10px",
-											background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-											display: "flex",
-											alignItems: "center",
-											justifyContent: "center",
-											marginRight: "16px",
-											flexShrink: 0,
-											fontSize: "18px",
-											boxShadow: "0 2px 8px rgba(99, 102, 241, 0.25)",
-										}}
-									>
-										🐙
-									</div>
-								)}
-								<div
-									style={{
-										maxWidth: msg.role === "user" ? "80%" : "calc(100% - 52px)",
-									}}
-								>
-									{msg.role === "user" ? (
-										<div
+						{(() => {
+							const visibleCount = Math.min(
+								visibleMessageCount,
+								messages.length,
+							);
+							const visible = messages.slice(-visibleCount);
+							const collapsedCount = messages.length - visible.length;
+							const nextBatchCount = Math.min(
+								MESSAGE_PAGE_SIZE,
+								collapsedCount,
+							);
+							return (
+								<>
+									{collapsedCount > 0 && (
+										<button
+											type="button"
+											onClick={revealOlderMessages}
 											style={{
-												padding: "14px 20px",
-												borderRadius: "20px 20px 4px 20px",
-												background: "#27272a",
-												color: "#f4f4f5",
-												fontSize: "0.95rem",
-												lineHeight: "1.6",
-												border: "1px solid #3f3f46",
+												display: "block",
+												width: "100%",
+												padding: "12px",
+												marginBottom: "16px",
+												background: "#18181b",
+												border: "1px dashed #3f3f46",
+												borderRadius: "12px",
+												color: "#71717a",
+												fontSize: "0.85rem",
+												cursor: "pointer",
+												textAlign: "center",
 											}}
 										>
-											{msg.content.includes("/api/media/file/") ? (
-												<div
-													className="markdown-body"
-													// biome-ignore lint/security/noDangerouslySetInnerHtml: user-uploaded local media
-													dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
-												/>
-											) : (
-												msg.content
-											)}
-										</div>
-									) : (
-										<div
-											style={{
-												color: "#e4e4e7",
-												fontSize: "0.95rem",
-												lineHeight: "1.7",
-											}}
-										>
-											{/* eslint-disable-next-line react/no-danger */}
-											<div
-												className="markdown-body"
-												dangerouslySetInnerHTML={{
-													__html: renderMarkdown(msg.content),
-												}}
-											/>
-										</div>
+											↑ Mostrar {nextBatchCount} mensajes anteriores (
+											{collapsedCount} restantes)
+										</button>
 									)}
-									<div
-										style={{
-											fontSize: "0.7rem",
-											color: "#71717a",
-											marginTop: "6px",
-											textAlign: msg.role === "user" ? "right" : "left",
-											paddingLeft: msg.role === "user" ? "0" : "4px",
-										}}
-									>
-										{formatTime(msg.timestamp)}
-									</div>
-								</div>
-							</div>
-						))}
-						{(isLoading || isStreaming || agentStatus !== "idle") && (
-							<AgentActivityPanel activities={agentActivity} />
+									{visible.map((msg) => (
+										<ChatMessage key={msg.id} msg={msg} collapsed={false} />
+									))}
+								</>
+							);
+						})()}
+						{shouldShowAgentActivity && (
+							<AgentActivityPanel
+								activities={visibleAgentActivity}
+								multiAgentPlan={multiAgentPlan}
+								multiAgentWorkers={multiAgentWorkers}
+							/>
 						)}
 
-						<div ref={messagesEndRef} style={{ height: "1px", width: "100%" }} />
+						<div
+							ref={messagesEndRef}
+							style={{ height: "1px", width: "100%" }}
+						/>
 					</div>
 				</div>
+				{showScrollToBottom && messages.length > 0 && (
+					<button
+						type="button"
+						onClick={() => scrollToBottom()}
+						data-tooltip="Volver al final del chat"
+						style={{
+							position: "absolute",
+							left: "50%",
+							bottom: "112px",
+							transform: "translateX(-50%)",
+							zIndex: 20,
+							display: "inline-flex",
+							alignItems: "center",
+							gap: "8px",
+							padding: "10px 14px",
+							borderRadius: "999px",
+							border: "1px solid rgba(99,102,241,.45)",
+							background: "rgba(24,24,27,.92)",
+							color: "#e0e7ff",
+							fontSize: "0.82rem",
+							fontWeight: 800,
+							fontFamily: "inherit",
+							cursor: "pointer",
+							boxShadow:
+								"0 12px 30px rgba(0,0,0,.32), 0 0 24px rgba(99,102,241,.18)",
+							backdropFilter: "blur(10px)",
+						}}
+					>
+						<svg
+							aria-hidden="true"
+							width="16"
+							height="16"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							strokeWidth="2"
+							strokeLinecap="round"
+							strokeLinejoin="round"
+						>
+							<path d="M12 5v14" />
+							<path d="m19 12-7 7-7-7" />
+						</svg>
+						Ir al final
+					</button>
+				)}
 
 				{/* Input Area */}
 				<div
@@ -1976,11 +3717,39 @@ export const ChatPage: React.FC = () => {
 							}}
 						>
 							{pendingAttachments.length > 0 && (
-								<div style={{ display: "flex", flexWrap: "wrap", gap: "8px", paddingBottom: "8px", borderBottom: "1px solid #27272a", marginBottom: "8px" }}>
+								<div
+									style={{
+										display: "flex",
+										flexWrap: "wrap",
+										gap: "8px",
+										paddingBottom: "8px",
+										borderBottom: "1px solid #27272a",
+										marginBottom: "8px",
+									}}
+								>
 									{pendingAttachments.map((attachment, idx) => (
-										<div key={idx} style={{ position: "relative", width: "60px", height: "60px", borderRadius: "8px", overflow: "hidden", border: "1px solid #3f3f46" }}>
-											<img src={attachment.previewUrl} alt="adjunto" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+										<div
+											key={attachment.previewUrl}
+											style={{
+												position: "relative",
+												width: "60px",
+												height: "60px",
+												borderRadius: "8px",
+												overflow: "hidden",
+												border: "1px solid #3f3f46",
+											}}
+										>
+											<img
+												src={attachment.previewUrl}
+												alt="adjunto"
+												style={{
+													width: "100%",
+													height: "100%",
+													objectFit: "cover",
+												}}
+											/>
 											<button
+												type="button"
 												onClick={() => removePendingAttachment(idx)}
 												style={{
 													position: "absolute",
@@ -1996,7 +3765,7 @@ export const ChatPage: React.FC = () => {
 													alignItems: "center",
 													justifyContent: "center",
 													cursor: "pointer",
-													fontSize: "12px"
+													fontSize: "12px",
 												}}
 											>
 												✕
@@ -2007,126 +3776,188 @@ export const ChatPage: React.FC = () => {
 							)}
 							<div style={{ display: "flex", alignItems: "flex-end" }}>
 								<input
-								id="chat-image-upload"
-								name="imageUpload"
-								type="file"
-								ref={fileInputRef}
-								style={{ display: "none" }}
-								onChange={handleFileUpload}
-								accept="image/*"
-							/>
-							<button
-								type="button"
-								aria-label="Adjuntar imagen"
-								onClick={() => fileInputRef.current?.click()}
-								disabled={isUploadingImage}
-								title="Adjuntar imagen"
-								style={{
-									width: "36px",
-									height: "36px",
-									borderRadius: "10px",
-									border: "none",
-									background: "transparent",
-									color: isUploadingImage ? "#6366f1" : "#a1a1aa",
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "center",
-									cursor: isUploadingImage ? "wait" : "pointer",
-									transition: "all 0.2s",
-									marginBottom: "4px",
-									marginRight: "4px",
-									flexShrink: 0,
-								}}
-								onMouseEnter={(e) => {
-									if (!isUploadingImage) e.currentTarget.style.color = "#f4f4f5";
-								}}
-								onMouseLeave={(e) => {
-									if (!isUploadingImage) e.currentTarget.style.color = "#a1a1aa";
-								}}
-							>
-								{isUploadingImage ? (
-									<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: "spin 2s linear infinite" }}>
-										<circle cx="12" cy="12" r="9" strokeDasharray="30" />
-									</svg>
-								) : (
-									<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-										<path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-									</svg>
-								)}
-							</button>
-							<textarea
-								id="chat-message-input"
-								name="message"
-								ref={inputRef}
-								value={input}
-								onChange={handleInput}
-								onKeyDown={handleKeyDown}
-								placeholder={
-									isConnected
-										? "Escribe un mensaje..."
-										: "Conectando al servidor..."
-								}
-								disabled={!isConnected}
-								rows={1}
-								style={{
-									flex: 1,
-									padding: "10px 8px",
-									background: "transparent",
-									border: "none",
-									color: "#f4f4f5",
-									fontSize: "0.95rem",
-									outline: "none",
-									resize: "none",
-									maxHeight: "200px",
-									lineHeight: "1.5",
-									fontFamily: "inherit",
-								}}
-							/>
-							<button
-								type="button"
-								onClick={handleSend}
-								disabled={(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading}
-								style={{
-									width: "36px",
-									height: "36px",
-									borderRadius: "10px",
-									border: "none",
-									background:
-										(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading
-											? "#27272a"
-											: "#6366f1",
-									color:
-										(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading
-											? "#52525b"
-											: "#fff",
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "center",
-									cursor:
-										(!input.trim() && pendingAttachments.length === 0) || !isConnected || isLoading
-											? "not-allowed"
-											: "pointer",
-									transition: "all 0.2s",
-									marginBottom: "4px",
-									flexShrink: 0,
-								}}
-							>
-								<svg
-									width="18"
-									height="18"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									strokeWidth="2"
-									strokeLinecap="round"
-									strokeLinejoin="round"
-									aria-hidden="true"
+									id="chat-image-upload"
+									name="imageUpload"
+									type="file"
+									ref={fileInputRef}
+									style={{ display: "none" }}
+									onChange={handleFileUpload}
+									accept="image/*"
+								/>
+								<button
+									type="button"
+									aria-label="Adjuntar imagen"
+									onClick={() => fileInputRef.current?.click()}
+									disabled={isUploadingImage}
+									data-tooltip="Adjuntar imagen"
+									style={{
+										width: "36px",
+										height: "36px",
+										borderRadius: "10px",
+										border: "none",
+										background: "transparent",
+										color: isUploadingImage ? "#6366f1" : "#a1a1aa",
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										cursor: isUploadingImage ? "wait" : "pointer",
+										transition: "all 0.2s",
+										marginBottom: "4px",
+										marginRight: "4px",
+										flexShrink: 0,
+									}}
+									onMouseEnter={(e) => {
+										if (!isUploadingImage)
+											e.currentTarget.style.color = "#f4f4f5";
+									}}
+									onMouseLeave={(e) => {
+										if (!isUploadingImage)
+											e.currentTarget.style.color = "#a1a1aa";
+									}}
 								>
-									<title>Send</title>
-									<line x1="22" y1="2" x2="11" y2="13" />
-									<polygon points="22 2 15 22 11 13 2 9 22 2" />
-								</svg>
-							</button>
+									{isUploadingImage ? (
+										<svg
+											aria-hidden="true"
+											width="20"
+											height="20"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="2"
+											style={{ animation: "spin 2s linear infinite" }}
+										>
+											<circle cx="12" cy="12" r="9" strokeDasharray="30" />
+										</svg>
+									) : (
+										<svg
+											aria-hidden="true"
+											width="20"
+											height="20"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="2"
+											strokeLinecap="round"
+											strokeLinejoin="round"
+										>
+											<path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+										</svg>
+									)}
+								</button>
+								<textarea
+									id="chat-message-input"
+									name="message"
+									ref={inputRef}
+									value={input}
+									onChange={handleInput}
+									onKeyDown={handleKeyDown}
+									placeholder={
+										isConnected
+											? "Escribe un mensaje..."
+											: "Conectando al servidor..."
+									}
+									disabled={!isConnected}
+									rows={1}
+									style={{
+										flex: 1,
+										padding: "10px 8px",
+										background: "transparent",
+										border: "none",
+										color: "#f4f4f5",
+										fontSize: "0.95rem",
+										outline: "none",
+										resize: "none",
+										maxHeight: "200px",
+										lineHeight: "1.5",
+										fontFamily: "inherit",
+									}}
+								/>
+								{activeBusy ? (
+									<button
+										type="button"
+										onClick={() => void handleStopExecution()}
+										aria-label="Parar tarea del agente"
+										data-tooltip="Parar tarea del agente"
+										style={{
+											width: "36px",
+											height: "36px",
+											borderRadius: "10px",
+											border: "none",
+											background: "#ef4444",
+											color: "#fff",
+											display: "flex",
+											alignItems: "center",
+											justifyContent: "center",
+											cursor: "pointer",
+											transition: "all 0.2s",
+											marginBottom: "4px",
+											flexShrink: 0,
+										}}
+									>
+										<svg
+											width="16"
+											height="16"
+											viewBox="0 0 24 24"
+											fill="currentColor"
+											aria-hidden="true"
+										>
+											<title>Parar</title>
+											<rect x="6" y="6" width="12" height="12" rx="2" />
+										</svg>
+									</button>
+								) : (
+									<button
+										type="button"
+										onClick={handleSend}
+										disabled={
+											(!input.trim() && pendingAttachments.length === 0) ||
+											!isConnected
+										}
+										style={{
+											width: "36px",
+											height: "36px",
+											borderRadius: "10px",
+											border: "none",
+											background:
+												(!input.trim() && pendingAttachments.length === 0) ||
+												!isConnected
+													? "#27272a"
+													: "#6366f1",
+											color:
+												(!input.trim() && pendingAttachments.length === 0) ||
+												!isConnected
+													? "#52525b"
+													: "#fff",
+											display: "flex",
+											alignItems: "center",
+											justifyContent: "center",
+											cursor:
+												(!input.trim() && pendingAttachments.length === 0) ||
+												!isConnected
+													? "not-allowed"
+													: "pointer",
+											transition: "all 0.2s",
+											marginBottom: "4px",
+											flexShrink: 0,
+										}}
+									>
+										<svg
+											width="18"
+											height="18"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="2"
+											strokeLinecap="round"
+											strokeLinejoin="round"
+											aria-hidden="true"
+										>
+											<title>Enviar</title>
+											<line x1="22" y1="2" x2="11" y2="13" />
+											<polygon points="22 2 15 22 11 13 2 9 22 2" />
+										</svg>
+									</button>
+								)}
 							</div>
 						</div>
 						<div
@@ -2162,10 +3993,58 @@ export const ChatPage: React.FC = () => {
 					50% { transform: translateY(-2px) scale(1.04); }
 				}
 				.agent-activity-row { display: flex; align-items: flex-start; margin-bottom: 32px; animation: fadeInFast 0.22s ease-out; }
-				.agent-activity-avatar { width: 36px; height: 36px; border-radius: 12px; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; display: flex; align-items: center; justify-content: center; margin-right: 16px; flex-shrink: 0; box-shadow: 0 8px 24px rgba(99, 102, 241, 0.28); animation: toolFloat 2.2s infinite ease-in-out; }
-				.agent-activity-card { min-width: 260px; max-width: min(620px, calc(100vw - 120px)); padding: 12px 14px; border-radius: 16px; background: linear-gradient(135deg, rgba(24,24,27,0.92), rgba(9,9,11,0.84)); border: 1px solid rgba(63,63,70,0.75); box-shadow: 0 12px 34px rgba(0,0,0,0.28); backdrop-filter: blur(10px); }
+				.agent-activity-avatar { position: relative; width: 63px; height: 63px; border-radius: 18px; background: rgba(24,24,27,.72); display: flex; align-items: center; justify-content: center; margin-right: 16px; flex-shrink: 0; box-shadow: 0 10px 28px rgba(255,111,59,.14); overflow: visible; }
+				.agent-activity-avatar img { width: 54px; height: 54px; object-fit: contain; }
+				.agent-thought-cloud { position: absolute; top: -18px; right: -10px; width: 40px; height: 28px; pointer-events: none; animation: thoughtCloudFloat 1.8s infinite ease-in-out; filter: drop-shadow(0 7px 12px rgba(0,0,0,.35)); }
+				.agent-thought-cloud span { position: absolute; display: block; border-radius: 999px; background: rgba(244,244,245,.92); border: 1px solid rgba(255,255,255,.78); }
+				.agent-thought-cloud span:nth-child(1) { width: 22px; height: 16px; left: 11px; top: 5px; }
+				.agent-thought-cloud span:nth-child(2) { width: 16px; height: 16px; left: 2px; top: 9px; opacity: .9; animation: thoughtDotPulse 1.35s infinite ease-in-out; }
+				.agent-thought-cloud span:nth-child(3) { width: 9px; height: 9px; left: 0; top: 24px; opacity: .78; animation: thoughtDotPulse 1.35s .18s infinite ease-in-out; }
+				@keyframes thoughtCloudFloat { 0%, 100% { transform: translateY(0) scale(.96); opacity: .82; } 50% { transform: translateY(-4px) scale(1.04); opacity: 1; } }
+				@keyframes thoughtDotPulse { 0%, 100% { transform: scale(.82); opacity: .62; } 50% { transform: scale(1.08); opacity: 1; } }
+				.agent-activity-card { min-width: 260px; max-width: min(820px, calc(100vw - 120px)); padding: 12px 14px; border-radius: 16px; background: linear-gradient(135deg, rgba(24,24,27,0.92), rgba(9,9,11,0.84)); border: 1px solid rgba(63,63,70,0.75); box-shadow: 0 12px 34px rgba(0,0,0,0.28); backdrop-filter: blur(10px); }
+				.multi-agent-summary { margin-bottom: 12px; padding: 10px 11px; border: 1px solid rgba(99,102,241,0.24); border-radius: 14px; background: rgba(99,102,241,0.08); }
+				.multi-agent-summary-top { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+				.multi-agent-pill { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; background: rgba(99,102,241,0.18); color: #c4b5fd; font-size: 0.72rem; font-weight: 800; }
+				.multi-agent-pill.muted { background: rgba(39,39,42,0.78); color: #a1a1aa; }
+				.multi-agent-plan-text { margin-top: 8px; color: #d4d4d8; font-size: 0.78rem; line-height: 1.4; }
+				.multi-agent-live-text { margin-top: 7px; color: #67e8f9; font-size: 0.74rem; font-weight: 700; }
+				.multi-agent-workers { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+				.multi-agent-worker { padding: 10px; border-radius: 14px; border: 1px solid rgba(63,63,70,0.75); background: rgba(9,9,11,0.62); min-width: 0; }
+				.multi-agent-worker-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+				.multi-agent-worker-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
+				.multi-agent-worker-title { color: #f4f4f5; font-size: 0.78rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				.multi-agent-worker-status { margin-left: auto; font-size: 0.68rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }
+				.multi-agent-worker-desc { margin-top: 7px; color: #a1a1aa; font-size: 0.72rem; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+				.multi-agent-progress { margin-top: 9px; height: 5px; border-radius: 999px; background: rgba(63,63,70,0.64); overflow: hidden; }
+				.multi-agent-progress span { display: block; height: 100%; border-radius: inherit; transition: width 0.25s ease; }
+				.multi-agent-current { margin-top: 8px; color: #e4e4e7; font-size: 0.73rem; line-height: 1.35; }
+				.multi-agent-worker-steps { margin-top: 8px; display: grid; gap: 6px; }
+				.multi-agent-worker-step { display: grid; grid-template-columns: auto minmax(0, auto) minmax(0, 1fr); gap: 6px; align-items: baseline; color: #a1a1aa; font-size: 0.68rem; }
+				.multi-agent-worker-step span { color: #71717a; }
+				.multi-agent-worker-step b { color: #d4d4d8; font-weight: 800; white-space: nowrap; }
+				.multi-agent-worker-step em { color: #a1a1aa; font-style: normal; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				.agent-activity-card.compact { max-width: min(760px, calc(100vw - 120px)); }
+				.agent-activity-card.compact .multi-agent-summary { margin-bottom: 10px; padding: 9px 10px; }
+				.agent-activity-card.compact .multi-agent-plan-text { display: none; }
+				.multi-agent-workers.compact-list { grid-template-columns: 1fr; gap: 7px; }
+				.multi-agent-workers.compact-list .multi-agent-worker { padding: 8px 10px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+				.multi-agent-workers.compact-list .multi-agent-worker-desc { margin-top: 0; color: #d4d4d8; font-size: 0.78rem; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				.multi-agent-workers.compact-list .multi-agent-progress { margin-top: 0; height: 4px; }
+				.multi-agent-worker-avatar { position: relative; width: 28px; height: 28px; border-radius: 10px; border: 1px solid rgba(63,63,70,.9); display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; background: linear-gradient(135deg, rgba(99,102,241,.18), rgba(14,165,233,.08)); color: #e0e7ff; }
+				.multi-agent-worker-avatar.active { animation: toolFloat 1.8s infinite ease-in-out; }
+				.agent-glyph { font-size: 15px; line-height: 1; font-weight: 900; }
+				.worker-tool-badge { position: absolute; right: -6px; top: -6px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid rgba(99,102,241,.42); background: #111827; color: #c4b5fd; font-size: 0.56rem; font-weight: 900; line-height: 1; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
+				.worker-tool-badge.active { animation: pulse 1.1s infinite ease-in-out; }
+				.worker-tool-badge[data-kind="image"] { color: #f0abfc; border-color: rgba(217,70,239,.45); background: rgba(88,28,135,.92); }
+				.worker-tool-badge[data-kind="code"] { color: #86efac; border-color: rgba(34,197,94,.45); background: rgba(20,83,45,.92); }
+				.worker-tool-badge[data-kind="web"] { color: #93c5fd; border-color: rgba(59,130,246,.45); background: rgba(30,58,138,.92); }
+				.worker-tool-badge[data-kind="video"] { color: #fca5a5; border-color: rgba(239,68,68,.45); background: rgba(127,29,29,.92); }
+				.multi-agent-collapsed-note { margin-top: 10px; padding: 9px 10px; border-radius: 12px; border: 1px dashed rgba(99,102,241,.34); color: #a1a1aa; background: rgba(24,24,27,.54); font-size: .76rem; line-height: 1.4; }
 				.agent-activity-current { display: flex; align-items: center; gap: 12px; }
 				.agent-activity-orb { width: 34px; height: 34px; border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+				.agent-activity-icon > svg { display: block !important; width: 100% !important; height: 100% !important; max-width: 100% !important; max-height: 100% !important; position: static !important; inset: auto !important; overflow: hidden; flex-shrink: 0; transform-origin: center; transform-box: fill-box; }
+				.agent-activity-icon svg * { transform-origin: center; transform-box: fill-box; }
 				.agent-activity-title { font-size: 0.88rem; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 				.agent-activity-detail { margin-top: 2px; font-size: 0.76rem; color: #a1a1aa; line-height: 1.35; }
 				.agent-activity-dots { margin-left: auto; display: flex; gap: 4px; padding-left: 10px; }
@@ -2175,10 +4054,27 @@ export const ChatPage: React.FC = () => {
 				.agent-activity-step-line { width: 7px; height: 1px; border-radius: 999px; background: #3f3f46; flex-shrink: 0; }
 				.agent-activity-step-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; opacity: 0.9; }
 				.agent-activity-step-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				.chat-welcome { min-height: min(640px, calc(100vh - 230px)); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 16px 22px; text-align: center; }
+				.chat-welcome-plan { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 72px; padding: 9px 16px; border-radius: 13px; background: rgba(24,24,27,.82); color: #a1a1aa; font-size: 0.92rem; font-weight: 700; border: 1px solid rgba(63,63,70,.45); }
+				.chat-welcome-title-row { display: flex; align-items: center; justify-content: center; gap: 30px; margin-bottom: 14px; }
+				.chat-welcome-logo { width: 184px; height: 184px; object-fit: contain; filter: drop-shadow(0 14px 28px rgba(255,111,59,.18)); image-rendering: auto; }
+				.chat-welcome-title { margin: 0; color: #d9d6cd; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(2.35rem, 5vw, 4.45rem); font-weight: 400; letter-spacing: -0.055em; line-height: 1.02; }
+				.chat-welcome-subtitle { margin: 0 0 54px; color: #a6a39c; font-size: clamp(1.1rem, 2.2vw, 1.55rem); font-weight: 500; }
+				.chat-welcome-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; max-width: 900px; }
+				.chat-welcome-chip { padding: 12px 18px; border-radius: 14px; border: 1px solid #383838; background: rgba(31,31,31,.72); color: #c8c4ba; font-family: inherit; font-size: 0.98rem; font-weight: 700; cursor: pointer; transition: all .16s ease; }
+				.chat-welcome-chip:hover { background: #2a2926; border-color: #4a4944; color: #f0ede6; transform: translateY(-1px); }
 				@media (max-width: 640px) {
 					.agent-activity-card { min-width: 0; max-width: calc(100vw - 92px); }
 					.agent-activity-detail { font-size: 0.72rem; }
 					.agent-activity-steps { display: none; }
+					.multi-agent-workers { grid-template-columns: 1fr; }
+					.multi-agent-worker-steps { display: none; }
+					.media-image img { max-height: min(66vh, calc(100vh - 220px)); }
+					.chat-welcome { min-height: calc(100vh - 240px); padding-top: 28px; }
+					.chat-welcome-plan { margin-bottom: 38px; }
+					.chat-welcome-title-row { flex-direction: column; gap: 10px; }
+					.chat-welcome-logo { width: 144px; height: 144px; }
+					.chat-welcome-subtitle { margin-bottom: 32px; }
 				}
 				.markdown-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 				.markdown-body p { margin: 0 0 12px 0; }
@@ -2195,13 +4091,13 @@ export const ChatPage: React.FC = () => {
 				.markdown-body table { border-collapse: collapse; margin: 16px 0; width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid #27272a; }
 				.markdown-body th, .markdown-body td { border-bottom: 1px solid #27272a; padding: 10px 14px; text-align: left; }
 				.markdown-body th { background: #18181b; font-weight: 500; color: #e4e4e7; }
-				.media-embed { margin: 12px 0; }
-				.media-image img { display: block; max-width: 100%; border-radius: 12px; border: 1px solid #27272a; transition: transform 0.2s, box-shadow 0.2s; cursor: pointer; }
+				.media-embed { margin: 14px 0; display: flex; justify-content: center; align-items: center; width: 100%; }
+				.media-image img { display: block; width: auto; height: auto; max-width: 100%; max-height: min(72vh, calc(100vh - 260px)); object-fit: contain; margin: 0 auto; border-radius: 12px; border: 1px solid #27272a; transition: transform 0.2s, box-shadow 0.2s; cursor: pointer; }
 				.media-image img:hover { transform: scale(1.01); box-shadow: 0 4px 24px rgba(99, 102, 241, 0.2); }
 				.media-audio { padding: 8px 0; }
 				.media-audio audio { width: 100%; max-width: 500px; border-radius: 8px; }
 				.media-video video { display: block; max-width: 100%; border-radius: 12px; border: 1px solid #27272a; }
-				.media-preview-overlay { position: fixed; inset: 0; z-index: 1050; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); cursor: pointer; }
+				.media-preview-overlay { position: fixed; inset: 0; z-index: 1050; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); cursor: pointer; border: 0; padding: 0; }
 				.media-preview-overlay img { max-width: 92vw; max-height: 90vh; border-radius: 12px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
 				::-webkit-scrollbar { width: 8px; height: 8px; }
 				::-webkit-scrollbar-track { background: transparent; }
@@ -2211,16 +4107,25 @@ export const ChatPage: React.FC = () => {
 
 			{/* Media preview overlay */}
 			{mediaPreviewSrc && (
-				<div
+				<button
+					type="button"
 					className="media-preview-overlay"
-					onClick={() => setMediaPreviewSrc(null)}
+					onClick={(event) => {
+						if (event.target === event.currentTarget) setMediaPreviewSrc(null);
+					}}
+					onKeyDown={(event) => {
+						if (
+							event.key === "Escape" ||
+							event.key === "Enter" ||
+							event.key === " "
+						) {
+							event.preventDefault();
+							setMediaPreviewSrc(null);
+						}
+					}}
 				>
-					<img
-						src={mediaPreviewSrc}
-						alt="Preview"
-						onClick={(e) => e.stopPropagation()}
-					/>
-				</div>
+					<img src={mediaPreviewSrc} alt="Preview" />
+				</button>
 			)}
 		</div>
 	);

@@ -47,7 +47,7 @@ export function showToast(type: ToastType, message: string) {
 		type,
 		message,
 	};
-	toastListeners.forEach((fn) => fn(toast));
+	for (const listener of toastListeners) listener(toast);
 }
 
 export const ToastContainer: React.FC = () => {

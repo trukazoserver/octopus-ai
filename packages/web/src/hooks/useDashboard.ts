@@ -30,15 +30,18 @@ export function useDashboard() {
 
 	const loadStats = useCallback(async () => {
 		try {
-			const [agents, mcp, memoryRaw, convs, statusRaw, toolsRaw, taskStatsRaw] = await Promise.all([
-				apiGet<unknown[]>("/api/agents").catch(() => []),
-				apiGet<unknown[]>("/api/mcp/servers").catch(() => []),
-				apiGet<Record<string, unknown>>("/api/memory/stats").catch(() => ({})),
-				apiGet<unknown[]>("/api/conversations").catch(() => []),
-				apiGet<Record<string, unknown>>("/api/status").catch(() => ({})),
-				apiGet<unknown[]>("/api/tools").catch(() => []),
-				apiGet<Record<string, number>>("/api/tasks/stats").catch(() => ({})),
-			]);
+			const [agents, mcp, memoryRaw, convs, statusRaw, toolsRaw, taskStatsRaw] =
+				await Promise.all([
+					apiGet<unknown[]>("/api/agents").catch(() => []),
+					apiGet<unknown[]>("/api/mcp/servers").catch(() => []),
+					apiGet<Record<string, unknown>>("/api/memory/stats").catch(
+						() => ({}),
+					),
+					apiGet<unknown[]>("/api/conversations").catch(() => []),
+					apiGet<Record<string, unknown>>("/api/status").catch(() => ({})),
+					apiGet<unknown[]>("/api/tools").catch(() => []),
+					apiGet<Record<string, number>>("/api/tasks/stats").catch(() => ({})),
+				]);
 
 			const memory = memoryRaw as {
 				longTerm?: { maxItems?: number };
@@ -60,15 +63,13 @@ export function useDashboard() {
 				tools: Array.isArray(toolsRaw)
 					? toolsRaw.length
 					: Array.isArray((toolsRaw as { items?: unknown[] }).items)
-						? ((toolsRaw as { items: unknown[] }).items.length)
+						? (toolsRaw as { items: unknown[] }).items.length
 						: 0,
 				mcp: mcp.length,
 				tasks: taskStats.total ?? 0,
 				runningTasks: taskStats.running ?? 0,
 				conversations: convs.length,
-				memories: memory.shortTerm
-					? (memory.shortTerm.count ?? 0)
-					: 0,
+				memories: memory.shortTerm ? (memory.shortTerm.count ?? 0) : 0,
 				provider: status.provider ?? "N/A",
 				thinking: status.thinking ?? "none",
 				channels: status.channels ?? [],
@@ -104,7 +105,8 @@ export function useDashboard() {
 					id: "system-ready",
 					type: "system",
 					title: "Workspace listo",
-					description: "Crea una conversación, agente o automatización para ver actividad real aquí.",
+					description:
+						"Crea una conversación, agente o automatización para ver actividad real aquí.",
 					timestamp: Date.now(),
 				});
 			}

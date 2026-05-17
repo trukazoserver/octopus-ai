@@ -200,75 +200,100 @@ export class GoogleProvider extends BaseLLMProvider {
 
 		try {
 			while (true) {
-			const { done, value } = await readNext();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
-			const parts = buffer.split("\n\n");
-			buffer = parts.pop() ?? "";
-			for (const part of parts) {
-				const lines = part.split("\n");
-				for (const line of lines) {
-					const trimmed = line.trim();
-					if (!trimmed.startsWith("data: ")) continue;
-					const payload = trimmed.slice(6);
-					if (payload === "[DONE]") return;
-					let parsed: any;
-					try {
-						parsed = JSON.parse(payload);
-					} catch {
-						continue; // ignore malformed chunks
-					}
-					if (parsed.error) {
-						throw new Error(
-							parsed.error.message || JSON.stringify(parsed.error),
-						);
-					}
-					if (parsed.usage) {
-						yield {
-							usage: {
-								promptTokens: parsed.usage.prompt_tokens ?? 0,
-								completionTokens: parsed.usage.completion_tokens ?? 0,
-								totalTokens: parsed.usage.total_tokens ?? 0,
-								...((parsed.usage.completion_tokens_details?.thoughts_tokens ??
-								parsed.usage.completion_tokens_details?.reasoning_tokens)
-									? {
-										reasoningTokens:
-											parsed.usage.completion_tokens_details
-												?.thoughts_tokens ??
-											parsed.usage.completion_tokens_details
-												?.reasoning_tokens,
-									}
-									: {}),
-							},
+				const { done, value } = await readNext();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const parts = buffer.split("\n\n");
+				buffer = parts.pop() ?? "";
+				for (const part of parts) {
+					const lines = part.split("\n");
+					for (const line of lines) {
+						const trimmed = line.trim();
+						if (!trimmed.startsWith("data: ")) continue;
+						const payload = trimmed.slice(6);
+						if (payload === "[DONE]") return;
+						let parsed: {
+							error?: { message?: string } | string;
+							usage?: {
+								prompt_tokens?: number;
+								completion_tokens?: number;
+								total_tokens?: number;
+								completion_tokens_details?: {
+									thoughts_tokens?: number;
+									reasoning_tokens?: number;
+								};
+							};
+							choices?: Array<{
+								delta?: {
+									content?: string;
+									reasoning_content?: string;
+									tool_calls?: Array<{
+										id?: string;
+										function?: { name?: string; arguments?: string };
+									}>;
+								};
+								finish_reason?: string;
+							}>;
 						};
-					}
-					const delta = parsed.choices?.[0];
-					if (!delta) continue;
-					const chunk: LLMChunk = {};
-					if (delta.delta?.content) chunk.content = delta.delta.content;
-					if (delta.delta?.reasoning_content)
-						chunk.thinking = delta.delta.reasoning_content;
-					if (delta.delta?.tool_calls) {
-						const tc = delta.delta.tool_calls[0];
-						if (tc) {
-							chunk.toolCalls = {
-								id: tc.id ?? "",
-								type: "function",
-								function: {
-									name: tc.function?.name ?? "",
-									arguments: tc.function?.arguments ?? "",
+						try {
+							parsed = JSON.parse(payload) as typeof parsed;
+						} catch {
+							continue; // ignore malformed chunks
+						}
+						if (parsed.error) {
+							throw new Error(
+								typeof parsed.error === "string"
+									? parsed.error
+									: parsed.error.message || JSON.stringify(parsed.error),
+							);
+						}
+						if (parsed.usage) {
+							yield {
+								usage: {
+									promptTokens: parsed.usage.prompt_tokens ?? 0,
+									completionTokens: parsed.usage.completion_tokens ?? 0,
+									totalTokens: parsed.usage.total_tokens ?? 0,
+									...((parsed.usage.completion_tokens_details
+										?.thoughts_tokens ??
+									parsed.usage.completion_tokens_details?.reasoning_tokens)
+										? {
+												reasoningTokens:
+													parsed.usage.completion_tokens_details
+														?.thoughts_tokens ??
+													parsed.usage.completion_tokens_details
+														?.reasoning_tokens,
+											}
+										: {}),
 								},
 							};
 						}
-					}
-					if (delta.finish_reason) chunk.finishReason = delta.finish_reason;
+						const delta = parsed.choices?.[0];
+						if (!delta) continue;
+						const chunk: LLMChunk = {};
+						if (delta.delta?.content) chunk.content = delta.delta.content;
+						if (delta.delta?.reasoning_content)
+							chunk.thinking = delta.delta.reasoning_content;
+						if (delta.delta?.tool_calls) {
+							const tc = delta.delta.tool_calls[0];
+							if (tc) {
+								chunk.toolCalls = {
+									id: tc.id ?? "",
+									type: "function",
+									function: {
+										name: tc.function?.name ?? "",
+										arguments: tc.function?.arguments ?? "",
+									},
+								};
+							}
+						}
+						if (delta.finish_reason) chunk.finishReason = delta.finish_reason;
 
-					if (Object.keys(chunk).length > 0) {
-						yield chunk;
+						if (Object.keys(chunk).length > 0) {
+							yield chunk;
+						}
 					}
 				}
 			}
-		}
 		} finally {
 			await reader.cancel().catch(() => {});
 		}

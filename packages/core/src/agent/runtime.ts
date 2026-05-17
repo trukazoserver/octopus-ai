@@ -1,6 +1,6 @@
-import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { LLMRouter } from "../ai/router.js";
 import type {
 	ContentPart,
@@ -11,7 +11,11 @@ import type {
 	LLMToolCall,
 } from "../ai/types.js";
 import type { LearningEngine, LearningInsight } from "../learning/index.js";
-import type { ExperienceSkillTrace, ExperienceToolTrace } from "../learning/types.js";
+import type {
+	ExperienceSkillTrace,
+	ExperienceStatus,
+	ExperienceToolTrace,
+} from "../learning/types.js";
 import type { MemoryConsolidator } from "../memory/consolidator.js";
 import type { GlobalDailyMemory } from "../memory/daily.js";
 import type { MemoryRetrieval } from "../memory/retrieval.js";
@@ -24,8 +28,12 @@ import type { LoadedSkill } from "../skills/types.js";
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
+import {
+	OctopusOrchestrator,
+	type OrchestratorConfig,
+	type OrchestratorEvent,
+} from "./orchestrator.js";
 import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
-import { OctopusOrchestrator, type OrchestratorConfig, type OrchestratorEvent } from "./orchestrator.js";
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 18;
 const MAX_REPEATED_TOOL_SIGNATURES = 2;
@@ -62,6 +70,16 @@ type ToolDecision =
 	| { action: "execute" }
 	| { action: "skip"; reason: string }
 	| { action: "stop"; reason: string };
+
+export interface AgentProcessOptions {
+	signal?: AbortSignal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) {
+		throw new Error("Execution cancelled");
+	}
+}
 
 export function requiresZaiVisionToolForModel(model?: string): boolean {
 	const normalized = (model ?? "").trim().toLowerCase();
@@ -130,7 +148,9 @@ export class AgentRuntime {
 	 */
 	enableOrchestrator(config?: Partial<OrchestratorConfig>): void {
 		if (!this.toolRegistry || !this.toolExecutor) {
-			console.warn("[Orchestrator] Tool system not configured yet. Call setToolSystem first.");
+			console.warn(
+				"[Orchestrator] Tool system not configured yet. Call setToolSystem first.",
+			);
 			return;
 		}
 		this.orchestrator = new OctopusOrchestrator(
@@ -149,7 +169,9 @@ export class AgentRuntime {
 		return this.orchestrator;
 	}
 
-	setToolIterationLimit(toolIterationLimit: AgentConfig["toolIterationLimit"]): void {
+	setToolIterationLimit(
+		toolIterationLimit: AgentConfig["toolIterationLimit"],
+	): void {
 		this.config = { ...this.config, toolIterationLimit };
 	}
 
@@ -161,7 +183,9 @@ export class AgentRuntime {
 		}));
 	}
 
-	private async getRelevantLearning(message: string): Promise<LearningInsight[]> {
+	private async getRelevantLearning(
+		message: string,
+	): Promise<LearningInsight[]> {
 		if (!this.learningEngine) return [];
 		try {
 			return await this.learningEngine.retrieveRelevant(message);
@@ -177,20 +201,76 @@ export class AgentRuntime {
 		startedAt: number;
 		toolsUsed?: ExperienceToolTrace[];
 		skillsUsed?: ExperienceSkillTrace[];
+		status?: ExperienceStatus;
 		metadata?: Record<string, unknown>;
 	}): void {
 		if (!this.learningEngine) return;
-		this.learningEngine.recordExperience({
-			agentId: this.config.id,
-			conversationId: input.channelId,
-			channelId: input.channelId,
-			userRequest: input.userRequest,
-			finalResponse: input.finalResponse,
-			toolsUsed: input.toolsUsed,
-			skillsUsed: input.skillsUsed,
-			durationMs: Date.now() - input.startedAt,
-			metadata: input.metadata,
-		}).catch((err) => console.error("Learning experience record failed:", err));
+		if (this.learningEngine.isEnabled?.() === false) return;
+		this.learningEngine
+			.recordExperience({
+				agentId: this.config.id,
+				conversationId: input.channelId,
+				channelId: input.channelId,
+				userRequest: input.userRequest,
+				finalResponse: input.finalResponse,
+				status:
+					input.status ??
+					this.inferLearningStatus(input.finalResponse, input.toolsUsed ?? []),
+				toolsUsed: input.toolsUsed,
+				skillsUsed: input.skillsUsed,
+				durationMs: Date.now() - input.startedAt,
+				metadata: input.metadata,
+			})
+			.catch((err) => console.error("Learning experience record failed:", err));
+	}
+
+	private inferLearningStatus(
+		finalResponse: string,
+		toolsUsed: ExperienceToolTrace[],
+	): ExperienceStatus {
+		const lower = finalResponse.toLowerCase();
+		const failedTools = toolsUsed.filter((tool) => !tool.success).length;
+		const successfulTools = toolsUsed.length - failedTools;
+		if (/error|failed|fall[oó]|bloque|captcha|limit|l[ií]mite/.test(lower)) {
+			return successfulTools > 0 ? "partial" : "failed";
+		}
+		if (failedTools > successfulTools) return "partial";
+		if (finalResponse.trim().length > 40) return "succeeded";
+		return "unknown";
+	}
+
+	private getRecentTurnsForProfile(
+		latestTurns: ConversationTurn[],
+	): ConversationTurn[] {
+		const seen = new Set<ConversationTurn>();
+		const turns = [...this.stm.getContext().slice(-8), ...latestTurns];
+		return turns.filter((turn) => {
+			if (seen.has(turn)) return false;
+			seen.add(turn);
+			return true;
+		});
+	}
+
+	private recordAuxiliaryMemories(
+		userTurn: ConversationTurn,
+		assistantTurn: ConversationTurn,
+		channelId?: string,
+	): void {
+		if (this.userProfileManager) {
+			this.userProfileManager
+				.updateFromConversation(
+					"owner",
+					this.getRecentTurnsForProfile([userTurn, assistantTurn]),
+				)
+				.catch((err) => console.error("Failed to update user profile:", err));
+		}
+
+		this.dailyMemory
+			?.addMessage(userTurn.content, "user", channelId || "system")
+			.catch(() => {});
+		this.dailyMemory
+			?.addMessage(assistantTurn.content, "assistant", channelId || "system")
+			.catch(() => {});
 	}
 
 	private shouldUseZaiVisionToolsForImages(): boolean {
@@ -206,9 +286,10 @@ export class AgentRuntime {
 
 	private getToolIterationLimit(): { enabled: boolean; maxIterations: number } {
 		const configuredMax = this.config.toolIterationLimit?.maxIterations;
-		const maxIterations = typeof configuredMax === "number" && Number.isFinite(configuredMax)
-			? Math.max(1, Math.trunc(configuredMax))
-			: DEFAULT_MAX_TOOL_ITERATIONS;
+		const maxIterations =
+			typeof configuredMax === "number" && Number.isFinite(configuredMax)
+				? Math.max(1, Math.trunc(configuredMax))
+				: DEFAULT_MAX_TOOL_ITERATIONS;
 
 		return {
 			enabled: this.config.toolIterationLimit?.enabled ?? true,
@@ -303,7 +384,9 @@ export class AgentRuntime {
 		return `${stripped.slice(0, MAX_TOOL_RESULT_CONTEXT_CHARS)}\n...[tool result truncated to keep memory bounded]`;
 	}
 
-	private formatToolResultForModel(resultContent: string): string | ContentPart[] {
+	private formatToolResultForModel(
+		resultContent: string,
+	): string | ContentPart[] {
 		const imgMatch = resultContent.match(TOOL_IMAGE_RE);
 		if (!imgMatch) return this.compactToolResultForContext(resultContent);
 
@@ -320,6 +403,100 @@ export class AgentRuntime {
 		return `${textContent || "Image data."}\n[Image data omitted: screenshot is available via the saved media URL/local path above.]`;
 	}
 
+	/**
+	 * Obtener un resumen compacto del STM para pasar a workers.
+	 */
+	getContextSummary(maxChars = 2000): string {
+		const context = this.stm.getContext();
+		const turns = context.slice(-10);
+		if (turns.length === 0) return "";
+
+		const lines = turns.map((t) => `[${t.role}]: ${t.content.slice(0, 200)}`);
+		const joined = lines.join("\n");
+		if (joined.length <= maxChars) return joined;
+		return `${joined.slice(0, maxChars)}\n...[context truncated]`;
+	}
+
+	/**
+	 * Inyecta un mensaje asíncrono (ej. alertas del equipo) en el contexto de memoria.
+	 */
+	injectSystemMessage(message: string): void {
+		this.stm.add({
+			role: "system",
+			content: message,
+			timestamp: new Date(),
+		});
+	}
+
+	/**
+	 * Usado por el Blackboard para que el orquestador responda rápidamente a un sub-agente.
+	 */
+	async answerWorkerQuestion(prompt: string): Promise<string> {
+		try {
+			const response = await this.llmRouter.chat({
+				model: this.config.model ?? "default",
+				messages: [
+					{
+						role: "system",
+						content:
+							"Eres el orquestador de un sistema multi-agente respondiendo a un agente subordinado. Sé muy breve, directo y ayúdale a desatascarse o tomar una decisión técnica.",
+					},
+					{ role: "user", content: prompt },
+				],
+				maxTokens: 500,
+			});
+			return response.content || "Sin respuesta.";
+		} catch (err) {
+			return `Error de LLM del orquestador: ${err instanceof Error ? err.message : String(err)}`;
+		}
+	}
+
+	private async buildSharedWorkerContext(
+		userMessage: string,
+		channelId?: string,
+		signal?: AbortSignal,
+	): Promise<LLMMessage[]> {
+		const memories = await this.memoryRetrieval.retrieveForContext(userMessage);
+		throwIfAborted(signal);
+
+		const skills = await this.skillLoader.resolveSkillsForTask({
+			description: userMessage,
+			complexity: 0.5,
+			domains: [],
+			keywords: userMessage.split(/\s+/).filter((w) => w.length > 3),
+		});
+		throwIfAborted(signal);
+
+		const learningInsights = await this.getRelevantLearning(userMessage);
+		throwIfAborted(signal);
+
+		const context = await this.buildContext(
+			memories,
+			skills,
+			userMessage,
+			channelId,
+			learningInsights,
+		);
+
+		try {
+			const skillCatalog = await this.skillLoader.listSkills();
+			if (skillCatalog.length > 0) {
+				context.splice(1, 0, {
+					role: "system",
+					content: `Available skill catalog for worker awareness:\n${skillCatalog
+						.map((skill) => `- ${skill.name}: ${skill.description}`)
+						.join(
+							"\n",
+						)}\nRelevant skill instructions, when selected for this task, are included in the main system context above.`,
+				});
+			}
+		} catch {
+			// Skill catalog is helpful but not required for worker execution.
+		}
+
+		return context;
+	}
+
 	private sanitizeActivityDetail(content: string): string {
 		const cleaned = content
 			.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
@@ -328,7 +505,9 @@ export class AgentRuntime {
 			.replace(/\s+/g, " ")
 			.trim();
 		if (!cleaned) return "";
-		return cleaned.length > 220 ? `${cleaned.slice(0, 217).trimEnd()}...` : cleaned;
+		return cleaned.length > 220
+			? `${cleaned.slice(0, 217).trimEnd()}...`
+			: cleaned;
 	}
 
 	private describeToolActivity(
@@ -339,8 +518,14 @@ export class AgentRuntime {
 		const modelDetail = this.sanitizeActivityDetail(modelMessage);
 		if (modelDetail) return modelDetail;
 
-		const text = typeof params.text === "string" ? params.text : typeof params.value === "string" ? params.value : undefined;
-		const selector = typeof params.selector === "string" ? params.selector : undefined;
+		const text =
+			typeof params.text === "string"
+				? params.text
+				: typeof params.value === "string"
+					? params.value
+					: undefined;
+		const selector =
+			typeof params.selector === "string" ? params.selector : undefined;
 		const url = typeof params.url === "string" ? params.url : undefined;
 		const key = typeof params.key === "string" ? params.key : undefined;
 		const uid = typeof params.uid === "string" ? params.uid : undefined;
@@ -422,7 +607,6 @@ export class AgentRuntime {
 	}
 
 	private getToolBudget(toolName: string): number {
-
 		if (toolName === "browser_screenshot") return 2;
 		if (toolName === "browser_snapshot") return 4;
 		if (toolName === "browser_read_page") return 4;
@@ -430,7 +614,8 @@ export class AgentRuntime {
 		if (toolName === "browser_eval") return 3;
 		if (toolName === "browser_extract_images") return 3;
 		if (toolName.startsWith("browser_")) return 4;
-		if (toolName === "image-url-to-base64" || toolName === "save_media") return 6;
+		if (toolName === "image-url-to-base64" || toolName === "save_media")
+			return 6;
 		return 8;
 	}
 
@@ -455,34 +640,41 @@ export class AgentRuntime {
 		}
 	}
 
-	private createToolPolicyResult(
-		message: string,
-	): { success: false; resultContent: string } {
+	private createToolPolicyResult(message: string): {
+		success: false;
+		resultContent: string;
+	} {
 		return { success: false, resultContent: `Tool policy: ${message}` };
 	}
 
 	private createEvidenceLedger(message: string): EvidenceLedger {
 		const lower = message.toLowerCase();
 		const objectiveKind: ObjectiveKind =
-			/(imagen|imágenes|image|images|foto|fotos|producto|product|media|screenshot|captura)/i.test(lower)
+			/(imagen|imágenes|image|images|foto|fotos|producto|product|media|screenshot|captura)/i.test(
+				lower,
+			)
 				? "media_collection"
 				: "generic";
-		const countMatch = lower.match(/(?:las|los|the)?\s*(\d{1,2})\s*(?:im[aá]genes|images|fotos|photos)/i);
+		const countMatch = lower.match(
+			/(?:las|los|the)?\s*(\d{1,2})\s*(?:im[aá]genes|images|fotos|photos)/i,
+		);
 		// Detect domain-specific CDN patterns from the user message
 		const cdnPatterns: string[] = [];
 		const knownCdns: Record<string, string> = {
-			"etsy": "etsystatic.com",
-			"amazon": "images-amazon.com",
-			"ebay": "ebayimg.com",
-			"aliexpress": "ae01.alicdn.com",
-			"shopify": "cdn.shopify.com",
+			etsy: "etsystatic.com",
+			amazon: "images-amazon.com",
+			ebay: "ebayimg.com",
+			aliexpress: "ae01.alicdn.com",
+			shopify: "cdn.shopify.com",
 		};
 		for (const [keyword, cdn] of Object.entries(knownCdns)) {
 			if (lower.includes(keyword)) cdnPatterns.push(cdn);
 		}
 		return {
 			objectiveKind,
-			requestedItemCount: countMatch ? Number.parseInt(countMatch[1], 10) : undefined,
+			requestedItemCount: countMatch
+				? Number.parseInt(countMatch[1], 10)
+				: undefined,
 			imageUrls: [],
 			mediaUrls: [],
 			capturedScreenshots: [],
@@ -510,7 +702,8 @@ export class AgentRuntime {
 		for (const match of text.matchAll(/https?:\/\/[^\s"'<>\])]+/gi)) {
 			const url = match[0].replace(/[,.]+$/, "");
 			const isImageExt = /\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(url);
-			const isCdnImage = cdnPatterns?.some((p) => url.toLowerCase().includes(p)) ?? false;
+			const isCdnImage =
+				cdnPatterns?.some((p) => url.toLowerCase().includes(p)) ?? false;
 			if (isImageExt || isCdnImage) {
 				urls.add(url);
 			}
@@ -548,17 +741,25 @@ export class AgentRuntime {
 		return null;
 	}
 
-	private collectUrlsFromJson(value: unknown, urls: Set<string>, cdnPatterns?: string[]): void {
+	private collectUrlsFromJson(
+		value: unknown,
+		urls: Set<string>,
+		cdnPatterns?: string[],
+	): void {
 		if (typeof value === "string") {
 			if (/^https?:\/\//i.test(value)) {
-				const isImageExt = /\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(value);
-				const isCdnImage = cdnPatterns?.some((p) => value.toLowerCase().includes(p)) ?? false;
+				const isImageExt = /\.(?:png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(
+					value,
+				);
+				const isCdnImage =
+					cdnPatterns?.some((p) => value.toLowerCase().includes(p)) ?? false;
 				if (isImageExt || isCdnImage) urls.add(value);
 			}
 			return;
 		}
 		if (Array.isArray(value)) {
-			for (const item of value) this.collectUrlsFromJson(item, urls, cdnPatterns);
+			for (const item of value)
+				this.collectUrlsFromJson(item, urls, cdnPatterns);
 			return;
 		}
 		if (value && typeof value === "object") {
@@ -591,25 +792,44 @@ export class AgentRuntime {
 			this.collectUrlsFromJson(json, jsonUrls, ledger.imageCdnPatterns);
 			if (this.addUnique(ledger.imageUrls, Array.from(jsonUrls))) useful = true;
 			const parsed = json as Record<string, unknown>;
-			if (typeof parsed.status === "string" && ["completed", "partial"].includes(parsed.status)) useful = true;
+			if (
+				typeof parsed.status === "string" &&
+				["completed", "partial"].includes(parsed.status)
+			)
+				useful = true;
 			const detail = parsed.product as Record<string, unknown> | undefined;
-			if (detail && typeof detail.url === "string") ledger.detailUrl = detail.url;
+			if (detail && typeof detail.url === "string")
+				ledger.detailUrl = detail.url;
 			const list = parsed.search as Record<string, unknown> | undefined;
 			if (list && typeof list.url === "string") ledger.listUrl = list.url;
 		}
 
-		if (this.addUnique(ledger.imageUrls, this.extractImageUrls(resultContent, ledger.imageCdnPatterns))) useful = true;
+		if (
+			this.addUnique(
+				ledger.imageUrls,
+				this.extractImageUrls(resultContent, ledger.imageCdnPatterns),
+			)
+		)
+			useful = true;
 
 		// Generic detail/list URL extraction from any e-commerce domain
-		const detailUrlMatch = resultContent.match(/https?:\/\/[^\s"')]+\/(?:listing|product|item|dp)\/[^\s"')]+/i);
+		const detailUrlMatch = resultContent.match(
+			/https?:\/\/[^\s"')]+\/(?:listing|product|item|dp)\/[^\s"')]+/i,
+		);
 		if (detailUrlMatch) {
 			ledger.detailUrl = detailUrlMatch[0];
 			useful = true;
 		}
-		const listUrlMatch = resultContent.match(/https?:\/\/[^\s"')]+\/(?:search|browse|category|s\?)[^\s"')]+/i);
+		const listUrlMatch = resultContent.match(
+			/https?:\/\/[^\s"')]+\/(?:search|browse|category|s\?)[^\s"')]+/i,
+		);
 		if (listUrlMatch) ledger.listUrl = listUrlMatch[0];
 
-		if (/datadome|captcha|blocked|access denied|pardon our interruption|cloudflare|challenge/i.test(resultContent)) {
+		if (
+			/datadome|captcha|blocked|access denied|pardon our interruption|cloudflare|challenge/i.test(
+				resultContent,
+			)
+		) {
 			this.addUnique(ledger.blockers, [resultContent.slice(0, 300)]);
 		}
 
@@ -627,8 +847,17 @@ export class AgentRuntime {
 	private isObjectiveSatisfied(ledger: EvidenceLedger): boolean {
 		if (ledger.objectiveKind !== "media_collection") return false;
 		if (ledger.imageUrls.length === 0) return false;
-		if (ledger.requestedItemCount && ledger.imageUrls.length >= ledger.requestedItemCount) return true;
-		return ledger.imageUrls.length > 0 && (ledger.capturedScreenshots.length > 0 || ledger.detailScreenshots.length > 0 || Boolean(ledger.detailUrl));
+		if (
+			ledger.requestedItemCount &&
+			ledger.imageUrls.length >= ledger.requestedItemCount
+		)
+			return true;
+		return (
+			ledger.imageUrls.length > 0 &&
+			(ledger.capturedScreenshots.length > 0 ||
+				ledger.detailScreenshots.length > 0 ||
+				Boolean(ledger.detailUrl))
+		);
 	}
 
 	private decideBeforeToolCall(
@@ -638,24 +867,58 @@ export class AgentRuntime {
 		remainingIterations: number | null,
 	): ToolDecision {
 		if (ledger.usefulResults > 0 && ledger.consecutiveErrors >= 3) {
-			return { action: "stop", reason: "Ya hay evidencia útil y los intentos de recuperación están fallando." };
+			return {
+				action: "stop",
+				reason:
+					"Ya hay evidencia útil y los intentos de recuperación están fallando.",
+			};
 		}
 
-		if (ledger.usefulResults > 0 && remainingIterations !== null && remainingIterations <= 1) {
-			return { action: "stop", reason: "Queda poco presupuesto de herramientas y ya existe evidencia útil." };
+		if (
+			ledger.usefulResults > 0 &&
+			remainingIterations !== null &&
+			remainingIterations <= 1
+		) {
+			return {
+				action: "stop",
+				reason:
+					"Queda poco presupuesto de herramientas y ya existe evidencia útil.",
+			};
 		}
 
 		const recent = ledger.toolHistory.slice(-3);
-		if (toolName === "browser_screenshot" && recent.filter((t) => t.name === "browser_screenshot" && !t.success).length >= 2) {
-			return { action: "skip", reason: "Se omitió otra captura porque las últimas capturas fallaron; usar DOM/extracción o responder con evidencia parcial." };
+		if (
+			toolName === "browser_screenshot" &&
+			recent.filter((t) => t.name === "browser_screenshot" && !t.success)
+				.length >= 2
+		) {
+			return {
+				action: "skip",
+				reason:
+					"Se omitió otra captura porque las últimas capturas fallaron; usar DOM/extracción o responder con evidencia parcial.",
+			};
 		}
 
-		if (toolName === "browser_wait" && recent.some((t) => t.name === "browser_wait" && !t.useful)) {
-			return { action: "skip", reason: "Otra espera sin una condición nueva tiene bajo valor esperado." };
+		if (
+			toolName === "browser_wait" &&
+			recent.some((t) => t.name === "browser_wait" && !t.useful)
+		) {
+			return {
+				action: "skip",
+				reason:
+					"Otra espera sin una condición nueva tiene bajo valor esperado.",
+			};
 		}
 
-		if (toolName === "browser_navigate" && typeof params.url === "string" && params.url === ledger.detailUrl) {
-			return { action: "skip", reason: "La navegación solicitada apunta al detalle ya identificado." };
+		if (
+			toolName === "browser_navigate" &&
+			typeof params.url === "string" &&
+			params.url === ledger.detailUrl
+		) {
+			return {
+				action: "skip",
+				reason: "La navegación solicitada apunta al detalle ya identificado.",
+			};
 		}
 
 		return { action: "execute" };
@@ -668,9 +931,16 @@ export class AgentRuntime {
 		success: boolean,
 		remainingIterations: number | null,
 	): string {
-		const recent = ledger.toolHistory.slice(-4).map((item) => `${item.name}:${item.success ? "ok" : "error"}${item.useful ? ":useful" : ""}`).join(", ");
+		const recent = ledger.toolHistory
+			.slice(-4)
+			.map(
+				(item) =>
+					`${item.name}:${item.success ? "ok" : "error"}${item.useful ? ":useful" : ""}`,
+			)
+			.join(", ");
 		const objectiveSatisfied = this.isObjectiveSatisfied(ledger);
-		const remainingBudget = remainingIterations === null ? "unlimited" : remainingIterations;
+		const remainingBudget =
+			remainingIterations === null ? "unlimited" : remainingIterations;
 		return [
 			"# Navigation Decision Guidance",
 			`Previous tool: ${toolName} (${success ? "success" : "error"}).`,
@@ -695,14 +965,19 @@ export class AgentRuntime {
 		];
 		if (ledger.detailUrl) lines.push(`Detail URL: ${ledger.detailUrl}`);
 		if (ledger.listUrl) lines.push(`List URL: ${ledger.listUrl}`);
-		if (ledger.blockers.length > 0) lines.push(`Blockers: ${ledger.blockers.join(" | ")}`);
+		if (ledger.blockers.length > 0)
+			lines.push(`Blockers: ${ledger.blockers.join(" | ")}`);
 		if (ledger.imageUrls.length > 0) {
 			lines.push("Images:");
-			ledger.imageUrls.slice(0, 20).forEach((url, index) => lines.push(`${index + 1}. ${url}`));
+			ledger.imageUrls
+				.slice(0, 20)
+				.forEach((url, index) => lines.push(`${index + 1}. ${url}`));
 		}
 		if (ledger.mediaUrls.length > 0) {
 			lines.push("Media:");
-			ledger.mediaUrls.slice(0, 10).forEach((url, index) => lines.push(`${index + 1}. ${url}`));
+			ledger.mediaUrls
+				.slice(0, 10)
+				.forEach((url, index) => lines.push(`${index + 1}. ${url}`));
 		}
 		return lines.join("\n");
 	}
@@ -726,7 +1001,9 @@ export class AgentRuntime {
 		ledger: EvidenceLedger,
 		reason: string,
 	): LLMMessage[] {
-		const sanitized = messages.filter((msg) => msg.role !== "tool" && !msg.toolCalls);
+		const sanitized = messages.filter(
+			(msg) => msg.role !== "tool" && !msg.toolCalls,
+		);
 		return [
 			...sanitized,
 			{
@@ -736,20 +1013,29 @@ export class AgentRuntime {
 		];
 	}
 
-	private buildFallbackFinalResponse(ledger: EvidenceLedger, reason: string): string {
+	private buildFallbackFinalResponse(
+		ledger: EvidenceLedger,
+		reason: string,
+	): string {
 		const lines = [`Detuve las herramientas porque ${reason}`];
 		if (ledger.capturedScreenshots.length > 0) {
 			lines.push("", "Capturas:");
-			ledger.capturedScreenshots.forEach((url) => lines.push(`![Captura](${url})`));
+			for (const url of ledger.capturedScreenshots) {
+				lines.push(`![Captura](${url})`);
+			}
 		}
 		if (ledger.detailScreenshots.length > 0) {
 			lines.push("", "Capturas de detalle:");
-			ledger.detailScreenshots.forEach((url) => lines.push(`![Detalle](${url})`));
+			for (const url of ledger.detailScreenshots) {
+				lines.push(`![Detalle](${url})`);
+			}
 		}
 		if (ledger.detailUrl) lines.push("", `URL de detalle: ${ledger.detailUrl}`);
 		if (ledger.imageUrls.length > 0) {
 			lines.push("", "Imagenes encontradas:");
-			ledger.imageUrls.slice(0, 20).forEach((url, index) => lines.push(`${index + 1}. ${url}`));
+			for (const [index, url] of ledger.imageUrls.slice(0, 20).entries()) {
+				lines.push(`${index + 1}. ${url}`);
+			}
 		}
 		if (ledger.blockers.length > 0) {
 			lines.push("", `Bloqueos detectados: ${ledger.blockers.join(" | ")}`);
@@ -813,8 +1099,13 @@ export class AgentRuntime {
 		}
 	}
 
-	async processMessage(message: string, channelId?: string): Promise<string> {
+	async processMessage(
+		message: string,
+		channelId?: string,
+		options: AgentProcessOptions = {},
+	): Promise<string> {
 		const startedAt = Date.now();
+		throwIfAborted(options.signal);
 		const userTurn: ConversationTurn = {
 			role: "user",
 			content: message,
@@ -826,7 +1117,66 @@ export class AgentRuntime {
 		// Update working memory from user message
 		this.workingMemory.updateFromUserMessage(message);
 
+		// === Auto-escalado a multi-agente ===
+		if (this.orchestrator) {
+			try {
+				throwIfAborted(options.signal);
+				const shouldDecompose =
+					await this.orchestrator.shouldDecompose(message);
+				if (shouldDecompose) {
+					const decomposition = await this.orchestrator.decompose(message);
+					if (decomposition.subtasks.length > 1) {
+						const sharedContext = await this.buildSharedWorkerContext(
+							message,
+							channelId,
+							options.signal,
+						);
+						let synthesisResult = "";
+						for await (const event of this.orchestrator.executeParallel(
+							decomposition,
+							{
+								sharedContext,
+								channelId,
+								signal: options.signal,
+								usesZaiVisionToolForImages:
+									this.shouldUseZaiVisionToolsForImages(),
+							},
+						)) {
+							if (event.type === "synthesis") {
+								synthesisResult = event.result;
+							}
+							throwIfAborted(options.signal);
+						}
+						if (synthesisResult) {
+							const assistantTurn: ConversationTurn = {
+								role: "assistant",
+								content: synthesisResult,
+								timestamp: new Date(),
+								metadata: channelId ? { conversationId: channelId } : undefined,
+							};
+							this.stm.add(assistantTurn);
+							this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
+							this.recordLearningExperience({
+								userRequest: message,
+								finalResponse: synthesisResult,
+								channelId,
+								startedAt,
+								metadata: { mode: "multi-agent" },
+							});
+							return synthesisResult;
+						}
+					}
+				}
+			} catch (err) {
+				console.error(
+					"[Orchestrator] Falló en processMessage, usando single-agent:",
+					err instanceof Error ? err.message : err,
+				);
+			}
+		}
+
 		const memories = await this.memoryRetrieval.retrieveForContext(message);
+		throwIfAborted(options.signal);
 
 		const skills = await this.skillLoader.resolveSkillsForTask({
 			description: message,
@@ -834,12 +1184,21 @@ export class AgentRuntime {
 			domains: [],
 			keywords: message.split(/\s+/).filter((w) => w.length > 3),
 		});
+		throwIfAborted(options.signal);
 		const learningInsights = await this.getRelevantLearning(message);
 
-		const context = await this.buildContext(memories, skills, message, channelId, learningInsights);
+		const context = await this.buildContext(
+			memories,
+			skills,
+			message,
+			channelId,
+			learningInsights,
+		);
 		const tools = this.getAvailableTools();
 
-		const response = await this.executeWithTools(context, tools);
+		throwIfAborted(options.signal);
+		const response = await this.executeWithTools(context, tools, options);
+		throwIfAborted(options.signal);
 
 		const assistantTurn: ConversationTurn = {
 			role: "assistant",
@@ -849,15 +1208,9 @@ export class AgentRuntime {
 		};
 		this.stm.add(assistantTurn);
 
-		if (this.userProfileManager) {
-			this.userProfileManager.updateFromConversation("owner", [userTurn, assistantTurn])
-				.catch(err => console.error("Failed to update user profile:", err));
-		}
+		this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
 
 		this.updateActiveTask(response.content);
-
-		this.dailyMemory?.addMessage(message, "user", channelId || "system").catch(() => {});
-		this.dailyMemory?.addMessage(response.content, "assistant", channelId || "system").catch(() => {});
 
 		this.recordLearningExperience({
 			userRequest: message,
@@ -881,8 +1234,10 @@ export class AgentRuntime {
 	async *processMessageStream(
 		message: string,
 		channelId?: string,
+		options: AgentProcessOptions = {},
 	): AsyncIterable<string> {
 		const startedAt = Date.now();
+		throwIfAborted(options.signal);
 		const userTurn: ConversationTurn = {
 			role: "user",
 			content: message,
@@ -890,30 +1245,94 @@ export class AgentRuntime {
 			metadata: channelId ? { conversationId: channelId } : undefined,
 		};
 		this.stm.add(userTurn);
+		this.workingMemory.updateFromUserMessage(message);
 
 		// === Auto-escalado a multi-agente ===
 		if (this.orchestrator) {
 			try {
-				const shouldDecompose = await this.orchestrator.shouldDecompose(message);
+				throwIfAborted(options.signal);
+				const shouldDecompose =
+					await this.orchestrator.shouldDecompose(message);
 				if (shouldDecompose) {
 					const decomposition = await this.orchestrator.decompose(message);
-					if (decomposition.subtasks.length > 0) {
+					if (decomposition.subtasks.length > 1) {
+						yield `\x00STATUS:orchestrating:planning::${this.encodeStatusField("Analizando la solicitud para decidir cuántos agentes crear y cómo dividir el trabajo.")}\x00`;
+						const sharedContext = await this.buildSharedWorkerContext(
+							message,
+							channelId,
+							options.signal,
+						);
 						yield `\x00STATUS:orchestrating:${decomposition.subtasks.length}\x00`;
-						for await (const event of this.orchestrator.executeParallel(decomposition)) {
+						for await (const event of this.orchestrator.executeParallel(
+							decomposition,
+							{
+								sharedContext,
+								channelId,
+								signal: options.signal,
+								usesZaiVisionToolForImages:
+									this.shouldUseZaiVisionToolsForImages(),
+							},
+						)) {
+							throwIfAborted(options.signal);
 							switch (event.type) {
+								case "decomposition":
+									yield `\x00STATUS:orchestrating:multiagent::${this.encodeStatusField(
+										JSON.stringify({
+											count: event.data.subtasks.length,
+											executionPlan: event.data.executionPlan,
+											reasoning: event.data.reasoning,
+											subtasks: event.data.subtasks.map((task) => ({
+												id: task.id,
+												role: task.role,
+												description: task.description,
+												toolScope: task.toolScope,
+											})),
+										}),
+									)}\x00`;
+									break;
 								case "worker_started":
-									yield `\x00STATUS:worker_start:${event.workerId}:${Buffer.from(event.description.slice(0, 100), "utf8").toString("base64")}\x00`;
+									yield `\x00STATUS:worker_start:${event.workerId}::${this.encodeStatusField(
+										JSON.stringify({
+											workerId: event.workerId,
+											taskId: event.taskId,
+											role: event.role,
+											description: event.description,
+										}),
+									)}\x00`;
 									break;
 								case "worker_progress":
-									yield `\x00STATUS:worker_progress:${event.workerId}:${Buffer.from(event.message.slice(0, 100), "utf8").toString("base64")}\x00`;
+									yield `\x00STATUS:worker_progress:${event.workerId}::${this.encodeStatusField(
+										JSON.stringify({
+											workerId: event.workerId,
+											taskId: event.taskId,
+											message: event.message,
+											progress: event.progress,
+											toolName: event.toolName,
+										}),
+									)}\x00`;
 									break;
 								case "worker_done":
-									yield `\x00STATUS:worker_done:${event.workerId}\x00`;
+									yield `\x00STATUS:worker_done:${event.workerId}::${this.encodeStatusField(
+										JSON.stringify({
+											workerId: event.workerId,
+											taskId: event.taskId,
+											result: event.result,
+										}),
+									)}\x00`;
 									break;
 								case "worker_error":
-									yield `\x00STATUS:worker_error:${event.workerId}:${Buffer.from(event.error.slice(0, 100), "utf8").toString("base64")}\x00`;
+									yield `\x00STATUS:worker_error:${event.workerId}::${this.encodeStatusField(
+										JSON.stringify({
+											workerId: event.workerId,
+											taskId: event.taskId,
+											error: event.error,
+										}),
+									)}\x00`;
 									break;
-								case "synthesis":
+								case "telemetry":
+									yield `\x00STATUS:orchestrating:telemetry::${this.encodeStatusField(JSON.stringify(event.data))}\x00`;
+									break;
+								case "synthesis": {
 									yield "\x00STATUS:responding\x00";
 									yield event.result;
 									// Guardar en STM y memoria
@@ -921,32 +1340,50 @@ export class AgentRuntime {
 										role: "assistant",
 										content: event.result,
 										timestamp: new Date(),
-										metadata: channelId ? { conversationId: channelId } : undefined,
+										metadata: channelId
+											? { conversationId: channelId }
+											: undefined,
 									};
 									this.stm.add(assistantTurn);
-									this.dailyMemory?.addMessage(message, "user", channelId || "system").catch(() => {});
-									this.dailyMemory?.addMessage(event.result, "assistant", channelId || "system").catch(() => {});
+									this.dailyMemory
+										?.addMessage(message, "user", channelId || "system")
+										.catch(() => {});
+									this.dailyMemory
+										?.addMessage(
+											event.result,
+											"assistant",
+											channelId || "system",
+										)
+										.catch(() => {});
 									this.recordLearningExperience({
 										userRequest: message,
 										finalResponse: event.result,
 										channelId,
 										startedAt,
-										metadata: { mode: "multi-agent", workers: decomposition.subtasks.length },
+										metadata: {
+											mode: "multi-agent",
+											workers: decomposition.subtasks.length,
+										},
 									});
 									return;
+								}
 							}
 						}
 						return; // Multi-agent completado
 					}
 				}
 			} catch (err) {
-				console.error("[Orchestrator] Falló, usando single-agent:", err instanceof Error ? err.message : err);
+				console.error(
+					"[Orchestrator] Falló, usando single-agent:",
+					err instanceof Error ? err.message : err,
+				);
 				// Fallback a single-agent silenciosamente
 			}
 		}
 
 		// === Single-agent (flujo normal) ===
 		const memories = await this.memoryRetrieval.retrieveForContext(message);
+		throwIfAborted(options.signal);
 
 		const skills = await this.skillLoader.resolveSkillsForTask({
 			description: message,
@@ -954,9 +1391,16 @@ export class AgentRuntime {
 			domains: [],
 			keywords: message.split(/\s+/).filter((w) => w.length > 3),
 		});
+		throwIfAborted(options.signal);
 		const learningInsights = await this.getRelevantLearning(message);
 
-		const context = await this.buildContext(memories, skills, message, channelId, learningInsights);
+		const context = await this.buildContext(
+			memories,
+			skills,
+			message,
+			channelId,
+			learningInsights,
+		);
 		const tools = this.getAvailableTools();
 
 		const messages = [...context];
@@ -969,6 +1413,7 @@ export class AgentRuntime {
 		let stoppedByDecision = false;
 
 		while (this.hasToolIterationsRemaining(iterations) && !stoppedByDecision) {
+			throwIfAborted(options.signal);
 			iterations++;
 
 			const request: LLMRequest = {
@@ -993,12 +1438,13 @@ export class AgentRuntime {
 			try {
 				yield "\x00STATUS:thinking\x00";
 				for await (const chunk of this.llmRouter.chatStream(request)) {
+					throwIfAborted(options.signal);
 					if (chunk.thinking) {
 						if (!isThinking) {
 							isThinking = true;
 						}
 					}
-					
+
 					if (chunk.content) {
 						if (isThinking) {
 							isThinking = false;
@@ -1055,7 +1501,8 @@ export class AgentRuntime {
 			);
 
 			if (!hasContent && validToolCalls.length === 0) {
-				const warnMsg = "\n\n⚠️ The AI model returned an empty response. This may be due to a content filter, context length limit, or an API error.";
+				const warnMsg =
+					"\n\n⚠️ The AI model returned an empty response. This may be due to a content filter, context length limit, or an API error.";
 				fullResponse += warnMsg;
 				yield warnMsg;
 				break;
@@ -1077,8 +1524,175 @@ export class AgentRuntime {
 				content: chunkContent || "",
 				toolCalls: validToolCalls,
 			});
+			const toolExecutor = this.toolExecutor;
 
-			for (const toolCall of validToolCalls) {
+			const delegateCalls = validToolCalls.filter(
+				(tc) => tc.function.name === "delegate_task",
+			);
+			const otherCalls = validToolCalls.filter(
+				(tc) => tc.function.name !== "delegate_task",
+			);
+
+			if (delegateCalls.length === 1) {
+				const singleDelegate = delegateCalls[0];
+				if (!singleDelegate) continue;
+				messages.push({
+					role: "tool",
+					content: [
+						"Delegación omitida: solo se solicitó una subtarea.",
+						"Resuelve esta tarea directamente como Octopus usando las herramientas disponibles.",
+						"Solo uses delegate_task cuando haya 2 o más subtareas independientes que puedan correr en paralelo.",
+					].join("\n"),
+					toolCallId: singleDelegate.id,
+				});
+			}
+
+			if (delegateCalls.length > 1) {
+				const delegatedTasks = delegateCalls.map((tc, index) => {
+					const parsedParams = this.parseToolParams(tc);
+					const role =
+						!parsedParams.error && typeof parsedParams.params.role === "string"
+							? parsedParams.params.role
+							: `Delegated Worker ${index + 1}`;
+					const task =
+						!parsedParams.error && typeof parsedParams.params.task === "string"
+							? parsedParams.params.task
+							: (parsedParams.error ?? "Delegated task");
+					return {
+						id: `delegate_${iterations}_${index + 1}`,
+						toolCall: tc,
+						parsedParams,
+						role,
+						task,
+					};
+				});
+
+				yield `\x00STATUS:orchestrating:multiagent::${this.encodeStatusField(
+					JSON.stringify({
+						count: delegatedTasks.length,
+						executionPlan: "parallel",
+						reasoning: `El modelo delegó ${delegatedTasks.length} subtarea${delegatedTasks.length === 1 ? "" : "s"} a workers especializados mediante delegate_task.`,
+						subtasks: delegatedTasks.map((task) => ({
+							id: task.id,
+							role: task.role,
+							description: task.task,
+							toolScope: ["delegate_task"],
+						})),
+					}),
+				)}\x00`;
+
+				for (const task of delegatedTasks) {
+					yield `\x00STATUS:worker_start:${task.id}::${this.encodeStatusField(
+						JSON.stringify({
+							workerId: task.id,
+							taskId: task.id,
+							role: task.role,
+							description: task.task,
+						}),
+					)}\x00`;
+					yield `\x00STATUS:worker_progress:${task.id}::${this.encodeStatusField(
+						JSON.stringify({
+							workerId: task.id,
+							taskId: task.id,
+							message: "Worker delegado ejecutándose mediante delegate_task.",
+							progress: 10,
+							toolName: "delegate_task",
+						}),
+					)}\x00`;
+				}
+
+				type DelegateJobResult = {
+					promise: Promise<DelegateJobResult>;
+					index: number;
+					workerId: string;
+					toolCallId: string;
+					result: string;
+					error?: string;
+				};
+				const pending = new Set<Promise<DelegateJobResult>>();
+				for (const [index, task] of delegatedTasks.entries()) {
+					const job = {
+						promise: undefined as unknown as Promise<DelegateJobResult>,
+					};
+					job.promise = (async () => {
+						if (task.parsedParams.error) {
+							return {
+								promise: job.promise,
+								index,
+								workerId: task.id,
+								toolCallId: task.toolCall.id,
+								result: `Error: ${task.parsedParams.error}`,
+								error: task.parsedParams.error,
+							};
+						}
+						const result = await toolExecutor.execute(
+							"delegate_task",
+							task.parsedParams.params,
+							{
+								...this.getToolExecutionContext(),
+								abortSignal: options.signal,
+							},
+						);
+						return {
+							promise: job.promise,
+							index,
+							workerId: task.id,
+							toolCallId: task.toolCall.id,
+							result: result.output || result.error || "",
+							error: result.success
+								? undefined
+								: result.error || "Worker delegado falló.",
+						};
+					})();
+					pending.add(job.promise);
+				}
+
+				const delegateResults = new Array<DelegateJobResult>(
+					delegatedTasks.length,
+				);
+				while (pending.size > 0) {
+					throwIfAborted(options.signal);
+					const settled = await Promise.race(pending);
+					pending.delete(settled.promise);
+					delegateResults[settled.index] = settled;
+					if (settled.error) {
+						yield `\x00STATUS:worker_error:${settled.workerId}::${this.encodeStatusField(
+							JSON.stringify({
+								workerId: settled.workerId,
+								taskId: settled.workerId,
+								error: settled.error,
+							}),
+						)}\x00`;
+					} else {
+						yield `\x00STATUS:worker_done:${settled.workerId}::${this.encodeStatusField(
+							JSON.stringify({
+								workerId: settled.workerId,
+								taskId: settled.workerId,
+								result: settled.result.slice(0, 2000),
+							}),
+						)}\x00`;
+					}
+				}
+
+				for (const result of delegateResults) {
+					const resultContent =
+						result?.result ??
+						"Error: delegated worker did not return a result.";
+					this.workingMemory.updateFromToolResult(
+						"delegate_task",
+						!result?.error,
+						result?.error,
+					);
+					messages.push({
+						role: "tool",
+						content: this.compactToolResultForContext(resultContent),
+						toolCallId: result?.toolCallId ?? "delegate_task",
+					});
+				}
+			}
+
+			for (const toolCall of otherCalls) {
+				throwIfAborted(options.signal);
 				const isCodeTool =
 					toolCall.function.name === "execute_code" ||
 					toolCall.function.name === "run_shell";
@@ -1132,9 +1746,14 @@ export class AgentRuntime {
 					const policyResult = this.createToolPolicyResult(
 						`Invalid JSON arguments for ${toolCall.function.name}: ${parsedParams.error}. Retry once with valid JSON arguments instead of executing with empty parameters.`,
 					);
-					toolResult = { success: false, output: "", error: policyResult.resultContent };
+					toolResult = {
+						success: false,
+						output: "",
+						error: policyResult.resultContent,
+					};
 				} else {
-					const toolNameCount = (toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
+					const toolNameCount =
+						(toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
 					toolNameCounts.set(toolCall.function.name, toolNameCount);
 					const toolBudget = this.getToolBudget(toolCall.function.name);
 					const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
@@ -1146,13 +1765,21 @@ export class AgentRuntime {
 						const policyResult = this.createToolPolicyResult(
 							`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
 						);
-						toolResult = { success: false, output: "", error: policyResult.resultContent };
+						toolResult = {
+							success: false,
+							output: "",
+							error: policyResult.resultContent,
+						};
 					} else if (signatureCount > MAX_REPEATED_TOOL_SIGNATURES) {
 						skipped = true;
 						const policyResult = this.createToolPolicyResult(
 							`Repeated action suppressed for ${toolCall.function.name}. The same parameters were already tried ${MAX_REPEATED_TOOL_SIGNATURES} times. Choose a different approach or provide a final answer with the current evidence.`,
 						);
-						toolResult = { success: false, output: "", error: policyResult.resultContent };
+						toolResult = {
+							success: false,
+							output: "",
+							error: policyResult.resultContent,
+						};
 					} else {
 						const decision = this.decideBeforeToolCall(
 							toolCall.function.name,
@@ -1163,22 +1790,40 @@ export class AgentRuntime {
 						if (decision.action === "skip") {
 							skipped = true;
 							const policyResult = this.createToolPolicyResult(decision.reason);
-							toolResult = { success: false, output: "", error: policyResult.resultContent };
+							toolResult = {
+								success: false,
+								output: "",
+								error: policyResult.resultContent,
+							};
 						} else {
 							toolResult = await this.toolExecutor.execute(
 								toolCall.function.name,
 								params,
 								this.getToolExecutionContext(),
 							);
+							throwIfAborted(options.signal);
 						}
 					}
 				}
 
 				const rawResultContentStr = toolResult.success
-					? (typeof toolResult.output === "string" ? toolResult.output : JSON.stringify(toolResult.output, null, 2))
+					? typeof toolResult.output === "string"
+						? toolResult.output
+						: JSON.stringify(toolResult.output, null, 2)
 					: `Error: ${toolResult.error ?? "Unknown error"}`;
-				const resultContentStr = this.compactToolResultForContext(rawResultContentStr);
-				this.updateEvidenceLedger(ledger, toolCall.function.name, resultContentStr, toolResult.success && !skipped);
+				const resultContentStr =
+					this.compactToolResultForContext(rawResultContentStr);
+				this.workingMemory.updateFromToolResult(
+					toolCall.function.name,
+					toolResult.success && !skipped,
+					toolResult.success ? undefined : toolResult.error,
+				);
+				this.updateEvidenceLedger(
+					ledger,
+					toolCall.function.name,
+					resultContentStr,
+					toolResult.success && !skipped,
+				);
 				fullResponse += this.buildContinuationCheckpoint(
 					ledger,
 					toolCall.function.name,
@@ -1188,14 +1833,19 @@ export class AgentRuntime {
 				toolTrace.push({
 					name: toolCall.function.name,
 					success: toolResult.success && !skipped,
-					useful: !skipped && toolResult.success && !resultContentStr.startsWith("Error:"),
+					useful:
+						!skipped &&
+						toolResult.success &&
+						!resultContentStr.startsWith("Error:"),
 					summary: resultContentStr.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
 					error: toolResult.success ? undefined : toolResult.error,
 				});
 
 				// Emit tool-done status (intercepted by frontend, not shown as text)
 				if (skipped) {
-					const skippedDetail = this.encodeStatusField(resultContentStr.replace(/^Error:\s*/, ""));
+					const skippedDetail = this.encodeStatusField(
+						resultContentStr.replace(/^Error:\s*/, ""),
+					);
 					yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${skippedDetail}\x00`;
 				} else if (toolResult.success) {
 					yield `\x00STATUS:tool_done:${toolCall.function.name}:\x00`;
@@ -1206,7 +1856,6 @@ export class AgentRuntime {
 				fullResponse += `
 <!-- tool:${toolCall.function.name}:${toolResult.success ? "ok" : "error"} -->
 `;
-
 
 				const parsedContent = this.formatToolResultForModel(resultContentStr);
 
@@ -1253,15 +1902,8 @@ export class AgentRuntime {
 			metadata: channelId ? { conversationId: channelId } : undefined,
 		};
 		this.stm.add(assistantTurn);
-		
-		if (this.userProfileManager) {
-			this.userProfileManager.updateFromConversation("owner", [userTurn, assistantTurn])
-				.catch(err => console.error("Failed to update user profile:", err));
-		}
+		this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
 
-		this.dailyMemory?.addMessage(message, "user", channelId || "system").catch(() => {});
-		this.dailyMemory?.addMessage(fullResponse, "assistant", channelId || "system").catch(() => {});
-		
 		this.updateActiveTask(fullResponse);
 		this.recordLearningExperience({
 			userRequest: message,
@@ -1280,6 +1922,7 @@ export class AgentRuntime {
 	private async executeWithTools(
 		context: LLMMessage[],
 		tools: LLMTool[],
+		options: AgentProcessOptions = {},
 	): Promise<{
 		content: string;
 		toolCallsExecuted: { name: string; result: string }[];
@@ -1290,10 +1933,12 @@ export class AgentRuntime {
 		const toolSignatureCounts = new Map<string, number>();
 		const toolNameCounts = new Map<string, number>();
 		const lastUser = [...context].reverse().find((msg) => msg.role === "user");
-		const userText = typeof lastUser?.content === "string" ? lastUser.content : "";
+		const userText =
+			typeof lastUser?.content === "string" ? lastUser.content : "";
 		const ledger = this.createEvidenceLedger(userText);
 
 		while (this.hasToolIterationsRemaining(iterations)) {
+			throwIfAborted(options.signal);
 			iterations++;
 
 			const request: LLMRequest = {
@@ -1305,6 +1950,7 @@ export class AgentRuntime {
 			};
 
 			const response = await this.llmRouter.chat(request);
+			throwIfAborted(options.signal);
 
 			if (
 				response.toolCalls &&
@@ -1328,6 +1974,7 @@ export class AgentRuntime {
 				}> = [];
 
 				for (const toolCall of response.toolCalls) {
+					throwIfAborted(options.signal);
 					const parsedParams = this.parseToolParams(toolCall);
 					const params = parsedParams.params;
 					let toolResult: ToolResult;
@@ -1348,13 +1995,19 @@ export class AgentRuntime {
 							this.getRemainingToolIterations(iterations),
 						);
 						if (decision.action === "stop") {
-							const finalContent = await this.generateFinalResponse(messages, ledger, decision.reason);
+							const finalContent = await this.generateFinalResponse(
+								messages,
+								ledger,
+								decision.reason,
+							);
 							return { content: finalContent, toolCallsExecuted };
 						}
-						const toolNameCount = (toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
+						const toolNameCount =
+							(toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
 						toolNameCounts.set(toolCall.function.name, toolNameCount);
 						const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
-						const signatureCount = (toolSignatureCounts.get(signature) ?? 0) + 1;
+						const signatureCount =
+							(toolSignatureCounts.get(signature) ?? 0) + 1;
 						toolSignatureCounts.set(signature, signatureCount);
 						const toolBudget = this.getToolBudget(toolCall.function.name);
 
@@ -1378,22 +2031,35 @@ export class AgentRuntime {
 							toolResult = {
 								success: false,
 								output: "",
-								error: this.createToolPolicyResult(decision.reason).resultContent,
+								error: this.createToolPolicyResult(decision.reason)
+									.resultContent,
 							};
 						} else {
-							toolResult = await this.toolExecutor!.execute(
+							toolResult = await this.toolExecutor?.execute(
 								toolCall.function.name,
 								params,
 								this.getToolExecutionContext(),
 							);
+							throwIfAborted(options.signal);
 						}
 					}
 
 					const rawResultContent = toolResult.success
 						? toolResult.output
 						: `Error: ${toolResult.error ?? "Unknown error"}`;
-					const resultContent = this.compactToolResultForContext(rawResultContent);
-					this.updateEvidenceLedger(ledger, toolCall.function.name, resultContent, toolResult.success);
+					const resultContent =
+						this.compactToolResultForContext(rawResultContent);
+					this.workingMemory.updateFromToolResult(
+						toolCall.function.name,
+						toolResult.success,
+						toolResult.success ? undefined : toolResult.error,
+					);
+					this.updateEvidenceLedger(
+						ledger,
+						toolCall.function.name,
+						resultContent,
+						toolResult.success,
+					);
 
 					const parsedContent = this.formatToolResultForModel(resultContent);
 
@@ -1402,7 +2068,10 @@ export class AgentRuntime {
 						name: toolCall.function.name,
 						resultContent: parsedContent,
 						executedName: toolCall.function.name,
-						executedResult: resultContent.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+						executedResult: resultContent.slice(
+							0,
+							MAX_TOOL_RESULT_STORED_CHARS,
+						),
 					});
 				}
 
@@ -1467,14 +2136,16 @@ export class AgentRuntime {
 		const contextParts: string[] = [];
 
 		let systemContent = this.config.systemPrompt;
-		
+
 		if (this.userProfileManager) {
 			try {
 				const profile = await this.userProfileManager.getProfile("owner");
-				let profileStr = `### User Profile (Preferences & Context)\n`;
+				let profileStr = "### User Profile (Preferences & Context)\n";
 				profileStr += `- Communication Style: ${profile.communicationStyle}\n`;
 				if (Object.keys(profile.preferences).length > 0) {
-					profileStr += `- Preferences: ${Object.entries(profile.preferences).map(([k, v]) => `${k}=${v}`).join(", ")}\n`;
+					profileStr += `- Preferences: ${Object.entries(profile.preferences)
+						.map(([k, v]) => `${k}=${v}`)
+						.join(", ")}\n`;
 				}
 				if (profile.traits.length > 0) {
 					profileStr += `- Traits: ${profile.traits.join(", ")}\n`;
@@ -1517,10 +2188,12 @@ export class AgentRuntime {
 				.map((t) => `- ${t.name}: ${t.description}`)
 				.join("\n");
 			systemContent += `\n\n# Available Tools\nYou have access to the following tools. Use them when needed to help the user:\n${toolNames}`;
-			systemContent += "\n\nCRITICAL RULE: Do NOT use tools or hallucinate past tasks for simple greetings (e.g. 'hola') or casual conversation. Only use tools if the *latest* user request explicitly requires it.";
-			systemContent += "\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
+			systemContent +=
+				"\n\nCRITICAL RULE: Do NOT use tools or hallucinate past tasks for simple greetings (e.g. 'hola') or casual conversation. Only use tools if the *latest* user request explicitly requires it.";
+			systemContent +=
+				"\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
 		}
-		
+
 		systemContent += `\n\nCRITICAL SYSTEM INSTRUCTION:
 - You have access to a persistent Long-Term Memory (LTM) system.
 - NEVER claim that you do not have memory or that "each conversation starts fresh".
@@ -1533,6 +2206,7 @@ Your browser has PERSISTENT SESSIONS. Cookies and login state are automatically 
 2. **If a site requires login and no session exists**, tell the user: "I need you to log in manually first. I'll open the page, you enter your credentials, and I'll remember the session for next time." Do NOT refuse the task entirely.
 3. **Sessions persist for 7 days** across restarts. The user does not need to re-login every time.
 4. **You CAN perform all human actions**: click, type, scroll, like, comment, post, upload, download, navigate menus, etc. You are a full browser automation agent.
+5. **Use known user context before searching.** Known Facebook page for this user: Cuentos Mitologicos / Cuentos Mitológicos = https://www.facebook.com/cuentosmitologicos1/. If the user asks about that page, navigate directly there or use the already-open authenticated Facebook tab; do not search for it first.
 
 ## SPA HANDLING (Facebook, Instagram, TikTok, YouTube, Reddit, Discord, etc.)
 Modern web apps (SPAs) use heavy JavaScript rendering. The accessibility tree (browser_snapshot) may return EMPTY or INCOMPLETE content. When this happens:
@@ -1545,7 +2219,8 @@ Modern web apps (SPAs) use heavy JavaScript rendering. The accessibility tree (b
 2. **For Facebook specifically**: Navigate to facebook.com/your-page/notifications or use Meta Business Suite (business.facebook.com) which has better accessibility.
 3. **For comments/notifications**: Try direct URLs like facebook.com/page_id/notifications, youtube.com/comments, etc.
 4. **NEVER say "Facebook detects automation"** as an excuse. The browser has stealth mode, realistic fingerprints, and persistent sessions. Just interact naturally.
-5. **Be persistent**: If one approach fails, try another. Use at least 3 different strategies before reporting failure.`;
+5. **Do not claim CAPTCHA/DataDome unless visible evidence confirms it.** A hidden script name, an internal tool warning, or a failed extraction is not enough. Confirm with visible text, snapshot, screenshot analysis, or an actual CAPTCHA element before reporting a blocker.
+6. **Be persistent**: If one approach fails, try another. Use at least 3 different strategies before reporting failure.`;
 
 		const activeModel = this.config.model ?? "unspecified";
 		const zaiVisionMode = this.shouldUseZaiVisionToolsForImages();
@@ -1582,6 +2257,7 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 14. If a browser tool reports a connection error or unavailable browser, call browser_restart once and retry the same browser action. If it still fails, report the exact browser/configuration error; do not offer unrelated alternatives such as generating images, using a different task, or asking whether to proceed another way.
 15. The browser may connect through a residential proxy, so pages may appear in the proxy region/language. This is normal; interact with the page language as shown.
 16. Navigate step by step and decide intelligently. Before each browser action, evaluate the last snapshot: did URL/title/elements change, did the action fail, and what exact observable change is expected next?
+16a. When using browser_scroll, read the reported actual page delta. If actual delta is 0px, do not say that visible scrolling happened; try a larger amount, an inner scrollable container with browser_eval, or direct DOM extraction.
 17. browser_etsy_task is only a fallback if normal step-by-step navigation stalls repeatedly or the user explicitly requests a compact Etsy flow. Do not use it as the first/default action.
 18. For requests to show, list, retrieve, or capture multiple page/product images, optimize for direct extraction once on the product/page: use browser_extract_images before clicking thumbnails. Only use browser_eval if the specialized extractor misses data. Deduplicate URLs, prefer the highest-resolution candidates, track obtained/pending internally, and avoid recapturing images already found.
 19. Stop using browser tools as soon as requested data is available. If browser_extract_images returns images or the required screenshots/images are available, answer immediately with available screenshots/images instead of navigating again.
@@ -1608,12 +2284,15 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 					} else if (m.item.source?.conversationId) {
 						sourceStr = `[Conversation: ${m.item.source.conversationId}] `;
 					}
-					
+
 					const timeMs = Date.now() - m.item.createdAt.getTime();
 					const hours = Math.round(timeMs / (1000 * 60 * 60));
-					const timeStr = hours > 24 
-						? `[${Math.round(hours/24)} days ago] ` 
-						: hours > 0 ? `[${hours} hours ago] ` : "[Recently] ";
+					const timeStr =
+						hours > 24
+							? `[${Math.round(hours / 24)} days ago] `
+							: hours > 0
+								? `[${hours} hours ago] `
+								: "[Recently] ";
 
 					return `- ${sourceStr}${timeStr}${m.item.content}`;
 				})
@@ -1624,10 +2303,21 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			});
 		}
 
-		const stmTurns = this.stm.getContext();
+		const stmTurns =
+			memories.fromSTM.length > 0 ? memories.fromSTM : this.stm.getContext();
+		for (const turn of stmTurns) {
+			if (turn.role === "system") {
+				messages.push({ role: "system", content: turn.content });
+			}
+		}
 		let conversationTurns = stmTurns;
 		if (channelId) {
-			conversationTurns = stmTurns.filter(t => !t.metadata?.conversationId || t.metadata.conversationId === channelId);
+			conversationTurns = stmTurns.filter(
+				(t) =>
+					t.role === "system" ||
+					!t.metadata?.conversationId ||
+					t.metadata.conversationId === channelId,
+			);
 		}
 		const recentTurns = conversationTurns.slice(-20);
 		for (const turn of recentTurns) {
@@ -1647,14 +2337,17 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			messages.push({ role: "user", content: userMessage });
 		}
 
-		const parsedMessages = messages.map(msg => {
+		const parsedMessages = messages.map((msg) => {
 			if (typeof msg.content === "string") {
 				const imgRegex = /!\[.*?\]\(\/api\/media\/file\/([^)]+)\)/g;
 				const matches = [...msg.content.matchAll(imgRegex)];
 				if (matches.length > 0) {
 					const localPaths = this.getLocalMediaPathsFromContent(msg.content);
 					if (this.shouldUseZaiVisionToolsForImages()) {
-						return { ...msg, content: this.appendZaiVisionHint(msg.content, localPaths) };
+						return {
+							...msg,
+							content: this.appendZaiVisionHint(msg.content, localPaths),
+						};
 					}
 
 					return {

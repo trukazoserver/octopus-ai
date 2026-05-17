@@ -4,13 +4,16 @@ import type { ConversationTurn, TaskState } from "../agent/types.js";
  * CondensationCallback — permite al STM solicitar un resumen
  * sin acoplarse directamente al LLMRouter.
  */
-export type CondensationCallback = (turns: ConversationTurn[]) => Promise<string>;
+export type CondensationCallback = (
+	turns: ConversationTurn[],
+) => Promise<string>;
 
 export class ShortTermMemory {
 	private workingContext: ConversationTurn[] = [];
 	private scratchPad: Map<string, string> = new Map();
 	private activeTask: TaskState | null = null;
 	private maxTokens: number;
+	private scratchPadSize: number;
 	private autoEviction: boolean;
 	private tokenCounter: {
 		countTokens: (text: string) => number;
@@ -35,6 +38,7 @@ export class ShortTermMemory {
 		};
 	}) {
 		this.maxTokens = config.maxTokens;
+		this.scratchPadSize = Math.max(1, config.scratchPadSize);
 		this.autoEviction = config.autoEviction;
 		this.tokenCounter = config.tokenCounter;
 	}
@@ -85,6 +89,13 @@ export class ShortTermMemory {
 	}
 
 	setScratchPad(key: string, value: string): void {
+		if (
+			!this.scratchPad.has(key) &&
+			this.scratchPad.size >= this.scratchPadSize
+		) {
+			const oldestKey = this.scratchPad.keys().next().value;
+			if (oldestKey) this.scratchPad.delete(oldestKey);
+		}
 		this.scratchPad.set(key, value);
 	}
 
@@ -138,12 +149,12 @@ export class ShortTermMemory {
 
 		// Determine how many turns to evict (evict oldest half)
 		const totalTurns = this.workingContext.length;
-		if (totalTurns <= 2) {
+		if (totalTurns <= 1) {
 			this.evictOldestSimple();
 			return;
 		}
 
-		const evictCount = Math.max(2, Math.floor(totalTurns / 2));
+		const evictCount = Math.max(1, Math.floor(totalTurns / 2));
 		const toEvict = this.workingContext.slice(0, evictCount);
 		const toKeep = this.workingContext.slice(evictCount);
 
@@ -201,7 +212,9 @@ export class ShortTermMemory {
 		const errorMentions = turns
 			.filter((t) => /error|fail|crash|exception|bug/i.test(t.content))
 			.map((t) => {
-				const match = t.content.match(/(?:error|fail|exception|bug)[^.!?\n]{0,120}/i);
+				const match = t.content.match(
+					/(?:error|fail|exception|bug)[^.!?\n]{0,120}/i,
+				);
 				return match ? match[0].trim() : null;
 			})
 			.filter(Boolean);

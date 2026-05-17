@@ -9,11 +9,13 @@ export { CodeExecutor, createCodeTools } from "./code-executor.js";
 export type {
 	CodeExecutionResult,
 	CodeExecutorConfig,
+	CodeExecutorHooks,
 } from "./code-executor.js";
 export { createMediaTools, mediaContext } from "./media.js";
 export { createAutomationTools } from "./automation.js";
 export { createTeamTools } from "./team.js";
 export { createSandboxTools } from "./sandbox-tool.js";
+export { createTeamCommTools } from "./team-comm.js";
 
 // Stealth browsing
 export { ProxyManager } from "./proxy-manager.js";

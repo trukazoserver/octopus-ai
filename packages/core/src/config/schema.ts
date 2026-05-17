@@ -16,6 +16,7 @@ const ServerSchema = Type.Object({
 
 const BrowserSchema = Type.Object({
 	headless: Type.Boolean({ default: false }),
+	chromiumSandbox: Type.Optional(Type.Boolean()),
 	provider: Type.Union(
 		[
 			Type.Literal("embedded"),
@@ -39,7 +40,11 @@ const BrowserSchema = Type.Object({
 	sessionTtlHours: Type.Number({ default: 168 }),
 	autoFallbackOnBlock: Type.Boolean({ default: true }),
 	blockFallbackProvider: Type.Union(
-		[Type.Literal("brightdata"), Type.Literal("decodo"), Type.Literal("embedded")],
+		[
+			Type.Literal("brightdata"),
+			Type.Literal("decodo"),
+			Type.Literal("embedded"),
+		],
 		{ default: "decodo" },
 	),
 	confirmBlockWithVision: Type.Boolean({ default: true }),

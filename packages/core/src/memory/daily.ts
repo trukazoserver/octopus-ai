@@ -1,6 +1,7 @@
-import type { DatabaseAdapter } from "../storage/database.js";
-import type { LLMRouter } from "../ai/router.js";
+import { randomUUID } from "node:crypto";
 import type { TokenCounter } from "../ai/index.js";
+import type { LLMRouter } from "../ai/router.js";
+import type { DatabaseAdapter } from "../storage/database.js";
 import { createLogger } from "../utils/logger.js";
 
 const logger = createLogger("daily-memory");
@@ -27,7 +28,7 @@ Rules:
 4. Output ONLY the updated summary text. Do not include introductory or concluding remarks.`;
 
 interface RawMessage {
-	id: number;
+	id: string;
 	role: string;
 	content: string;
 	source: string;
@@ -89,7 +90,11 @@ export class GlobalDailyMemory {
 		);
 	}
 
-	async addMessage(content: string, role: string, source: string = "system"): Promise<void> {
+	async addMessage(
+		content: string,
+		role: string,
+		source = "system",
+	): Promise<void> {
 		await this.initialize();
 		await this.ensureTodayRow();
 
@@ -107,15 +112,15 @@ export class GlobalDailyMemory {
 			const row = rows[0];
 
 			const rawMessages: RawMessage[] = JSON.parse(row.raw_messages || "[]");
-			
+
 			const newMessage: RawMessage = {
-				id: Date.now(),
+				id: randomUUID(),
 				role,
 				content: content.trim().substring(0, 5000), // Prevent massive payloads
 				source,
-				created_at: new Date().toISOString()
+				created_at: new Date().toISOString(),
 			};
-			
+
 			rawMessages.push(newMessage);
 
 			await this.db.run(
@@ -125,10 +130,13 @@ export class GlobalDailyMemory {
 				[JSON.stringify(rawMessages), this.activeDate],
 			);
 
-			if (rawMessages.length >= this.config.triggerMessageCount && !this.summarizing) {
+			if (
+				rawMessages.length >= this.config.triggerMessageCount &&
+				!this.summarizing
+			) {
 				// Don't await to avoid blocking chat stream
-				this.summarizeInternal(rawMessages, row.summary).catch(e => 
-					logger.error(`Error summarizing daily memory: ${e}`)
+				this.summarizeInternal(rawMessages, row.summary).catch((e) =>
+					logger.error(`Error summarizing daily memory: ${e}`),
 				);
 			}
 		} catch (e: unknown) {
@@ -138,19 +146,22 @@ export class GlobalDailyMemory {
 
 	private async summarizeInternal(
 		messagesToSummarize: RawMessage[],
-		currentSummary: string
+		currentSummary: string,
 	): Promise<void> {
 		if (this.summarizing || messagesToSummarize.length === 0) return;
 		this.summarizing = true;
 
 		try {
-			const formattedMessages = messagesToSummarize.map(m => 
-				`[${m.source}] ${m.role.toUpperCase()}: ${m.content}`
-			).join("\n---\n");
+			const formattedMessages = messagesToSummarize
+				.map((m) => `[${m.source}] ${m.role.toUpperCase()}: ${m.content}`)
+				.join("\n---\n");
 
 			const messages = [
 				{ role: "system" as const, content: SUMMARIZE_PROMPT },
-				{ role: "user" as const, content: `CURRENT SUMMARY:\n${currentSummary || "No summary yet."}\n\nNEW MESSAGES:\n${formattedMessages}` }
+				{
+					role: "user" as const,
+					content: `CURRENT SUMMARY:\n${currentSummary || "No summary yet."}\n\nNEW MESSAGES:\n${formattedMessages}`,
+				},
 			];
 
 			const response = await this.router.chat({
@@ -165,24 +176,28 @@ export class GlobalDailyMemory {
 			// Ensure we don't blow up the max tokens budget
 			const tokens = this.tokenCounter.countTokens(newSummary);
 			if (tokens > this.config.maxTokens) {
-				logger.warn(`Daily summary exceeded token budget (${tokens} > ${this.config.maxTokens}). Compressing...`);
+				logger.warn(
+					`Daily summary exceeded token budget (${tokens} > ${this.config.maxTokens}). Compressing...`,
+				);
 				newSummary = newSummary.substring(0, this.config.maxTokens * 3); // Rough fallback truncation
 			}
 
 			// Clear the summarized messages, but re-fetch in case new ones arrived during summarization
 			const rows = await this.db.all<{ raw_messages: string }>(
 				"SELECT raw_messages FROM global_daily_memory WHERE date_id = ?",
-				[this.activeDate]
+				[this.activeDate],
 			);
-			
-			let currentRaw = [];
+
+			let currentRaw: RawMessage[] = [];
 			if (rows.length > 0) {
 				currentRaw = JSON.parse(rows[0].raw_messages || "[]");
 			}
 
 			// Filter out the messages we just summarized (by ID)
-			const summarizedIds = new Set(messagesToSummarize.map(m => m.id));
-			const remainingMessages = currentRaw.filter((m: RawMessage) => !summarizedIds.has(m.id));
+			const summarizedIds = new Set(messagesToSummarize.map((m) => m.id));
+			const remainingMessages = currentRaw.filter(
+				(m) => !summarizedIds.has(String(m.id)),
+			);
 
 			await this.db.run(
 				`UPDATE global_daily_memory 
@@ -190,9 +205,10 @@ export class GlobalDailyMemory {
 				 WHERE date_id = ?`,
 				[newSummary, JSON.stringify(remainingMessages), this.activeDate],
 			);
-			
-			logger.debug("Daily episodic scratchpad successfully summarized and appended.");
 
+			logger.debug(
+				"Daily episodic scratchpad successfully summarized and appended.",
+			);
 		} finally {
 			this.summarizing = false;
 		}
@@ -201,41 +217,56 @@ export class GlobalDailyMemory {
 	async getCurrentContext(): Promise<string> {
 		await this.initialize();
 		await this.ensureTodayRow();
-		
+
 		const rows = await this.db.all<{
 			summary: string;
 			raw_messages: string;
 		}>("SELECT * FROM global_daily_memory WHERE date_id = ?", [
 			this.activeDate,
 		]);
-		
+
 		if (rows.length === 0) return "No events today yet.";
-		
+
 		const row = rows[0];
-		const summary = row.summary.trim() ? row.summary : "No events summarized yet.";
-		
+		const summary = row.summary.trim()
+			? row.summary
+			: "No events summarized yet.";
+
 		const rawMessages: RawMessage[] = JSON.parse(row.raw_messages || "[]");
 		let rawText = "";
 		if (rawMessages.length > 0) {
-			rawText = "\n\n### Unsummarized Recent Activity\n" + 
-				rawMessages.map(m => `- [${m.source}] ${m.role}: ${m.content.substring(0, 100).replace(/\\n/g, " ")}...`).join("\n");
+			rawText = `\n\n### Unsummarized Recent Activity\n${rawMessages
+				.map(
+					(m) =>
+						`- [${m.source}] ${m.role}: ${m.content.substring(0, 100).replace(/\\n/g, " ")}...`,
+				)
+				.join("\n")}`;
 		}
-		
+
 		return `### Global Daily Summary (${this.activeDate})\n${summary}${rawText}`;
 	}
-	
+
 	async dumpAndClear(targetDate: string): Promise<string | null> {
-		const rows = await this.db.all<{ summary: string, raw_messages: string }>(
-			"SELECT * FROM global_daily_memory WHERE date_id = ?", [targetDate]
+		const rows = await this.db.all<{ summary: string; raw_messages: string }>(
+			"SELECT * FROM global_daily_memory WHERE date_id = ?",
+			[targetDate],
 		);
-		
+
 		if (rows.length === 0) return null;
-		
-		const summary = rows[0].summary;
-		const finalDump = `Daily Episode for ${targetDate}:\n${summary}`;
-		
-		await this.db.run("DELETE FROM global_daily_memory WHERE date_id = ?", [targetDate]);
-		
+
+		const summary = rows[0].summary.trim();
+		const rawMessages: RawMessage[] = JSON.parse(rows[0].raw_messages || "[]");
+		const rawText = rawMessages.length
+			? `\n\nUnsummarized Activity:\n${rawMessages
+					.map((m) => `- [${m.source}] ${m.role}: ${m.content}`)
+					.join("\n")}`
+			: "";
+		const finalDump = `Daily Episode for ${targetDate}:\n${summary || "No summary."}${rawText}`;
+
+		await this.db.run("DELETE FROM global_daily_memory WHERE date_id = ?", [
+			targetDate,
+		]);
+
 		logger.info(`Dumped and cleared daily memory for ${targetDate}`);
 		return finalDump;
 	}
@@ -251,7 +282,10 @@ export class GlobalDailyMemory {
 		return raw.length;
 	}
 
-	async getStructuredData(): Promise<{ summary: string; rawMessages: RawMessage[] }> {
+	async getStructuredData(): Promise<{
+		summary: string;
+		rawMessages: RawMessage[];
+	}> {
 		await this.initialize();
 		await this.ensureTodayRow();
 		const rows = await this.db.all<{ summary: string; raw_messages: string }>(
@@ -261,7 +295,7 @@ export class GlobalDailyMemory {
 		if (rows.length === 0) return { summary: "", rawMessages: [] };
 		return {
 			summary: rows[0].summary,
-			rawMessages: JSON.parse(rows[0].raw_messages || "[]")
+			rawMessages: JSON.parse(rows[0].raw_messages || "[]"),
 		};
 	}
 }

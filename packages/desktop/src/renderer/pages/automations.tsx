@@ -73,7 +73,7 @@ export const Automations: React.FC = () => {
 		loadData();
 	}, [loadData]);
 
-	const validateJson = (str: string): boolean => {
+	const validateJson = useCallback((str: string): boolean => {
 		try {
 			JSON.parse(str);
 			setJsonError(null);
@@ -82,7 +82,7 @@ export const Automations: React.FC = () => {
 			setJsonError("Invalid JSON");
 			return false;
 		}
-	};
+	}, []);
 
 	const openCreate = () => {
 		setEditingId(null);
@@ -131,7 +131,7 @@ export const Automations: React.FC = () => {
 		} finally {
 			setSubmitting(false);
 		}
-	}, [form, editingId, loadData]);
+	}, [form, editingId, loadData, validateJson]);
 
 	const handleToggle = useCallback(
 		async (auto: Automation) => {
@@ -312,6 +312,7 @@ export const Automations: React.FC = () => {
 						<div style={{ display: "flex", gap: "12px" }}>
 							<div style={{ flex: 1 }}>
 								<label
+									htmlFor="automation-trigger-type"
 									style={{
 										fontSize: "12px",
 										color: "#71717a",
@@ -322,6 +323,7 @@ export const Automations: React.FC = () => {
 									Trigger Type
 								</label>
 								<select
+									id="automation-trigger-type"
 									value={form.triggerType}
 									onChange={(e) =>
 										setForm((f) => ({ ...f, triggerType: e.target.value }))
@@ -346,6 +348,7 @@ export const Automations: React.FC = () => {
 							</div>
 							<div style={{ flex: 1 }}>
 								<label
+									htmlFor="automation-action-type"
 									style={{
 										fontSize: "12px",
 										color: "#71717a",
@@ -356,6 +359,7 @@ export const Automations: React.FC = () => {
 									Action Type
 								</label>
 								<select
+									id="automation-action-type"
 									value={form.actionType}
 									onChange={(e) =>
 										setForm((f) => ({ ...f, actionType: e.target.value }))
@@ -382,6 +386,7 @@ export const Automations: React.FC = () => {
 						<div style={{ display: "flex", gap: "12px" }}>
 							<div style={{ flex: 1 }}>
 								<label
+									htmlFor="automation-trigger-config"
 									style={{
 										fontSize: "12px",
 										color: "#71717a",
@@ -392,6 +397,7 @@ export const Automations: React.FC = () => {
 									Trigger Config (JSON)
 								</label>
 								<textarea
+									id="automation-trigger-config"
 									value={form.triggerConfig}
 									onChange={(e) => {
 										setForm((f) => ({ ...f, triggerConfig: e.target.value }));
@@ -415,6 +421,7 @@ export const Automations: React.FC = () => {
 							</div>
 							<div style={{ flex: 1 }}>
 								<label
+									htmlFor="automation-action-config"
 									style={{
 										fontSize: "12px",
 										color: "#71717a",
@@ -425,6 +432,7 @@ export const Automations: React.FC = () => {
 									Action Config (JSON)
 								</label>
 								<textarea
+									id="automation-action-config"
 									value={form.actionConfig}
 									onChange={(e) => {
 										setForm((f) => ({ ...f, actionConfig: e.target.value }));

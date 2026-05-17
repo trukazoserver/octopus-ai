@@ -37,7 +37,10 @@ export interface ExperienceRecordInput {
 	metadata?: Record<string, unknown>;
 }
 
-export interface ExperienceRecord extends Required<Pick<ExperienceRecordInput, "userRequest" | "finalResponse">> {
+export interface ExperienceRecord
+	extends Required<
+		Pick<ExperienceRecordInput, "userRequest" | "finalResponse">
+	> {
 	id: string;
 	conversationId?: string;
 	taskId?: string;

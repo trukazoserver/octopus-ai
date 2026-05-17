@@ -7,6 +7,15 @@ import type { ToolDefinition, ToolResult } from "./registry.js";
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
 const MEDIA_META_PATH = join(MEDIA_DIR, "meta.json");
 
+interface MediaMetaItem {
+	id: string;
+	filename: string;
+	mimetype: string;
+	size: number;
+	createdAt: string;
+	description?: string;
+}
+
 const MIME_EXTENSIONS: Record<string, string> = {
 	"image/png": ".png",
 	"image/jpeg": ".jpg",
@@ -25,16 +34,17 @@ function ensureMediaDir(): void {
 	if (!existsSync(MEDIA_DIR)) mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
-function loadMediaMeta(): unknown[] {
+function loadMediaMeta(): MediaMetaItem[] {
 	ensureMediaDir();
 	try {
-		return JSON.parse(readFileSync(MEDIA_META_PATH, "utf-8"));
+		const parsed = JSON.parse(readFileSync(MEDIA_META_PATH, "utf-8"));
+		return Array.isArray(parsed) ? (parsed as MediaMetaItem[]) : [];
 	} catch {
 		return [];
 	}
 }
 
-function saveMediaMeta(items: unknown[]): void {
+function saveMediaMeta(items: MediaMetaItem[]): void {
 	ensureMediaDir();
 	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
 }
@@ -47,7 +57,10 @@ function normalizeBase64Data(data: string): string {
 export const mediaContext = {
 	save: async (buffer: Buffer, mimeType: string, description?: string) => {
 		const id = randomUUID();
-		const ext = MIME_EXTENSIONS[mimeType] || extname(`file.${mimeType.split("/")[1] || "png"}`) || ".png";
+		const ext =
+			MIME_EXTENSIONS[mimeType] ||
+			extname(`file.${mimeType.split("/")[1] || "png"}`) ||
+			".png";
 		const filename = `${id}${ext}`;
 		const filePath = join(MEDIA_DIR, filename);
 		ensureMediaDir();
@@ -55,7 +68,7 @@ export const mediaContext = {
 		writeFileSync(filePath, buffer);
 
 		const items = loadMediaMeta();
-		const item = {
+		const item: MediaMetaItem = {
 			id,
 			filename,
 			mimetype: mimeType,
@@ -63,13 +76,12 @@ export const mediaContext = {
 			createdAt: new Date().toISOString(),
 			description,
 		};
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		(items as any[]).push(item);
+		items.push(item);
 		saveMediaMeta(items);
 
 		return {
 			...item,
-			url: `/api/media/file/${filename}`
+			url: `/api/media/file/${filename}`,
 		};
 	},
 	resolve: async (urlStr: string) => {
@@ -84,15 +96,18 @@ export const mediaContext = {
 			throw new Error(`Media not found: ${urlStr}`);
 		}
 		const buffer = readFileSync(filePath);
-		
-		const items = loadMediaMeta() as any[];
-		const item = items.find(i => i.filename === filename || i.id === filename || urlStr.includes(i.id));
-		
+
+		const items = loadMediaMeta();
+		const item = items.find(
+			(i) =>
+				i.filename === filename || i.id === filename || urlStr.includes(i.id),
+		);
+
 		return {
 			buffer,
-			mimeType: item ? item.mimetype : "application/octet-stream"
+			mimeType: item ? item.mimetype : "application/octet-stream",
 		};
-	}
+	},
 };
 
 export function createMediaTools(): ToolDefinition[] {
@@ -212,22 +227,26 @@ export function createMediaTools(): ToolDefinition[] {
 			},
 			handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
 				try {
-					const items = loadMediaMeta() as any[];
+					const items = loadMediaMeta();
 					let filtered = items;
 
-					const typeFilter = params.type ? String(params.type).toLowerCase() : "";
+					const typeFilter = params.type
+						? String(params.type).toLowerCase()
+						: "";
 					if (typeFilter) {
-						filtered = filtered.filter(
-							(i) => i.mimetype && i.mimetype.startsWith(typeFilter),
+						filtered = filtered.filter((i) =>
+							i.mimetype?.startsWith(typeFilter),
 						);
 					}
 
-					const search = params.search ? String(params.search).toLowerCase() : "";
+					const search = params.search
+						? String(params.search).toLowerCase()
+						: "";
 					if (search) {
 						filtered = filtered.filter(
 							(i) =>
-								(i.filename && i.filename.toLowerCase().includes(search)) ||
-								(i.description && i.description.toLowerCase().includes(search)),
+								i.filename?.toLowerCase().includes(search) ||
+								i.description?.toLowerCase().includes(search),
 						);
 					}
 

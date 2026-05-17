@@ -21,6 +21,7 @@ export type AgentEventType =
 
 export interface AgentEvent {
 	id: string;
+	runId?: string;
 	timestamp: number;
 	workerId: string;
 	taskId: string;
@@ -32,11 +33,15 @@ export interface AgentEvent {
 		toolResult?: string;
 		progress?: number; // 0-100
 		error?: string;
+		durationMs?: number;
+		toolIterations?: number;
+		metadata?: Record<string, unknown>;
 		artifacts?: string[]; // URLs, file paths, or other outputs
 	};
 }
 
 export interface EventFilter {
+	runId?: string;
 	workerId?: string;
 	taskId?: string;
 	types?: AgentEventType[];
@@ -80,6 +85,10 @@ export class EventStream {
 	query(filter: EventFilter): AgentEvent[] {
 		let results = this.events;
 
+		if (filter.runId) {
+			results = results.filter((e) => e.runId === filter.runId);
+		}
+
 		if (filter.workerId) {
 			results = results.filter((e) => e.workerId === filter.workerId);
 		}
@@ -91,7 +100,8 @@ export class EventStream {
 			results = results.filter((e) => typeSet.has(e.type));
 		}
 		if (filter.since) {
-			results = results.filter((e) => e.timestamp >= filter.since!);
+			const since = filter.since;
+			results = results.filter((e) => e.timestamp >= since);
 		}
 		if (filter.limit) {
 			results = results.slice(-filter.limit);
@@ -148,10 +158,17 @@ export class EventStream {
 	/**
 	 * Check if all tasks in a set are completed.
 	 */
-	areAllTasksComplete(taskIds: string[]): boolean {
+	areAllTasksComplete(taskIds: string[], runId?: string): boolean {
 		const completed = new Set(
 			this.events
-				.filter((e) => e.type === "result" || e.type === "cancelled")
+				.filter((e) => !runId || e.runId === runId)
+				.filter(
+					(e) =>
+						e.type === "result" ||
+						e.type === "cancelled" ||
+						e.type === "error" ||
+						e.type === "blocked",
+				)
 				.map((e) => e.taskId),
 		);
 		return taskIds.every((id) => completed.has(id));
@@ -161,16 +178,23 @@ export class EventStream {
 	 * Get a compact summary of all activity for the orchestrator.
 	 */
 	getSummary(): string {
-		const taskStatus = new Map<string, { workerId: string; status: string; lastMessage: string }>();
+		const taskStatus = new Map<
+			string,
+			{ workerId: string; status: string; lastMessage: string }
+		>();
 
 		for (const event of this.events) {
 			const existing = taskStatus.get(event.taskId);
 			const status =
-				event.type === "result" ? "done" :
-				event.type === "error" ? "error" :
-				event.type === "blocked" ? "blocked" :
-				event.type === "cancelled" ? "cancelled" :
-				"running";
+				event.type === "result"
+					? "done"
+					: event.type === "error"
+						? "error"
+						: event.type === "blocked"
+							? "blocked"
+							: event.type === "cancelled"
+								? "cancelled"
+								: "running";
 
 			taskStatus.set(event.taskId, {
 				workerId: event.workerId,
@@ -181,7 +205,9 @@ export class EventStream {
 
 		const lines: string[] = ["# Event Stream Summary"];
 		for (const [taskId, info] of taskStatus) {
-			lines.push(`- [${info.status.toUpperCase()}] Task ${taskId} (worker: ${info.workerId}): ${info.lastMessage.slice(0, 200)}`);
+			lines.push(
+				`- [${info.status.toUpperCase()}] Task ${taskId} (worker: ${info.workerId}): ${info.lastMessage.slice(0, 200)}`,
+			);
 		}
 		return lines.join("\n");
 	}
@@ -198,5 +224,11 @@ export class EventStream {
 	 */
 	clear(): void {
 		this.events = [];
+	}
+
+	prune(maxEvents = 1000): void {
+		if (this.events.length > maxEvents) {
+			this.events = this.events.slice(-maxEvents);
+		}
 	}
 }

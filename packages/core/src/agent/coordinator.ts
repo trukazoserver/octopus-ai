@@ -49,47 +49,10 @@ export class AgentCoordinator {
 		return Array.from(this.configs.values());
 	}
 
-	findBestAgent(task: TaskDescription): AgentRuntime | undefined {
-		const taskKeywords = new Set(task.keywords.map((k) => k.toLowerCase()));
-		const taskDomains = new Set(task.domains.map((d) => d.toLowerCase()));
-		const taskWords = new Set(
-			task.description
-				.toLowerCase()
-				.split(/\s+/)
-				.filter((w) => w.length > 3),
-		);
-
-		let bestAgent: AgentRuntime | undefined;
-		let bestScore = -1;
-
-		for (const [id, config] of this.configs) {
-			const descLower = config.description.toLowerCase();
-			const descWords = new Set(
-				descLower.split(/\s+/).filter((w) => w.length > 3),
-			);
-			const nameLower = config.name.toLowerCase();
-
-			let score = 0;
-
-			for (const kw of taskKeywords) {
-				if (descLower.includes(kw)) score += 2;
-				if (nameLower.includes(kw)) score += 3;
-			}
-
-			for (const domain of taskDomains) {
-				if (descLower.includes(domain)) score += 2;
-			}
-
-			for (const word of taskWords) {
-				if (descWords.has(word)) score += 1;
-			}
-
-			if (score > bestScore) {
-				bestScore = score;
-				bestAgent = this.agents.get(id);
-			}
-		}
-
-		return bestAgent;
+	findBestAgent(_task: TaskDescription): AgentRuntime | undefined {
+		// Con un solo agente registrado, retornamos el primero disponible
+		// TODO: Implementar routing real cuando haya múltiples agentes especializados
+		const agents = Array.from(this.agents.values());
+		return agents.length > 0 ? agents[0] : undefined;
 	}
 }

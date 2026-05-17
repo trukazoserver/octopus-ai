@@ -236,9 +236,7 @@ export class MetricsCollector {
 	/**
 	 * Get a summary dashboard for a time period.
 	 */
-	async getDashboard(
-		periodHours = 24,
-	): Promise<MetricsDashboard> {
+	async getDashboard(periodHours = 24): Promise<MetricsDashboard> {
 		await this.flush(); // Ensure all buffered metrics are written
 
 		const since = new Date(
@@ -354,7 +352,8 @@ export class MetricsCollector {
 			},
 			systemMetrics: {
 				uptime: 0,
-				totalRequests: toolRows.reduce((sum, r) => sum + r.count, 0) +
+				totalRequests:
+					toolRows.reduce((sum, r) => sum + r.count, 0) +
 					llmRows.reduce((sum, r) => sum + r.count, 0),
 				avgResponseMs: 0,
 				heartbeats: heartbeatCount?.count ?? 0,

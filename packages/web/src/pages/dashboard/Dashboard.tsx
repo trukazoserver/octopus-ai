@@ -25,12 +25,22 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 				>
 					<div
 						style={{
-							fontSize: "48px",
+							width: "58px",
+							height: "58px",
+							borderRadius: "18px",
+							background: "#050505",
+							border: "1px solid #202020",
+							display: "grid",
+							placeItems: "center",
 							filter: "drop-shadow(0 0 20px rgba(99,102,241,0.3))",
 							animation: "float 3s ease-in-out infinite",
 						}}
 					>
-						🐙
+						<img
+							src="/logo_Pulpo_octavio.png"
+							alt="Octopus AI"
+							style={{ width: "46px", height: "46px", objectFit: "contain" }}
+						/>
 					</div>
 					<div>
 						<h1
@@ -65,8 +75,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 					onViewSettings={() => onNavigate?.("settings")}
 					onViewChannels={() => onNavigate?.("channels")}
 					onViewTasks={() => onNavigate?.("tasks")}
-					onViewTools={() => onNavigate?.("code")}
+					onViewTools={() => onNavigate?.("tools")}
 					onViewVariables={() => onNavigate?.("variables")}
+					onViewAutomations={() => onNavigate?.("automations")}
+					onViewMemory={() => onNavigate?.("memory")}
+					onViewSkills={() => onNavigate?.("skills")}
+					onViewMedia={() => onNavigate?.("media")}
 				/>
 			</div>
 

@@ -160,9 +160,7 @@ export class HeartbeatDaemon {
 
 		// Then on interval
 		this.timer = setInterval(() => {
-			this.pulse().catch((e) =>
-				logger.error("Heartbeat pulse failed:", e),
-			);
+			this.pulse().catch((e) => logger.error("Heartbeat pulse failed:", e));
 		}, this.config.intervalMs);
 	}
 
@@ -251,8 +249,7 @@ export class HeartbeatDaemon {
 
 			const result: HeartbeatResult = {
 				timestamp: new Date(),
-				status:
-					actionsTriggered.length > 0 ? "action_taken" : "ok",
+				status: actionsTriggered.length > 0 ? "action_taken" : "ok",
 				itemsChecked: items.length,
 				actionsTriggered,
 				silent: actionsTriggered.length === 0,
@@ -295,10 +292,10 @@ export class HeartbeatDaemon {
 
 	async toggleItem(id: string, enabled: boolean): Promise<void> {
 		await this.initialize();
-		await this.db.run(
-			"UPDATE heartbeat_items SET enabled = ? WHERE id = ?",
-			[enabled ? 1 : 0, id],
-		);
+		await this.db.run("UPDATE heartbeat_items SET enabled = ? WHERE id = ?", [
+			enabled ? 1 : 0,
+			id,
+		]);
 	}
 
 	async getItems(): Promise<HeartbeatItem[]> {
@@ -358,9 +355,7 @@ export class HeartbeatDaemon {
 		];
 	}
 
-	private parseDecisions(
-		content: string,
-	): Array<{
+	private parseDecisions(content: string): Array<{
 		id: string;
 		needsAction: boolean;
 		reason: string;
@@ -371,14 +366,12 @@ export class HeartbeatDaemon {
 			if (!jsonMatch) return [];
 			const parsed = JSON.parse(jsonMatch[0]);
 			if (!Array.isArray(parsed.items)) return [];
-			return parsed.items.map(
-				(item: Record<string, unknown>) => ({
-					id: String(item.id ?? ""),
-					needsAction: Boolean(item.needsAction),
-					reason: String(item.reason ?? ""),
-					action: item.action ? String(item.action) : null,
-				}),
-			);
+			return parsed.items.map((item: Record<string, unknown>) => ({
+				id: String(item.id ?? ""),
+				needsAction: Boolean(item.needsAction),
+				reason: String(item.reason ?? ""),
+				action: item.action ? String(item.action) : null,
+			}));
 		} catch {
 			return [];
 		}

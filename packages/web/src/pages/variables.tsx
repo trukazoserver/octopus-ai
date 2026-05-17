@@ -1,5 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { AppIcon } from "../components/ui/AppIcon.js";
 import { showToast } from "../components/ui/Toast.js";
 import { apiDelete, apiGet, apiPost } from "../hooks/useApi.js";
 
@@ -10,6 +11,12 @@ interface EnvVar {
 	createdAt?: string;
 }
 
+const VARIABLE_SKELETON_KEYS = [
+	"env-skeleton-1",
+	"env-skeleton-2",
+	"env-skeleton-3",
+];
+
 export const VariablesPage: React.FC = () => {
 	const [vars, setVars] = useState<EnvVar[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -18,6 +25,7 @@ export const VariablesPage: React.FC = () => {
 	const [newDesc, setNewDesc] = useState("");
 	const [saving, setSaving] = useState(false);
 	const [showValue, setShowValue] = useState<Set<string>>(new Set());
+	const [revealingKey, setRevealingKey] = useState<string | null>(null);
 	const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
 	const load = useCallback(async () => {
@@ -42,7 +50,10 @@ export const VariablesPage: React.FC = () => {
 			return;
 		}
 		if (!/^[A-Z0-9_]+$/.test(normalizedKey)) {
-			showToast("error", "Usa solo mayúsculas, números y guiones bajos en el nombre");
+			showToast(
+				"error",
+				"Usa solo mayúsculas, números y guiones bajos en el nombre",
+			);
 			return;
 		}
 		if (vars.some((v) => v.key === normalizedKey)) {
@@ -85,22 +96,44 @@ export const VariablesPage: React.FC = () => {
 		}
 	};
 
-	const toggleShow = (key: string) => {
-		setShowValue((prev) => {
-			const next = new Set(prev);
-			if (next.has(key)) next.delete(key);
-			else {
-				next.add(key);
-				setTimeout(() => {
-					setShowValue((current) => {
-						const updated = new Set(current);
-						updated.delete(key);
-						return updated;
-					});
-				}, 10000);
+	const toggleShow = async (key: string) => {
+		if (showValue.has(key)) {
+			setShowValue((prev) => {
+				const next = new Set(prev);
+				next.delete(key);
+				return next;
+			});
+			return;
+		}
+
+		setRevealingKey(key);
+		try {
+			const data = await apiGet<EnvVar[]>("/api/env?showSecrets=true");
+			const revealed = data.find((v) => v.key === key);
+			if (revealed) {
+				setVars((current) =>
+					current.map((v) =>
+						v.key === key ? { ...v, value: revealed.value } : v,
+					),
+				);
 			}
-			return next;
-		});
+			setShowValue((prev) => new Set(prev).add(key));
+			showToast("info", "El valor se ocultará automáticamente en 10 segundos");
+			setTimeout(() => {
+				setShowValue((current) => {
+					const updated = new Set(current);
+					updated.delete(key);
+					return updated;
+				});
+			}, 10000);
+		} catch (err) {
+			showToast(
+				"error",
+				err instanceof Error ? err.message : "No se pudo revelar el secreto",
+			);
+		} finally {
+			setRevealingKey(null);
+		}
 	};
 
 	return (
@@ -163,17 +196,17 @@ export const VariablesPage: React.FC = () => {
 							autoComplete="off"
 							style={{
 								width: "100%",
-							padding: "10px 14px",
-							borderRadius: "10px",
-							border: "1px solid #3f3f46",
-							background: "#18181b",
-							color: "#f4f4f5",
-							fontSize: "0.85rem",
-							outline: "none",
-							fontFamily:
-								"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-							boxSizing: "border-box",
-							minWidth: 0,
+								padding: "10px 14px",
+								borderRadius: "10px",
+								border: "1px solid #3f3f46",
+								background: "#18181b",
+								color: "#f4f4f5",
+								fontSize: "0.85rem",
+								outline: "none",
+								fontFamily:
+									"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+								boxSizing: "border-box",
+								minWidth: 0,
 							}}
 							onFocus={(e) => {
 								e.target.style.borderColor = "#6366f1";
@@ -195,17 +228,17 @@ export const VariablesPage: React.FC = () => {
 							autoComplete="off"
 							style={{
 								width: "100%",
-							padding: "10px 14px",
-							borderRadius: "10px",
-							border: "1px solid #3f3f46",
-							background: "#18181b",
-							color: "#f4f4f5",
-							fontSize: "0.85rem",
-							outline: "none",
-							fontFamily:
-								"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-							boxSizing: "border-box",
-							minWidth: 0,
+								padding: "10px 14px",
+								borderRadius: "10px",
+								border: "1px solid #3f3f46",
+								background: "#18181b",
+								color: "#f4f4f5",
+								fontSize: "0.85rem",
+								outline: "none",
+								fontFamily:
+									"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+								boxSizing: "border-box",
+								minWidth: 0,
 							}}
 							onFocus={(e) => {
 								e.target.style.borderColor = "#6366f1";
@@ -216,34 +249,41 @@ export const VariablesPage: React.FC = () => {
 						/>
 					</label>
 				</div>
-				<div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap" }}>
+				<div
+					style={{
+						display: "flex",
+						gap: "10px",
+						alignItems: "flex-end",
+						flexWrap: "wrap",
+					}}
+				>
 					<label style={{ flex: 1, minWidth: 220 }}>
 						<span style={fieldLabelStyle}>Descripción opcional</span>
 						<input
-						id="env-new-desc"
-						name="description"
-						type="text"
-						value={newDesc}
-						onChange={(e) => setNewDesc(e.target.value)}
-						placeholder="Descripción (opcional)"
-						autoComplete="off"
-						style={{
-							width: "100%",
-							padding: "8px 14px",
-							borderRadius: "10px",
-							border: "1px solid #3f3f46",
-							background: "#18181b",
-							color: "#f4f4f5",
-							fontSize: "0.85rem",
-							outline: "none",
-							boxSizing: "border-box",
-						}}
-						onFocus={(e) => {
-							e.target.style.borderColor = "#6366f1";
-						}}
-						onBlur={(e) => {
-							e.target.style.borderColor = "#3f3f46";
-						}}
+							id="env-new-desc"
+							name="description"
+							type="text"
+							value={newDesc}
+							onChange={(e) => setNewDesc(e.target.value)}
+							placeholder="Descripción (opcional)"
+							autoComplete="off"
+							style={{
+								width: "100%",
+								padding: "8px 14px",
+								borderRadius: "10px",
+								border: "1px solid #3f3f46",
+								background: "#18181b",
+								color: "#f4f4f5",
+								fontSize: "0.85rem",
+								outline: "none",
+								boxSizing: "border-box",
+							}}
+							onFocus={(e) => {
+								e.target.style.borderColor = "#6366f1";
+							}}
+							onBlur={(e) => {
+								e.target.style.borderColor = "#3f3f46";
+							}}
 						/>
 					</label>
 					<button
@@ -281,9 +321,9 @@ export const VariablesPage: React.FC = () => {
 			{/* Variables list */}
 			{loading ? (
 				<div style={{ display: "grid", gap: "12px" }}>
-					{Array.from({ length: 3 }).map((_, i) => (
+					{VARIABLE_SKELETON_KEYS.map((key) => (
 						<div
-							key={i}
+							key={key}
 							className="skeleton"
 							style={{ height: "72px", borderRadius: "12px" }}
 						/>
@@ -297,7 +337,9 @@ export const VariablesPage: React.FC = () => {
 						color: "#52525b",
 					}}
 				>
-					<div style={{ fontSize: "48px", marginBottom: "16px" }}>🔐</div>
+					<div style={{ color: "#818cf8", marginBottom: "16px" }}>
+						<AppIcon name="key" size={48} strokeWidth={1.5} />
+					</div>
 					<div
 						style={{
 							fontSize: "1rem",
@@ -382,7 +424,8 @@ export const VariablesPage: React.FC = () => {
 							</div>
 							<button
 								type="button"
-								onClick={() => toggleShow(v.key)}
+								onClick={() => void toggleShow(v.key)}
+								disabled={revealingKey === v.key}
 								style={{
 									padding: "6px 12px",
 									borderRadius: "8px",
@@ -390,13 +433,17 @@ export const VariablesPage: React.FC = () => {
 									background: "#27272a",
 									color: "#a1a1aa",
 									fontSize: "0.75rem",
-									cursor: "pointer",
+									cursor: revealingKey === v.key ? "wait" : "pointer",
 									fontFamily: "inherit",
 									transition: "all 0.15s",
 									whiteSpace: "nowrap",
 								}}
 							>
-								{showValue.has(v.key) ? "Ocultar" : "Mostrar"}
+								{revealingKey === v.key
+									? "Cargando..."
+									: showValue.has(v.key)
+										? "Ocultar"
+										: "Mostrar"}
 							</button>
 							<button
 								type="button"

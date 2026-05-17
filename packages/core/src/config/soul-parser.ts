@@ -220,8 +220,7 @@ export class SoulParser {
 		const frontmatter = this.parseFrontmatter(content);
 
 		const config: MemoryConfig = {
-			autoConsolidate:
-				frontmatter.auto_consolidate !== "false",
+			autoConsolidate: frontmatter.auto_consolidate !== "false",
 			importantKeywords: [],
 			decayDays: Number(frontmatter.decay_days ?? 90),
 			userModeling: frontmatter.user_modeling !== "false",
@@ -376,7 +375,9 @@ export class SoulParser {
 		}
 
 		if (soul.personality.length > 0) {
-			parts.push(`\n## Personality\n${soul.personality.map((p) => `- ${p}`).join("\n")}`);
+			parts.push(
+				`\n## Personality\n${soul.personality.map((p) => `- ${p}`).join("\n")}`,
+			);
 		}
 
 		if (soul.goals.length > 0) {

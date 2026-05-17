@@ -13,9 +13,9 @@ import type { LLMRouter } from "../ai/router.js";
 import type { LLMRequest } from "../ai/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
-import type { AgentConfig } from "./types.js";
 import { EventStream } from "./event-stream.js";
-import { WorkerPool, type SubTask, type WorkerConfig } from "./worker-pool.js";
+import type { AgentConfig } from "./types.js";
+import { type SubTask, type WorkerConfig, WorkerPool } from "./worker-pool.js";
 
 export interface TaskDecomposition {
 	originalGoal: string;
@@ -35,17 +35,46 @@ export interface OrchestratorConfig {
 
 export type OrchestratorEvent =
 	| { type: "decomposition"; data: TaskDecomposition }
-	| { type: "worker_started"; workerId: string; taskId: string; description: string }
-	| { type: "worker_progress"; workerId: string; taskId: string; message: string; progress: number }
+	| {
+			type: "worker_started";
+			workerId: string;
+			taskId: string;
+			role?: string;
+			description: string;
+	  }
+	| {
+			type: "worker_progress";
+			workerId: string;
+			taskId: string;
+			message: string;
+			progress: number;
+			toolName?: string;
+	  }
 	| { type: "worker_done"; workerId: string; taskId: string; result: string }
 	| { type: "worker_error"; workerId: string; taskId: string; error: string }
+	| { type: "telemetry"; data: OrchestratorTelemetry }
 	| { type: "synthesis"; result: string };
+
+export interface OrchestratorTelemetry {
+	runId: string;
+	totalMs: number;
+	executionMs: number;
+	synthesisMs: number;
+	workerCount: number;
+	succeeded: number;
+	failed: number;
+	cancelled: number;
+}
 
 const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 	maxWorkers: 5,
 	workerConfig: {},
 	complexityThreshold: 5,
 };
+
+function createRunId(): string {
+	return `run_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
 
 const DECOMPOSITION_PROMPT = `Eres un orquestador de tareas. Tu trabajo es analizar el objetivo del usuario y descomponerlo en subtareas independientes que puedan ejecutarse en paralelo por agentes especializados.
 
@@ -73,7 +102,9 @@ Reglas:
 3. Cada subtarea debe ser auto-contenida: incluir todo el contexto que el worker necesita.
 4. Los roles disponibles son: researcher, coder, browser-navigator, analyst, writer.
 5. Los toolScopes posibles incluyen: shell, read_file, write_file, browser_navigate, browser_click, browser_read_page, browser_screenshot, browser_observe, browser_snapshot, browser_eval, execute_code, web_search, save_media, image-url-to-base64.
-6. Un máximo de MAX_WORKERS subtareas paralelas.`;
+6. toolScope es una recomendación de herramientas prioritarias para cada worker, NO una restricción. Todos los workers tendrán acceso completo a las herramientas registradas, MCPs, memoria, skills y contexto compartido disponibles en el sistema.
+7. Para subtareas de generación programática de imágenes/audio/video, incluye SIEMPRE execute_code en toolScope. execute_code auto-guarda archivos media generados si el worker los escribe en el directorio actual del script; save_media solo es necesario si el worker ya tiene base64 o una fuente externa.
+8. Un máximo de MAX_WORKERS subtareas paralelas.`;
 
 export class OctopusOrchestrator {
 	private eventStream: EventStream;
@@ -103,33 +134,51 @@ export class OctopusOrchestrator {
 	 * Evaluar si una tarea necesita descomposición multi-agente.
 	 */
 	async shouldDecompose(message: string): Promise<boolean> {
-		// Heurísticas rápidas antes de llamar al LLM
-		const indicators = [
-			/\by\b.*\by\b.*\by\b/i,                    // "haz X y Y y Z"
-			/\b(además|también|aparte|simultáneamente)\b/i,
-			/\b(multiple|varios|diferentes|distintos)\b/i,
-			/\b(parallel|paralelo|simultáneo)\b/i,
-			/\b(investiga|busca).*\b(escribe|genera|crea)\b/i,
-			/\b(and|then|also|while)\b.*\b(and|then|also|while)\b/i,
-		];
+		// Octopus trabaja solo por defecto. El multiagente solo se activa cuando
+		// hay señales fuertes de 2+ tareas independientes que pueden correr a la vez.
+		const explicitParallel =
+			/\b(paralel[oa]s?|parallel|simult[aá]ne[oa]s?|a la vez|en paralelo|multiagente|subagentes|varios agentes|m[uú]ltiples agentes)\b/i.test(
+				message,
+			);
+		const explicitDistribution =
+			/\b(divide|dividir|delegar|delega|asigna|encarga|distribuye|reparte)\b/i.test(
+				message,
+			) &&
+			/\b(tareas?|subtareas?|agentes?|workers?|partes|lotes?)\b/i.test(message);
+		const batchWork =
+			/\b(vari[oa]s?|m[uú]ltiples|diferentes|distint[oa]s|independientes|por separado)\b/i.test(
+				message,
+			) &&
+			/\b(im[aá]genes?|videos?|escenas?|archivos?|b[uú]squedas?|investigaciones?|variantes?|opciones?|tareas?)\b/i.test(
+				message,
+			);
+		const countedBatch =
+			/\b(?:[2-9]|\d{2,})\b[^.\n]{0,80}\b(im[aá]genes?|videos?|escenas?|archivos?|b[uú]squedas?|variantes?|opciones?|tareas?)\b/i.test(
+				message,
+			);
+		const numberedItems = message.match(/^\s*\d+[.)]\s+.+$/gm)?.length ?? 0;
 
-		const heuristicScore = indicators.filter((re) => re.test(message)).length;
-		if (heuristicScore >= 2) return true;
-		if (message.length < 100) return false; // Mensajes cortos → single agent
-
-		return false; // Por defecto, single agent
+		return (
+			explicitParallel ||
+			explicitDistribution ||
+			batchWork ||
+			countedBatch ||
+			numberedItems >= 3
+		);
 	}
 
 	/**
 	 * Descomponer un objetivo del usuario en subtareas paralelas.
 	 */
 	async decompose(goal: string): Promise<TaskDecomposition> {
-		const prompt = DECOMPOSITION_PROMPT
-			.replace("THRESHOLD", String(this.config.complexityThreshold))
-			.replace("MAX_WORKERS", String(this.config.maxWorkers));
+		const prompt = DECOMPOSITION_PROMPT.replace(
+			"THRESHOLD",
+			String(this.config.complexityThreshold),
+		).replace("MAX_WORKERS", String(this.config.maxWorkers));
 
 		const request: LLMRequest = {
-			model: this.config.decompositionModel || this.baseConfig.model || "default",
+			model:
+				this.config.decompositionModel || this.baseConfig.model || "default",
 			messages: [
 				{ role: "system", content: prompt },
 				{ role: "user", content: goal },
@@ -145,7 +194,10 @@ export class OctopusOrchestrator {
 			// Extraer JSON de la respuesta
 			const jsonMatch = content.match(/\{[\s\S]*\}/);
 			if (!jsonMatch) {
-				return this.singleTaskFallback(goal, "No se pudo parsear la descomposición");
+				return this.singleTaskFallback(
+					goal,
+					"No se pudo parsear la descomposición",
+				);
 			}
 
 			const parsed = JSON.parse(jsonMatch[0]) as {
@@ -163,7 +215,10 @@ export class OctopusOrchestrator {
 			};
 
 			// Si la complejidad es baja, ejecutar como single agent
-			if (parsed.complexity <= this.config.complexityThreshold || parsed.subtasks.length <= 1) {
+			if (
+				parsed.complexity <= this.config.complexityThreshold ||
+				parsed.subtasks.length <= 1
+			) {
 				return this.singleTaskFallback(goal, parsed.reasoning);
 			}
 
@@ -183,14 +238,20 @@ export class OctopusOrchestrator {
 				reasoning: parsed.reasoning,
 			};
 		} catch {
-			return this.singleTaskFallback(goal, "Error parseando respuesta de descomposición");
+			return this.singleTaskFallback(
+				goal,
+				"Error parseando respuesta de descomposición",
+			);
 		}
 	}
 
 	/**
 	 * Fallback: ejecutar como una sola tarea (sin multi-agent).
 	 */
-	private singleTaskFallback(goal: string, reasoning: string): TaskDecomposition {
+	private singleTaskFallback(
+		goal: string,
+		reasoning: string,
+	): TaskDecomposition {
 		return {
 			originalGoal: goal,
 			subtasks: [],
@@ -203,7 +264,12 @@ export class OctopusOrchestrator {
 	 * Ejecutar todas las subtareas con workers paralelos.
 	 * Retorna un async iterable de eventos para streaming al frontend.
 	 */
-	async *executeParallel(decomposition: TaskDecomposition): AsyncIterable<OrchestratorEvent> {
+	async *executeParallel(
+		decomposition: TaskDecomposition,
+		workerConfig: Partial<WorkerConfig> = {},
+	): AsyncIterable<OrchestratorEvent> {
+		const runId = workerConfig.runId ?? createRunId();
+		const startedAt = Date.now();
 		// Emitir la descomposición
 		yield { type: "decomposition", data: decomposition };
 
@@ -214,27 +280,42 @@ export class OctopusOrchestrator {
 		// Suscribirse al event stream para re-emitir eventos
 		const eventQueue: OrchestratorEvent[] = [];
 		let resolveWaiting: (() => void) | null = null;
+		const taskById = new Map(
+			decomposition.subtasks.map((task) => [task.id, task]),
+		);
 
 		const unsubscribe = this.eventStream.subscribe((event) => {
+			if (event.runId !== runId) return;
 			let orchEvent: OrchestratorEvent | null = null;
 
 			switch (event.type) {
 				case "task_claimed":
-					orchEvent = {
-						type: "worker_started",
-						workerId: event.workerId,
-						taskId: event.taskId,
-						description: event.data.message || "",
-					};
+					{
+						const task = taskById.get(event.taskId);
+						orchEvent = {
+							type: "worker_started",
+							workerId: event.workerId,
+							taskId: event.taskId,
+							role: task?.role,
+							description: task?.description || event.data.message || "",
+						};
+					}
 					break;
 				case "tool_used":
 				case "progress":
+				case "thinking":
+				case "tool_result":
 					orchEvent = {
 						type: "worker_progress",
 						workerId: event.workerId,
 						taskId: event.taskId,
-						message: event.data.message || event.data.toolName || "",
+						message:
+							event.data.message ||
+							(event.type === "tool_result" && event.data.toolName
+								? `Resultado de ${event.data.toolName}: ${event.data.toolResult || "recibido"}`
+								: event.data.toolName || ""),
 						progress: event.data.progress || 0,
+						toolName: event.data.toolName,
 					};
 					break;
 				case "result":
@@ -267,38 +348,81 @@ export class OctopusOrchestrator {
 		// Lanzar ejecución paralela (no-blocking)
 		const executionPromise = this.workerPool.executeAll(
 			decomposition.subtasks,
-			this.config.workerConfig,
+			{ ...this.config.workerConfig, ...workerConfig, runId },
 		);
+		const executionStartedAt = Date.now();
 
 		// Emitir eventos mientras se ejecutan los workers
 		try {
 			while (true) {
+				if (workerConfig.signal?.aborted) {
+					this.cancel();
+					break;
+				}
 				// Drenar la cola de eventos
 				while (eventQueue.length > 0) {
-					yield eventQueue.shift()!;
+					const queuedEvent = eventQueue.shift();
+					if (queuedEvent) yield queuedEvent;
 				}
 
 				// Verificar si terminó
 				const taskIds = decomposition.subtasks.map((t) => t.id);
-				if (this.eventStream.areAllTasksComplete(taskIds)) {
+				if (this.eventStream.areAllTasksComplete(taskIds, runId)) {
 					break;
 				}
 
 				// Esperar al siguiente evento con timeout
 				await Promise.race([
-					new Promise<void>((resolve) => { resolveWaiting = resolve; }),
+					new Promise<void>((resolve) => {
+						resolveWaiting = resolve;
+					}),
 					new Promise<void>((resolve) => setTimeout(resolve, 1000)),
 				]);
 			}
 
 			// Esperar a que termine la ejecución
 			const results = await executionPromise;
+			const executionMs = Date.now() - executionStartedAt;
 
 			// Sintetizar resultados
+			const synthesisStartedAt = Date.now();
 			const synthesis = await this.synthesize(decomposition, results);
+			const synthesisMs = Date.now() - synthesisStartedAt;
+			const finalEvents = this.eventStream.query({ runId });
+			const terminalByTask = new Map<string, string>();
+			for (const event of finalEvents) {
+				if (
+					event.type === "result" ||
+					event.type === "error" ||
+					event.type === "cancelled" ||
+					event.type === "blocked"
+				) {
+					terminalByTask.set(event.taskId, event.type);
+				}
+			}
+			yield {
+				type: "telemetry",
+				data: {
+					runId,
+					totalMs: Date.now() - startedAt,
+					executionMs,
+					synthesisMs,
+					workerCount: decomposition.subtasks.length,
+					succeeded: [...terminalByTask.values()].filter(
+						(type) => type === "result",
+					).length,
+					failed: [...terminalByTask.values()].filter(
+						(type) => type === "error" || type === "blocked",
+					).length,
+					cancelled: [...terminalByTask.values()].filter(
+						(type) => type === "cancelled",
+					).length,
+				},
+			};
 			yield { type: "synthesis", result: synthesis };
 		} finally {
 			unsubscribe();
+			this.eventStream.prune();
 		}
 	}
 

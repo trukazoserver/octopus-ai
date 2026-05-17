@@ -243,7 +243,7 @@ export const Chat: React.FC = () => {
 				setStreaming(false);
 			}, 1000);
 		}
-	}, [input, streaming]);
+	}, [input, streamEnabled, streaming]);
 
 	return (
 		<div style={darkStyles.container}>

@@ -1,5 +1,7 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { AppIcon } from "../components/ui/AppIcon.js";
+import { Loading } from "../components/ui/Loading.js";
 import { apiDelete, apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
 
 interface Automation {
@@ -166,7 +168,7 @@ export const AutomationsPage: React.FC = () => {
 	const [automations, setAutomations] = useState<Automation[]>([]);
 	const [agents, setAgents] = useState<Agent[]>([]);
 	const [loading, setLoading] = useState(true);
-	const [msg, setMsg] = useState<string | null>(null);
+	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 	const [showForm, setShowForm] = useState(false);
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [form, setForm] = useState<FormData>(emptyForm());
@@ -183,7 +185,7 @@ export const AutomationsPage: React.FC = () => {
 			setAutomations(Array.isArray(autosRes) ? autosRes : []);
 			setAgents(Array.isArray(agentsRes) ? agentsRes : []);
 		} catch (e) {
-			setMsg(e instanceof Error ? e.message : String(e));
+			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
 		} finally {
 			setLoading(false);
 		}
@@ -193,8 +195,8 @@ export const AutomationsPage: React.FC = () => {
 		load();
 	}, [load]);
 
-	const showMsg = (text: string) => {
-		setMsg(text);
+	const showMsg = (text: string, ok = true) => {
+		setMsg({ text, ok });
 		setTimeout(() => setMsg(null), 4000);
 	};
 
@@ -226,7 +228,7 @@ export const AutomationsPage: React.FC = () => {
 
 	const handleSubmit = async () => {
 		if (!form.name.trim()) {
-			showMsg("El nombre es obligatorio");
+			showMsg("El nombre es obligatorio", false);
 			return;
 		}
 		const triggerError = validateJson(
@@ -238,7 +240,7 @@ export const AutomationsPage: React.FC = () => {
 			"La configuración de la acción",
 		);
 		if (triggerError || actionError) {
-			showMsg(triggerError ?? actionError ?? "JSON inválido");
+			showMsg(triggerError ?? actionError ?? "JSON inválido", false);
 			return;
 		}
 		setSaving(true);
@@ -264,7 +266,7 @@ export const AutomationsPage: React.FC = () => {
 			closeForm();
 			await load();
 		} catch (e) {
-			showMsg(e instanceof Error ? e.message : String(e));
+			showMsg(e instanceof Error ? e.message : String(e), false);
 		} finally {
 			setSaving(false);
 		}
@@ -276,7 +278,7 @@ export const AutomationsPage: React.FC = () => {
 			await apiPost(`/api/automations/${id}/toggle`);
 			await load();
 		} catch (e) {
-			showMsg(e instanceof Error ? e.message : String(e));
+			showMsg(e instanceof Error ? e.message : String(e), false);
 		} finally {
 			setTogglingId(null);
 		}
@@ -289,7 +291,7 @@ export const AutomationsPage: React.FC = () => {
 			setDeleteConfirm(null);
 			await load();
 		} catch (e) {
-			showMsg(e instanceof Error ? e.message : String(e));
+			showMsg(e instanceof Error ? e.message : String(e), false);
 		}
 	};
 
@@ -309,8 +311,8 @@ export const AutomationsPage: React.FC = () => {
 
 	if (loading) {
 		return (
-			<div className="page-shell" style={{ padding: 40, color: MUTED }}>
-				Cargando automatizaciones...
+			<div className="page-shell">
+				<Loading text="Cargando automatizaciones..." />
 			</div>
 		);
 	}
@@ -328,9 +330,27 @@ export const AutomationsPage: React.FC = () => {
 			}}
 		>
 			<div className="page-header">
-				<h2 style={{ margin: 0, fontSize: "1.3rem" }}>Automatizaciones</h2>
+				<div>
+					<h2
+						style={{
+							margin: 0,
+							fontSize: "1.9rem",
+							display: "flex",
+							alignItems: "center",
+							gap: 10,
+						}}
+					>
+						<AppIcon name="automation" size={24} /> Automatizaciones
+					</h2>
+					<p
+						style={{ margin: "8px 0 0", color: "#a1a1aa", fontSize: "0.95rem" }}
+					>
+						Programa tareas, webhooks y acciones automáticas conectadas a
+						agentes.
+					</p>
+				</div>
 				<button type="button" style={btnPrimary} onClick={openCreate}>
-					+ Crear automatización
+					Crear automatización
 				</button>
 			</div>
 
@@ -340,18 +360,14 @@ export const AutomationsPage: React.FC = () => {
 						padding: "10px 16px",
 						borderRadius: 8,
 						marginBottom: 12,
-						background:
-							msg.includes("Error") || msg.startsWith("\u2717")
-								? "rgba(239,68,68,0.12)"
-								: "rgba(34,197,94,0.12)",
-						color:
-							msg.includes("Error") || msg.startsWith("\u2717")
-								? DANGER
-								: SUCCESS,
+						background: msg.ok
+							? "rgba(34,197,94,0.12)"
+							: "rgba(239,68,68,0.12)",
+						color: msg.ok ? SUCCESS : DANGER,
 						fontSize: "0.85rem",
 					}}
 				>
-					{msg}
+					{msg.text}
 				</div>
 			)}
 
@@ -364,6 +380,7 @@ export const AutomationsPage: React.FC = () => {
 					<div className="responsive-grid-2" style={{ gap: 14 }}>
 						<div style={{ gridColumn: "1 / -1" }}>
 							<label
+								htmlFor="automation-name"
 								style={{
 									fontSize: "0.8rem",
 									color: MUTED,
@@ -388,6 +405,7 @@ export const AutomationsPage: React.FC = () => {
 
 						<div style={{ gridColumn: "1 / -1" }}>
 							<label
+								htmlFor="automation-description"
 								style={{
 									fontSize: "0.8rem",
 									color: MUTED,
@@ -412,6 +430,7 @@ export const AutomationsPage: React.FC = () => {
 
 						<div>
 							<label
+								htmlFor="automation-trigger-type"
 								style={{
 									fontSize: "0.8rem",
 									color: MUTED,
@@ -440,6 +459,7 @@ export const AutomationsPage: React.FC = () => {
 
 						<div>
 							<label
+								htmlFor="automation-action-type"
 								style={{
 									fontSize: "0.8rem",
 									color: MUTED,
@@ -468,6 +488,7 @@ export const AutomationsPage: React.FC = () => {
 
 						<div style={{ gridColumn: "1 / -1" }}>
 							<label
+								htmlFor="automation-trigger-config"
 								style={{
 									fontSize: "0.8rem",
 									color: MUTED,
@@ -491,6 +512,7 @@ export const AutomationsPage: React.FC = () => {
 
 						<div style={{ gridColumn: "1 / -1" }}>
 							<label
+								htmlFor="automation-action-config"
 								style={{
 									fontSize: "0.8rem",
 									color: MUTED,
@@ -514,6 +536,7 @@ export const AutomationsPage: React.FC = () => {
 
 						<div>
 							<label
+								htmlFor="automation-agent"
 								style={{
 									fontSize: "0.8rem",
 									color: MUTED,
@@ -549,12 +572,14 @@ export const AutomationsPage: React.FC = () => {
 								paddingTop: 20,
 							}}
 						>
-							<label style={{ fontSize: "0.8rem", color: MUTED }}>
-								Activa
-							</label>
+							<span style={{ fontSize: "0.8rem", color: MUTED }}>Activa</span>
 							<button
 								type="button"
-								aria-label={form.enabled ? "Desactivar automatización" : "Activar automatización"}
+								aria-label={
+									form.enabled
+										? "Desactivar automatización"
+										: "Activar automatización"
+								}
 								aria-pressed={form.enabled}
 								onClick={() => setForm((f) => ({ ...f, enabled: !f.enabled }))}
 								style={{
@@ -598,7 +623,7 @@ export const AutomationsPage: React.FC = () => {
 							{saving ? "Guardando..." : editingId ? "Actualizar" : "Crear"}
 						</button>
 						<button type="button" onClick={closeForm} style={btnSecondary}>
-						Cancelar
+							Cancelar
 						</button>
 					</div>
 				</div>
@@ -614,12 +639,30 @@ export const AutomationsPage: React.FC = () => {
 						borderRadius: 12,
 					}}
 				>
-					<div style={{ fontSize: "2rem", marginBottom: 8 }}>
+					<div style={{ color: PRIMARY, marginBottom: 12 }}>
+						<AppIcon name="automation" size={42} strokeWidth={1.5} />
+					</div>
+					<div
+						style={{
+							color: TEXT,
+							fontWeight: 700,
+							fontSize: "1.05rem",
+							marginBottom: 8,
+						}}
+					>
 						Aún no hay automatizaciones
 					</div>
 					<div style={{ fontSize: "0.9rem" }}>
-						Crea una automatización programada, por evento o webhook para empezar.
+						Crea una automatización programada, por evento o webhook para
+						empezar.
 					</div>
+					<button
+						type="button"
+						onClick={openCreate}
+						style={{ ...btnPrimary, marginTop: 18 }}
+					>
+						Crear automatización
+					</button>
 				</div>
 			)}
 
@@ -667,7 +710,7 @@ export const AutomationsPage: React.FC = () => {
 											color: a.enabled ? SUCCESS : MUTED,
 										}}
 									>
-						{a.enabled ? "Activa" : "Inactiva"}
+										{a.enabled ? "Activa" : "Inactiva"}
 									</span>
 								</div>
 								{a.description && (
@@ -691,9 +734,9 @@ export const AutomationsPage: React.FC = () => {
 									}}
 								>
 									<span>
-					Disparador:{" "}
+										Disparador:{" "}
 										<span style={{ color: PRIMARY, fontWeight: 600 }}>
-						{TRIGGER_LABELS[a.trigger_type] ?? a.trigger_type}
+											{TRIGGER_LABELS[a.trigger_type] ?? a.trigger_type}
 										</span>
 										{a.trigger_config && a.trigger_config !== "{}" && (
 											<span style={{ color: "#52525b", marginLeft: 4 }}>
@@ -702,17 +745,18 @@ export const AutomationsPage: React.FC = () => {
 										)}
 									</span>
 									<span>
-					Acción:{" "}
+										Acción:{" "}
 										<span style={{ color: "#a78bfa", fontWeight: 600 }}>
-						{ACTION_LABELS[a.action_type] ?? a.action_type}
+											{ACTION_LABELS[a.action_type] ?? a.action_type}
 										</span>
 									</span>
 									<span>
-					Ejecuciones: <span style={{ color: TEXT }}>{a.run_count}</span>
+										Ejecuciones:{" "}
+										<span style={{ color: TEXT }}>{a.run_count}</span>
 									</span>
 									{a.last_run && (
 										<span>
-						Última ejecución:{" "}
+											Última ejecución:{" "}
 											<span style={{ color: TEXT }}>
 												{new Date(a.last_run).toLocaleString()}
 											</span>
@@ -729,13 +773,15 @@ export const AutomationsPage: React.FC = () => {
 									flexShrink: 0,
 								}}
 							>
-					<button
-						type="button"
-						onClick={() => handleToggle(a.id)}
-						disabled={togglingId === a.id}
-						aria-label={a.enabled ? `Desactivar ${a.name}` : `Activar ${a.name}`}
-						aria-pressed={Boolean(a.enabled)}
-						style={{
+								<button
+									type="button"
+									onClick={() => handleToggle(a.id)}
+									disabled={togglingId === a.id}
+									aria-label={
+										a.enabled ? `Desactivar ${a.name}` : `Activar ${a.name}`
+									}
+									aria-pressed={Boolean(a.enabled)}
+									style={{
 										width: 44,
 										height: 24,
 										borderRadius: 12,
@@ -765,7 +811,7 @@ export const AutomationsPage: React.FC = () => {
 									style={btnSmall}
 									onClick={() => openEdit(a)}
 								>
-						Editar
+									Editar
 								</button>
 								{deleteConfirm === a.id ? (
 									<>
@@ -774,14 +820,14 @@ export const AutomationsPage: React.FC = () => {
 											style={btnSmallDanger}
 											onClick={() => handleDelete(a.id)}
 										>
-							Confirmar
+											Confirmar
 										</button>
 										<button
 											type="button"
 											style={btnSmall}
 											onClick={() => setDeleteConfirm(null)}
 										>
-							Cancelar
+											Cancelar
 										</button>
 									</>
 								) : (
@@ -790,7 +836,7 @@ export const AutomationsPage: React.FC = () => {
 										style={btnSmallDanger}
 										onClick={() => setDeleteConfirm(a.id)}
 									>
-						Eliminar
+										Eliminar
 									</button>
 								)}
 							</div>

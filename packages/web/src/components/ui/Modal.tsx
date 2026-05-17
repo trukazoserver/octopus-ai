@@ -16,7 +16,7 @@ export const Modal: React.FC<ModalProps> = ({
 	children,
 	maxWidth = "480px",
 }) => {
-	const dialogRef = useRef<HTMLDivElement>(null);
+	const dialogRef = useRef<HTMLDialogElement>(null);
 
 	const handleKeyDown = useCallback(
 		(e: KeyboardEvent) => {
@@ -51,19 +51,23 @@ export const Modal: React.FC<ModalProps> = ({
 				animation: "fadeInFast 0.15s ease-out",
 			}}
 		>
-			<div
+			<button
+				type="button"
+				aria-label="Cerrar modal"
 				onClick={onClose}
 				style={{
 					position: "absolute",
 					inset: 0,
 					background: "rgba(0, 0, 0, 0.7)",
 					backdropFilter: "blur(4px)",
+					border: 0,
+					padding: 0,
+					cursor: "pointer",
 				}}
 			/>
-			<div
+			<dialog
 				ref={dialogRef}
-				role="dialog"
-				aria-modal="true"
+				open
 				style={{
 					position: "relative",
 					width: "100%",
@@ -121,7 +125,7 @@ export const Modal: React.FC<ModalProps> = ({
 					</div>
 				)}
 				<div style={{ padding: "24px" }}>{children}</div>
-			</div>
+			</dialog>
 		</div>
 	);
 };

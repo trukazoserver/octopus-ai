@@ -1,5 +1,6 @@
 import type React from "react";
 import type { Channel } from "../../hooks/useChannels.js";
+import { BrandLogo } from "../ui/BrandLogo.js";
 
 interface ChannelCardProps {
 	channel: Channel;
@@ -7,6 +8,7 @@ interface ChannelCardProps {
 	onTest: (name: string) => void;
 	children?: React.ReactNode;
 	testing?: boolean;
+	canTest?: boolean;
 }
 
 const STATUS_CONFIG: Record<
@@ -15,7 +17,7 @@ const STATUS_CONFIG: Record<
 > = {
 	connected: {
 		color: "#10b981",
-		bg: "rgba(16, 185, 129, 0.1)",
+		bg: "rgba(16, 185, 129, 0.08)",
 		label: "Conectado",
 	},
 	disconnected: {
@@ -32,15 +34,46 @@ const STATUS_CONFIG: Record<
 	idle: { color: "#71717a", bg: "rgba(255,255,255,0.05)", label: "Inactivo" },
 };
 
-const TYPE_ICONS: Record<string, string> = {
-	telegram: "✈️",
-	discord: "🎮",
-	whatsapp: "📱",
-	slack: "💼",
-	teams: "📋",
-	signal: "🔔",
-	wechat: "💬",
-	webchat: "🌐",
+const CHANNEL_BRANDS: Record<
+	string,
+	{ name: string; domain: string; src?: string; sources?: string[] }
+> = {
+	telegram: {
+		name: "Telegram",
+		domain: "telegram.org",
+		src: "https://cdn.simpleicons.org/telegram",
+	},
+	discord: {
+		name: "Discord",
+		domain: "discord.com",
+		src: "https://cdn.simpleicons.org/discord",
+	},
+	whatsapp: {
+		name: "WhatsApp",
+		domain: "whatsapp.com",
+		src: "https://cdn.simpleicons.org/whatsapp",
+	},
+	slack: {
+		name: "Slack",
+		domain: "slack.com",
+		src: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/slack.svg",
+	},
+	teams: {
+		name: "Microsoft Teams",
+		domain: "microsoft.com",
+		src: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/microsoftteams.svg",
+	},
+	signal: {
+		name: "Signal",
+		domain: "signal.org",
+		src: "https://cdn.simpleicons.org/signal",
+	},
+	wechat: {
+		name: "WeChat",
+		domain: "wechat.com",
+		src: "https://cdn.simpleicons.org/wechat",
+	},
+	webchat: { name: "Web Chat", domain: "octopus.local" },
 };
 
 export const ChannelCard: React.FC<ChannelCardProps> = ({
@@ -49,25 +82,24 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 	onTest,
 	children,
 	testing,
+	canTest = true,
 }) => {
 	const statusCfg = STATUS_CONFIG[channel.status] ?? STATUS_CONFIG.idle;
-	const icon = TYPE_ICONS[channel.type] ?? "📡";
+	const brand = CHANNEL_BRANDS[channel.type] ?? {
+		name: channel.type,
+		domain: channel.type,
+	};
 
 	return (
 		<div
 			className="hover-lift"
 			style={{
-				padding: "20px",
+				padding: "18px",
 				borderRadius: "16px",
-				background: "rgba(24, 24, 27, 0.6)",
+				background: "rgba(24,24,27,0.6)",
 				border: "1px solid #27272a",
+				boxShadow: "0 12px 28px rgba(0,0,0,.18)",
 				transition: "all 0.2s ease",
-			}}
-			onMouseEnter={(e) => {
-				e.currentTarget.style.borderColor = "#3f3f46";
-			}}
-			onMouseLeave={(e) => {
-				e.currentTarget.style.borderColor = "#27272a";
 			}}
 		>
 			<div
@@ -79,20 +111,13 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 				}}
 			>
 				<div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-					<div
-						style={{
-							width: "44px",
-							height: "44px",
-							borderRadius: "12px",
-							background: statusCfg.bg,
-							display: "flex",
-							alignItems: "center",
-							justifyContent: "center",
-							fontSize: "20px",
-						}}
-					>
-						{icon}
-					</div>
+					<BrandLogo
+						name={brand.name}
+						domain={brand.domain}
+						src={brand.src}
+						sources={brand.sources}
+						size={44}
+					/>
 					<div>
 						<div
 							style={{
@@ -146,7 +171,6 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 				</span>
 			</div>
 
-
 			{/* Config section (children) */}
 			{children && (
 				<div style={{ marginBottom: "12px" }}>
@@ -169,64 +193,66 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 				</div>
 			)}
 
-			{/* Action buttons */}
-			{(
-				<div
+			<div
+				style={{
+					display: "flex",
+					gap: "8px",
+					marginTop: channel.enabled && children ? "12px" : "0",
+				}}
+			>
+				<button
+					type="button"
+					onClick={() => onTest(channel.name)}
+					disabled={testing || !channel.enabled || !canTest}
+					title={
+						canTest
+							? undefined
+							: "Prueba automática no disponible para este canal"
+					}
 					style={{
-						display: "flex",
-						gap: "8px",
-						marginTop: channel.enabled && children ? "12px" : "0",
+						flex: 1,
+						padding: "10px",
+						borderRadius: "10px",
+						border: "1px solid #242424",
+						background: "#111",
+						color: testing || !canTest ? "#52525b" : "#e4e4e7",
+						fontSize: "0.85rem",
+						fontWeight: 600,
+						cursor:
+							testing || !channel.enabled || !canTest
+								? "not-allowed"
+								: "pointer",
+						fontFamily: "inherit",
+						opacity: testing || !channel.enabled || !canTest ? 0.5 : 1,
+						transition: "all 0.15s",
 					}}
 				>
-					{(
-						<button
-							type="button"
-							onClick={() => onTest(channel.name)}
-							disabled={testing || !channel.enabled}
-							style={{
-								flex: 1,
-								padding: "10px",
-								borderRadius: "10px",
-								border: "1px solid #3f3f46",
-								background: "#27272a",
-								color: testing ? "#52525b" : "#e4e4e7",
-								fontSize: "0.85rem",
-								fontWeight: 600,
-								cursor: testing || !channel.enabled ? "not-allowed" : "pointer",
-								fontFamily: "inherit",
-								opacity: testing || !channel.enabled ? 0.5 : 1,
-								transition: "all 0.15s",
-							}}
-						>
-							{testing ? "Probando..." : "Probar conexión"}
-						</button>
-					)}
-					<button
-						type="button"
-						onClick={() => onToggle(channel.name)}
-						style={{
-							flex: 1,
-							padding: "10px",
-							borderRadius: "10px",
-							border: "1px solid",
-							borderColor: channel.enabled
-								? "rgba(239, 68, 68, 0.3)"
-								: "rgba(16, 185, 129, 0.3)",
-							background: channel.enabled
-								? "rgba(239, 68, 68, 0.1)"
-								: "rgba(16, 185, 129, 0.1)",
-							color: channel.enabled ? "#ef4444" : "#10b981",
-							fontSize: "0.85rem",
-							fontWeight: 600,
-							cursor: "pointer",
-							fontFamily: "inherit",
-							transition: "all 0.15s",
-						}}
-					>
-						{channel.enabled ? "Desactivar" : "Activar"}
-					</button>
-				</div>
-			)}
+					{testing
+						? "Probando..."
+						: canTest
+							? "Probar conexión"
+							: "Prueba no disponible"}
+				</button>
+				<button
+					type="button"
+					onClick={() => onToggle(channel.name)}
+					style={{
+						flex: 1,
+						padding: "10px",
+						borderRadius: "10px",
+						border: "1px solid #2a2a2a",
+						background: channel.enabled ? "#111" : "#f4f4f5",
+						color: channel.enabled ? "#ef4444" : "#050505",
+						fontSize: "0.85rem",
+						fontWeight: 600,
+						cursor: "pointer",
+						fontFamily: "inherit",
+						transition: "all 0.15s",
+					}}
+				>
+					{channel.enabled ? "Desactivar" : "Activar"}
+				</button>
+			</div>
 		</div>
 	);
 };

@@ -22,6 +22,38 @@ export interface ChatMessage {
 	parent_id: string | null;
 }
 
+export type ChatExecutionStatus =
+	| "queued"
+	| "running"
+	| "completed"
+	| "failed"
+	| "cancelled"
+	| "interrupted";
+
+export interface ChatExecutionActivity {
+	id: string;
+	status: string;
+	toolName?: string | null;
+	uiIconB64?: string | null;
+	activityDetail?: string | null;
+	timestamp: number;
+}
+
+export interface ChatExecution {
+	id: string;
+	request_id: string | null;
+	conversation_id: string;
+	agent_id: string | null;
+	status: ChatExecutionStatus;
+	current_status: string | null;
+	activities: string | null;
+	assistant_message_id: string | null;
+	error: string | null;
+	started_at: string;
+	updated_at: string;
+	completed_at: string | null;
+}
+
 export class ChatManager {
 	constructor(private db: DatabaseAdapter) {}
 
@@ -218,5 +250,143 @@ export class ChatManager {
 			`SELECT * FROM conversations WHERE id IN (${placeholders}) ORDER BY updated_at DESC`,
 			ids,
 		);
+	}
+
+	async createExecution(opts: {
+		requestId?: string;
+		conversationId: string;
+		agentId?: string;
+		status?: ChatExecutionStatus;
+	}): Promise<ChatExecution> {
+		const id = nanoid(16);
+		const now = new Date().toISOString();
+		const status = opts.status ?? "queued";
+		await this.db.run(
+			`INSERT INTO chat_executions
+				(id, request_id, conversation_id, agent_id, status, current_status, activities, assistant_message_id, error, started_at, updated_at, completed_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				id,
+				opts.requestId ?? null,
+				opts.conversationId,
+				opts.agentId ?? null,
+				status,
+				null,
+				JSON.stringify([]),
+				null,
+				null,
+				now,
+				now,
+				null,
+			],
+		);
+		await this.db.flush?.();
+		return {
+			id,
+			request_id: opts.requestId ?? null,
+			conversation_id: opts.conversationId,
+			agent_id: opts.agentId ?? null,
+			status,
+			current_status: null,
+			activities: JSON.stringify([]),
+			assistant_message_id: null,
+			error: null,
+			started_at: now,
+			updated_at: now,
+			completed_at: null,
+		};
+	}
+
+	async updateExecution(
+		id: string,
+		updates: {
+			status?: ChatExecutionStatus;
+			currentStatus?: string | null;
+			activities?: ChatExecutionActivity[];
+			assistantMessageId?: string | null;
+			error?: string | null;
+			completedAt?: string | null;
+		},
+	): Promise<void> {
+		const current = await this.getExecution(id);
+		if (!current) return;
+		const now = new Date().toISOString();
+		await this.db.run(
+			`UPDATE chat_executions SET
+				status = ?,
+				current_status = ?,
+				activities = ?,
+				assistant_message_id = ?,
+				error = ?,
+				updated_at = ?,
+				completed_at = ?
+				WHERE id = ?`,
+			[
+				updates.status ?? current.status,
+				updates.currentStatus !== undefined
+					? updates.currentStatus
+					: current.current_status,
+				updates.activities !== undefined
+					? JSON.stringify(updates.activities)
+					: current.activities,
+				updates.assistantMessageId !== undefined
+					? updates.assistantMessageId
+					: current.assistant_message_id,
+				updates.error !== undefined ? updates.error : current.error,
+				now,
+				updates.completedAt !== undefined
+					? updates.completedAt
+					: current.completed_at,
+				id,
+			],
+		);
+		await this.db.flush?.();
+	}
+
+	async getExecution(id: string): Promise<ChatExecution | null> {
+		const execution = await this.db.get<ChatExecution>(
+			"SELECT * FROM chat_executions WHERE id = ?",
+			[id],
+		);
+		return execution ?? null;
+	}
+
+	async getActiveExecutionForConversation(
+		conversationId: string,
+	): Promise<ChatExecution | null> {
+		const execution = await this.db.get<ChatExecution>(
+			`SELECT * FROM chat_executions
+				WHERE conversation_id = ? AND status IN ('queued', 'running')
+				ORDER BY updated_at DESC LIMIT 1`,
+			[conversationId],
+		);
+		return execution ?? null;
+	}
+
+	async getLatestExecutionForConversation(
+		conversationId: string,
+	): Promise<ChatExecution | null> {
+		const execution = await this.db.get<ChatExecution>(
+			"SELECT * FROM chat_executions WHERE conversation_id = ? ORDER BY updated_at DESC LIMIT 1",
+			[conversationId],
+		);
+		return execution ?? null;
+	}
+
+	async listActiveExecutions(): Promise<ChatExecution[]> {
+		return this.db.all<ChatExecution>(
+			"SELECT * FROM chat_executions WHERE status IN ('queued', 'running') ORDER BY updated_at DESC",
+		);
+	}
+
+	async markStaleExecutionsInterrupted(): Promise<void> {
+		const now = new Date().toISOString();
+		await this.db.run(
+			`UPDATE chat_executions
+				SET status = 'interrupted', error = COALESCE(error, 'Server restarted while execution was active'), updated_at = ?, completed_at = ?
+				WHERE status IN ('queued', 'running')`,
+			[now, now],
+		);
+		await this.db.flush?.();
 	}
 }

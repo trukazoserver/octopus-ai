@@ -91,7 +91,9 @@ export function checkPrerequisites(): PrereqResult[] {
 	results.push({
 		name: "Python (opcional)",
 		passed: true,
-		message: pythonVersion || "No encontrado; solo requerido para scripts o tools Python",
+		message:
+			pythonVersion ||
+			"No encontrado; solo requerido para scripts o tools Python",
 		fixHint: isWin
 			? "Se intentará instalar via winget"
 			: "Ejecuta: sudo apt install python3 (Debian/Ubuntu) o brew install python3 (macOS)",
@@ -162,7 +164,9 @@ export function checkPrerequisites(): PrereqResult[] {
 		results.push({
 			name: "Build Tools (C/C++, opcional)",
 			passed: true,
-			message: buildToolsOk ? "Compilador detectado" : "No detectado; solo requerido para dependencias nativas opcionales",
+			message: buildToolsOk
+				? "Compilador detectado"
+				: "No detectado; solo requerido para dependencias nativas opcionales",
 			fixHint:
 				"Ejecuta: sudo apt install build-essential (Debian/Ubuntu) o xcode-select --install (macOS)",
 			autoInstall:
@@ -190,7 +194,13 @@ export function checkNativeBindings(): PrereqResult {
 
 	if (projectRoot) {
 		const rootPath = path.join(projectRoot, "node_modules", "sql.js");
-		const corePath = path.join(projectRoot, "packages", "core", "node_modules", "sql.js");
+		const corePath = path.join(
+			projectRoot,
+			"packages",
+			"core",
+			"node_modules",
+			"sql.js",
+		);
 		sqlJsOk = fs.existsSync(rootPath) || fs.existsSync(corePath);
 	}
 

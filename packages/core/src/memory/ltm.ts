@@ -58,7 +58,11 @@ export class LongTermMemory {
 		}
 
 		filtered.sort((a, b) => b.score - a.score);
-		return filtered.slice(0, options.maxResults);
+		const selected = filtered.slice(0, options.maxResults);
+		await Promise.all(
+			selected.map((result) => this.updateAccess(result.item.id)),
+		);
+		return selected;
 	}
 
 	async associate(
@@ -71,6 +75,7 @@ export class LongTermMemory {
         id TEXT PRIMARY KEY,
         source_id TEXT NOT NULL,
         target_id TEXT NOT NULL,
+        relation TEXT NOT NULL DEFAULT 'associated',
         strength REAL NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
@@ -134,7 +139,16 @@ export class LongTermMemory {
 			const minImp = filters.minImportance;
 			items = items.filter((i) => i.importance >= minImp);
 		}
+		await Promise.all(items.map((item) => this.updateAccess(item.id)));
 		return items;
+	}
+
+	async listRecent(limit: number): Promise<MemoryItem[]> {
+		return this.vectorStore.listRecent(limit);
+	}
+
+	async listAll(limit?: number): Promise<MemoryItem[]> {
+		return this.vectorStore.listAll(limit);
 	}
 
 	async count(): Promise<number> {

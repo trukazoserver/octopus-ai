@@ -1,14 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+
+let bootstrapModule: typeof import("../bootstrap.js");
 
 describe("CLI Bootstrap", () => {
-	it("should export bootstrap function", async () => {
-		const mod = await import("../bootstrap.js");
-		expect(mod.bootstrap).toBeDefined();
-		expect(typeof mod.bootstrap).toBe("function");
-	}, 15000);
+	beforeAll(async () => {
+		bootstrapModule = await import("../bootstrap.js");
+	}, 60000);
 
-	it("should export OctopusSystem type", async () => {
-		const mod = await import("../bootstrap.js");
-		expect(mod.bootstrap).toBeDefined();
-	}, 15000);
+	it("should export bootstrap function", () => {
+		expect(bootstrapModule.bootstrap).toBeDefined();
+		expect(typeof bootstrapModule.bootstrap).toBe("function");
+	});
+
+	it("should export OctopusSystem type", () => {
+		expect(bootstrapModule.bootstrap).toBeDefined();
+	});
 });

@@ -1,5 +1,6 @@
 import type {
 	LLMChunk,
+	LLMMessage,
 	LLMRequest,
 	LLMResponse,
 	LLMToolCall,
@@ -51,10 +52,15 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		return headers;
 	}
 
-	private buildMessages(request: LLMRequest): any[] {
+	private buildMessages(request: LLMRequest): Array<{
+		role: LLMMessage["role"];
+		content: LLMMessage["content"];
+		tool_calls?: LLMToolCall[];
+		tool_call_id?: string;
+	}> {
 		return request.messages.map((m) => ({
 			role: m.role,
-			content: m.content as any,
+			content: m.content,
 			...(m.toolCalls ? { tool_calls: m.toolCalls } : {}),
 			...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
 		}));
@@ -254,15 +260,37 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 						if (!trimmed.startsWith("data: ")) continue;
 						const payload = trimmed.slice(6);
 						if (payload === "[DONE]") return;
-						let parsed: any;
+						let parsed: {
+							error?: { message?: string } | string;
+							usage?: {
+								prompt_tokens?: number;
+								completion_tokens?: number;
+								total_tokens?: number;
+								completion_tokens_details?: { reasoning_tokens?: number };
+							};
+							choices?: Array<{
+								delta?: {
+									content?: string;
+									reasoning_content?: string;
+									tool_calls?: Array<{
+										id?: string;
+										type?: "function";
+										function?: { name?: string; arguments?: string };
+									}>;
+								};
+								finish_reason?: string;
+							}>;
+						};
 						try {
-							parsed = JSON.parse(payload);
+							parsed = JSON.parse(payload) as typeof parsed;
 						} catch {
 							continue; // ignore malformed chunks
 						}
 						if (parsed.error) {
 							throw new Error(
-								parsed.error.message || JSON.stringify(parsed.error),
+								typeof parsed.error === "string"
+									? parsed.error
+									: parsed.error.message || JSON.stringify(parsed.error),
 							);
 						}
 						if (parsed.usage) {
@@ -273,10 +301,10 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 									totalTokens: parsed.usage.total_tokens ?? 0,
 									...(parsed.usage.completion_tokens_details?.reasoning_tokens
 										? {
-											reasoningTokens:
-												parsed.usage.completion_tokens_details
-													.reasoning_tokens,
-										}
+												reasoningTokens:
+													parsed.usage.completion_tokens_details
+														.reasoning_tokens,
+											}
 										: {}),
 								},
 							};

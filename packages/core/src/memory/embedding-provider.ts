@@ -103,7 +103,9 @@ export class EmbeddingProvider {
 				}
 			} catch (err) {
 				if (this.apiAvailable === null) {
-					logger.warn(`Embedding API not available, using hash fallback: ${String(err)}`);
+					logger.warn(
+						`Embedding API not available, using hash fallback: ${String(err)}`,
+					);
 					this.apiAvailable = false;
 				}
 			}
@@ -144,9 +146,19 @@ export class EmbeddingProvider {
 		// Try API for uncached
 		if (this.config.apiKey && this.apiAvailable !== false) {
 			try {
-				for (let batch = 0; batch < uncachedTexts.length; batch += this.config.maxBatchSize) {
-					const batchTexts = uncachedTexts.slice(batch, batch + this.config.maxBatchSize);
-					const batchIndices = uncachedIndices.slice(batch, batch + this.config.maxBatchSize);
+				for (
+					let batch = 0;
+					batch < uncachedTexts.length;
+					batch += this.config.maxBatchSize
+				) {
+					const batchTexts = uncachedTexts.slice(
+						batch,
+						batch + this.config.maxBatchSize,
+					);
+					const batchIndices = uncachedIndices.slice(
+						batch,
+						batch + this.config.maxBatchSize,
+					);
 					const embeddings = await this.embedViaAPI(batchTexts);
 
 					for (let j = 0; j < embeddings.length; j++) {
@@ -159,7 +171,9 @@ export class EmbeddingProvider {
 				return results;
 			} catch (err) {
 				if (this.apiAvailable === null) {
-					logger.warn(`Batch embedding API failed, using hash fallback: ${String(err)}`);
+					logger.warn(
+						`Batch embedding API failed, using hash fallback: ${String(err)}`,
+					);
 					this.apiAvailable = false;
 				}
 			}
@@ -168,7 +182,9 @@ export class EmbeddingProvider {
 		// Fallback for remaining
 		for (const i of uncachedIndices) {
 			if (!results[i]) {
-				const clean = (texts[i] || "").trim().slice(0, this.config.maxTextLength);
+				const clean = (texts[i] || "")
+					.trim()
+					.slice(0, this.config.maxTextLength);
 				results[i] = this.hashEmbedding(clean);
 				this.cacheSet(this.hashText(clean), results[i]);
 			}
@@ -219,7 +235,6 @@ export class EmbeddingProvider {
 				return this.embedViaCohere(texts);
 			case "ollama":
 				return this.embedViaOllama(texts);
-			case "openai":
 			default:
 				return this.embedViaOpenAI(texts);
 		}
@@ -253,7 +268,9 @@ export class EmbeddingProvider {
 
 		if (!response.ok) {
 			const errorText = await response.text().catch(() => "");
-			throw new Error(`OpenAI Embedding API error: ${response.status} ${errorText.slice(0, 200)}`);
+			throw new Error(
+				`OpenAI Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
+			);
 		}
 
 		const data = (await response.json()) as {
@@ -293,7 +310,9 @@ export class EmbeddingProvider {
 
 			if (!response.ok) {
 				const errorText = await response.text().catch(() => "");
-				throw new Error(`Google Embedding API error: ${response.status} ${errorText.slice(0, 200)}`);
+				throw new Error(
+					`Google Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
+				);
 			}
 
 			const data = (await response.json()) as {
@@ -325,7 +344,9 @@ export class EmbeddingProvider {
 
 		if (!response.ok) {
 			const errorText = await response.text().catch(() => "");
-			throw new Error(`Google Batch Embedding API error: ${response.status} ${errorText.slice(0, 200)}`);
+			throw new Error(
+				`Google Batch Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
+			);
 		}
 
 		const data = (await response.json()) as {
@@ -363,7 +384,9 @@ export class EmbeddingProvider {
 
 		if (!response.ok) {
 			const errorText = await response.text().catch(() => "");
-			throw new Error(`Cohere Embedding API error: ${response.status} ${errorText.slice(0, 200)}`);
+			throw new Error(
+				`Cohere Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
+			);
 		}
 
 		const data = (await response.json()) as {
@@ -397,7 +420,9 @@ export class EmbeddingProvider {
 
 		if (!response.ok) {
 			const errorText = await response.text().catch(() => "");
-			throw new Error(`Ollama Embedding API error: ${response.status} ${errorText.slice(0, 200)}`);
+			throw new Error(
+				`Ollama Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
+			);
 		}
 
 		const data = (await response.json()) as {
@@ -441,7 +466,7 @@ export class EmbeddingProvider {
 			// Secondary hash (different seed)
 			let hash2 = 5381;
 			for (let j = 0; j < word.length; j++) {
-				hash2 = ((hash2 << 5) + hash2) + word.charCodeAt(j);
+				hash2 = (hash2 << 5) + hash2 + word.charCodeAt(j);
 				hash2 |= 0;
 			}
 
@@ -453,7 +478,7 @@ export class EmbeddingProvider {
 
 			// Bigrams for context
 			if (i > 0) {
-				const bigram = words[i - 1] + " " + word;
+				const bigram = `${words[i - 1]} ${word}`;
 				let biHash = 0;
 				for (let j = 0; j < bigram.length; j++) {
 					biHash = (biHash << 5) - biHash + bigram.charCodeAt(j);

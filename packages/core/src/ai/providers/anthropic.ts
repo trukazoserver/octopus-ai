@@ -36,7 +36,10 @@ export class AnthropicProvider extends BaseLLMProvider {
 
 		for (const msg of messages) {
 			if (msg.role === "system") {
-				const systemStr = typeof msg.content === "string" ? msg.content : (msg.content.find(p => p.type === "text") as any)?.text ?? "";
+				const systemStr =
+					typeof msg.content === "string"
+						? msg.content
+						: (msg.content.find((p) => p.type === "text")?.text ?? "");
 				systemMessages.push(systemStr);
 			} else {
 				filtered.push(msg);
@@ -61,8 +64,11 @@ export class AnthropicProvider extends BaseLLMProvider {
 				const contentBlocks: Array<Record<string, unknown>> = [];
 				if (m.content) {
 					if (Array.isArray(m.content)) {
-						const textPart = m.content.find(p => p.type === "text") as {text: string} | undefined;
-						if (textPart) contentBlocks.push({ type: "text", text: textPart.text });
+						const textPart = m.content.find((p) => p.type === "text") as
+							| { text: string }
+							| undefined;
+						if (textPart)
+							contentBlocks.push({ type: "text", text: textPart.text });
 					} else {
 						contentBlocks.push({ type: "text", text: m.content });
 					}
@@ -79,24 +85,29 @@ export class AnthropicProvider extends BaseLLMProvider {
 			}
 
 			if (Array.isArray(m.content)) {
-				const anthropicBlocks = m.content.map(part => {
+				const anthropicBlocks = m.content.map((part) => {
 					if (part.type === "text") return part;
 					if (part.type === "image_url") {
-						const match = part.image_url.url.match(/^data:(image\/[a-z0-9-]+);base64,(.+)$/);
+						const match = part.image_url.url.match(
+							/^data:(image\/[a-z0-9-]+);base64,(.+)$/,
+						);
 						if (match) {
 							return {
 								type: "image",
 								source: {
 									type: "base64",
 									media_type: match[1],
-									data: match[2]
-								}
+									data: match[2],
+								},
 							};
 						}
 					}
 					return part; // fallback
 				});
-				return { role: m.role as "user" | "assistant", content: anthropicBlocks };
+				return {
+					role: m.role as "user" | "assistant",
+					content: anthropicBlocks,
+				};
 			}
 
 			return { role: m.role as "user" | "assistant", content: m.content };
@@ -308,94 +319,121 @@ export class AnthropicProvider extends BaseLLMProvider {
 
 		try {
 			while (true) {
-			const { done, value } = await readNext();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
-			const parts = buffer.split("\n\n");
-			buffer = parts.pop() ?? "";
+				const { done, value } = await readNext();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const parts = buffer.split("\n\n");
+				buffer = parts.pop() ?? "";
 
-			for (const part of parts) {
-				const lines = part.split("\n");
-				for (const line of lines) {
-					const trimmed = line.trim();
-					if (!trimmed.startsWith("data: ")) continue;
-					const payload = trimmed.slice(6);
+				for (const part of parts) {
+					const lines = part.split("\n");
+					for (const line of lines) {
+						const trimmed = line.trim();
+						if (!trimmed.startsWith("data: ")) continue;
+						const payload = trimmed.slice(6);
 
-					let event: any;
-					try {
-						event = JSON.parse(payload);
-					} catch {
-						continue; // ignore malformed chunks
-					}
-
-					if (event.type === "error" && event.error) {
-						throw new Error(event.error.message || JSON.stringify(event.error));
-					}
-
-					if (event.type === "content_block_delta" && event.delta?.text) {
-						yield { content: event.delta.text };
-					} else if (
-						event.type === "content_block_delta" &&
-						event.delta?.thinking
-					) {
-						yield { thinking: event.delta.thinking };
-					} else if (
-						(event.type === "content_block_delta" && event.delta?.type === "input_json_delta") ||
-						(event.type === "tool_use_chunk" && event.delta?.partial_json)
-					) {
-						yield {
-							toolCalls: {
-								id: "", // anthropic only sends id at block_start
-								type: "function",
-								function: { name: "", arguments: event.delta.partial_json || event.delta.partial_json || "" },
-							},
+						let event: {
+							type?: string;
+							error?: { message?: string } | string;
+							delta?: {
+								text?: string;
+								thinking?: string;
+								type?: string;
+								partial_json?: string;
+								stop_reason?: string;
+							};
+							content_block?: { type?: string; id?: string; name?: string };
+							usage?: { output_tokens?: number };
+							message?: {
+								usage?: { input_tokens: number; output_tokens: number };
+							};
 						};
-					} else if (
-						event.type === "content_block_start" &&
-						event.content_block?.type === "tool_use"
-					) {
-						yield {
-							toolCalls: {
-								id: event.content_block.id ?? "",
-								type: "function",
-								function: {
-									name: event.content_block.name ?? "",
-									arguments: "",
-								},
-							},
-						};
-					} else if (event.type === "message_delta") {
-						const hasStopReason = !!event.delta?.stop_reason;
-						const outputTokens = hasStopReason
-							? event.usage?.output_tokens
-							: undefined;
-						const chunk: LLMChunk = {
-							...(hasStopReason ? { finishReason: event.delta.stop_reason } : {}),
-							...(outputTokens != null
-								? {
-									usage: {
-										promptTokens: 0,
-										completionTokens: outputTokens,
-										totalTokens: outputTokens,
+						try {
+							event = JSON.parse(payload) as typeof event;
+						} catch {
+							continue; // ignore malformed chunks
+						}
+
+						if (event.type === "error" && event.error) {
+							throw new Error(
+								typeof event.error === "string"
+									? event.error
+									: event.error.message || JSON.stringify(event.error),
+							);
+						}
+
+						if (event.type === "content_block_delta" && event.delta?.text) {
+							yield { content: event.delta.text };
+						} else if (
+							event.type === "content_block_delta" &&
+							event.delta?.thinking
+						) {
+							yield { thinking: event.delta.thinking };
+						} else if (
+							(event.type === "content_block_delta" &&
+								event.delta?.type === "input_json_delta") ||
+							(event.type === "tool_use_chunk" && event.delta?.partial_json)
+						) {
+							yield {
+								toolCalls: {
+									id: "", // anthropic only sends id at block_start
+									type: "function",
+									function: {
+										name: "",
+										arguments:
+											event.delta.partial_json ||
+											event.delta.partial_json ||
+											"",
 									},
-								}
-								: {}),
-						};
-						if (Object.keys(chunk).length > 0) yield chunk;
-					} else if (event.type === "message_start" && event.message?.usage) {
-						yield {
-							usage: {
-								promptTokens: event.message.usage.input_tokens,
-								completionTokens: event.message.usage.output_tokens,
-								totalTokens:
-									event.message.usage.input_tokens +
-									event.message.usage.output_tokens,
-							},
-						};
+								},
+							};
+						} else if (
+							event.type === "content_block_start" &&
+							event.content_block?.type === "tool_use"
+						) {
+							yield {
+								toolCalls: {
+									id: event.content_block.id ?? "",
+									type: "function",
+									function: {
+										name: event.content_block.name ?? "",
+										arguments: "",
+									},
+								},
+							};
+						} else if (event.type === "message_delta") {
+							const hasStopReason = !!event.delta?.stop_reason;
+							const stopReason = event.delta?.stop_reason;
+							const outputTokens = hasStopReason
+								? event.usage?.output_tokens
+								: undefined;
+							const chunk: LLMChunk = {
+								...(hasStopReason ? { finishReason: stopReason } : {}),
+								...(outputTokens != null
+									? {
+											usage: {
+												promptTokens: 0,
+												completionTokens: outputTokens,
+												totalTokens: outputTokens,
+											},
+										}
+									: {}),
+							};
+							if (Object.keys(chunk).length > 0) yield chunk;
+						} else if (event.type === "message_start" && event.message?.usage) {
+							yield {
+								usage: {
+									promptTokens: event.message.usage.input_tokens,
+									completionTokens: event.message.usage.output_tokens,
+									totalTokens:
+										event.message.usage.input_tokens +
+										event.message.usage.output_tokens,
+								},
+							};
+						}
 					}
 				}
 			}
-		}
 		} finally {
 			await reader.cancel().catch(() => {});
 		}

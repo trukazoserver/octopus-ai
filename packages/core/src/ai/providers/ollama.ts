@@ -25,7 +25,7 @@ export class OllamaProvider extends BaseLLMProvider {
 			model,
 			messages: request.messages.map((m) => ({
 				role: m.role,
-				content: m.content as any,
+				content: m.content,
 			})),
 			stream: false,
 			...(request.maxTokens != null
@@ -95,7 +95,7 @@ export class OllamaProvider extends BaseLLMProvider {
 			model,
 			messages: request.messages.map((m) => ({
 				role: m.role,
-				content: m.content as any,
+				content: m.content,
 			})),
 			stream: true,
 			...(request.maxTokens != null
@@ -150,16 +150,16 @@ export class OllamaProvider extends BaseLLMProvider {
 			for (const line of lines) {
 				const trimmed = line.trim();
 				if (!trimmed) continue;
-				let parsed: any;
+				let parsed: {
+					error?: string;
+					message?: { content?: string };
+					done?: boolean;
+					done_reason?: string;
+					prompt_eval_count?: number;
+					eval_count?: number;
+				};
 				try {
-					parsed = JSON.parse(trimmed) as {
-						error?: string;
-						message?: { content?: string };
-						done?: boolean;
-						done_reason?: string;
-						prompt_eval_count?: number;
-						eval_count?: number;
-					};
+					parsed = JSON.parse(trimmed) as typeof parsed;
 				} catch {
 					continue; // ignore malformed chunks
 				}
