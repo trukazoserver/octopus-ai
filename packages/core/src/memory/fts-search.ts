@@ -96,6 +96,7 @@ export class FTSSearchEngine {
 		try {
 			// Delete existing entry first (upsert)
 			await this.db.run("DELETE FROM memory_fts WHERE id = ?", [item.id]);
+			if (!this.isVisible(item)) return;
 
 			await this.db.run(
 				"INSERT INTO memory_fts (id, content, type, source_info) VALUES (?, ?, ?, ?)",
@@ -143,7 +144,7 @@ export class FTSSearchEngine {
 				 WHERE memory_fts MATCH ?
 				 ORDER BY rank
 				 LIMIT ?`,
-				[sanitized, this.config.maxFTSResults],
+				[sanitized, this.config.maxFTSResults * 20],
 			);
 
 			// We need to fetch full MemoryItem data from memory_items
@@ -178,6 +179,7 @@ export class FTSSearchEngine {
 						source: JSON.parse(fullRow.source),
 						metadata: JSON.parse(fullRow.metadata),
 					};
+					if (!this.isVisible(item)) continue;
 
 					// Normalize rank to 0-1 (BM25 rank is negative, lower = better)
 					const normalizedScore = Math.max(
@@ -189,7 +191,7 @@ export class FTSSearchEngine {
 				}
 			}
 
-			return results;
+			return results.slice(0, this.config.maxFTSResults);
 		} catch (err) {
 			logger.error(`FTS search failed: ${String(err)}`);
 			return this.fallbackSearch(query);
@@ -246,21 +248,44 @@ export class FTSSearchEngine {
 	 */
 	private async syncFromMemoryItems(): Promise<void> {
 		try {
-			const memCount = await this.db.get<{ count: number }>(
-				"SELECT COUNT(*) as count FROM memory_items",
-			);
-
 			await this.db.run("DELETE FROM memory_fts");
-			if ((memCount?.count ?? 0) > 0) {
+			const rows = await this.db.all<{
+				id: string;
+				type: string;
+				content: string;
+				embedding: Buffer;
+				importance: number;
+				access_count: number;
+				last_accessed: string;
+				created_at: string;
+				associations: string;
+				source: string;
+				metadata: string;
+			}>("SELECT * FROM memory_items");
+
+			if (rows.length > 0) {
 				logger.info("Syncing memory items to FTS5 index...");
+				let indexed = 0;
+				for (const row of rows) {
+					const item: MemoryItem = {
+						id: row.id,
+						type: row.type as MemoryItem["type"],
+						content: row.content,
+						embedding: this.deserializeEmbedding(row.embedding),
+						importance: row.importance,
+						accessCount: row.access_count,
+						lastAccessed: new Date(row.last_accessed),
+						createdAt: new Date(row.created_at),
+						associations: JSON.parse(row.associations),
+						source: JSON.parse(row.source),
+						metadata: JSON.parse(row.metadata),
+					};
+					if (!this.isVisible(item)) continue;
+					await this.index(item);
+					indexed += 1;
+				}
 
-				await this.db.run(
-					`INSERT INTO memory_fts (id, content, type, source_info)
-					 SELECT id, content, type, COALESCE(source, '{}')
-					 FROM memory_items`,
-				);
-
-				logger.info(`Synced ${memCount?.count ?? 0} items to FTS5`);
+				logger.info(`Synced ${indexed} active items to FTS5`);
 			}
 		} catch (err) {
 			logger.warn(`FTS sync from memory_items failed: ${String(err)}`);
@@ -297,27 +322,29 @@ export class FTSSearchEngine {
 
 			return rows
 				.map((row) => {
+					const embedding = this.deserializeEmbedding(row.embedding);
+					const item: MemoryItem = {
+						id: row.id,
+						type: row.type as MemoryItem["type"],
+						content: row.content,
+						embedding,
+						importance: row.importance,
+						accessCount: row.access_count,
+						lastAccessed: new Date(row.last_accessed),
+						createdAt: new Date(row.created_at),
+						associations: JSON.parse(row.associations),
+						source: JSON.parse(row.source),
+						metadata: JSON.parse(row.metadata),
+					};
+					if (!this.isVisible(item)) return null;
 					const searchable =
 						`${row.content} ${row.type} ${row.source} ${row.metadata}`.toLowerCase();
 					const matchedWords = words.filter((word) =>
 						searchable.includes(word),
 					);
 					if (matchedWords.length === 0) return null;
-					const embedding = this.deserializeEmbedding(row.embedding);
 					return {
-						item: {
-							id: row.id,
-							type: row.type as MemoryItem["type"],
-							content: row.content,
-							embedding,
-							importance: row.importance,
-							accessCount: row.access_count,
-							lastAccessed: new Date(row.last_accessed),
-							createdAt: new Date(row.created_at),
-							associations: JSON.parse(row.associations),
-							source: JSON.parse(row.source),
-							metadata: JSON.parse(row.metadata),
-						},
+						item,
 						ftsScore: matchedWords.length / words.length,
 					} satisfies FTSResult;
 				})
@@ -350,6 +377,19 @@ export class FTSSearchEngine {
 			.split(/\s+/)
 			.filter((w) => w.length > 1)
 			.slice(0, 10);
+	}
+
+	private isVisible(item: MemoryItem): boolean {
+		const status = item.metadata.status;
+		if (status && status !== "active") return false;
+		const expiresAt = item.metadata.expiresAt;
+		if (typeof expiresAt === "string") {
+			const parsed = new Date(expiresAt);
+			if (!Number.isNaN(parsed.getTime()) && parsed.getTime() <= Date.now()) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	isAvailable(): boolean {

@@ -7,41 +7,41 @@
 
 [data-tooltip]::before,
 [data-tooltip]::after {
-	position: absolute;
-	left: 50%;
+	position: fixed;
+	left: var(--tooltip-x, 50vw);
+	top: var(--tooltip-y, 0px);
 	pointer-events: none;
 	opacity: 0;
-	z-index: 1000;
+	z-index: 3000;
 	transition: opacity 0.16s ease, transform 0.16s ease;
 }
 
 [data-tooltip]::before {
 	content: "";
-	bottom: calc(100% + 5px);
 	width: 10px;
 	height: 10px;
-	background: rgba(24, 24, 27, 0.96);
-	border-right: 1px solid rgba(99, 102, 241, 0.28);
-	border-bottom: 1px solid rgba(99, 102, 241, 0.28);
-	transform: translate(-50%, 2px) rotate(45deg) scale(0.9);
+	background: rgba(9, 9, 11, 0.96);
+	border-right: 1px solid rgba(255, 255, 255, 0.14);
+	border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+	transform: translate(-50%, -14px) rotate(45deg) scale(0.9);
 }
 
 [data-tooltip]::after {
 	content: attr(data-tooltip);
-	bottom: calc(100% + 10px);
 	max-width: min(260px, 80vw);
-	padding: 8px 11px;
-	border: 1px solid rgba(99, 102, 241, 0.28);
-	border-radius: 12px;
-	background: rgba(24, 24, 27, 0.96);
-	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35), 0 0 20px rgba(99, 102, 241, 0.12);
+	padding: 7px 10px;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	border-radius: 10px;
+	background: rgba(9, 9, 11, 0.96);
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
 	color: #f4f4f5;
 	font-size: 0.75rem;
-	font-weight: 700;
-	line-height: 1.25;
+	font-weight: 800;
+	line-height: 1;
 	white-space: nowrap;
-	transform: translate(-50%, 4px) scale(0.96);
+	transform: translate(-50%, calc(-100% - 16px)) scale(0.96);
 }
 
 [data-tooltip]:hover::before,
@@ -49,10 +49,10 @@
 [data-tooltip]:focus-visible::before,
 [data-tooltip]:focus-visible::after {
 	opacity: 1;
-	transform: translate(-50%, 0) rotate(45deg) scale(1);
+	transform: translate(-50%, -12px) rotate(45deg) scale(1);
 }
 
 [data-tooltip]:hover::after,
 [data-tooltip]:focus-visible::after {
-	transform: translate(-50%, 0) scale(1);
+	transform: translate(-50%, calc(-100% - 14px)) scale(1);
 }

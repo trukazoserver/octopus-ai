@@ -99,7 +99,11 @@ export class SqliteVectorStore extends VectorStore {
 
 	async search(
 		queryEmbedding: number[],
-		options: { limit: number; threshold: number },
+		options: {
+			limit: number;
+			threshold: number;
+			filter?: (item: MemoryItem) => boolean;
+		},
 	): Promise<VectorSearchResult[]> {
 		await this.ensureInitialized();
 
@@ -107,10 +111,12 @@ export class SqliteVectorStore extends VectorStore {
 		const results: VectorSearchResult[] = [];
 		for (const row of rows) {
 			const embedding = this.deserializeEmbedding(row.embedding);
+			const item = this.rowToItem(row, embedding);
+			if (options.filter && !options.filter(item)) continue;
 			const similarity = this.cosineSimilarity(queryEmbedding, embedding);
 			if (similarity >= options.threshold) {
 				results.push({
-					item: this.rowToItem(row, embedding),
+					item,
 					similarity,
 				});
 			}
@@ -211,6 +217,7 @@ export class SqliteVectorStore extends VectorStore {
 
 		try {
 			await this.db.run("DELETE FROM memory_fts WHERE id = ?", [item.id]);
+			if (!this.isVisible(item)) return;
 			await this.db.run(
 				"INSERT INTO memory_fts (id, content, type, source_info) VALUES (?, ?, ?, ?)",
 				[item.id, item.content, item.type, sourceInfo],
@@ -243,6 +250,19 @@ export class SqliteVectorStore extends VectorStore {
 			source: JSON.parse(row.source),
 			metadata: JSON.parse(row.metadata),
 		};
+	}
+
+	private isVisible(item: MemoryItem): boolean {
+		const status = item.metadata.status;
+		if (status && status !== "active") return false;
+		const expiresAt = item.metadata.expiresAt;
+		if (typeof expiresAt === "string") {
+			const parsed = new Date(expiresAt);
+			if (!Number.isNaN(parsed.getTime()) && parsed.getTime() <= Date.now()) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private cosineSimilarity(a: number[], b: number[]): number {

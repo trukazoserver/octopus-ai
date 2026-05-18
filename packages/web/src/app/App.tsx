@@ -27,11 +27,6 @@ const DashboardPage = lazy(() =>
 		default: DashboardPage,
 	})),
 );
-const MediaLibraryPage = lazy(() =>
-	import("../pages/media-library.js").then(({ MediaLibraryPage }) => ({
-		default: MediaLibraryPage,
-	})),
-);
 const MemoryPage = lazy(() =>
 	import("../pages/memory.js").then(({ MemoryPage }) => ({
 		default: MemoryPage,
@@ -64,7 +59,6 @@ type TabId =
 	| "chat"
 	| "channels"
 	| "variables"
-	| "media"
 	| "tools"
 	| "memory"
 	| "skills"
@@ -76,6 +70,13 @@ type TabId =
 interface NavGroup {
 	label: string;
 	items: Array<{ id: TabId; icon: AppIconName; label: string }>;
+}
+
+type ChatWorkspaceView = "chat" | "media";
+
+interface ChatWorkspaceRequest {
+	id: number;
+	view: ChatWorkspaceView;
 }
 
 const NAV_GROUPS: NavGroup[] = [
@@ -109,7 +110,6 @@ const NAV_GROUPS: NavGroup[] = [
 	{
 		label: "Sistema",
 		items: [
-			{ id: "media", icon: "folder", label: "Medios" },
 			{ id: "variables", icon: "key", label: "Variables" },
 			{ id: "settings", icon: "settings", label: "Configuración" },
 		],
@@ -129,6 +129,12 @@ const PageLoading: React.FC = () => (
 		Cargando...
 	</div>
 );
+
+function isTabId(tab: string): tab is TabId {
+	return NAV_GROUPS.some((group) =>
+		group.items.some((item) => item.id === tab),
+	);
+}
 
 export const App: React.FC = () => {
 	const [activeTab, setActiveTab] = useState<TabId>(() => {
@@ -155,10 +161,26 @@ export const App: React.FC = () => {
 		new Set(),
 	);
 	const [chatLoaded, setChatLoaded] = useState(activeTab === "chat");
+	const [chatWorkspaceRequest, setChatWorkspaceRequest] =
+		useState<ChatWorkspaceRequest>({ id: 0, view: "chat" });
 
 	const selectTab = (tab: TabId) => {
+		if (tab === "chat") {
+			setChatWorkspaceRequest((prev) => ({ id: prev.id + 1, view: "chat" }));
+		}
 		setActiveTab(tab);
 		setMenuOpen(false);
+	};
+
+	const selectDestination = (tab: string) => {
+		if (tab === "media") {
+			setChatWorkspaceRequest((prev) => ({ id: prev.id + 1, view: "media" }));
+			setActiveTab("chat");
+			setMenuOpen(false);
+			return;
+		}
+
+		if (isTabId(tab)) selectTab(tab);
 	};
 
 	const toggleGroup = (label: string) => {
@@ -182,10 +204,38 @@ export const App: React.FC = () => {
 		if (activeTab === "chat") setChatLoaded(true);
 	}, [activeTab]);
 
+	useEffect(() => {
+		const updateTooltipPosition = (event: PointerEvent) => {
+			const target = event.target instanceof Element ? event.target : null;
+			const tooltipElement = target?.closest<HTMLElement>("[data-tooltip]");
+			if (!tooltipElement) return;
+
+			const viewportPadding = 12;
+			const x = Math.max(
+				viewportPadding,
+				Math.min(window.innerWidth - viewportPadding, event.clientX),
+			);
+			const y = Math.max(viewportPadding, event.clientY);
+			tooltipElement.style.setProperty("--tooltip-x", `${x}px`);
+			tooltipElement.style.setProperty("--tooltip-y", `${y}px`);
+		};
+
+		window.addEventListener("pointerover", updateTooltipPosition, {
+			passive: true,
+		});
+		window.addEventListener("pointermove", updateTooltipPosition, {
+			passive: true,
+		});
+		return () => {
+			window.removeEventListener("pointerover", updateTooltipPosition);
+			window.removeEventListener("pointermove", updateTooltipPosition);
+		};
+	}, []);
+
 	const renderPage = () => {
 		switch (activeTab) {
 			case "dashboard":
-				return <DashboardPage onNavigate={(tab) => selectTab(tab as TabId)} />;
+				return <DashboardPage onNavigate={selectDestination} />;
 			case "channels":
 				return <ChannelsPage />;
 			case "tools":
@@ -200,17 +250,13 @@ export const App: React.FC = () => {
 				return <TasksPage />;
 			case "automations":
 				return <AutomationsPage />;
-			case "media":
-				return <MediaLibraryPage />;
 			case "variables":
 				return <VariablesPage />;
 			case "settings":
 				return <SettingsPage />;
 			default:
 				if (activeTab !== "chat") {
-					return (
-						<DashboardPage onNavigate={(tab) => selectTab(tab as TabId)} />
-					);
+					return <DashboardPage onNavigate={selectDestination} />;
 				}
 				return null;
 		}
@@ -320,7 +366,10 @@ export const App: React.FC = () => {
 						}}
 					>
 						<Suspense fallback={<PageLoading />}>
-							<ChatPage onNavigate={(tab) => selectTab(tab as TabId)} />
+							<ChatPage
+								onNavigate={selectDestination}
+								workspaceRequest={chatWorkspaceRequest}
+							/>
 						</Suspense>
 					</div>
 				)}

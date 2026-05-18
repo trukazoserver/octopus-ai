@@ -13,7 +13,11 @@ export abstract class VectorStore {
 	abstract store(item: MemoryItem): Promise<void>;
 	abstract search(
 		queryEmbedding: number[],
-		options: { limit: number; threshold: number },
+		options: {
+			limit: number;
+			threshold: number;
+			filter?: (item: MemoryItem) => boolean;
+		},
 	): Promise<VectorSearchResult[]>;
 	abstract getById(id: string): Promise<MemoryItem | undefined>;
 	abstract getByIds(ids: string[]): Promise<MemoryItem[]>;

@@ -84,6 +84,67 @@ describe("ToolExecutor", () => {
 			);
 		});
 
+		it("should save media base64 returned by tools and hide raw payloads", async () => {
+			const imageBase64 = Buffer.alloc(100, 1).toString("base64");
+			const tool = createTestTool({
+				name: "image-generator",
+				handler: vi.fn().mockResolvedValue({
+					success: true,
+					output: {
+						filename: "generated.png",
+						mimetype: "image/png",
+						image_base64: imageBase64,
+					},
+				} as unknown as ToolResult),
+			});
+			registry.register(tool);
+			const executor = new ToolExecutor(registry, {
+				sandboxCommands: false,
+				allowedPaths: [],
+			});
+
+			const result = await executor.execute("image-generator", {
+				input: "test",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.output).toContain("/api/media/file/");
+			expect(result.output).not.toContain(imageBase64);
+			expect(result.metadata?.savedMedia).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						mimetype: "image/png",
+						url: expect.stringContaining("/api/media/file/"),
+					}),
+				]),
+			);
+		});
+
+		it("should replace embedded data URLs with saved media URLs", async () => {
+			const imageBase64 = Buffer.alloc(100, 2).toString("base64");
+			const tool = createTestTool({
+				name: "inline-image-generator",
+				handler: vi.fn().mockResolvedValue({
+					success: true,
+					output: `Generated: data:image/png;base64,${imageBase64}`,
+				} satisfies ToolResult),
+			});
+			registry.register(tool);
+			const executor = new ToolExecutor(registry, {
+				sandboxCommands: false,
+				allowedPaths: [],
+			});
+
+			const result = await executor.execute("inline-image-generator", {
+				input: "test",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.output).toContain("/api/media/file/");
+			expect(result.output).not.toContain("data:image/png;base64");
+			expect(result.output).not.toContain(imageBase64);
+		});
+
 		it("should return error for missing required parameters", async () => {
 			const tool = createTestTool();
 			registry.register(tool);

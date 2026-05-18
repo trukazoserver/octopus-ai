@@ -33,8 +33,10 @@ export class LongTermMemory {
 		options: RetrieveOptions,
 	): Promise<ScoredMemory[]> {
 		const results = await this.vectorStore.search(embedding, {
-			limit: options.maxResults * 3,
+			limit: Math.max(options.maxResults * 20, options.maxResults),
 			threshold: options.minRelevance,
+			filter: (item) =>
+				this.isVisible(item) && (!options.filter || options.filter(item)),
 		});
 
 		const scored: ScoredMemory[] = results.map((r) => {
@@ -59,9 +61,11 @@ export class LongTermMemory {
 
 		filtered.sort((a, b) => b.score - a.score);
 		const selected = filtered.slice(0, options.maxResults);
-		await Promise.all(
-			selected.map((result) => this.updateAccess(result.item.id)),
-		);
+		if (options.updateAccess !== false) {
+			await Promise.all(
+				selected.map((result) => this.updateAccess(result.item.id)),
+			);
+		}
 		return selected;
 	}
 
@@ -130,6 +134,7 @@ export class LongTermMemory {
 		const results = await this.vectorStore.search(embedding, {
 			limit: 50,
 			threshold: 0.5,
+			filter: (item) => this.isVisible(item),
 		});
 		let items = results.map((r) => r.item);
 		if (filters?.types && filters.types.length > 0) {
@@ -144,11 +149,22 @@ export class LongTermMemory {
 	}
 
 	async listRecent(limit: number): Promise<MemoryItem[]> {
-		return this.vectorStore.listRecent(limit);
+		const items = await this.vectorStore.listRecent(limit * 5);
+		return items.filter((item) => this.isVisible(item)).slice(0, limit);
 	}
 
-	async listAll(limit?: number): Promise<MemoryItem[]> {
-		return this.vectorStore.listAll(limit);
+	async listAll(
+		limit?: number,
+		options: { includeInactive?: boolean } = {},
+	): Promise<MemoryItem[]> {
+		const items = await this.vectorStore.listAll(limit);
+		return options.includeInactive
+			? items
+			: items.filter((item) => this.isVisible(item));
+	}
+
+	async update(item: MemoryItem): Promise<void> {
+		await this.vectorStore.update(item);
 	}
 
 	async count(): Promise<number> {
@@ -173,5 +189,18 @@ export class LongTermMemory {
 
 	private computeFrequencyScore(item: MemoryItem): number {
 		return Math.log(1 + item.accessCount) / Math.log(1 + 100);
+	}
+
+	private isVisible(item: MemoryItem): boolean {
+		const status = item.metadata.status;
+		if (status && status !== "active") return false;
+		const expiresAt = item.metadata.expiresAt;
+		if (typeof expiresAt === "string") {
+			const parsed = new Date(expiresAt);
+			if (!Number.isNaN(parsed.getTime()) && parsed.getTime() <= Date.now()) {
+				return false;
+			}
+		}
+		return true;
 	}
 }

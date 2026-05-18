@@ -1,5 +1,5 @@
 import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
 import { showToast } from "../components/ui/Toast.js";
 import { API_BASE, apiDelete, apiGet } from "../hooks/useApi.js";
@@ -65,6 +65,7 @@ export const MediaLibraryPage: React.FC = () => {
 		"all" | "image" | "video" | "audio" | "document"
 	>("all");
 	const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+	const previewDialogRef = useRef<HTMLDialogElement | null>(null);
 
 	const load = useCallback(async () => {
 		setError(null);
@@ -83,12 +84,16 @@ export const MediaLibraryPage: React.FC = () => {
 	}, [load]);
 
 	useEffect(() => {
-		if (!preview) return undefined;
-		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "Escape") setPreview(null);
-		};
-		window.addEventListener("keydown", handleKeyDown);
-		return () => window.removeEventListener("keydown", handleKeyDown);
+		if (!preview) return;
+		const dialog = previewDialogRef.current;
+		if (!dialog) return;
+
+		try {
+			if (!dialog.open) dialog.showModal();
+		} catch {
+			dialog.setAttribute("open", "");
+		}
+		dialog.focus();
 	}, [preview]);
 
 	const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -451,12 +456,17 @@ export const MediaLibraryPage: React.FC = () => {
 			{/* Preview modal */}
 			{preview && (
 				<dialog
-					open
+					ref={previewDialogRef}
+					aria-modal="true"
 					aria-label="Vista previa de archivo"
 					tabIndex={-1}
 					style={{
 						position: "fixed",
 						inset: 0,
+						width: "100vw",
+						height: "100vh",
+						maxWidth: "none",
+						maxHeight: "none",
 						zIndex: 1050,
 						display: "flex",
 						alignItems: "center",
@@ -464,12 +474,20 @@ export const MediaLibraryPage: React.FC = () => {
 						background: "rgba(0,0,0,0.8)",
 						backdropFilter: "blur(4px)",
 						animation: "fadeInFast 0.15s ease-out",
+						border: 0,
+						boxSizing: "border-box",
+						margin: 0,
+						padding: "24px",
 					}}
 					onClick={(event) => {
 						if (event.target === event.currentTarget) setPreview(null);
 					}}
 					onKeyDown={(event) => {
 						if (event.key === "Escape") setPreview(null);
+					}}
+					onCancel={(event) => {
+						event.preventDefault();
+						setPreview(null);
 					}}
 				>
 					<div
@@ -593,6 +611,7 @@ export const MediaLibraryPage: React.FC = () => {
 						})()}
 						<button
 							type="button"
+							aria-label="Cerrar vista previa"
 							onClick={() => setPreview(null)}
 							style={{
 								position: "absolute",

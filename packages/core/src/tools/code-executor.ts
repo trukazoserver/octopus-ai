@@ -474,7 +474,7 @@ export class CodeExecutor {
 		return {
 			name: "create_tool",
 			description:
-				"Create a new tool/plugin that can be used by Octopus AI. Provide a name, description, the code implementation, and the tool will be saved and registered for future use. The code should export a default function that receives params and returns a result.",
+				"Create a new tool/plugin that can be used by Octopus AI. Provide a name, description, the code implementation, and the tool will be saved and registered for future use. The code should export a default function that receives params and returns a result. If the tool generates images, audio, video, PDFs, documents, archives, or other binary media, it must export `async function(params, context = {})`, save generated buffers with `context.media.save(buffer, mimeType, description)`, and return only the saved `/api/media/file/...` URL plus concise metadata. Never return raw base64 or data URLs from media-generating tools.",
 			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>`,
 			parameters: {
 				name: {
@@ -496,7 +496,7 @@ export class CodeExecutor {
 				code: {
 					type: "string",
 					description:
-						"The tool implementation code. Must export a default async function(params) that returns { success, output, error? }",
+						"The tool implementation code. Must export a default async function(params, context = {}) that returns { success, output, error? }. Media-generating tools must save buffers with context.media.save(...) and return media URLs only, never base64/data URLs.",
 					required: true,
 				},
 				language: {

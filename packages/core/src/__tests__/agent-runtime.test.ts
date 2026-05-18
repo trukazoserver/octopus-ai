@@ -6,7 +6,11 @@ import type {
 	TaskState,
 } from "../agent/types.js";
 import type { LLMChunk, LLMResponse } from "../ai/types.js";
-import type { ConsolidationResult, MemoryContext } from "../memory/types.js";
+import type {
+	ConsolidationResult,
+	ContextAssemblyResult,
+	MemoryContext,
+} from "../memory/types.js";
 import type { LoadedSkill } from "../skills/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry, ToolResult } from "../tools/registry.js";
@@ -282,6 +286,68 @@ describe("AgentRuntime", () => {
 			expect(request.messages[0]?.content).toContain(
 				"You are a helpful test assistant.",
 			);
+		});
+
+		it("should clear stale memory trace when advanced context assembly fails", async () => {
+			const assembled: ContextAssemblyResult = {
+				memoryPack: {
+					taskObjective: "first",
+					uncertaintyLevel: "HIGH_CONFIDENCE",
+					memories: [
+						{
+							item: {
+								id: "memory-1",
+								type: "semantic",
+								content: "known fact",
+								embedding: [],
+								importance: 0.8,
+								accessCount: 0,
+								lastAccessed: new Date(),
+								createdAt: new Date(),
+								associations: [],
+								source: {},
+								metadata: {},
+							},
+							score: 0.9,
+						},
+					],
+					userMemory: [],
+					projectMemory: [],
+					similarEpisodes: [],
+					agentLessons: [],
+					prospectiveReminders: [],
+					knownGaps: [],
+					toolRecommendations: [],
+					knownRisks: [],
+					tokenBudgetUsed: 3,
+					tokenBudgetRemaining: 100,
+				},
+				proactiveNotices: [],
+				proactiveMemoryIds: ["reminder-1"],
+				degradedSections: [],
+				mandatorySectionsPreserved: [],
+				budgetExceeded: false,
+			};
+			const assembler = { assemble: vi.fn().mockResolvedValue(assembled) };
+			runtime.setContextAssembler(assembler as never);
+
+			await runtime.processMessage("first");
+			expect(runtime.getLastMemoryTrace()?.memoryIds).toEqual([
+				"memory-1",
+				"reminder-1",
+			]);
+
+			const failingAssembler = {
+				assemble: vi.fn().mockRejectedValue(new Error("boom")),
+			};
+			const consoleError = vi
+				.spyOn(console, "error")
+				.mockImplementation(() => {});
+			runtime.setContextAssembler(failingAssembler as never);
+			await runtime.processMessage("second");
+
+			expect(runtime.getLastMemoryTrace()).toBeUndefined();
+			consoleError.mockRestore();
 		});
 
 		it("should execute tool calls when LLM returns them", async () => {

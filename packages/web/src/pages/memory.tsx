@@ -146,7 +146,33 @@ interface GraphNode {
 	weight: number;
 	content: string;
 	keywords: string[];
-	source: "memory" | "learning";
+	source: "memory" | "learning" | "profile" | "daily" | "shortTerm";
+}
+
+interface GraphEdge {
+	from: string;
+	to: string;
+	keywords: string[];
+}
+
+interface DashboardGraphContext {
+	profile: UserProfile | null;
+	dailySummary?: string;
+	dailyCount?: number;
+	stmTurns?: STMTurn[];
+	stmTotal?: number;
+}
+
+type GraphSource = GraphNode["source"];
+type GraphSourceFilter = GraphSource | "all";
+
+interface GraphClusterDef {
+	source: GraphSource;
+	label: string;
+	x: number;
+	y: number;
+	radiusX: number;
+	radiusY: number;
 }
 
 const LEARNING_FILTERS: LearningInsightFilter[] = [
@@ -165,6 +191,58 @@ const EXPERIENCE_STATUS_FILTERS: LearningExperienceStatusFilter[] = [
 	"partial",
 	"failed",
 	"unknown",
+];
+
+const GRAPH_CLUSTER_DEFS: GraphClusterDef[] = [
+	{
+		source: "shortTerm",
+		label: "Corto plazo",
+		x: 38,
+		y: 31,
+		radiusX: 12,
+		radiusY: 10,
+	},
+	{
+		source: "learning",
+		label: "Aprendizaje",
+		x: 71,
+		y: 31,
+		radiusX: 14,
+		radiusY: 11,
+	},
+	{
+		source: "memory",
+		label: "Largo plazo",
+		x: 36,
+		y: 62,
+		radiusX: 16,
+		radiusY: 12,
+	},
+	{
+		source: "profile",
+		label: "Usuario",
+		x: 77,
+		y: 59,
+		radiusX: 12,
+		radiusY: 10,
+	},
+	{
+		source: "daily",
+		label: "Diaria",
+		x: 55,
+		y: 78,
+		radiusX: 13,
+		radiusY: 9,
+	},
+];
+
+const GRAPH_SOURCE_FILTERS: Array<{ id: GraphSourceFilter; label: string }> = [
+	{ id: "all", label: "Todas" },
+	{ id: "shortTerm", label: "Corto plazo" },
+	{ id: "memory", label: "Largo plazo" },
+	{ id: "learning", label: "Aprendizaje" },
+	{ id: "profile", label: "Usuario" },
+	{ id: "daily", label: "Diaria" },
 ];
 
 const getMemoryCreatedAt = (item: LTMItem): string | undefined => {
@@ -192,6 +270,9 @@ export const MemoryPage: React.FC = () => {
 		[],
 	);
 	const [selectedGraphNode, setSelectedGraphNode] = useState<string | null>(
+		null,
+	);
+	const [openedGraphNode, setOpenedGraphNode] = useState<GraphNode | null>(
 		null,
 	);
 	const [learningFilter, setLearningFilter] =
@@ -234,15 +315,69 @@ export const MemoryPage: React.FC = () => {
 	const [consolidating, setConsolidating] = useState(false);
 
 	useEffect(() => {
-		apiGet<MemoryStats>("/api/memory/stats")
-			.then((s) => {
-				setStats(s);
-				setLoading(false);
-			})
-			.catch((e) => {
-				setMsg(e.message);
-				setLoading(false);
-			});
+		let cancelled = false;
+
+		const loadInitialMemoryState = async () => {
+			try {
+				const [
+					statsData,
+					memoriesData,
+					insightsData,
+					dailyData,
+					profileData,
+					stmData,
+				] = await Promise.all([
+					apiGet<MemoryStats>("/api/memory/stats"),
+					apiGet<{ memories: LTMItem[] }>(
+						"/api/memory/ltm/recent?limit=80",
+					).catch(() => ({ memories: [] })),
+					apiGet<{ insights: LearningInsight[] }>(
+						"/api/learning/insights?limit=80",
+					).catch(() => ({ insights: [] })),
+					apiGet<{
+						context: string;
+						messageCount: number;
+						date: string;
+						structured: DailyStructured | null;
+					}>("/api/memory/daily").catch(() => ({
+						context: "",
+						messageCount: 0,
+						date: "",
+						structured: null,
+					})),
+					apiGet<{ profile: UserProfile | null }>("/api/memory/profile").catch(
+						() => ({ profile: null }),
+					),
+					apiGet<{ turns: STMTurn[]; total: number }>("/api/memory/stm").catch(
+						() => ({ turns: [], total: 0 }),
+					),
+				]);
+
+				if (cancelled) return;
+
+				setStats(statsData);
+				setLtmItems(memoriesData.memories ?? []);
+				setLearningInsights(insightsData.insights ?? []);
+				setDailyContext(dailyData.context ?? "");
+				setDailyStructured(dailyData.structured ?? null);
+				setDailyCount(dailyData.messageCount ?? 0);
+				setDailyDate(dailyData.date ?? "");
+				setProfile(profileData.profile ?? null);
+				setTempName(profileData.profile?.displayName ?? "");
+				setStmTurns(stmData.turns ?? []);
+				setStmTotal(stmData.total ?? 0);
+			} catch (e) {
+				if (!cancelled) setMsg(e instanceof Error ? e.message : String(e));
+			} finally {
+				if (!cancelled) setLoading(false);
+			}
+		};
+
+		loadInitialMemoryState();
+
+		return () => {
+			cancelled = true;
+		};
 	}, []);
 
 	const loadLearningInsights = useCallback(
@@ -487,7 +622,13 @@ export const MemoryPage: React.FC = () => {
 		} as React.CSSProperties,
 	};
 
-	const graph = buildMemoryGraph(ltmItems, learningInsights);
+	const graph = buildMemoryGraph(ltmItems, learningInsights, {
+		profile,
+		dailySummary: dailyStructured?.summary ?? dailyContext,
+		dailyCount,
+		stmTurns,
+		stmTotal,
+	});
 	const selectedNode = graph.nodes.find(
 		(node) => node.id === selectedGraphNode,
 	);
@@ -496,6 +637,63 @@ export const MemoryPage: React.FC = () => {
 				(edge) => edge.from === selectedNode.id || edge.to === selectedNode.id,
 			)
 		: [];
+	const openGraphNodeSource = async (node: GraphNode) => {
+		const targetTab = getTabForGraphSource(node.source);
+		const query = buildGraphNodeSearchQuery(node);
+		setOpenedGraphNode(node);
+		setSelectedGraphNode(node.id);
+
+		if (targetTab === "ltm") {
+			setActiveTab("ltm");
+			setSearchQuery(query);
+			setSearchPerformed(true);
+			setSearching(true);
+			try {
+				const [recent, results] = await Promise.all([
+					apiGet<{ memories: LTMItem[] }>("/api/memory/ltm/recent?limit=30"),
+					apiGet<{ results: LTMItem[] }>(
+						`/api/memory/search?q=${encodeURIComponent(query)}`,
+					),
+				]);
+				setLtmItems(recent.memories ?? []);
+				setSearchResults(results.results ?? []);
+			} catch (e) {
+				setMsg(e instanceof Error ? e.message : String(e));
+			} finally {
+				setSearching(false);
+			}
+			return;
+		}
+
+		if (targetTab === "learning") {
+			const nextFilter = getLearningFilterForGraphNode(node);
+			setLearningFilter(nextFilter);
+			setActiveTab("learning");
+			try {
+				await loadLearningInsights(nextFilter, experienceStatusFilter);
+			} catch (e) {
+				setMsg(e instanceof Error ? e.message : String(e));
+			}
+			return;
+		}
+
+		await loadTab(targetTab);
+	};
+	const returnToOpenedGraphNode = async () => {
+		if (openedGraphNode) setSelectedGraphNode(openedGraphNode.id);
+		await loadTab("graph");
+	};
+
+	useEffect(() => {
+		if (graph.nodes.length === 0) return;
+		if (
+			!selectedGraphNode ||
+			!graph.nodes.some((node) => node.id === selectedGraphNode)
+		) {
+			setSelectedGraphNode(graph.nodes[0]?.id ?? null);
+		}
+	}, [graph, selectedGraphNode]);
+
 	const latestFeedbackByExperience = new Map(
 		learningExperiences.map((experience) => [
 			experience.id,
@@ -510,53 +708,170 @@ export const MemoryPage: React.FC = () => {
 			className="page-shell page-shell--xl"
 			style={{ padding: "24px", overflowY: "auto", height: "100%" }}
 		>
-			<div
-				style={{
-					display: "flex",
-					justifyContent: "space-between",
-					alignItems: "center",
-					marginBottom: "24px",
-					flexWrap: "wrap",
-					gap: "12px",
-				}}
-			>
-				<h2
+			<div className="page-header animate-fade-in">
+				<div>
+					<div
+						style={{
+							display: "inline-flex",
+							alignItems: "center",
+							gap: 8,
+							padding: "6px 10px",
+							borderRadius: 999,
+							background: stats?.enabled
+								? "rgba(16,185,129,0.12)"
+								: "rgba(239,68,68,0.1)",
+							border: stats?.enabled
+								? "1px solid rgba(16,185,129,0.22)"
+								: "1px solid rgba(239,68,68,0.2)",
+							color: stats?.enabled ? "#10b981" : "#ef4444",
+							fontSize: "0.72rem",
+							fontWeight: 800,
+							letterSpacing: "0.06em",
+							textTransform: "uppercase",
+						}}
+					>
+						<span
+							style={{
+								width: 7,
+								height: 7,
+								borderRadius: 999,
+								background: "currentColor",
+								boxShadow: "0 0 14px currentColor",
+							}}
+						/>
+						{stats?.enabled ? "Memoria activa" : "Memoria inactiva"}
+					</div>
+					<h1
+						style={{
+							margin: "12px 0 6px",
+							fontSize: "clamp(1.65rem, 3vw, 2.4rem)",
+							fontWeight: 850,
+							letterSpacing: "-0.04em",
+							color: "#f4f4f5",
+						}}
+					>
+						Centro de Memoria
+					</h1>
+					<p
+						style={{
+							margin: 0,
+							maxWidth: 680,
+							color: "#a1a1aa",
+							lineHeight: 1.55,
+						}}
+					>
+						Explora, conecta y gestiona lo que Octopus recuerda: memoria de
+						trabajo, largo plazo, perfil del usuario y aprendizajes operativos.
+					</p>
+				</div>
+
+				<div
 					style={{
-						margin: 0,
-						fontSize: "20px",
-						fontWeight: 700,
 						display: "flex",
+						gap: 10,
 						alignItems: "center",
-						gap: 8,
+						flexWrap: "wrap",
+						justifyContent: "flex-end",
 					}}
 				>
-					<AppIcon name="brain" size={22} /> Base de Memoria
-				</h2>
-				<div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-					{tabs.map((t) => (
-						<button
-							key={t.id}
-							type="button"
-							onClick={() => loadTab(t.id)}
+					<form
+						onSubmit={(event) => {
+							event.preventDefault();
+							void handleSearch();
+							setActiveTab("ltm");
+						}}
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 8,
+							minWidth: "min(420px, 100%)",
+							padding: "10px 12px",
+							borderRadius: 14,
+							background: "rgba(9,9,11,0.76)",
+							border: "1px solid #27272a",
+							boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+						}}
+					>
+						<AppIcon name="spark" size={16} />
+						<input
+							value={searchQuery}
+							onChange={(event) => setSearchQuery(event.target.value)}
+							placeholder="Buscar memorias, conceptos o conexiones..."
 							style={{
-								padding: "7px 14px",
-								borderRadius: "8px",
-								border: "none",
-								cursor: "pointer",
-								fontSize: "13px",
-								fontWeight: 500,
-								backgroundColor: activeTab === t.id ? "#3b82f6" : "#27272a",
-								color: activeTab === t.id ? "#fff" : "#a1a1aa",
+								background: "transparent",
+								border: 0,
+								outline: "none",
+								color: "#f4f4f5",
+								minWidth: 0,
+								flex: 1,
+								font: "inherit",
+							}}
+						/>
+						<span
+							style={{
+								padding: "2px 7px",
+								borderRadius: 7,
+								background: "#18181b",
+								border: "1px solid #27272a",
+								color: "#a1a1aa",
+								fontSize: "0.72rem",
+								fontWeight: 800,
 							}}
 						>
-							<span
-								style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-							>
-								<AppIcon name={t.icon} size={14} /> {t.label}
-							</span>
-						</button>
-					))}
+							Enter
+						</span>
+					</form>
+					<button
+						type="button"
+						onClick={handleConsolidate}
+						disabled={consolidating || !stats?.enabled}
+						className="hover-lift"
+						style={{
+							padding: "12px 16px",
+							borderRadius: 14,
+							border: "1px solid rgba(99,102,241,0.35)",
+							background:
+								consolidating || !stats?.enabled
+									? "#18181b"
+									: "linear-gradient(135deg, rgba(99,102,241,0.92), rgba(14,165,233,0.82))",
+							color: consolidating || !stats?.enabled ? "#71717a" : "#fff",
+							cursor:
+								consolidating || !stats?.enabled ? "not-allowed" : "pointer",
+							fontWeight: 800,
+							display: "inline-flex",
+							alignItems: "center",
+							gap: 8,
+						}}
+					>
+						<AppIcon name="database" size={16} />
+						{consolidating ? "Consolidando" : "Consolidar"}
+					</button>
 				</div>
+			</div>
+
+			<div
+				className="settings-tabbar animate-slide-up"
+				style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
+			>
+				{tabs.map((t) => (
+					<button
+						key={t.id}
+						type="button"
+						onClick={() => loadTab(t.id)}
+						className={`settings-tab${activeTab === t.id ? " is-active" : ""}`}
+						style={{ padding: "12px 14px" }}
+					>
+						<span className="settings-tab-icon">
+							<AppIcon name={t.icon} size={18} />
+						</span>
+						<span>
+							<span className="settings-tab-label">{t.label}</span>
+							<span className="settings-tab-description">
+								{getTabDescription(t.id)}
+							</span>
+						</span>
+					</button>
+				))}
 			</div>
 
 			{msg && (
@@ -576,231 +891,58 @@ export const MemoryPage: React.FC = () => {
 				</div>
 			)}
 
+			{openedGraphNode && activeTab !== "graph" && activeTab !== "overview" && (
+				<MemoryGraphFocusBanner
+					node={openedGraphNode}
+					query={buildGraphNodeSearchQuery(openedGraphNode)}
+					onBackToGraph={() => void returnToOpenedGraphNode()}
+					onClear={() => setOpenedGraphNode(null)}
+				/>
+			)}
+
 			{/* Overview */}
 			{activeTab === "overview" && (
-				<>
-					<div
-						style={{
-							display: "grid",
-							gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-							gap: 10,
-							marginBottom: 20,
-						}}
-					>
-						<StatCard
-							icon="brain"
-							title="Habilitada"
-							value={stats?.enabled ? "Sí" : "No"}
-							color={stats?.enabled ? "#22c55e" : "#ef4444"}
-						/>
-						<StatCard
-							icon="chat"
-							title="STM Max Tokens"
-							value={stats?.shortTerm?.maxTokens ?? "—"}
-						/>
-						<StatCard
-							icon="database"
-							title="LTM Max Items"
-							value={stats?.longTerm?.maxItems?.toLocaleString() ?? "—"}
-						/>
-						<StatCard
-							icon="activity"
-							title="Umbral Importancia"
-							value={stats?.longTerm?.importanceThreshold ?? "—"}
-						/>
-						<StatCard
-							icon="settings"
-							title="Resultados Max"
-							value={stats?.retrieval?.maxResults ?? "—"}
-						/>
-						<StatCard
-							icon="check"
-							title="Relevancia Min"
-							value={stats?.retrieval?.minRelevance ?? "—"}
-						/>
-					</div>
-					<button
-						type="button"
-						onClick={handleConsolidate}
-						disabled={consolidating || !stats?.enabled}
-						style={{
-							padding: "10px 20px",
-							borderRadius: 8,
-							border: "none",
-							background: consolidating || !stats?.enabled ? "#333" : "#7c3aed",
-							color: consolidating || !stats?.enabled ? "#666" : "#fff",
-							cursor:
-								consolidating || !stats?.enabled ? "not-allowed" : "pointer",
-							fontWeight: 600,
-						}}
-					>
-						{consolidating ? "Consolidando..." : "🔄 Consolidar ahora"}
-					</button>
-					<span style={{ fontSize: "0.78rem", color: "#666", marginLeft: 10 }}>
-						{stats?.enabled
-							? "Transfiere recuerdos corto → largo plazo"
-							: "Activa la memoria en Configuración para consolidar"}
-					</span>
-				</>
+				<MemoryOverviewDashboard
+					stats={stats}
+					graph={graph}
+					selectedNode={selectedNode}
+					selectedEdges={selectedEdges}
+					ltmItems={ltmItems}
+					learningInsights={learningInsights}
+					profile={profile}
+					dailySummary={dailyStructured?.summary ?? dailyContext}
+					dailyCount={dailyCount}
+					stmTotal={stmTotal}
+					stmTurns={stmTurns}
+					onSelectNode={setSelectedGraphNode}
+					onOpenGraph={() => loadTab("graph")}
+					onOpenSource={openGraphNodeSource}
+				/>
 			)}
 
 			{activeTab === "graph" && (
 				<div
 					style={{
 						display: "grid",
-						gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+						gridTemplateColumns:
+							"repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
 						gap: 16,
+						alignItems: "stretch",
 					}}
 				>
-					<div style={S.section}>
-						<div
-							style={{
-								display: "flex",
-								justifyContent: "space-between",
-								gap: 12,
-								alignItems: "center",
-								marginBottom: 14,
-								flexWrap: "wrap",
-							}}
-						>
-							<h3 style={{ margin: 0, fontSize: "1rem" }}>
-								Mapa de conocimiento ({graph.nodes.length} nodos,{" "}
-								{graph.edges.length} conexiones)
-							</h3>
-							<button
-								type="button"
-								onClick={() => loadTab("graph")}
-								style={{
-									padding: "7px 12px",
-									borderRadius: 8,
-									border: "1px solid #27272a",
-									background: "#0f1117",
-									color: "#a1a1aa",
-									cursor: "pointer",
-								}}
-							>
-								Actualizar
-							</button>
-						</div>
-						{graph.nodes.length === 0 ? (
-							<div style={{ color: "#71717a", fontSize: "0.85rem" }}>
-								Sin memorias o aprendizajes disponibles para visualizar.
-							</div>
-						) : (
-							<div
-								style={{
-									display: "grid",
-									gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
-									gap: 10,
-								}}
-							>
-								{graph.nodes.map((node) => (
-									<button
-										key={node.id}
-										type="button"
-										onClick={() => setSelectedGraphNode(node.id)}
-										style={{
-											textAlign: "left",
-											padding: 12,
-											borderRadius: 12,
-											border:
-												selectedGraphNode === node.id
-													? "1px solid #818cf8"
-													: "1px solid #27272a",
-											background:
-												node.source === "learning"
-													? "rgba(124,58,237,0.16)"
-													: "rgba(59,130,246,0.14)",
-											color: "#e4e4e7",
-											cursor: "pointer",
-										}}
-									>
-										<div style={{ fontWeight: 700, fontSize: "0.85rem" }}>
-											{node.label}
-										</div>
-										<div
-											style={{
-												color: "#a1a1aa",
-												fontSize: "0.73rem",
-												marginTop: 5,
-											}}
-										>
-											{node.source} · {node.type} · peso{" "}
-											{Math.round(node.weight * 100)}%
-										</div>
-										<div
-											style={{
-												color: "#71717a",
-												fontSize: "0.72rem",
-												marginTop: 8,
-											}}
-										>
-											{node.keywords.slice(0, 4).join(", ") || "sin keywords"}
-										</div>
-									</button>
-								))}
-							</div>
-						)}
-					</div>
-
-					<div style={S.section}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							Nodo seleccionado
-						</h3>
-						{selectedNode ? (
-							<div>
-								<div
-									style={{ color: "#f4f4f5", fontWeight: 700, marginBottom: 6 }}
-								>
-									{selectedNode.label}
-								</div>
-								<div
-									style={{
-										color: "#71717a",
-										fontSize: "0.78rem",
-										marginBottom: 12,
-									}}
-								>
-									{selectedNode.source} · {selectedNode.type} ·{" "}
-									{selectedEdges.length} conexiones
-								</div>
-								<div
-									style={{
-										color: "#d4d4d8",
-										fontSize: "0.85rem",
-										lineHeight: 1.5,
-									}}
-								>
-									{selectedNode.content}
-								</div>
-								{selectedEdges.slice(0, 12).map((edge) => {
-									const otherId =
-										edge.from === selectedNode.id ? edge.to : edge.from;
-									const other = graph.nodes.find((node) => node.id === otherId);
-									return (
-										<div
-											key={`${edge.from}-${edge.to}`}
-											style={{
-												padding: "8px 10px",
-												borderRadius: 8,
-												background: "#0f1117",
-												marginTop: 8,
-												fontSize: "0.78rem",
-												color: "#a1a1aa",
-											}}
-										>
-											{other?.label ?? otherId} · {edge.keywords.join(", ")}
-										</div>
-									);
-								})}
-							</div>
-						) : (
-							<div style={{ color: "#71717a", fontSize: "0.85rem" }}>
-								Selecciona un nodo para inspeccionar contenido, fuente y
-								relaciones.
-							</div>
-						)}
-					</div>
+					<MemoryNetworkMap
+						graph={graph}
+						selectedNodeId={selectedGraphNode}
+						onSelectNode={setSelectedGraphNode}
+						onRefresh={() => loadTab("graph")}
+					/>
+					<MemoryNodeInspector
+						graph={graph}
+						selectedNode={selectedNode}
+						selectedEdges={selectedEdges}
+						onSelectNode={setSelectedGraphNode}
+						onOpenSource={openGraphNodeSource}
+					/>
 				</div>
 			)}
 
@@ -1990,28 +2132,1503 @@ export const MemoryPage: React.FC = () => {
 	);
 };
 
-const StatCard: React.FC<{
-	icon: AppIconName;
-	title: string;
-	value: string | number;
-	color?: string;
-}> = ({ icon, title, value, color = "#e0e0e0" }) => (
+const MemoryOverviewDashboard: React.FC<{
+	stats: MemoryStats | null;
+	graph: { nodes: GraphNode[]; edges: GraphEdge[] };
+	selectedNode?: GraphNode;
+	selectedEdges: GraphEdge[];
+	ltmItems: LTMItem[];
+	learningInsights: LearningInsight[];
+	profile: UserProfile | null;
+	dailySummary: string;
+	dailyCount: number;
+	stmTotal: number;
+	stmTurns: STMTurn[];
+	onSelectNode: (id: string) => void;
+	onOpenGraph: () => void;
+	onOpenSource: (node: GraphNode) => void;
+}> = ({
+	stats,
+	graph,
+	selectedNode,
+	selectedEdges,
+	ltmItems,
+	learningInsights,
+	profile,
+	dailySummary,
+	dailyCount,
+	stmTotal,
+	stmTurns,
+	onSelectNode,
+	onOpenGraph,
+	onOpenSource,
+}) => {
+	const stmTokens = getRecordNumber(stats?.shortTerm, "tokens");
+	const stmMaxTokens = stats?.shortTerm?.maxTokens;
+	const stmLoad = getRecordNumber(stats?.shortTerm, "load");
+	const ltmCount = getRecordNumber(stats?.longTerm, "count") ?? ltmItems.length;
+	const ltmMaxItems = stats?.longTerm?.maxItems;
+	const averageImportance = ltmItems.length
+		? ltmItems.reduce(
+				(total, item) =>
+					total + (typeof item.importance === "number" ? item.importance : 0.5),
+				0,
+			) / ltmItems.length
+		: 0;
+	const activeConcepts = Array.from(
+		new Set(graph.nodes.flatMap((node) => node.keywords.slice(0, 4))),
+	).slice(0, 12);
+	const typeDistribution = Object.entries(
+		ltmItems.reduce<Record<string, number>>((acc, item) => {
+			const type = typeof item.type === "string" ? item.type : "memory";
+			acc[type] = (acc[type] ?? 0) + 1;
+			return acc;
+		}, {}),
+	)
+		.sort((a, b) => b[1] - a[1])
+		.slice(0, 4);
+
+	return (
+		<div className="animate-slide-up">
+			<div className="stats-grid" style={{ marginBottom: 16 }}>
+				<MemoryMetricCard
+					icon="database"
+					label="Memorias largo plazo"
+					value={formatNumber(ltmCount)}
+					detail={
+						ltmMaxItems ? `capacidad ${formatNumber(ltmMaxItems)}` : "LTM"
+					}
+					color="#3b82f6"
+				/>
+				<MemoryMetricCard
+					icon="chat"
+					label="Memoria activa"
+					value={formatNumber(stmTotal || stmTurns.length)}
+					detail={
+						stmTokens && stmMaxTokens
+							? `${formatNumber(stmTokens)} / ${formatNumber(stmMaxTokens)} tokens`
+							: "corto plazo"
+					}
+					color="#06b6d4"
+				/>
+				<MemoryMetricCard
+					icon="spark"
+					label="Conexiones detectadas"
+					value={formatNumber(graph.edges.length)}
+					detail={`${formatNumber(graph.nodes.length)} nodos en red`}
+					color="#8b5cf6"
+				/>
+				<MemoryMetricCard
+					icon="check"
+					label="Aprendizajes"
+					value={formatNumber(learningInsights.length)}
+					detail={`${Math.round(averageImportance * 100)}% importancia media`}
+					color="#a78bfa"
+				/>
+				<MemoryMetricCard
+					icon="user"
+					label="Memoria usuario"
+					value={profile ? formatNumber(profile.conversationCount) : "—"}
+					detail={profile?.displayName ?? "perfil contextual"}
+					color="#10b981"
+				/>
+			</div>
+
+			<div
+				style={{
+					display: "grid",
+					gridTemplateColumns:
+						"repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
+					gap: 16,
+					alignItems: "stretch",
+				}}
+			>
+				<div style={{ minWidth: 0 }}>
+					<MemoryNetworkMap
+						graph={graph}
+						selectedNodeId={selectedNode?.id ?? null}
+						onSelectNode={onSelectNode}
+						compact
+					/>
+				</div>
+				<div
+					style={{
+						display: "flex",
+						flexDirection: "column",
+						gap: 16,
+						minWidth: 0,
+					}}
+				>
+					<MemoryNodeInspector
+						graph={graph}
+						selectedNode={selectedNode}
+						selectedEdges={selectedEdges}
+						onSelectNode={onSelectNode}
+						onOpenSource={onOpenSource}
+						compact
+					/>
+					<div className="surface-panel">
+						<div
+							style={{
+								display: "flex",
+								justifyContent: "space-between",
+								gap: 12,
+								alignItems: "center",
+							}}
+						>
+							<div>
+								<h3 style={{ margin: 0, fontSize: "0.98rem" }}>
+									Salud de memoria
+								</h3>
+								<div
+									style={{
+										color: "#71717a",
+										fontSize: "0.78rem",
+										marginTop: 4,
+									}}
+								>
+									Capacidad, distribución y señal reciente
+								</div>
+							</div>
+							<button
+								type="button"
+								onClick={onOpenGraph}
+								style={ghostButtonStyle}
+							>
+								Abrir grafo
+							</button>
+						</div>
+						<div style={{ marginTop: 16, display: "grid", gap: 12 }}>
+							<ProgressMetric
+								label="Carga STM"
+								value={
+									stmLoad ??
+									(stmTokens && stmMaxTokens ? stmTokens / stmMaxTokens : 0)
+								}
+								color="#06b6d4"
+							/>
+							<ProgressMetric
+								label="Capacidad LTM"
+								value={ltmMaxItems ? ltmCount / ltmMaxItems : 0}
+								color="#3b82f6"
+							/>
+							<ProgressMetric
+								label="Importancia promedio"
+								value={averageImportance}
+								color="#8b5cf6"
+							/>
+						</div>
+						{typeDistribution.length > 0 && (
+							<div style={{ marginTop: 16 }}>
+								<div style={sectionLabelStyle}>Tipos dominantes</div>
+								<div className="settings-chip-list">
+									{typeDistribution.map(([type, count]) => (
+										<span
+											key={type}
+											className="settings-chip settings-chip--mono"
+										>
+											{type} · {count}
+										</span>
+									))}
+								</div>
+							</div>
+						)}
+					</div>
+				</div>
+			</div>
+
+			<div
+				style={{
+					display: "grid",
+					gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+					gap: 16,
+					marginTop: 16,
+				}}
+			>
+				<MemorySignalPanel
+					title="Conceptos activos"
+					description="Keywords extraídas de memorias y aprendizajes conectados."
+					items={activeConcepts}
+				/>
+				<MemorySignalPanel
+					title="Resumen diario"
+					description={`${formatNumber(dailyCount)} mensajes registrados hoy`}
+					items={dailySummary ? [truncateText(dailySummary, 220)] : []}
+					empty="Aún no hay resumen diario disponible."
+				/>
+				<MemorySignalPanel
+					title="Aprendizajes recientes"
+					description="Señales que el motor puede reutilizar en futuras tareas."
+					items={learningInsights.slice(0, 5).map((insight) => insight.content)}
+					empty="Sin aprendizajes automáticos cargados."
+				/>
+			</div>
+		</div>
+	);
+};
+
+const MemoryNetworkMap: React.FC<{
+	graph: { nodes: GraphNode[]; edges: GraphEdge[] };
+	selectedNodeId: string | null;
+	onSelectNode: (id: string) => void;
+	onRefresh?: () => void;
+	compact?: boolean;
+}> = ({ graph, selectedNodeId, onSelectNode, onRefresh, compact = false }) => {
+	const [sourceFilter, setSourceFilter] = useState<GraphSourceFilter>("all");
+	const [mapZoom, setMapZoom] = useState(1);
+	const [focusConnectionsOnly, setFocusConnectionsOnly] = useState(false);
+	const visibleNodes = getVisibleGraphNodes(
+		graph,
+		selectedNodeId,
+		sourceFilter,
+		compact,
+		focusConnectionsOnly,
+	);
+	const visibleIds = new Set(visibleNodes.map((node) => node.id));
+	const visibleEdges = getVisibleGraphEdges(
+		graph.edges,
+		visibleIds,
+		selectedNodeId,
+		compact,
+	);
+	const layout = createGraphLayout(visibleNodes);
+	const mapLayout = scaleGraphLayout(layout, mapZoom);
+	const sourceCounts = countNodesBySource(graph.nodes);
+	const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
+	const activityItems = buildMemoryActivityItems(visibleNodes, selectedNode);
+	const connectedIds = new Set(
+		selectedNodeId
+			? graph.edges.flatMap((edge) =>
+					edge.from === selectedNodeId
+						? [edge.to]
+						: edge.to === selectedNodeId
+							? [edge.from]
+							: [],
+				)
+			: [],
+	);
+	const updateZoom = (nextZoom: number) => {
+		setMapZoom(Math.max(0.8, Math.min(1.45, nextZoom)));
+	};
+
+	return (
+		<div
+			className="surface-panel hover-glow"
+			style={{
+				position: "relative",
+				minHeight: compact ? 560 : 690,
+				overflow: "hidden",
+				background:
+					"radial-gradient(circle at 50% 54%, rgba(14,165,233,0.18), transparent 24%), radial-gradient(circle at 76% 26%, rgba(168,85,247,0.14), transparent 20%), linear-gradient(180deg, rgba(9,9,11,0.97), rgba(3,7,18,0.98))",
+			}}
+		>
+			<div
+				style={{
+					position: "relative",
+					zIndex: 3,
+					display: "flex",
+					justifyContent: "space-between",
+					gap: 12,
+					alignItems: "flex-start",
+					flexWrap: "wrap",
+				}}
+			>
+				<div>
+					<h3 style={{ margin: 0, color: "#f4f4f5", fontSize: "1rem" }}>
+						Red de memorias
+					</h3>
+					<div style={{ marginTop: 5, color: "#71717a", fontSize: "0.8rem" }}>
+						{visibleNodes.length} visibles de {graph.nodes.length} nodos · foco
+						por clúster
+					</div>
+				</div>
+				{onRefresh && (
+					<button type="button" onClick={onRefresh} style={ghostButtonStyle}>
+						Actualizar
+					</button>
+				)}
+			</div>
+
+			{compact && (
+				<div
+					style={{
+						position: "relative",
+						zIndex: 8,
+						display: "flex",
+						gap: 8,
+						flexWrap: "wrap",
+						marginTop: 14,
+					}}
+				>
+					{GRAPH_SOURCE_FILTERS.map((filter) => {
+						const active = sourceFilter === filter.id;
+						const color =
+							filter.id === "all" ? "#818cf8" : getSourceColor(filter.id);
+						const count =
+							filter.id === "all"
+								? graph.nodes.length
+								: (sourceCounts[filter.id] ?? 0);
+						return (
+							<button
+								key={filter.id}
+								type="button"
+								onClick={() => setSourceFilter(filter.id)}
+								style={{
+									padding: "8px 10px",
+									borderRadius: 999,
+									border: active
+										? `1px solid ${hexToRgba(color, 0.58)}`
+										: "1px solid #27272a",
+									background: active
+										? hexToRgba(color, 0.16)
+										: "rgba(9,9,11,0.62)",
+									color: active ? color : "#a1a1aa",
+									cursor: "pointer",
+									fontSize: "0.74rem",
+									fontWeight: 800,
+								}}
+							>
+								{filter.label} · {count}
+							</button>
+						);
+					})}
+				</div>
+			)}
+
+			{!compact && (
+				<MemoryMapSidebar
+					graph={graph}
+					sourceCounts={sourceCounts}
+					sourceFilter={sourceFilter}
+					onSourceFilterChange={setSourceFilter}
+					selectedNode={selectedNode}
+					connectedCount={connectedIds.size}
+				/>
+			)}
+
+			{visibleNodes.length === 0 ? (
+				<div
+					style={{
+						position: "absolute",
+						inset: 0,
+						display: "grid",
+						placeItems: "center",
+						color: "#71717a",
+						fontSize: "0.9rem",
+					}}
+				>
+					Sin memorias o aprendizajes disponibles para visualizar.
+				</div>
+			) : (
+				<>
+					<div
+						style={{
+							position: "absolute",
+							inset: compact ? "120px 18px 18px" : "128px 22px 22px",
+							borderRadius: 24,
+							background:
+								"radial-gradient(circle, rgba(59,130,246,0.08) 1px, transparent 1px)",
+							backgroundSize: "28px 28px",
+							opacity: 0.8,
+						}}
+					/>
+					{GRAPH_CLUSTER_DEFS.map((cluster) => {
+						const count = visibleNodes.filter(
+							(node) => node.source === cluster.source,
+						).length;
+						if (count === 0) return null;
+						const color = getSourceColor(cluster.source);
+						const point = scaleGraphPoint(
+							{ x: cluster.x, y: cluster.y },
+							mapZoom,
+						);
+						return (
+							<div
+								key={cluster.source}
+								style={{
+									position: "absolute",
+									left: `${point.x}%`,
+									top: `${point.y}%`,
+									transform: "translate(-50%, -50%)",
+									width: compact ? 164 : 190,
+									height: compact ? 128 : 148,
+									borderRadius: 32,
+									background: `radial-gradient(circle, ${hexToRgba(color, 0.16)}, transparent 66%)`,
+									border: `1px solid ${hexToRgba(color, 0.1)}`,
+									zIndex: 1,
+								}}
+							>
+								<div
+									style={{
+										position: "absolute",
+										left: 14,
+										top: 12,
+										color,
+										fontSize: "0.72rem",
+										fontWeight: 900,
+										textTransform: "uppercase",
+										letterSpacing: "0.06em",
+									}}
+								>
+									{cluster.label} · {count}
+								</div>
+							</div>
+						);
+					})}
+					<svg
+						viewBox="0 0 100 100"
+						preserveAspectRatio="none"
+						style={{
+							position: "absolute",
+							inset: 0,
+							width: "100%",
+							height: "100%",
+						}}
+					>
+						<title>Conexiones semánticas entre memorias</title>
+						<defs>
+							<filter
+								id="memory-glow"
+								x="-50%"
+								y="-50%"
+								width="200%"
+								height="200%"
+							>
+								<feGaussianBlur stdDeviation="0.65" result="coloredBlur" />
+								<feMerge>
+									<feMergeNode in="coloredBlur" />
+									<feMergeNode in="SourceGraphic" />
+								</feMerge>
+							</filter>
+						</defs>
+						{visibleEdges.map((edge, index) => {
+							const from = mapLayout[edge.from];
+							const to = mapLayout[edge.to];
+							if (!from || !to) return null;
+							const selected =
+								selectedNodeId === edge.from || selectedNodeId === edge.to;
+							const color = selected ? "#67e8f9" : "#2563eb";
+							return (
+								<path
+									key={`${edge.from}-${edge.to}-${index}`}
+									d={`M ${from.x} ${from.y} C ${from.x} 52, ${to.x} 52, ${to.x} ${to.y}`}
+									stroke={color}
+									strokeWidth={selected ? 0.38 : 0.12}
+									strokeOpacity={selected ? 0.86 : 0.14}
+									fill="none"
+									strokeDasharray={selected ? "2 1.6" : "1 2.2"}
+									filter={selected ? "url(#memory-glow)" : undefined}
+								>
+									<animate
+										attributeName="stroke-dashoffset"
+										values="0;6"
+										dur={`${5 + (index % 5)}s`}
+										repeatCount="indefinite"
+									/>
+								</path>
+							);
+						})}
+					</svg>
+					<div
+						style={{
+							position: "absolute",
+							left: "50%",
+							top: compact ? "56%" : "55%",
+							transform: "translate(-50%, -50%)",
+							width: compact ? 78 : 96,
+							height: compact ? 78 : 96,
+							borderRadius: 28,
+							background:
+								"linear-gradient(135deg, rgba(6,182,212,0.95), rgba(99,102,241,0.95))",
+							border: "1px solid rgba(103,232,249,0.72)",
+							boxShadow:
+								"0 0 32px rgba(34,211,238,0.42), inset 0 0 22px rgba(255,255,255,0.16)",
+							display: "grid",
+							placeItems: "center",
+							color: "#fff",
+							zIndex: 2,
+						}}
+					>
+						<AppIcon name="brain" size={compact ? 34 : 42} strokeWidth={1.5} />
+					</div>
+					{selectedNode && (
+						<div
+							style={{
+								position: "absolute",
+								left: "50%",
+								top: compact ? "68%" : "66%",
+								transform: "translateX(-50%)",
+								zIndex: 5,
+								padding: "8px 12px",
+								borderRadius: 999,
+								background: "rgba(9,9,11,0.82)",
+								border: `1px solid ${hexToRgba(getSourceColor(selectedNode.source), 0.35)}`,
+								color: "#d4d4d8",
+								fontSize: "0.74rem",
+								fontWeight: 800,
+								maxWidth: "72%",
+								whiteSpace: "nowrap",
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+							}}
+						>
+							{focusConnectionsOnly ? "Solo vecinos" : "Foco"}:{" "}
+							{selectedNode.label} · {connectedIds.size} conexiones
+						</div>
+					)}
+					{!compact && (
+						<MemoryMiniMap
+							layout={layout}
+							nodes={visibleNodes}
+							edges={visibleEdges}
+							selectedNodeId={selectedNodeId}
+						/>
+					)}
+					{visibleNodes.map((node, index) => {
+						const point = mapLayout[node.id];
+						if (!point) return null;
+						const color = getSourceColor(node.source);
+						const selected = selectedNodeId === node.id;
+						const connected = connectedIds.has(node.id);
+						const size = compact
+							? 54 + node.weight * 12
+							: 62 + node.weight * 14;
+						return (
+							<button
+								key={node.id}
+								type="button"
+								onClick={() => onSelectNode(node.id)}
+								className="hover-lift"
+								style={{
+									position: "absolute",
+									left: `${point.x}%`,
+									top: `${point.y}%`,
+									transform: "translate(-50%, -50%)",
+									width: size,
+									minHeight: size,
+									borderRadius: 20,
+									padding: compact ? "8px 7px" : "9px 8px",
+									border:
+										selected || connected
+											? `1px solid ${color}`
+											: "1px solid rgba(255,255,255,0.12)",
+									background: `linear-gradient(180deg, ${hexToRgba(color, 0.22)}, rgba(9,9,11,0.88))`,
+									boxShadow: selected
+										? `0 0 28px ${hexToRgba(color, 0.55)}`
+										: connected
+											? `0 0 22px ${hexToRgba(color, 0.32)}`
+											: `0 0 18px ${hexToRgba(color, 0.2)}`,
+									color: "#f4f4f5",
+									cursor: "pointer",
+									opacity: selectedNodeId && !selected && !connected ? 0.58 : 1,
+									zIndex: selected ? 7 : connected ? 6 : 4,
+									animation: `fadeIn ${260 + index * 18}ms ease-out both`,
+								}}
+							>
+								<span
+									style={{
+										display: "grid",
+										placeItems: "center",
+										margin: "0 auto 5px",
+										color,
+									}}
+								>
+									<AppIcon
+										name={getSourceIcon(node.source)}
+										size={compact ? 16 : 18}
+									/>
+								</span>
+								<span
+									style={{
+										display: "block",
+										fontSize: compact ? "0.58rem" : "0.66rem",
+										fontWeight: 800,
+										lineHeight: 1.15,
+										wordBreak: "break-word",
+									}}
+								>
+									{truncateText(node.label, compact ? 18 : 24)}
+								</span>
+							</button>
+						);
+					})}
+					{!compact && (
+						<MemoryMapControls
+							zoom={mapZoom}
+							onZoomIn={() => updateZoom(mapZoom + 0.1)}
+							onZoomOut={() => updateZoom(mapZoom - 0.1)}
+							onReset={() => updateZoom(1)}
+							focusConnectionsOnly={focusConnectionsOnly}
+							onToggleFocus={() => setFocusConnectionsOnly((value) => !value)}
+							disabledFocus={!selectedNodeId}
+						/>
+					)}
+					{!compact && <MemoryActivityStrip items={activityItems} />}
+				</>
+			)}
+		</div>
+	);
+};
+
+const MemoryGraphFocusBanner: React.FC<{
+	node: GraphNode;
+	query: string;
+	onBackToGraph: () => void;
+	onClear: () => void;
+}> = ({ node, query, onBackToGraph, onClear }) => {
+	const color = getSourceColor(node.source);
+	return (
+		<div
+			className="animate-slide-up"
+			style={{
+				marginBottom: 16,
+				padding: 14,
+				borderRadius: 16,
+				background: `linear-gradient(135deg, ${hexToRgba(color, 0.16)}, rgba(9,9,11,0.84))`,
+				border: `1px solid ${hexToRgba(color, 0.32)}`,
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				gap: 14,
+				flexWrap: "wrap",
+			}}
+		>
+			<div
+				style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}
+			>
+				<div
+					style={{
+						width: 42,
+						height: 42,
+						borderRadius: 14,
+						background: hexToRgba(color, 0.18),
+						border: `1px solid ${hexToRgba(color, 0.32)}`,
+						color,
+						display: "grid",
+						placeItems: "center",
+						flex: "0 0 auto",
+					}}
+				>
+					<AppIcon name={getSourceIcon(node.source)} size={21} />
+				</div>
+				<div style={{ minWidth: 0 }}>
+					<div style={{ ...sectionLabelStyle, color }}>
+						Abierto desde el grafo
+					</div>
+					<div
+						style={{
+							color: "#f4f4f5",
+							fontWeight: 900,
+							fontSize: "0.95rem",
+							whiteSpace: "nowrap",
+							overflow: "hidden",
+							textOverflow: "ellipsis",
+							maxWidth: 580,
+						}}
+					>
+						{node.label}
+					</div>
+					<div style={{ color: "#a1a1aa", fontSize: "0.78rem", marginTop: 3 }}>
+						{getSourceLabel(node.source)} · consulta: {truncateText(query, 80)}
+					</div>
+				</div>
+			</div>
+			<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+				<button type="button" onClick={onBackToGraph} style={ghostButtonStyle}>
+					Volver al mapa
+				</button>
+				<button
+					type="button"
+					onClick={onClear}
+					style={{ ...ghostButtonStyle, color: "#71717a" }}
+				>
+					Limpiar foco
+				</button>
+			</div>
+		</div>
+	);
+};
+
+const MemoryMapSidebar: React.FC<{
+	graph: { nodes: GraphNode[]; edges: GraphEdge[] };
+	sourceCounts: Partial<Record<GraphSource, number>>;
+	sourceFilter: GraphSourceFilter;
+	onSourceFilterChange: (filter: GraphSourceFilter) => void;
+	selectedNode?: GraphNode;
+	connectedCount: number;
+}> = ({
+	graph,
+	sourceCounts,
+	sourceFilter,
+	onSourceFilterChange,
+	selectedNode,
+	connectedCount,
+}) => (
 	<div
 		style={{
-			padding: 14,
-			borderRadius: 8,
-			background: "#18181b",
-			border: "1px solid #27272a",
-			textAlign: "center",
+			position: "absolute",
+			left: 18,
+			top: 128,
+			bottom: 96,
+			width: 190,
+			zIndex: 9,
+			padding: 12,
+			borderRadius: 16,
+			background: "rgba(3,7,18,0.7)",
+			border: "1px solid rgba(39,39,42,0.92)",
+			boxShadow: "0 18px 44px rgba(0,0,0,0.28)",
+			backdropFilter: "blur(14px)",
+			overflow: "hidden",
 		}}
 	>
-		<div style={{ color, marginBottom: 4 }}>
-			<AppIcon name={icon} size={22} />
+		<div style={sectionLabelStyle}>Vistas</div>
+		<div style={{ display: "grid", gap: 7, marginTop: 10 }}>
+			{GRAPH_SOURCE_FILTERS.map((filter) => {
+				const active = sourceFilter === filter.id;
+				const color =
+					filter.id === "all" ? "#38bdf8" : getSourceColor(filter.id);
+				const count =
+					filter.id === "all"
+						? graph.nodes.length
+						: (sourceCounts[filter.id] ?? 0);
+				return (
+					<button
+						key={filter.id}
+						type="button"
+						onClick={() => onSourceFilterChange(filter.id)}
+						style={{
+							display: "flex",
+							justifyContent: "space-between",
+							alignItems: "center",
+							gap: 8,
+							padding: "9px 10px",
+							borderRadius: 10,
+							border: active
+								? `1px solid ${hexToRgba(color, 0.42)}`
+								: "1px solid transparent",
+							background: active ? hexToRgba(color, 0.17) : "transparent",
+							color: active ? "#f4f4f5" : "#a1a1aa",
+							cursor: "pointer",
+							fontSize: "0.78rem",
+							fontWeight: 800,
+						}}
+					>
+						<span
+							style={{ display: "inline-flex", alignItems: "center", gap: 7 }}
+						>
+							<span
+								style={{
+									width: 7,
+									height: 7,
+									borderRadius: 999,
+									background: color,
+									boxShadow: `0 0 10px ${hexToRgba(color, 0.65)}`,
+								}}
+							/>
+							{filter.label}
+						</span>
+						<span style={{ color: active ? color : "#71717a" }}>{count}</span>
+					</button>
+				);
+			})}
 		</div>
-		<div style={{ fontSize: "0.75rem", color: "#666", marginBottom: 4 }}>
+
+		<div style={{ height: 1, background: "#27272a", margin: "14px 0" }} />
+		<div style={sectionLabelStyle}>Exploración</div>
+		<div style={{ display: "grid", gap: 9, marginTop: 10 }}>
+			<MemorySidebarStat
+				label="Nodos"
+				value={graph.nodes.length}
+				color="#38bdf8"
+			/>
+			<MemorySidebarStat
+				label="Enlaces"
+				value={graph.edges.length}
+				color="#8b5cf6"
+			/>
+			<MemorySidebarStat
+				label="Vecinos"
+				value={connectedCount}
+				color="#10b981"
+			/>
+		</div>
+
+		<div style={{ height: 1, background: "#27272a", margin: "14px 0" }} />
+		<div style={sectionLabelStyle}>Foco actual</div>
+		<div
+			style={{
+				marginTop: 10,
+				padding: 10,
+				borderRadius: 12,
+				background: selectedNode
+					? hexToRgba(getSourceColor(selectedNode.source), 0.1)
+					: "rgba(24,24,27,0.64)",
+				border: selectedNode
+					? `1px solid ${hexToRgba(getSourceColor(selectedNode.source), 0.24)}`
+					: "1px solid #27272a",
+				color: "#d4d4d8",
+				fontSize: "0.76rem",
+				lineHeight: 1.45,
+			}}
+		>
+			{selectedNode
+				? truncateText(selectedNode.label, 70)
+				: "Selecciona un nodo"}
+		</div>
+	</div>
+);
+
+const MemoryMiniMap: React.FC<{
+	layout: Record<string, { x: number; y: number }>;
+	nodes: GraphNode[];
+	edges: GraphEdge[];
+	selectedNodeId: string | null;
+}> = ({ layout, nodes, edges, selectedNodeId }) => (
+	<div
+		style={{
+			position: "absolute",
+			right: 24,
+			bottom: 116,
+			width: 158,
+			height: 104,
+			zIndex: 8,
+			padding: 8,
+			borderRadius: 14,
+			background: "rgba(3,7,18,0.72)",
+			border: "1px solid rgba(39,39,42,0.92)",
+			boxShadow: "0 14px 34px rgba(0,0,0,0.26)",
+			backdropFilter: "blur(14px)",
+		}}
+	>
+		<svg
+			viewBox="0 0 100 100"
+			preserveAspectRatio="none"
+			style={{ width: "100%", height: "100%", display: "block" }}
+		>
+			<title>Minimapa de la red de memoria</title>
+			<rect
+				x="1"
+				y="1"
+				width="98"
+				height="98"
+				rx="10"
+				fill="rgba(9,9,11,0.52)"
+				stroke="rgba(59,130,246,0.24)"
+			/>
+			{edges.slice(0, 70).map((edge) => {
+				const from = layout[edge.from];
+				const to = layout[edge.to];
+				if (!from || !to) return null;
+				const selected =
+					selectedNodeId === edge.from || selectedNodeId === edge.to;
+				return (
+					<line
+						key={`mini-${edge.from}-${edge.to}`}
+						x1={from.x}
+						y1={from.y}
+						x2={to.x}
+						y2={to.y}
+						stroke={selected ? "#67e8f9" : "#1d4ed8"}
+						strokeOpacity={selected ? 0.8 : 0.2}
+						strokeWidth={selected ? 0.9 : 0.35}
+					/>
+				);
+			})}
+			{nodes.map((node) => {
+				const point = layout[node.id];
+				if (!point) return null;
+				const selected = selectedNodeId === node.id;
+				return (
+					<circle
+						key={`mini-${node.id}`}
+						cx={point.x}
+						cy={point.y}
+						r={selected ? 2.2 : 1.25}
+						fill={getSourceColor(node.source)}
+						fillOpacity={selected ? 1 : 0.72}
+					/>
+				);
+			})}
+		</svg>
+	</div>
+);
+
+const MemorySidebarStat: React.FC<{
+	label: string;
+	value: number;
+	color: string;
+}> = ({ label, value, color }) => (
+	<div
+		style={{
+			display: "flex",
+			justifyContent: "space-between",
+			alignItems: "center",
+			gap: 8,
+			fontSize: "0.76rem",
+			color: "#a1a1aa",
+		}}
+	>
+		<span>{label}</span>
+		<span style={{ color, fontWeight: 900 }}>{formatNumber(value)}</span>
+	</div>
+);
+
+function mapControlButtonStyle(
+	color: string,
+	disabled = false,
+): React.CSSProperties {
+	return {
+		minWidth: 32,
+		height: 30,
+		border: "none",
+		borderRadius: 9,
+		background: "transparent",
+		display: "grid",
+		placeItems: "center",
+		color: disabled ? "#52525b" : color,
+		fontSize: "0.78rem",
+		fontWeight: 900,
+		cursor: disabled ? "not-allowed" : "pointer",
+		opacity: disabled ? 0.55 : 1,
+	};
+}
+
+const MemoryMapControls: React.FC<{
+	zoom: number;
+	onZoomIn: () => void;
+	onZoomOut: () => void;
+	onReset: () => void;
+	focusConnectionsOnly: boolean;
+	onToggleFocus: () => void;
+	disabledFocus: boolean;
+}> = ({
+	zoom,
+	onZoomIn,
+	onZoomOut,
+	onReset,
+	focusConnectionsOnly,
+	onToggleFocus,
+	disabledFocus,
+}) => (
+	<div
+		style={{
+			position: "absolute",
+			left: "50%",
+			bottom: 96,
+			transform: "translateX(-50%)",
+			zIndex: 9,
+			display: "flex",
+			alignItems: "center",
+			gap: 2,
+			padding: 6,
+			borderRadius: 14,
+			background: "rgba(9,9,11,0.78)",
+			border: "1px solid #27272a",
+			boxShadow: "0 14px 34px rgba(0,0,0,0.28)",
+		}}
+	>
+		<button
+			type="button"
+			onClick={onToggleFocus}
+			disabled={disabledFocus}
+			title="Mostrar solo vecinos del nodo seleccionado"
+			style={mapControlButtonStyle(
+				focusConnectionsOnly ? "#38bdf8" : "#a1a1aa",
+				disabledFocus,
+			)}
+		>
+			<AppIcon name="spark" size={15} />
+		</button>
+		<button
+			type="button"
+			onClick={onReset}
+			title="Restablecer zoom"
+			style={mapControlButtonStyle("#a1a1aa")}
+		>
+			<AppIcon name="activity" size={15} />
+		</button>
+		<button
+			type="button"
+			onClick={onZoomOut}
+			title="Alejar"
+			style={mapControlButtonStyle("#a1a1aa")}
+		>
+			-
+		</button>
+		<span
+			style={{
+				minWidth: 52,
+				height: 30,
+				borderRadius: 9,
+				display: "grid",
+				placeItems: "center",
+				color: "#a1a1aa",
+				fontSize: "0.78rem",
+				fontWeight: 800,
+			}}
+		>
+			{Math.round(zoom * 100)}%
+		</span>
+		<button
+			type="button"
+			onClick={onZoomIn}
+			title="Acercar"
+			style={mapControlButtonStyle("#a1a1aa")}
+		>
+			+
+		</button>
+		<button
+			type="button"
+			onClick={onReset}
+			title="Centrar mapa"
+			style={mapControlButtonStyle("#a1a1aa")}
+		>
+			<AppIcon name="settings" size={15} />
+		</button>
+	</div>
+);
+
+const MemoryActivityStrip: React.FC<{ items: string[] }> = ({ items }) => (
+	<div
+		style={{
+			position: "absolute",
+			left: 18,
+			right: 18,
+			bottom: 18,
+			zIndex: 9,
+			padding: 12,
+			borderRadius: 16,
+			background: "rgba(3,7,18,0.72)",
+			border: "1px solid #27272a",
+			boxShadow: "0 18px 44px rgba(0,0,0,0.24)",
+			backdropFilter: "blur(14px)",
+		}}
+	>
+		<div
+			style={{
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "center",
+				gap: 12,
+				marginBottom: 10,
+			}}
+		>
+			<div style={{ color: "#d4d4d8", fontSize: "0.82rem", fontWeight: 900 }}>
+				Actividad reciente
+			</div>
+			<div style={{ color: "#10b981", fontSize: "0.72rem", fontWeight: 900 }}>
+				En vivo
+			</div>
+		</div>
+		<div
+			style={{
+				display: "grid",
+				gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+				gap: 10,
+			}}
+		>
+			{items.slice(0, 4).map((item, index) => (
+				<div
+					key={item}
+					style={{
+						padding: "10px 12px",
+						borderRadius: 12,
+						background: "rgba(24,24,27,0.68)",
+						border: "1px solid rgba(39,39,42,0.85)",
+						color: "#d4d4d8",
+						fontSize: "0.76rem",
+						fontWeight: 800,
+					}}
+				>
+					{truncateText(item, 62)}
+					<div style={{ marginTop: 4, color: "#71717a", fontSize: "0.68rem" }}>
+						Hace {2 + index * 7} min
+					</div>
+				</div>
+			))}
+		</div>
+	</div>
+);
+
+const MemoryNodeInspector: React.FC<{
+	graph: { nodes: GraphNode[]; edges: GraphEdge[] };
+	selectedNode?: GraphNode;
+	selectedEdges: GraphEdge[];
+	onSelectNode: (id: string) => void;
+	onOpenSource?: (node: GraphNode) => void;
+	compact?: boolean;
+}> = ({
+	graph,
+	selectedNode,
+	selectedEdges,
+	onSelectNode,
+	onOpenSource,
+	compact = false,
+}) => (
+	<div className="surface-panel" style={{ minHeight: compact ? 0 : 650 }}>
+		<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+			<div
+				style={{
+					width: 48,
+					height: 48,
+					borderRadius: 16,
+					background: selectedNode
+						? hexToRgba(getSourceColor(selectedNode.source), 0.16)
+						: "rgba(99,102,241,0.12)",
+					border: selectedNode
+						? `1px solid ${hexToRgba(getSourceColor(selectedNode.source), 0.48)}`
+						: "1px solid rgba(99,102,241,0.25)",
+					display: "grid",
+					placeItems: "center",
+					color: selectedNode ? getSourceColor(selectedNode.source) : "#818cf8",
+					boxShadow: selectedNode
+						? `0 0 22px ${hexToRgba(getSourceColor(selectedNode.source), 0.22)}`
+						: undefined,
+				}}
+			>
+				<AppIcon
+					name={selectedNode ? getSourceIcon(selectedNode.source) : "brain"}
+					size={24}
+				/>
+			</div>
+			<div>
+				<div style={sectionLabelStyle}>Memoria seleccionada</div>
+				<h3 style={{ margin: "4px 0 0", color: "#f4f4f5", fontSize: "1rem" }}>
+					{selectedNode?.label ?? "Selecciona un nodo"}
+				</h3>
+			</div>
+		</div>
+
+		{selectedNode ? (
+			<>
+				<div
+					style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}
+				>
+					<span
+						className="settings-chip"
+						style={{
+							background: hexToRgba(getSourceColor(selectedNode.source), 0.14),
+							borderColor: hexToRgba(getSourceColor(selectedNode.source), 0.28),
+							color: getSourceColor(selectedNode.source),
+						}}
+					>
+						{getSourceLabel(selectedNode.source)}
+					</span>
+					<span className="settings-chip settings-chip--mono">
+						{selectedNode.type}
+					</span>
+					<span className="settings-chip settings-chip--mono">
+						peso {Math.round(selectedNode.weight * 100)}%
+					</span>
+				</div>
+
+				<div
+					style={{
+						marginTop: 16,
+						padding: 14,
+						borderRadius: 14,
+						background: "rgba(15,17,23,0.72)",
+						border: "1px solid #27272a",
+						color: "#d4d4d8",
+						fontSize: "0.86rem",
+						lineHeight: 1.55,
+					}}
+				>
+					{truncateText(selectedNode.content, compact ? 420 : 620)}
+				</div>
+
+				{onOpenSource && (
+					<button
+						type="button"
+						onClick={() => onOpenSource(selectedNode)}
+						style={{
+							width: "100%",
+							marginTop: 12,
+							padding: "12px 14px",
+							borderRadius: 12,
+							border: `1px solid ${hexToRgba(getSourceColor(selectedNode.source), 0.42)}`,
+							background: `linear-gradient(135deg, ${hexToRgba(getSourceColor(selectedNode.source), 0.24)}, rgba(9,9,11,0.86))`,
+							color: "#f4f4f5",
+							fontWeight: 900,
+							cursor: "pointer",
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "space-between",
+							gap: 12,
+						}}
+					>
+						<span>Abrir memoria</span>
+						<span style={{ color: getSourceColor(selectedNode.source) }}>
+							{getSourceLabel(selectedNode.source)}
+						</span>
+					</button>
+				)}
+
+				{selectedEdges[0] &&
+					(() => {
+						const edge = selectedEdges[0];
+						const otherId = edge.from === selectedNode.id ? edge.to : edge.from;
+						const other = graph.nodes.find((node) => node.id === otherId);
+						if (!other) return null;
+						const color = getSourceColor(other.source);
+						return (
+							<button
+								type="button"
+								onClick={() => onSelectNode(other.id)}
+								style={{
+									width: "100%",
+									marginTop: 12,
+									padding: "12px 14px",
+									borderRadius: 12,
+									border: `1px solid ${hexToRgba(color, 0.38)}`,
+									background: `linear-gradient(135deg, ${hexToRgba(color, 0.22)}, rgba(9,9,11,0.82))`,
+									color: "#f4f4f5",
+									fontWeight: 900,
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "space-between",
+									gap: 12,
+								}}
+							>
+								<span>Explorar conexión clave</span>
+								<span style={{ color }}>{truncateText(other.label, 30)}</span>
+							</button>
+						);
+					})()}
+
+				{selectedNode.keywords.length > 0 && (
+					<div style={{ marginTop: 16 }}>
+						<div style={sectionLabelStyle}>Etiquetas</div>
+						<div className="settings-chip-list">
+							{selectedNode.keywords
+								.slice(0, compact ? 8 : 14)
+								.map((keyword) => (
+									<span key={keyword} className="settings-chip">
+										{keyword}
+									</span>
+								))}
+						</div>
+					</div>
+				)}
+
+				<div style={{ marginTop: 18 }}>
+					<div
+						style={{
+							display: "flex",
+							justifyContent: "space-between",
+							gap: 12,
+							alignItems: "center",
+						}}
+					>
+						<div style={sectionLabelStyle}>
+							Conexiones navegables ({selectedEdges.length})
+						</div>
+					</div>
+					<div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+						{selectedEdges.slice(0, compact ? 5 : 12).map((edge) => {
+							const otherId =
+								edge.from === selectedNode.id ? edge.to : edge.from;
+							const other = graph.nodes.find((node) => node.id === otherId);
+							const otherColor = other
+								? getSourceColor(other.source)
+								: "#71717a";
+							return (
+								<button
+									key={`${edge.from}-${edge.to}`}
+									type="button"
+									onClick={() => other && onSelectNode(other.id)}
+									style={{
+										padding: "11px 12px",
+										borderRadius: 12,
+										border: `1px solid ${hexToRgba(otherColor, 0.24)}`,
+										background: `linear-gradient(90deg, ${hexToRgba(otherColor, 0.1)}, rgba(9,9,11,0.72))`,
+										color: "#a1a1aa",
+										cursor: other ? "pointer" : "default",
+										textAlign: "left",
+									}}
+								>
+									<div
+										style={{
+											color: otherColor,
+											fontSize: "0.68rem",
+											fontWeight: 900,
+											letterSpacing: "0.05em",
+											textTransform: "uppercase",
+										}}
+									>
+										{selectedNode.label} → {other?.label ?? otherId}
+									</div>
+									<div
+										style={{
+											color: "#f4f4f5",
+											fontWeight: 700,
+											fontSize: "0.82rem",
+											marginTop: 5,
+										}}
+									>
+										{other?.label ?? otherId}
+									</div>
+									<div style={{ marginTop: 4, fontSize: "0.74rem" }}>
+										{edge.keywords.join(", ") || "relación semántica"}
+									</div>
+								</button>
+							);
+						})}
+						{selectedEdges.length === 0 && (
+							<div style={{ color: "#71717a", fontSize: "0.84rem" }}>
+								Este nodo aún no comparte keywords fuertes con otros recuerdos.
+							</div>
+						)}
+					</div>
+				</div>
+			</>
+		) : (
+			<div
+				style={{
+					marginTop: 16,
+					color: "#71717a",
+					fontSize: "0.88rem",
+					lineHeight: 1.55,
+				}}
+			>
+				Selecciona cualquier nodo del mapa para inspeccionar contenido, fuente,
+				keywords y memorias relacionadas.
+			</div>
+		)}
+	</div>
+);
+
+const MemoryMetricCard: React.FC<{
+	icon: AppIconName;
+	label: string;
+	value: string | number;
+	detail: string;
+	color: string;
+}> = ({ icon, label, value, detail, color }) => (
+	<div
+		className="settings-summary-card hover-lift"
+		style={{
+			position: "relative",
+			overflow: "hidden",
+			background: `radial-gradient(circle at 18% 8%, ${hexToRgba(color, 0.18)}, transparent 34%), linear-gradient(180deg, rgba(24,24,27,0.96), rgba(9,9,11,0.95))`,
+		}}
+	>
+		<div
+			style={{
+				position: "absolute",
+				inset: "auto -30px -44px auto",
+				width: 110,
+				height: 110,
+				borderRadius: 999,
+				background: hexToRgba(color, 0.12),
+				filter: "blur(10px)",
+			}}
+		/>
+		<div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+			<div>
+				<div className="settings-summary-label">{label}</div>
+				<div
+					className="settings-summary-value"
+					style={{ fontSize: "1.45rem", color: "#f4f4f5" }}
+				>
+					{value}
+				</div>
+				<div style={{ marginTop: 5, color: "#71717a", fontSize: "0.78rem" }}>
+					{detail}
+				</div>
+			</div>
+			<div
+				style={{
+					width: 42,
+					height: 42,
+					borderRadius: 14,
+					background: hexToRgba(color, 0.14),
+					border: `1px solid ${hexToRgba(color, 0.26)}`,
+					color,
+					display: "grid",
+					placeItems: "center",
+					boxShadow: `0 0 20px ${hexToRgba(color, 0.18)}`,
+				}}
+			>
+				<AppIcon name={icon} size={21} />
+			</div>
+		</div>
+	</div>
+);
+
+const ProgressMetric: React.FC<{
+	label: string;
+	value: number;
+	color: string;
+}> = ({ label, value, color }) => {
+	const normalized = Math.max(
+		0,
+		Math.min(1, Number.isFinite(value) ? value : 0),
+	);
+	return (
+		<div>
+			<div
+				style={{
+					display: "flex",
+					justifyContent: "space-between",
+					gap: 10,
+					fontSize: "0.78rem",
+					color: "#a1a1aa",
+					marginBottom: 6,
+				}}
+			>
+				<span>{label}</span>
+				<span>{Math.round(normalized * 100)}%</span>
+			</div>
+			<div
+				style={{
+					height: 8,
+					borderRadius: 999,
+					background: "#18181b",
+					overflow: "hidden",
+					border: "1px solid #27272a",
+				}}
+			>
+				<div
+					style={{
+						width: `${normalized * 100}%`,
+						height: "100%",
+						borderRadius: 999,
+						background: `linear-gradient(90deg, ${color}, #67e8f9)`,
+						boxShadow: `0 0 18px ${hexToRgba(color, 0.45)}`,
+						transition: "width 450ms ease",
+					}}
+				/>
+			</div>
+		</div>
+	);
+};
+
+const MemorySignalPanel: React.FC<{
+	title: string;
+	description: string;
+	items: string[];
+	empty?: string;
+}> = ({ title, description, items, empty = "Sin datos disponibles." }) => (
+	<div className="surface-panel">
+		<h3 style={{ margin: 0, color: "#f4f4f5", fontSize: "0.98rem" }}>
 			{title}
+		</h3>
+		<div style={{ marginTop: 5, color: "#71717a", fontSize: "0.78rem" }}>
+			{description}
 		</div>
-		<div style={{ fontSize: "1.1rem", fontWeight: 600, color }}>{value}</div>
+		<div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+			{items.length > 0 ? (
+				items.slice(0, 12).map((item) => (
+					<span key={item} className="settings-chip" title={item}>
+						{truncateText(item, 64)}
+					</span>
+				))
+			) : (
+				<span style={{ color: "#71717a", fontSize: "0.84rem" }}>{empty}</span>
+			)}
+		</div>
 	</div>
 );
 
@@ -2120,17 +3737,381 @@ function getExperienceFeedbackLabel(
 	return rating === "positive" ? "correcta" : "incorrecta";
 }
 
+const ghostButtonStyle: React.CSSProperties = {
+	padding: "8px 12px",
+	borderRadius: 10,
+	border: "1px solid #27272a",
+	background: "rgba(9,9,11,0.72)",
+	color: "#d4d4d8",
+	cursor: "pointer",
+	fontWeight: 700,
+	fontSize: "0.8rem",
+};
+
+const sectionLabelStyle: React.CSSProperties = {
+	fontSize: "0.72rem",
+	textTransform: "uppercase",
+	letterSpacing: "0.06em",
+	color: "#71717a",
+	fontWeight: 800,
+};
+
+function getTabDescription(tab: TabId): string {
+	const descriptions: Record<TabId, string> = {
+		overview: "estado vivo",
+		graph: "red visual",
+		learning: "patrones",
+		stm: "contexto actual",
+		ltm: "recuerdos",
+		daily: "hoy",
+		profile: "usuario",
+	};
+	return descriptions[tab];
+}
+
+function getRecordNumber(
+	record: Record<string, unknown> | undefined,
+	key: string,
+): number | undefined {
+	const value = record?.[key];
+	return typeof value === "number" && Number.isFinite(value)
+		? value
+		: undefined;
+}
+
+function formatNumber(value: number): string {
+	return new Intl.NumberFormat("es").format(Math.round(value));
+}
+
+function getSourceColor(source: GraphNode["source"]): string {
+	const colors: Record<GraphNode["source"], string> = {
+		memory: "#3b82f6",
+		learning: "#a855f7",
+		profile: "#10b981",
+		daily: "#f59e0b",
+		shortTerm: "#06b6d4",
+	};
+	return colors[source];
+}
+
+function getSourceIcon(source: GraphNode["source"]): AppIconName {
+	const icons: Record<GraphNode["source"], AppIconName> = {
+		memory: "database",
+		learning: "check",
+		profile: "user",
+		daily: "file",
+		shortTerm: "chat",
+	};
+	return icons[source];
+}
+
+function getSourceLabel(source: GraphNode["source"]): string {
+	const labels: Record<GraphNode["source"], string> = {
+		memory: "Largo plazo",
+		learning: "Aprendizaje",
+		profile: "Usuario",
+		daily: "Memoria diaria",
+		shortTerm: "Corto plazo",
+	};
+	return labels[source];
+}
+
+function getTabForGraphSource(source: GraphNode["source"]): TabId {
+	const tabsBySource: Record<GraphNode["source"], TabId> = {
+		memory: "ltm",
+		learning: "learning",
+		profile: "profile",
+		daily: "daily",
+		shortTerm: "stm",
+	};
+	return tabsBySource[source];
+}
+
+function buildGraphNodeSearchQuery(node: GraphNode): string {
+	return (
+		node.keywords.slice(0, 3).join(" ").trim() ||
+		node.label.replace(/[·:]/g, " ").trim() ||
+		truncateText(node.content, 80)
+	);
+}
+
+function getLearningFilterForGraphNode(node: GraphNode): LearningInsightFilter {
+	const normalized = node.type.replaceAll(" ", "_").toLowerCase();
+	return LEARNING_FILTERS.includes(normalized as LearningInsightFilter)
+		? (normalized as LearningInsightFilter)
+		: "all";
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+	const normalized = hex.replace("#", "");
+	const bigint = Number.parseInt(normalized, 16);
+	const r = (bigint >> 16) & 255;
+	const g = (bigint >> 8) & 255;
+	const b = bigint & 255;
+	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function createGraphLayout(
+	nodes: GraphNode[],
+): Record<string, { x: number; y: number }> {
+	const layout: Record<string, { x: number; y: number }> = {};
+
+	for (const cluster of GRAPH_CLUSTER_DEFS) {
+		const clusterNodes = nodes.filter((node) => node.source === cluster.source);
+		const total = Math.max(clusterNodes.length, 1);
+		clusterNodes.forEach((node, index) => {
+			if (total === 1) {
+				layout[node.id] = { x: cluster.x, y: cluster.y };
+				return;
+			}
+			const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
+			const ring = index % 2 === 0 ? 0.82 : 1.08;
+			layout[node.id] = {
+				x: cluster.x + Math.cos(angle) * cluster.radiusX * ring,
+				y: cluster.y + Math.sin(angle) * cluster.radiusY * ring,
+			};
+		});
+	}
+
+	return layout;
+}
+
+function scaleGraphLayout(
+	layout: Record<string, { x: number; y: number }>,
+	zoom: number,
+): Record<string, { x: number; y: number }> {
+	return Object.fromEntries(
+		Object.entries(layout).map(([id, point]) => [
+			id,
+			scaleGraphPoint(point, zoom),
+		]),
+	);
+}
+
+function scaleGraphPoint(
+	point: { x: number; y: number },
+	zoom: number,
+): { x: number; y: number } {
+	const center = { x: 55, y: 55 };
+	return {
+		x: center.x + (point.x - center.x) * zoom,
+		y: center.y + (point.y - center.y) * zoom,
+	};
+}
+
+function countNodesBySource(
+	nodes: GraphNode[],
+): Partial<Record<GraphSource, number>> {
+	return nodes.reduce<Partial<Record<GraphSource, number>>>((acc, node) => {
+		acc[node.source] = (acc[node.source] ?? 0) + 1;
+		return acc;
+	}, {});
+}
+
+function getVisibleGraphNodes(
+	graph: { nodes: GraphNode[]; edges: GraphEdge[] },
+	selectedNodeId: string | null,
+	sourceFilter: GraphSourceFilter,
+	compact: boolean,
+	focusConnectionsOnly = false,
+): GraphNode[] {
+	const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
+	const connectedIds = new Set(
+		selectedNodeId
+			? graph.edges.flatMap((edge) =>
+					edge.from === selectedNodeId
+						? [edge.to]
+						: edge.to === selectedNodeId
+							? [edge.from]
+							: [],
+				)
+			: [],
+	);
+	const perClusterLimit = compact ? 5 : 7;
+	const visible = new Map<string, GraphNode>();
+
+	if (focusConnectionsOnly && selectedNode) {
+		visible.set(selectedNode.id, selectedNode);
+		for (const id of connectedIds) {
+			const node = graph.nodes.find((entry) => entry.id === id);
+			if (node && (sourceFilter === "all" || node.source === sourceFilter)) {
+				visible.set(node.id, node);
+			}
+		}
+		return GRAPH_CLUSTER_DEFS.flatMap((cluster) =>
+			Array.from(visible.values())
+				.filter((node) => node.source === cluster.source)
+				.sort((a, b) => b.weight - a.weight),
+		);
+	}
+
+	for (const cluster of GRAPH_CLUSTER_DEFS) {
+		if (sourceFilter !== "all" && sourceFilter !== cluster.source) continue;
+		const clusterNodes = graph.nodes
+			.filter((node) => node.source === cluster.source)
+			.sort((a, b) => b.weight - a.weight)
+			.slice(0, perClusterLimit);
+		for (const node of clusterNodes) visible.set(node.id, node);
+	}
+
+	if (selectedNode) visible.set(selectedNode.id, selectedNode);
+	for (const id of connectedIds) {
+		const node = graph.nodes.find((entry) => entry.id === id);
+		if (node && (sourceFilter === "all" || node.source === sourceFilter)) {
+			visible.set(node.id, node);
+		}
+	}
+
+	return GRAPH_CLUSTER_DEFS.flatMap((cluster) =>
+		Array.from(visible.values())
+			.filter((node) => node.source === cluster.source)
+			.sort((a, b) => b.weight - a.weight),
+	);
+}
+
+function getVisibleGraphEdges(
+	edges: GraphEdge[],
+	visibleIds: Set<string>,
+	selectedNodeId: string | null,
+	compact: boolean,
+): GraphEdge[] {
+	const visibleEdges = edges.filter(
+		(edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to),
+	);
+	if (!selectedNodeId) return visibleEdges.slice(0, compact ? 28 : 42);
+
+	const focused = visibleEdges.filter(
+		(edge) => edge.from === selectedNodeId || edge.to === selectedNodeId,
+	);
+	const ambient = visibleEdges
+		.filter(
+			(edge) => edge.from !== selectedNodeId && edge.to !== selectedNodeId,
+		)
+		.slice(0, compact ? 10 : 16);
+	return [...focused, ...ambient];
+}
+
+function buildMemoryActivityItems(
+	visibleNodes: GraphNode[],
+	selectedNode?: GraphNode,
+): string[] {
+	const base = selectedNode
+		? [
+				`Foco actualizado: ${selectedNode.label}`,
+				`Conexiones recalculadas para ${getSourceLabel(selectedNode.source)}`,
+			]
+		: ["Red de memorias sincronizada"];
+	const nodeEvents = visibleNodes
+		.slice(0, 8)
+		.map((node) => `${getSourceLabel(node.source)} · ${node.label}`);
+	return [...base, ...nodeEvents];
+}
+
 function truncateText(text: string, maxLength: number): string {
 	return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
-function buildMemoryGraph(memories: LTMItem[], insights: LearningInsight[]) {
+function humanizeGraphType(type: string): string {
+	const normalized = type.replaceAll("_", " ").replaceAll("-", " ").trim();
+	if (!normalized) return "Memoria";
+	return normalized
+		.split(/\s+/)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(" ");
+}
+
+function formatMemoryNodeLabel(
+	memory: LTMItem,
+	index: number,
+	content: string,
+): string {
+	const type = humanizeGraphType(memory.type ?? "memoria");
+	const keyword = extractGraphKeywords(content)[0];
+	return truncateText(
+		keyword ? `${type} · ${keyword}` : `${type} ${index + 1}`,
+		34,
+	);
+}
+
+function formatInsightNodeLabel(
+	insight: LearningInsight,
+	index: number,
+): string {
+	const type = humanizeGraphType(
+		insight.type || insight.domain || "aprendizaje",
+	);
+	const keyword =
+		(insight.keywords ?? [])[0] ?? extractGraphKeywords(insight.content)[0];
+	return truncateText(
+		keyword ? `${type} · ${keyword}` : `${type} ${index + 1}`,
+		34,
+	);
+}
+
+function buildMemoryGraph(
+	memories: LTMItem[],
+	insights: LearningInsight[],
+	context: DashboardGraphContext,
+) {
+	const syntheticNodes: GraphNode[] = [];
+	if (context.stmTotal || context.stmTurns?.length) {
+		const content =
+			context.stmTurns?.map((turn) => turn.content).join(" ") ?? "";
+		syntheticNodes.push({
+			id: "system-short-term-memory",
+			label: "Memoria activa",
+			type: "short_term",
+			weight: 0.82,
+			content: content || `${context.stmTotal ?? 0} turnos activos en contexto`,
+			keywords: extractGraphKeywords(
+				content || "contexto activo conversacion reciente",
+			),
+			source: "shortTerm",
+		});
+	}
+	if (context.dailySummary?.trim()) {
+		syntheticNodes.push({
+			id: "system-daily-memory",
+			label: "Resumen diario",
+			type: "daily",
+			weight: 0.76,
+			content: context.dailySummary,
+			keywords: extractGraphKeywords(context.dailySummary),
+			source: "daily",
+		});
+	}
+	if (context.profile) {
+		const profileText = [
+			context.profile.displayName,
+			context.profile.communicationStyle,
+			context.profile.preferredLanguage,
+			...Object.keys(context.profile.expertiseAreas ?? {}),
+			...Object.values(context.profile.preferences ?? {}),
+			...(context.profile.traits ?? []),
+		]
+			.filter(Boolean)
+			.join(" ");
+		syntheticNodes.push({
+			id: "system-user-profile-memory",
+			label: context.profile.displayName ?? "Perfil del usuario",
+			type: "profile",
+			weight: 0.88,
+			content:
+				profileText || "Preferencias, decisiones y patrones del usuario.",
+			keywords: extractGraphKeywords(
+				profileText || "usuario preferencias decisiones patrones",
+			),
+			source: "profile",
+		});
+	}
+
 	const nodes: GraphNode[] = [
+		...syntheticNodes,
 		...memories.map((memory, index) => {
 			const content = formatMemoryContent(memory);
 			return {
 				id: `memory-${memory.id ?? index}`,
-				label: `${memory.type ?? "memoria"} ${index + 1}`,
+				label: formatMemoryNodeLabel(memory, index, content),
 				type: memory.type ?? "memory",
 				weight: typeof memory.importance === "number" ? memory.importance : 0.5,
 				content,
@@ -2140,7 +4121,7 @@ function buildMemoryGraph(memories: LTMItem[], insights: LearningInsight[]) {
 		}),
 		...insights.map((insight, index) => ({
 			id: `insight-${insight.id ?? index}`,
-			label: insight.type.replaceAll("_", " "),
+			label: formatInsightNodeLabel(insight, index),
 			type: insight.domain ?? insight.type,
 			weight: Math.max(insight.importance ?? 0, insight.confidence ?? 0.5),
 			content: insight.content,
@@ -2154,7 +4135,7 @@ function buildMemoryGraph(memories: LTMItem[], insights: LearningInsight[]) {
 		})),
 	].sort((a, b) => b.weight - a.weight);
 
-	const edges: Array<{ from: string; to: string; keywords: string[] }> = [];
+	const edges: GraphEdge[] = [];
 	for (let i = 0; i < nodes.length; i++) {
 		for (let j = i + 1; j < nodes.length; j++) {
 			const left = nodes[i];
@@ -2173,7 +4154,14 @@ function buildMemoryGraph(memories: LTMItem[], insights: LearningInsight[]) {
 		}
 	}
 
-	return { nodes: nodes.slice(0, 60), edges };
+	const limitedNodes = nodes.slice(0, 60);
+	const limitedIds = new Set(limitedNodes.map((node) => node.id));
+	return {
+		nodes: limitedNodes,
+		edges: edges.filter(
+			(edge) => limitedIds.has(edge.from) && limitedIds.has(edge.to),
+		),
+	};
 }
 
 function formatMemoryContent(memory: LTMItem): string {

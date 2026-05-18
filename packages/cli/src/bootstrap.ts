@@ -15,14 +15,17 @@ import {
 	CodeExecutor,
 	ConfigLoader,
 	ConnectionManager,
+	ContextAssembler,
 	EmbeddingProvider,
 	EnvVarManager,
+	FTSSearchEngine,
 	GlobalDailyMemory,
 	LLMRouter,
 	LearningEngine,
 	LongTermMemory,
 	MCPManager,
 	MemoryConsolidator,
+	MemoryOrchestrator,
 	MemoryRetrieval,
 	PluginMarketplace,
 	PluginRegistry,
@@ -71,6 +74,7 @@ export interface OctopusSystem {
 	ltm: LongTermMemory;
 	dailyMemory: GlobalDailyMemory;
 	userProfileManager: UserProfileManager;
+	memoryOrchestrator: MemoryOrchestrator;
 	memoryRetrieval: MemoryRetrieval;
 	memoryConsolidator: MemoryConsolidator;
 	skillRegistry: SkillRegistry;
@@ -503,6 +507,27 @@ export async function bootstrap(options?: {
 		extractEvents: config.memory.consolidation.extractEvents,
 		extractProcedures: config.memory.consolidation.extractProcedures,
 	});
+	const ftsSearch = new FTSSearchEngine(db);
+	await ftsSearch.initialize();
+	const memoryOrchestrator = new MemoryOrchestrator({
+		db,
+		ltm,
+		embeddingFn: embedFn,
+		ftsSearch,
+		config: {
+			defaultTenantId: "local",
+			defaultUserId: "owner",
+			defaultProjectId: process.cwd(),
+			minRelevance: config.memory.retrieval.minRelevance,
+			maxReadCandidates: config.memory.retrieval.maxResults * 3,
+		},
+	});
+	await memoryOrchestrator.initialize();
+	const contextAssembler = new ContextAssembler(memoryOrchestrator, {
+		reserveTokens: 128,
+		maxSimilarEpisodes: 4,
+		maxAgentLessons: 5,
+	});
 
 	const providers: Record<string, ProviderConfig & { mode?: string }> = {};
 	const providerEntries = Object.entries(config.ai.providers) as Array<
@@ -603,7 +628,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	await dailyMemory.initialize();
 
 	const userProfileManager = new UserProfileManager(db, router, {
-		minTurnsForUpdate: 5,
+		minTurnsForUpdate: 3,
 		maxDecisions: 50,
 		maxWorkflows: 20,
 	});
@@ -1369,6 +1394,8 @@ Always be concise, helpful, and thorough.`,
 	agentRuntime.setToolSystem(toolRegistry, toolExecutor);
 	agentRuntime.setDailyMemory(dailyMemory);
 	agentRuntime.setUserProfileManager(userProfileManager);
+	agentRuntime.setMemoryOrchestrator(memoryOrchestrator);
+	agentRuntime.setContextAssembler(contextAssembler);
 	agentRuntime.setLearningEngine(learningEngine);
 	agentRuntime.enableOrchestrator({
 		maxWorkers: 5,
@@ -1508,6 +1535,7 @@ Always be concise, helpful, and thorough.`,
 		ltm,
 		dailyMemory,
 		userProfileManager,
+		memoryOrchestrator,
 		memoryRetrieval,
 		memoryConsolidator,
 		skillRegistry,

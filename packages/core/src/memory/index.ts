@@ -42,3 +42,35 @@ export type {
 export { WorkingMemory } from "./working-memory.js";
 export type { WorkingState } from "./working-memory.js";
 export type { CondensationCallback } from "./stm.js";
+export { ContextAssembler } from "./context-assembler.js";
+export type { ContextAssemblerConfig } from "./context-assembler.js";
+export { MemoryIntegrityLayer } from "./integrity.js";
+export { MemoryOrchestrator } from "./orchestrator.js";
+export { ProactiveMemoryScanner } from "./proactive-scanner.js";
+export type { ProactiveMemoryScannerConfig } from "./proactive-scanner.js";
+export { UncertaintyEstimator } from "./uncertainty.js";
+export type { UncertaintyEstimatorConfig } from "./uncertainty.js";
+export type {
+	MemorySourceTrustLevel,
+	MemoryStatus,
+	MemoryUncertaintyLevel,
+	MemoryScope,
+	MemoryCandidate,
+	MemoryValidationResult,
+	MemoryPack,
+	MemoryReadContext,
+	MemoryWriteResult,
+	MemoryFeedbackType,
+	MemoryFeedbackInput,
+	MemoryFeedbackResult,
+	ActiveForgettingOptions,
+	ActiveForgettingReport,
+	MemoryUsageRecord,
+	MemoryCoverageSnapshot,
+	MemoryUncertaintyEstimate,
+	MemoryExplanation,
+	ProspectiveReminder,
+	ProactiveMemoryScanResult,
+	ContextAssemblyInput,
+	ContextAssemblyResult,
+} from "./types.js";

@@ -83,6 +83,7 @@ const PROFILE_EXTRACTION_PROMPT = `You are analyzing a conversation to update a 
 
 Respond in valid JSON:
 {
+  "displayName": "<name|null>",
   "communicationStyle": "<concise|detailed|casual|formal>",
   "language": "<detected primary language, e.g., es, en, pt>",
   "expertiseAreas": { "<area>": <confidence 0-1>, ... },
@@ -98,6 +99,7 @@ Rules:
 - expertiseAreas confidence: 0.3=mentioned, 0.6=demonstrated, 0.9=expert-level
 - preferences should be actionable (e.g., "editor": "vscode", "framework": "react")
 - workflowSteps should be the sequence of actions in this conversation
+- displayName should only be set when the user explicitly states their name
 - Keep traits factual (e.g., "detail-oriented", "prefers Spanish")`;
 
 export class UserProfileManager {
@@ -200,11 +202,15 @@ export class UserProfileManager {
 		userId: string,
 		turns: ConversationTurn[],
 	): Promise<UserProfile> {
-		if (turns.length < this.config.minTurnsForUpdate) {
+		const hasExplicitSignal = this.hasExplicitProfileSignal(turns);
+		if (turns.length < this.config.minTurnsForUpdate && !hasExplicitSignal) {
 			return this.getProfile(userId);
 		}
 
-		const profile = await this.getProfile(userId);
+		const profile = this.applyExplicitProfileSignals(
+			await this.getProfile(userId),
+			turns,
+		);
 
 		if (this.config.useLLMExtraction) {
 			return this.updateWithLLM(profile, turns);
@@ -261,6 +267,124 @@ export class UserProfileManager {
 
 	// --- Private ---
 
+	private hasExplicitProfileSignal(turns: ConversationTurn[]): boolean {
+		const userContent = turns
+			.filter((turn) => turn.role === "user")
+			.map((turn) => turn.content)
+			.join("\n");
+		return /\b(me llamo|mi nombre es|ll[aá]mame|prefiero|me gusta que|no me gusta|no quiero que|responde en|respondas en|my name is|call me|i prefer|please respond in)\b/i.test(
+			userContent,
+		);
+	}
+
+	private applyExplicitProfileSignals(
+		profile: UserProfile,
+		turns: ConversationTurn[],
+	): UserProfile {
+		const updated: UserProfile = {
+			...profile,
+			expertiseAreas: { ...profile.expertiseAreas },
+			preferences: { ...profile.preferences },
+			decisions: [...profile.decisions],
+			workflowPatterns: profile.workflowPatterns.map((pattern) => ({
+				...pattern,
+				steps: [...pattern.steps],
+			})),
+			traits: [...profile.traits],
+		};
+		const userContent = turns
+			.filter((turn) => turn.role === "user")
+			.map((turn) => turn.content)
+			.join("\n");
+		if (!userContent.trim()) return updated;
+
+		const nameMatch = userContent.match(
+			/\b(?:me llamo|mi nombre es|ll[aá]mame|my name is|call me)\s+([^\n,.!?;]+)/i,
+		);
+		if (nameMatch?.[1]) {
+			const displayName = this.cleanProfilePhrase(nameMatch[1], 4);
+			if (displayName) updated.displayName = displayName;
+		}
+
+		const wantsSpanish =
+			/\b(espa[nñ]ol|spanish)\b/i.test(userContent) &&
+			/\b(prefiero|quiero|responde|respondas|h[aá]blame|hablame|please|answer|respond)\b/i.test(
+				userContent,
+			);
+		const wantsEnglish =
+			/\b(ingl[eé]s|english)\b/i.test(userContent) &&
+			/\b(prefiero|quiero|responde|respondas|h[aá]blame|hablame|please|answer|respond)\b/i.test(
+				userContent,
+			);
+		if (wantsSpanish) {
+			updated.preferredLanguage = "es";
+			updated.preferences.response_language = "es";
+			this.addTrait(updated, "prefers Spanish");
+		} else if (wantsEnglish) {
+			updated.preferredLanguage = "en";
+			updated.preferences.response_language = "en";
+			this.addTrait(updated, "prefers English");
+		}
+
+		if (
+			/\b(respuestas?\s+(cortas|breves|concisas)|s[eé]\s+breve|se breve|no me expliques tanto|concise|brief|short answers?)\b/i.test(
+				userContent,
+			)
+		) {
+			updated.communicationStyle = "concise";
+			updated.preferences.communication_style = "concise";
+			this.addTrait(updated, "prefers concise responses");
+		} else if (
+			/\b(detallad[ao]s?|paso a paso|explica(?:me)?\s+bien|detailed|step by step)\b/i.test(
+				userContent,
+			)
+		) {
+			updated.communicationStyle = "detailed";
+			updated.preferences.communication_style = "detailed";
+			this.addTrait(updated, "prefers detailed responses");
+		}
+
+		const preferencePatterns: Array<{ key: string; pattern: RegExp }> = [
+			{
+				key: "prefers",
+				pattern:
+					/\b(?:prefiero|me gusta que|quiero que|i prefer|i like when)\s+([^\n.!?;]{3,140})/gi,
+			},
+			{
+				key: "dislikes",
+				pattern:
+					/\b(?:no me gusta que|no quiero que|evita|avoid|i dislike when)\s+([^\n.!?;]{3,140})/gi,
+			},
+		];
+		for (const { key, pattern } of preferencePatterns) {
+			const matches = Array.from(userContent.matchAll(pattern));
+			const value = matches.at(-1)?.[1];
+			const cleaned = value ? this.cleanProfilePhrase(value, 14) : "";
+			if (cleaned) updated.preferences[key] = cleaned;
+		}
+
+		return updated;
+	}
+
+	private addTrait(profile: UserProfile, trait: string): void {
+		if (!profile.traits.includes(trait)) {
+			profile.traits = [...profile.traits, trait].slice(0, 20);
+		}
+	}
+
+	private cleanProfilePhrase(value: string, maxWords: number): string {
+		return (
+			value
+				.replace(/["'`]/g, "")
+				.split(/\s+(?:y|and|pero|but)\s+/i)[0]
+				?.trim()
+				.split(/\s+/)
+				.slice(0, maxWords)
+				.join(" ")
+				.trim() ?? ""
+		);
+	}
+
 	private async updateWithLLM(
 		profile: UserProfile,
 		turns: ConversationTurn[],
@@ -314,7 +438,7 @@ export class UserProfileManager {
 		profile: UserProfile,
 		turns: ConversationTurn[],
 	): Promise<UserProfile> {
-		const updated = { ...profile };
+		const updated = this.applyExplicitProfileSignals(profile, turns);
 		const userContent = turns
 			.filter((t) => t.role === "user")
 			.map((t) => t.content)
@@ -392,6 +516,11 @@ export class UserProfileManager {
 		extracted: Record<string, unknown>,
 	): Promise<UserProfile> {
 		const updated = { ...profile };
+
+		if (typeof extracted.displayName === "string") {
+			const displayName = this.cleanProfilePhrase(extracted.displayName, 4);
+			if (displayName) updated.displayName = displayName;
+		}
 
 		if (typeof extracted.communicationStyle === "string") {
 			updated.communicationStyle = extracted.communicationStyle;

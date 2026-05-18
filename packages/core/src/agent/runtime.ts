@@ -17,10 +17,17 @@ import type {
 	ExperienceToolTrace,
 } from "../learning/types.js";
 import type { MemoryConsolidator } from "../memory/consolidator.js";
+import type { ContextAssembler } from "../memory/context-assembler.js";
 import type { GlobalDailyMemory } from "../memory/daily.js";
+import type { MemoryOrchestrator } from "../memory/orchestrator.js";
 import type { MemoryRetrieval } from "../memory/retrieval.js";
 import type { ShortTermMemory } from "../memory/stm.js";
-import type { ConsolidationResult, MemoryContext } from "../memory/types.js";
+import type {
+	ConsolidationResult,
+	MemoryContext,
+	MemoryExplanation,
+	MemoryPack,
+} from "../memory/types.js";
 import type { UserProfileManager } from "../memory/user-profile.js";
 import { WorkingMemory } from "../memory/working-memory.js";
 import type { SkillLoader } from "../skills/loader.js";
@@ -71,6 +78,18 @@ type ToolDecision =
 	| { action: "skip"; reason: string }
 	| { action: "stop"; reason: string };
 
+export interface RuntimeMemoryTrace {
+	responseId: string;
+	generatedAt: Date;
+	objective: string;
+	channelId?: string;
+	uncertaintyLevel: string;
+	memoryIds: string[];
+	knownGaps: string[];
+	proactiveNotices: string[];
+	degradedSections: string[];
+}
+
 export interface AgentProcessOptions {
 	signal?: AbortSignal;
 }
@@ -105,9 +124,12 @@ export class AgentRuntime {
 	private toolExecutor?: ToolExecutor;
 	private dailyMemory?: GlobalDailyMemory;
 	private userProfileManager?: UserProfileManager;
+	private memoryOrchestrator?: MemoryOrchestrator;
+	private contextAssembler?: ContextAssembler;
 	private learningEngine?: LearningEngine;
 	private orchestrator?: OctopusOrchestrator;
 	private workingMemory: WorkingMemory = new WorkingMemory();
+	private lastMemoryTrace?: RuntimeMemoryTrace;
 
 	constructor(
 		config: AgentConfig,
@@ -136,6 +158,31 @@ export class AgentRuntime {
 
 	setUserProfileManager(manager: UserProfileManager): void {
 		this.userProfileManager = manager;
+	}
+
+	setMemoryOrchestrator(orchestrator: MemoryOrchestrator): void {
+		this.memoryOrchestrator = orchestrator;
+	}
+
+	setContextAssembler(assembler: ContextAssembler): void {
+		this.contextAssembler = assembler;
+	}
+
+	getLastMemoryTrace(): RuntimeMemoryTrace | undefined {
+		return this.lastMemoryTrace;
+	}
+
+	async explainLastMemoryUsage(): Promise<{
+		trace?: RuntimeMemoryTrace;
+		explanations: MemoryExplanation[];
+	}> {
+		if (!this.lastMemoryTrace || !this.memoryOrchestrator) {
+			return { trace: this.lastMemoryTrace, explanations: [] };
+		}
+		const explanations = await this.memoryOrchestrator.explain(
+			this.lastMemoryTrace.memoryIds,
+		);
+		return { trace: this.lastMemoryTrace, explanations };
 	}
 
 	setLearningEngine(engine: LearningEngine): void {
@@ -271,6 +318,121 @@ export class AgentRuntime {
 		this.dailyMemory
 			?.addMessage(assistantTurn.content, "assistant", channelId || "system")
 			.catch(() => {});
+
+		this.recordExplicitUserMemoryCandidates(userTurn, channelId);
+	}
+
+	private recordExplicitUserMemoryCandidates(
+		userTurn: ConversationTurn,
+		channelId?: string,
+	): void {
+		if (!this.memoryOrchestrator) return;
+		const content = userTurn.content.trim();
+		if (!content) return;
+		const isPreference =
+			/\b(me llamo|mi nombre es|ll[aá]mame|prefiero|me gusta que|no me gusta|no quiero que|responde en|respondas en|my name is|call me|i prefer|please respond in)\b/i.test(
+				content,
+			);
+		const isProspective =
+			/\b(recuerdame|recu[eé]rdame|no olvides|pendiente|deadline|fecha l[ií]mite|remind me|follow up)\b/i.test(
+				content,
+			);
+		if (!isPreference && !isProspective) return;
+
+		this.memoryOrchestrator
+			.write({
+				type: isProspective ? "prospective" : "user",
+				content,
+				sourceTrust: "user_explicit",
+				scope: {
+					tenantId: "local",
+					userId: "owner",
+					projectId: process.cwd(),
+					agentRole: this.config.id,
+					sessionId: channelId,
+				},
+				source: { channelId },
+				evidence: {
+					sourceType: "message",
+					sourceId: channelId,
+					excerpt: content.slice(0, 1200),
+				},
+				metadata: {
+					capturedBy: "agent_runtime_explicit_signal",
+					...(isProspective
+						? {
+								prospectiveStatus: "pending",
+								dueAt: this.extractProspectiveDueAt(content)?.toISOString(),
+								triggerCondition: this.extractProspectiveTrigger(content),
+							}
+						: {}),
+					originalRole: userTurn.role,
+				},
+			})
+			.catch((err) =>
+				console.error("Failed to write orchestrated memory:", err),
+			);
+	}
+
+	private extractProspectiveDueAt(content: string): Date | undefined {
+		const now = new Date();
+		const lower = content.toLowerCase();
+		if (/\b(mañana|tomorrow)\b/.test(lower)) {
+			const due = new Date(now);
+			due.setDate(due.getDate() + 1);
+			due.setHours(9, 0, 0, 0);
+			return due;
+		}
+		if (/\b(hoy|today)\b/.test(lower)) {
+			const due = new Date(now);
+			due.setHours(18, 0, 0, 0);
+			return due;
+		}
+		const isoLike = content.match(
+			/\b(20\d{2}-\d{2}-\d{2})(?:[ t](\d{1,2}:\d{2}))?\b/i,
+		);
+		if (isoLike?.[1]) {
+			const parsed = new Date(`${isoLike[1]}T${isoLike[2] ?? "09:00"}:00`);
+			return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+		}
+		const weekday = lower.match(
+			/\b(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/,
+		);
+		if (weekday?.[1]) return this.nextWeekdayDate(weekday[1], now);
+		return undefined;
+	}
+
+	private extractProspectiveTrigger(content: string): string | undefined {
+		const match = content.match(/\b(?:cuando|if|when)\s+([^.!?\n]{4,120})/i);
+		return match?.[1]?.trim();
+	}
+
+	private nextWeekdayDate(day: string, from: Date): Date | undefined {
+		const weekdays: Record<string, number> = {
+			domingo: 0,
+			sunday: 0,
+			lunes: 1,
+			monday: 1,
+			martes: 2,
+			tuesday: 2,
+			miércoles: 3,
+			miercoles: 3,
+			wednesday: 3,
+			jueves: 4,
+			thursday: 4,
+			viernes: 5,
+			friday: 5,
+			sábado: 6,
+			sabado: 6,
+			saturday: 6,
+		};
+		const target = weekdays[day];
+		if (target === undefined) return undefined;
+		const due = new Date(from);
+		const delta = (target - due.getDay() + 7) % 7 || 7;
+		due.setDate(due.getDate() + delta);
+		due.setHours(9, 0, 0, 0);
+		return due;
 	}
 
 	private shouldUseZaiVisionToolsForImages(): boolean {
@@ -1345,16 +1507,11 @@ export class AgentRuntime {
 											: undefined,
 									};
 									this.stm.add(assistantTurn);
-									this.dailyMemory
-										?.addMessage(message, "user", channelId || "system")
-										.catch(() => {});
-									this.dailyMemory
-										?.addMessage(
-											event.result,
-											"assistant",
-											channelId || "system",
-										)
-										.catch(() => {});
+									this.recordAuxiliaryMemories(
+										userTurn,
+										assistantTurn,
+										channelId,
+									);
 									this.recordLearningExperience({
 										userRequest: message,
 										finalResponse: event.result,
@@ -2134,8 +2291,50 @@ export class AgentRuntime {
 	): Promise<LLMMessage[]> {
 		const messages: LLMMessage[] = [];
 		const contextParts: string[] = [];
+		let advancedMemoryPack: MemoryPack | undefined;
+		let proactiveMemoryNotices: string[] = [];
+		let degradedMemorySections: string[] = [];
 
 		let systemContent = this.config.systemPrompt;
+
+		if (this.contextAssembler) {
+			try {
+				const assembled = await this.contextAssembler.assemble({
+					objective: userMessage,
+					tenantId: "local",
+					userId: "owner",
+					projectId: process.cwd(),
+					agentRole: this.config.id,
+					sessionId: channelId,
+					budgetTokens: 900,
+				});
+				advancedMemoryPack = assembled.memoryPack;
+				proactiveMemoryNotices = assembled.proactiveNotices;
+				degradedMemorySections = assembled.degradedSections;
+				const generatedAt = new Date();
+				this.lastMemoryTrace = {
+					responseId: `memory-${generatedAt.getTime()}-${Math.random()
+						.toString(36)
+						.slice(2, 10)}`,
+					generatedAt,
+					objective: userMessage,
+					channelId,
+					uncertaintyLevel: assembled.memoryPack.uncertaintyLevel,
+					memoryIds: Array.from(
+						new Set([
+							...assembled.memoryPack.memories.map((memory) => memory.item.id),
+							...assembled.proactiveMemoryIds,
+						]),
+					),
+					knownGaps: assembled.memoryPack.knownGaps,
+					proactiveNotices: assembled.proactiveNotices,
+					degradedSections: assembled.degradedSections,
+				};
+			} catch (e) {
+				this.lastMemoryTrace = undefined;
+				console.error("Failed to assemble advanced memory context:", e);
+			}
+		}
 
 		if (this.userProfileManager) {
 			try {
@@ -2182,6 +2381,26 @@ export class AgentRuntime {
 			systemContent += `\n\n# Learned Operating Guidance\nUse these prior operational learnings when they are relevant. Prefer higher-confidence procedures and avoid listed anti-patterns.\n${guidance}`;
 		}
 
+		if (advancedMemoryPack) {
+			const knownGaps = advancedMemoryPack.knownGaps.slice(0, 5);
+			const proactive = proactiveMemoryNotices.slice(0, 5);
+			let advancedMemoryContext = "# Advanced Memory Context\n";
+			advancedMemoryContext += `- Uncertainty: ${advancedMemoryPack.uncertaintyLevel}\n`;
+			advancedMemoryContext += `- Token budget used: ${advancedMemoryPack.tokenBudgetUsed}\n`;
+			if (knownGaps.length > 0) {
+				advancedMemoryContext += `- Known gaps: ${knownGaps.join("; ")}\n`;
+			}
+			if (proactive.length > 0) {
+				advancedMemoryContext += `- Proactive notices: ${proactive.join("; ")}\n`;
+			}
+			if (degradedMemorySections.length > 0) {
+				advancedMemoryContext += `- Degraded sections due to budget: ${degradedMemorySections.join(", ")}\n`;
+			}
+			advancedMemoryContext +=
+				"Use retrieved memories only as scoped context. If uncertainty is NO_COVERAGE, explicitly avoid pretending you remember prior facts about this topic.";
+			contextParts.push(advancedMemoryContext);
+		}
+
 		if (this.toolRegistry && this.toolRegistry.list().length > 0) {
 			const toolNames = this.toolRegistry
 				.list()
@@ -2192,6 +2411,8 @@ export class AgentRuntime {
 				"\n\nCRITICAL RULE: Do NOT use tools or hallucinate past tasks for simple greetings (e.g. 'hola') or casual conversation. Only use tools if the *latest* user request explicitly requires it.";
 			systemContent +=
 				"\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
+			systemContent +=
+				"\n\nMANDATORY MEDIA OUTPUT RULE: Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description)`) or the `save_media` tool. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
 		}
 
 		systemContent += `\n\nCRITICAL SYSTEM INSTRUCTION:
@@ -2274,8 +2495,9 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 
 		messages.push({ role: "system", content: systemContent });
 
-		if (memories.memories.length > 0) {
-			const memoryFacts = memories.memories
+		const memoryItems = advancedMemoryPack?.memories ?? memories.memories;
+		if (memoryItems.length > 0) {
+			const memoryFacts = memoryItems
 				.map((m) => {
 					let sourceStr = "";
 					const sourceChannel = m.item.source?.channelId;
@@ -2299,7 +2521,7 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 				.join("\n");
 			messages.push({
 				role: "system",
-				content: `Relevant memories from long-term storage:\n${memoryFacts}`,
+				content: `Relevant memories from ${advancedMemoryPack ? "orchestrated memory" : "long-term storage"}:\n${memoryFacts}`,
 			});
 		}
 

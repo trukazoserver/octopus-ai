@@ -1,7 +1,16 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type React from "react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	Suspense,
+	lazy,
+	memo,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { showToast } from "../components/ui/Toast.js";
 import {
 	API_BASE,
@@ -17,6 +26,12 @@ const INITIAL_VISIBLE_MESSAGES = 20;
 const MESSAGE_PAGE_SIZE = 20;
 const USER_MESSAGE_PREVIEW_WORDS = 180;
 const USER_MESSAGE_PREVIEW_CHARS = 1800;
+
+const MediaLibraryPage = lazy(() =>
+	import("./media-library.js").then(({ MediaLibraryPage }) => ({
+		default: MediaLibraryPage,
+	})),
+);
 
 interface StatusData {
 	provider?: string;
@@ -200,6 +215,13 @@ interface UserProfileResponse {
 		communicationStyle?: string;
 		preferences?: Record<string, string>;
 	} | null;
+}
+
+type WorkspaceView = "chat" | "media";
+
+interface WorkspaceRequest {
+	id: number;
+	view: WorkspaceView;
 }
 
 function nanoid(): string {
@@ -923,16 +945,23 @@ function isMediaUrl(href: string): boolean {
 	);
 }
 
-function getMediaType(url: string): "image" | "audio" | "video" | null {
+function getMediaType(
+	url: string,
+): "image" | "audio" | "video" | "file" | null {
 	const path = url.split("?")[0] ?? "";
 	if (/\.(mp3|wav|ogg|m4a|weba|flac)(\/|$)/i.test(path)) return "audio";
 	if (/\.(mp4|webm|ogv|avi|mov)(\/|$)/i.test(path)) return "video";
-	if (
-		/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)(\/|$)/i.test(path) ||
-		path.includes("/api/media/file/")
-	) {
+	if (/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)(\/|$)/i.test(path)) {
 		return "image";
 	}
+	if (
+		/\.(pdf|zip|txt|md|csv|json|doc|docx|xls|xlsx|ppt|pptx|html|xml)(\/|$)/i.test(
+			path,
+		)
+	) {
+		return "file";
+	}
+	if (path.includes("/api/media/file/")) return "file";
 	return null;
 }
 
@@ -946,6 +975,32 @@ function escapeAttr(value: string): string {
 
 function getVideoPosterUrl(url: string): string {
 	return url.replace("/api/media/file/", "/api/media/thumbnail/");
+}
+
+function getMediaFilename(url: string): string {
+	try {
+		const path = new URL(url, MEDIA_BASE).pathname;
+		const filename = decodeURIComponent(path.split("/").pop() || "archivo");
+		return filename || "archivo";
+	} catch {
+		return decodeURIComponent(url.split("/").pop()?.split("?")[0] || "archivo");
+	}
+}
+
+function renderDownloadButton(
+	url: string,
+	label = "Descargar",
+	corner = false,
+): string {
+	const safeUrl = escapeAttr(url);
+	if (corner) {
+		const safeLabel = escapeAttr(label);
+		return `<a class="media-download media-download-corner" href="${safeUrl}" download data-download-media="true" rel="noopener noreferrer" aria-label="${safeLabel}"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></a>`;
+	}
+	const className = corner
+		? "media-download media-download-corner"
+		: "media-download";
+	return `<a class="${className}" href="${safeUrl}" download data-download-media="true" rel="noopener noreferrer" title="Descargar archivo">${label}</a>`;
 }
 
 function getUserMessagePreview(content: string): {
@@ -973,24 +1028,62 @@ function getUserMessagePreview(content: string): {
 	};
 }
 
-function renderMediaInline(url: string, alt?: string): string {
+let renderCompactMediaImages = false;
+let renderAgentMediaDownloads = false;
+
+function renderMediaInline(
+	url: string,
+	alt?: string,
+	compactImage = renderCompactMediaImages,
+	showDownload = renderAgentMediaDownloads,
+): string {
 	const fullUrl = url.startsWith("http") ? url : MEDIA_BASE + url;
 	const mediaType = getMediaType(url);
 	if (mediaType === "image") {
-		return `<div class="media-embed media-image"><img src="${fullUrl}" alt="${alt || ""}" loading="lazy" style="max-width:100%;height:auto;border-radius:12px;cursor:pointer" onclick="window.openMediaPreview(this.src)" /></div>`;
+		const safeUrl = escapeAttr(fullUrl);
+		const safeAlt = escapeAttr(alt || "Imagen adjunta");
+		const imageClass = compactImage ? "media-image-thumb" : "media-image-full";
+		const download = showDownload
+			? renderDownloadButton(fullUrl, "Descargar", true)
+			: "";
+		return `<div class="media-embed media-image"><div class="media-download-frame"><a href="${safeUrl}" class="${imageClass}" data-media-preview="${safeUrl}" data-tooltip="Clic para ampliar" aria-label="Ampliar imagen"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy" /></a>${download}</div></div>`;
 	}
 	if (mediaType === "audio") {
-		return `<div class="media-embed media-audio" style="padding:12px 0"><audio controls src="${fullUrl}" style="width:100%;max-width:500px" preload="metadata"></audio></div>`;
+		const safeUrl = escapeAttr(fullUrl);
+		const download = showDownload
+			? renderDownloadButton(fullUrl, "Descargar", true)
+			: "";
+		const cardClass = showDownload
+			? "media-audio-card media-has-download"
+			: "media-audio-card";
+		return `<div class="media-embed media-audio"><div class="${cardClass}"><audio controls src="${safeUrl}" preload="metadata"></audio>${download}</div></div>`;
 	}
 	if (mediaType === "video") {
 		const safeUrl = escapeAttr(fullUrl);
 		const posterUrl = escapeAttr(getVideoPosterUrl(fullUrl));
-		return `<div class="media-embed media-video video-thumbnail" data-video-src="${safeUrl}" role="button" tabindex="0" aria-label="Cargar video" style="position:relative;width:100%;max-width:100%;border-radius:14px;border:1px solid #27272a;background:#09090b;display:block;cursor:pointer;overflow:hidden">
-			<img src="${posterUrl}" alt="Miniatura del video" loading="lazy" style="display:block;width:100%;height:auto;max-width:100%;pointer-events:none" />
-			<div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.04),rgba(0,0,0,.46));pointer-events:none"></div>
-			<div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:58px;height:58px;border-radius:50%;background:rgba(99,102,241,.9);display:flex;align-items:center;justify-content:center;color:white;font-size:24px;box-shadow:0 10px 30px rgba(99,102,241,.35);padding-left:4px;pointer-events:none">&#9654;</div>
-			<div style="position:absolute;left:14px;bottom:12px;color:#f4f4f5;font-size:.8rem;text-shadow:0 1px 8px rgba(0,0,0,.75);pointer-events:none">Clic para reproducir video</div>
-		</div>`;
+		const download = showDownload
+			? renderDownloadButton(fullUrl, "Descargar", true)
+			: "";
+		const embedClass = showDownload
+			? "media-embed media-video media-video-agent"
+			: "media-embed media-video";
+		return `<div class="${embedClass}"><div class="media-download-frame media-video-frame"><div class="video-thumbnail" data-video-src="${safeUrl}" role="button" tabindex="0" aria-label="Cargar video">
+			<img src="${posterUrl}" alt="Miniatura del video" loading="lazy" />
+			<div class="video-thumbnail-scrim"></div>
+			<div class="video-thumbnail-play">&#9654;</div>
+			<div class="video-thumbnail-label">Clic para reproducir video</div>
+		</div>${download}</div></div>`;
+	}
+	if (mediaType === "file") {
+		const filename = escapeAttr(getMediaFilename(fullUrl));
+		const label = escapeAttr(alt || filename);
+		const download = showDownload
+			? renderDownloadButton(fullUrl, "Descargar", true)
+			: "";
+		const cardClass = showDownload
+			? "media-file-card media-has-download"
+			: "media-file-card";
+		return `<div class="media-embed media-file"><div class="${cardClass}"><div class="media-file-icon" aria-hidden="true">↓</div><div class="media-file-meta"><div class="media-file-title">${label}</div><div class="media-file-name">${filename}</div></div>${download}</div></div>`;
 	}
 	return "";
 }
@@ -998,14 +1091,24 @@ function renderMediaInline(url: string, alt?: string): string {
 const mediaRenderer = {
 	image({ href, text }: { href: string; text: string }): string {
 		if (isMediaUrl(href)) {
-			const media = renderMediaInline(href, text);
+			const media = renderMediaInline(
+				href,
+				text,
+				renderCompactMediaImages,
+				renderAgentMediaDownloads,
+			);
 			if (media) return media;
 		}
 		return false as unknown as string;
 	},
 	link({ href, text }: { href: string; text: string }): string {
 		if (isMediaUrl(href)) {
-			const media = renderMediaInline(href, text);
+			const media = renderMediaInline(
+				href,
+				text,
+				renderCompactMediaImages,
+				renderAgentMediaDownloads,
+			);
 			if (media) return media;
 		}
 		return false as unknown as string;
@@ -1014,7 +1117,15 @@ const mediaRenderer = {
 
 marked.use({ renderer: mediaRenderer });
 
-function renderMarkdown(text: string): string {
+function renderMarkdown(
+	text: string,
+	compactImages = false,
+	showMediaDownloads = false,
+): string {
+	const previousCompactImages = renderCompactMediaImages;
+	const previousMediaDownloads = renderAgentMediaDownloads;
+	renderCompactMediaImages = compactImages;
+	renderAgentMediaDownloads = showMediaDownloads;
 	try {
 		let processed = text;
 		// Strip think tags so they aren't displayed in the text bubble
@@ -1028,13 +1139,14 @@ function renderMarkdown(text: string): string {
 
 		// Detect bare media URLs and convert to embeddable media
 		processed = processed.replace(
-			/(?:^|\n)\s*(https?:\/\/[^\s<>"']+\/(?:api\/media\/file\/)?[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|svg|mp3|wav|ogg|m4a|mp4|webm)|\/api\/media\/file\/[^\s<>"']+)/gi,
+			/(?:^|\n)\s*(https?:\/\/[^\s<>"']+\/(?:api\/media\/file\/)?[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|svg|mp3|wav|ogg|m4a|mp4|webm|pdf|zip|txt|md|csv|json|doc|docx|xls|xlsx|ppt|pptx)|\/api\/media\/file\/[^\s<>"']+)/gi,
 			(match: string, url: string) => {
 				const fullUrl = url.startsWith("http") ? url : MEDIA_BASE + url;
 				const mediaType = getMediaType(url);
 				if (mediaType === "image") return `\n![image](${fullUrl})\n`;
 				if (mediaType === "audio") return `\n${renderMediaInline(url)}\n`;
 				if (mediaType === "video") return `\n${renderMediaInline(url)}\n`;
+				if (mediaType === "file") return `\n${renderMediaInline(url)}\n`;
 				return match;
 			},
 		);
@@ -1055,6 +1167,13 @@ function renderMarkdown(text: string): string {
 				"style",
 				"class",
 				"data-video-src",
+				"data-media-preview",
+				"data-tooltip",
+				"data-download-media",
+				"download",
+				"target",
+				"rel",
+				"title",
 				"role",
 				"tabindex",
 				"aria-label",
@@ -1074,12 +1193,22 @@ function renderMarkdown(text: string): string {
 				"style",
 				"class",
 				"data-video-src",
+				"data-media-preview",
+				"data-tooltip",
+				"data-download-media",
+				"download",
+				"target",
+				"rel",
+				"title",
 				"role",
 				"tabindex",
 				"aria-label",
 			],
 			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
 		});
+	} finally {
+		renderCompactMediaImages = previousCompactImages;
+		renderAgentMediaDownloads = previousMediaDownloads;
 	}
 }
 
@@ -1125,8 +1254,15 @@ const ChatMessage = memo(function ChatMessage({
 	const needsMarkdown =
 		msg.role === "assistant" || displayContent.includes("/api/media/file/");
 	const renderedMarkdown = useMemo(
-		() => (needsMarkdown && !isCollapsed ? renderMarkdown(displayContent) : ""),
-		[needsMarkdown, displayContent, isCollapsed],
+		() =>
+			needsMarkdown && !isCollapsed
+				? renderMarkdown(
+						displayContent,
+						msg.role === "user",
+						msg.role === "assistant",
+					)
+				: "",
+		[needsMarkdown, displayContent, isCollapsed, msg.role],
 	);
 	const bodyRef = useRef<HTMLDivElement>(null);
 	const copyAssistantResponse = useCallback(async () => {
@@ -1152,36 +1288,153 @@ const ChatMessage = memo(function ChatMessage({
 		}
 	}, [msg.content]);
 
-	// Keep videos as cheap thumbnails until the user explicitly opens one.
+	// Keep videos/images as cheap thumbnails until the user explicitly opens one.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: Rebind media handlers after sanitized markdown content is replaced.
 	useEffect(() => {
 		if (isCollapsed || !bodyRef.current) return;
 		const root = bodyRef.current;
+		const previewMedia = (el: HTMLElement) => {
+			const src = el.getAttribute("data-media-preview");
+			if (!src) return;
+			const openPreview = (window as unknown as Record<string, unknown>)
+				.openMediaPreview;
+			if (typeof openPreview === "function") openPreview(src);
+		};
+
+		const getDownloadFilename = (url: string, response: Response): string => {
+			const disposition = response.headers.get("content-disposition");
+			const match = disposition?.match(/filename\*?=(?:UTF-8''|\")?([^";]+)/i);
+			if (match?.[1]) return decodeURIComponent(match[1].replace(/"/g, ""));
+			return getMediaFilename(url);
+		};
+
+		const downloadMedia = async (link: HTMLAnchorElement) => {
+			const href = link.href;
+			if (!href) return;
+
+			try {
+				const response = await fetch(href);
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				const blob = await response.blob();
+				const objectUrl = URL.createObjectURL(blob);
+				const filename = getDownloadFilename(href, response);
+				const tempLink = document.createElement("a");
+				tempLink.href = objectUrl;
+				tempLink.download = filename;
+				tempLink.style.display = "none";
+				document.body.appendChild(tempLink);
+				tempLink.click();
+				document.body.removeChild(tempLink);
+				window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+			} catch {
+				showToast("error", "No se pudo descargar el archivo");
+			}
+		};
+
+		const classifyVideoPoster = (img: HTMLImageElement) => {
+			if (!img.naturalWidth || !img.naturalHeight) return;
+			const frame = img.closest<HTMLElement>(".media-video-frame");
+			const thumbnail = img.closest<HTMLElement>(".video-thumbnail");
+			if (!frame || !thumbnail) return;
+			const isVertical = img.naturalWidth < img.naturalHeight;
+			frame.classList.toggle("is-vertical-video", isVertical);
+			frame.classList.toggle("is-horizontal-video", !isVertical);
+			frame.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+			thumbnail.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+		};
+
+		const classifyVideoDimensions = (
+			frame: HTMLElement,
+			thumbnail: HTMLElement | null,
+			width: number,
+			height: number,
+		) => {
+			if (!width || !height) return;
+			const isVertical = width < height;
+			const aspectRatio = `${width} / ${height}`;
+			frame.classList.toggle("is-vertical-video", isVertical);
+			frame.classList.toggle("is-horizontal-video", !isVertical);
+			frame.style.aspectRatio = aspectRatio;
+			if (thumbnail) thumbnail.style.aspectRatio = aspectRatio;
+		};
+
+		const preloadVideoAspectRatio = (thumbnail: HTMLElement) => {
+			const src = thumbnail.getAttribute("data-video-src");
+			const frame = thumbnail.closest<HTMLElement>(".media-video-frame");
+			if (!src || !frame || frame.dataset.videoAspectLoaded === "true") return;
+			frame.dataset.videoAspectLoaded = "true";
+			const video = document.createElement("video");
+			video.preload = "metadata";
+			video.muted = true;
+			video.src = src;
+			video.addEventListener(
+				"loadedmetadata",
+				() => {
+					classifyVideoDimensions(
+						frame,
+						thumbnail,
+						video.videoWidth,
+						video.videoHeight,
+					);
+					video.removeAttribute("src");
+					video.load();
+				},
+				{ once: true },
+			);
+		};
+
+		const syncVideoLayouts = () => {
+			for (const img of root.querySelectorAll<HTMLImageElement>(
+				".video-thumbnail img",
+			)) {
+				if (img.naturalWidth && img.naturalHeight) classifyVideoPoster(img);
+				else {
+					img.addEventListener("load", () => classifyVideoPoster(img), {
+						once: true,
+					});
+				}
+			}
+			for (const thumbnail of root.querySelectorAll<HTMLElement>(
+				".video-thumbnail[data-video-src]",
+			)) {
+				preloadVideoAspectRatio(thumbnail);
+			}
+		};
+
+		syncVideoLayouts();
+		const animationFrame = window.requestAnimationFrame(syncVideoLayouts);
+		const layoutTimers = [100, 500, 1500].map((delay) =>
+			window.setTimeout(syncVideoLayouts, delay),
+		);
 
 		const loadVideo = (el: HTMLElement) => {
 			const src = el.getAttribute("data-video-src");
 			if (!src || el.querySelector("video")) return;
 			const rect = el.getBoundingClientRect();
 			const poster = el.querySelector("img")?.getAttribute("src") ?? "";
-			el.style.display = "block";
-			el.style.width = "100%";
 			el.style.height = `${rect.height}px`;
 			el.style.aspectRatio = `${rect.width} / ${rect.height}`;
-			el.style.background = "#000";
-			el.style.overflow = "hidden";
 			const video = document.createElement("video");
+			video.className = "media-video-player";
 			video.controls = true;
 			video.src = src;
 			video.preload = "metadata";
 			video.playsInline = true;
 			video.autoplay = true;
 			if (poster) video.poster = poster;
-			video.style.cssText =
-				"display:block;width:100%;height:100%;max-width:100%;object-fit:contain;border-radius:12px;background:#000";
 			video.addEventListener(
 				"loadedmetadata",
 				() => {
 					if (!video.videoWidth || !video.videoHeight) return;
+					const frame = el.closest<HTMLElement>(".media-video-frame");
+					if (frame) {
+						classifyVideoDimensions(
+							frame,
+							el,
+							video.videoWidth,
+							video.videoHeight,
+						);
+					}
 					el.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
 					el.style.height = "";
 				},
@@ -1197,6 +1450,21 @@ const ChatMessage = memo(function ChatMessage({
 
 		const handleActivate = (event: Event) => {
 			const target = event.target as HTMLElement | null;
+			const downloadLink = target?.closest<HTMLAnchorElement>(
+				'a[data-download-media="true"]',
+			);
+			if (downloadLink && root.contains(downloadLink)) {
+				event.preventDefault();
+				event.stopPropagation();
+				void downloadMedia(downloadLink);
+				return;
+			}
+			const previewEl = target?.closest<HTMLElement>("[data-media-preview]");
+			if (previewEl && root.contains(previewEl)) {
+				event.preventDefault();
+				previewMedia(previewEl);
+				return;
+			}
 			const el = target?.closest<HTMLElement>("[data-video-src]");
 			if (!el || !root.contains(el)) return;
 			event.preventDefault();
@@ -1206,6 +1474,21 @@ const ChatMessage = memo(function ChatMessage({
 		const handleKeyDown = (event: KeyboardEvent) => {
 			if (event.key !== "Enter" && event.key !== " ") return;
 			const target = event.target as HTMLElement | null;
+			const downloadLink = target?.closest<HTMLAnchorElement>(
+				'a[data-download-media="true"]',
+			);
+			if (downloadLink && root.contains(downloadLink)) {
+				event.preventDefault();
+				event.stopPropagation();
+				void downloadMedia(downloadLink);
+				return;
+			}
+			const previewEl = target?.closest<HTMLElement>("[data-media-preview]");
+			if (previewEl && root.contains(previewEl)) {
+				event.preventDefault();
+				previewMedia(previewEl);
+				return;
+			}
 			const el = target?.closest<HTMLElement>("[data-video-src]");
 			if (!el || !root.contains(el)) return;
 			event.preventDefault();
@@ -1216,6 +1499,8 @@ const ChatMessage = memo(function ChatMessage({
 		root.addEventListener("keydown", handleKeyDown);
 
 		return () => {
+			window.cancelAnimationFrame(animationFrame);
+			for (const timer of layoutTimers) window.clearTimeout(timer);
 			root.removeEventListener("click", handleActivate);
 			root.removeEventListener("keydown", handleKeyDown);
 		};
@@ -1374,7 +1659,10 @@ const ChatMessage = memo(function ChatMessage({
 			<div
 				ref={bodyRef}
 				style={{
-					maxWidth: msg.role === "user" ? "80%" : "calc(100% - 52px)",
+					maxWidth: msg.role === "user" ? "80%" : "calc(100% - 79px)",
+					width: msg.role === "assistant" ? "100%" : undefined,
+					minWidth: msg.role === "assistant" ? 0 : undefined,
+					flex: msg.role === "assistant" ? "1 1 auto" : undefined,
 				}}
 			>
 				{msg.role === "user" ? (
@@ -1391,7 +1679,7 @@ const ChatMessage = memo(function ChatMessage({
 					>
 						{needsMarkdown ? (
 							<div
-								className="markdown-body"
+								className={`markdown-body markdown-body-${msg.role}`}
 								// biome-ignore lint/security/noDangerouslySetInnerHtml: user-uploaded local media
 								dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
 							/>
@@ -1409,7 +1697,7 @@ const ChatMessage = memo(function ChatMessage({
 						}}
 					>
 						<div
-							className="markdown-body"
+							className={`markdown-body markdown-body-${msg.role}`}
 							// biome-ignore lint/security/noDangerouslySetInnerHtml: sanitized assistant markdown
 							dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
 						/>
@@ -1482,9 +1770,10 @@ const ChatMessage = memo(function ChatMessage({
 
 const SIDEBAR_WIDTH = 312;
 
-export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
-	onNavigate,
-}) => {
+export const ChatPage: React.FC<{
+	onNavigate?: (tab: string) => void;
+	workspaceRequest?: WorkspaceRequest;
+}> = ({ onNavigate, workspaceRequest }) => {
 	const [messages, setMessages] = useState<Message[]>([]);
 	const messagesRef = useRef<Message[]>([]);
 	const [input, setInput] = useState("");
@@ -1517,6 +1806,7 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 	}, []);
 
 	const [sidebarOpen, setSidebarOpen] = useState(true);
+	const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("chat");
 	const [conversations, setConversations] = useState<Conversation[]>([]);
 	const [conversationSearch, setConversationSearch] = useState("");
 	const [conversationsLoaded, setConversationsLoaded] = useState(false);
@@ -1561,6 +1851,10 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 	const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 	const scrollRestoreRef = useRef<{ height: number; top: number } | null>(null);
 	const [editingTitle, setEditingTitle] = useState("");
+
+	useEffect(() => {
+		if (workspaceRequest) setWorkspaceView(workspaceRequest.view);
+	}, [workspaceRequest]);
 	const [mediaPreviewSrc, setMediaPreviewSrc] = useState<string | null>(null);
 
 	// Register global media preview handler for onclick in rendered HTML
@@ -2023,12 +2317,14 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 		(convId: string) => {
 			const executionId = executionByConversation[convId]?.executionId;
 			if (executionId) notifiedExecutionRef.current.delete(executionId);
+			setWorkspaceView("chat");
 			setActiveConversationId(convId);
 		},
 		[executionByConversation],
 	);
 
 	const handleNewChat = useCallback(async () => {
+		setWorkspaceView("chat");
 		try {
 			const body: Record<string, string> = {};
 			if (selectedAgentId) body.agentId = selectedAgentId;
@@ -2576,7 +2872,7 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 		const userMsg: Message = {
 			id: nanoid(),
 			role: "user",
-			content: text,
+			content: finalContent,
 			timestamp: Date.now(),
 		};
 		setMessages((prev) => [...prev, userMsg]);
@@ -3174,15 +3470,16 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 					>
 						<button
 							type="button"
-							onClick={() => onNavigate?.("media")}
+							onClick={() => setWorkspaceView("media")}
+							aria-pressed={workspaceView === "media"}
 							style={{
 								width: "100%",
 								boxSizing: "border-box",
 								padding: "10px 12px",
 								borderRadius: "12px",
-								border: "none",
-								background: "transparent",
-								color: "#e4e4e7",
+								border: `1px solid ${workspaceView === "media" ? "#202020" : "transparent"}`,
+								background: workspaceView === "media" ? "#111" : "transparent",
+								color: workspaceView === "media" ? "#f4f4f5" : "#e4e4e7",
 								fontFamily: "inherit",
 								fontWeight: 700,
 								fontSize: "0.92rem",
@@ -3334,645 +3631,772 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 					position: "relative",
 				}}
 			>
-				{/* Top bar */}
-				<div
-					className="chat-status-bar"
-					style={{
-						padding: "10px 24px",
-						background: "#09090b",
-						borderBottom: "1px solid #27272a",
-						display: "flex",
-						alignItems: "center",
-						gap: "10px",
-						flexWrap: "wrap",
-					}}
-				>
-					{!sidebarOpen && (
-						<button
-							type="button"
-							onClick={() => setSidebarOpen((v) => !v)}
-							style={{
-								background: "none",
-								border: "1px solid #3f3f46",
-								borderRadius: "8px",
-								color: "#a1a1aa",
-								cursor: "pointer",
-								padding: "6px 8px",
-								display: "flex",
-								alignItems: "center",
-								transition: "border-color 0.2s",
-							}}
-							onMouseEnter={(e) => {
-								e.currentTarget.style.borderColor = "#6366f1";
-							}}
-							onMouseLeave={(e) => {
-								e.currentTarget.style.borderColor = "#3f3f46";
-							}}
-							data-tooltip={sidebarOpen ? "Ocultar panel" : "Mostrar panel"}
-						>
-							<svg
-								aria-hidden="true"
-								width="16"
-								height="16"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								strokeWidth="2"
-								strokeLinecap="round"
-								strokeLinejoin="round"
-							>
-								<rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-								<line x1="9" y1="3" x2="9" y2="21" />
-							</svg>
-						</button>
-					)}
-
-					<div
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: "8px",
-							padding: "6px 12px",
-							borderRadius: "8px",
-							background: isConnected
-								? "rgba(16, 185, 129, 0.1)"
-								: "rgba(239, 68, 68, 0.1)",
-							border: `1px solid ${isConnected ? "rgba(16, 185, 129, 0.3)" : "rgba(239, 68, 68, 0.3)"}`,
-						}}
-					>
-						<div
-							style={{
-								width: "8px",
-								height: "8px",
-								borderRadius: "50%",
-								background: isConnected ? "#10b981" : "#ef4444",
-								flexShrink: 0,
-								boxShadow: isConnected
-									? "0 0 8px rgba(16, 185, 129, 0.5)"
-									: "0 0 8px rgba(239, 68, 68, 0.5)",
-								animation: isConnected ? "pulse 2s infinite" : "none",
-							}}
-						/>
-						<span
-							style={{
-								color: isConnected ? "#10b981" : "#ef4444",
-								fontSize: "0.85rem",
-								fontWeight: 700,
-							}}
-						>
-							{isConnected ? "● CONECTADO" : "○ DESCONECTADO"}
-						</span>
-					</div>
-
-					{/* Agent selector */}
-					<select
-						id="chat-agent-selector"
-						name="agentId"
-						value={selectedAgentId}
-						onChange={(e) => setSelectedAgentId(e.target.value)}
-						style={{
-							marginLeft: "12px",
-							padding: "6px 12px",
-							borderRadius: "8px",
-							border: "1px solid #3f3f46",
-							background: "#18181b",
-							color: "#f4f4f5",
-							fontSize: "0.8rem",
-							outline: "none",
-							cursor: "pointer",
-							fontFamily: "inherit",
-						}}
-					>
-						<option value="">Seleccionar agente</option>
-						{agents.map((agent) => (
-							<option key={agent.id} value={agent.id}>
-								{agent.name}
-							</option>
-						))}
-					</select>
-
-					<button
-						type="button"
-						onClick={() => {
-							const next = !streamEnabled;
-							setStreamEnabled(next);
-							try {
-								localStorage.setItem("octopus-stream", String(next));
-							} catch {}
-						}}
-						data-tooltip={
-							streamEnabled
-								? "Streaming activado (respuesta en tiempo real)"
-								: "Streaming desactivado (respuesta completa)"
-						}
-						style={{
-							marginLeft: "8px",
-							padding: "6px 12px",
-							borderRadius: "8px",
-							border: `1px solid ${streamEnabled ? "rgba(99, 102, 241, 0.4)" : "#3f3f46"}`,
-							background: streamEnabled ? "rgba(99, 102, 241, 0.1)" : "#18181b",
-							color: streamEnabled ? "#818cf8" : "#71717a",
-							fontSize: "0.8rem",
-							cursor: "pointer",
-							display: "flex",
-							alignItems: "center",
-							gap: "6px",
-							fontWeight: 500,
-							transition: "all 0.2s",
-							fontFamily: "inherit",
-						}}
-					>
-						<svg
-							aria-hidden="true"
-							width="14"
-							height="14"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							strokeWidth="2"
-							strokeLinecap="round"
-							strokeLinejoin="round"
-						>
-							<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-						</svg>
-						{streamEnabled ? "Stream" : "Completo"}
-					</button>
-
-					<div style={{ flex: 1 }} />
-					{status?.provider && (
-						<div
-							className="chat-status-meta"
-							style={{ display: "flex", alignItems: "center", gap: "8px" }}
-						>
-							{status.thinking && status.thinking !== "none" && (
-								<span
-									style={{
-										fontSize: "0.75rem",
-										padding: "4px 10px",
-										borderRadius: "20px",
-										background: "rgba(16, 185, 129, 0.1)",
-										color: "#10b981",
-										border: "1px solid rgba(16, 185, 129, 0.2)",
-										fontWeight: 500,
-									}}
-								>
-									Razonamiento: {status.thinking}
-								</span>
-							)}
-							<span
+				{workspaceView === "media" ? (
+					<>
+						{!sidebarOpen && (
+							<div
 								style={{
-									fontSize: "0.75rem",
-									padding: "4px 10px",
-									borderRadius: "20px",
-									background: "rgba(99, 102, 241, 0.1)",
-									color: "#818cf8",
-									border: "1px solid rgba(99, 102, 241, 0.2)",
-									fontWeight: 500,
+									padding: "10px 16px",
+									background: "#09090b",
+									borderBottom: "1px solid #27272a",
+									display: "flex",
+									alignItems: "center",
+									gap: "10px",
 								}}
 							>
-								Modelo: {status.provider}
-							</span>
-						</div>
-					)}
-				</div>
-
-				{/* Messages */}
-				<div
-					ref={messagesContainerRef}
-					className="chat-messages"
-					onScroll={handleMessagesScroll}
-					style={{ flex: 1, overflowY: "auto", padding: "30px 20px" }}
-				>
-					<div
-						className="chat-messages-inner"
-						style={{ maxWidth: "800px", margin: "0 auto" }}
-					>
-						{messages.length === 0 && (
-							<div className="chat-welcome">
-								<div className="chat-welcome-plan">Plan local · Octopus AI</div>
-								<div className="chat-welcome-title-row">
-									<img
-										src="/logo_Pulpo_octavio.png"
-										alt="Octopus"
-										className="chat-welcome-logo"
-									/>
-									<h1 className="chat-welcome-title">
-										Buenos dias, {userDisplayName}
-									</h1>
-								</div>
-								<p className="chat-welcome-subtitle">
-									Como puedo ayudarte hoy?
-								</p>
-								<div className="chat-welcome-chips">
-									{[
-										{ label: "Escribir", prompt: "Ayudame a escribir " },
-										{ label: "Aprender", prompt: "Explicame paso a paso " },
-										{ label: "Codigo", prompt: "Ayudame con este codigo: " },
-										{ label: "Vida personal", prompt: "Ayudame a organizar " },
-										{ label: "Multimedia", prompt: "Genera una imagen de " },
-									].map((suggestion) => (
-										<button
-											key={suggestion.label}
-											type="button"
-											className="chat-welcome-chip"
-											onClick={() => {
-												setInput(suggestion.prompt);
-												inputRef.current?.focus();
-											}}
-										>
-											{suggestion.label}
-										</button>
-									))}
-								</div>
+								<button
+									type="button"
+									onClick={() => setSidebarOpen(true)}
+									data-tooltip="Mostrar panel"
+									style={{
+										background: "none",
+										border: "1px solid #3f3f46",
+										borderRadius: "8px",
+										color: "#a1a1aa",
+										cursor: "pointer",
+										padding: "6px 8px",
+										display: "flex",
+										alignItems: "center",
+									}}
+								>
+									<svg
+										aria-hidden="true"
+										width="16"
+										height="16"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										strokeWidth="2"
+										strokeLinecap="round"
+										strokeLinejoin="round"
+									>
+										<rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+										<line x1="9" y1="3" x2="9" y2="21" />
+									</svg>
+								</button>
+								<button
+									type="button"
+									onClick={() => setWorkspaceView("chat")}
+									style={{
+										border: "1px solid #3f3f46",
+										borderRadius: "8px",
+										background: "#18181b",
+										color: "#f4f4f5",
+										cursor: "pointer",
+										fontFamily: "inherit",
+										fontWeight: 700,
+										padding: "6px 12px",
+									}}
+								>
+									Volver al chat
+								</button>
 							</div>
 						)}
-						{(() => {
-							const visibleCount = Math.min(
-								visibleMessageCount,
-								messages.length,
-							);
-							const visible = messages.slice(-visibleCount);
-							const collapsedCount = messages.length - visible.length;
-							const nextBatchCount = Math.min(
-								MESSAGE_PAGE_SIZE,
-								collapsedCount,
-							);
-							return (
-								<>
-									{collapsedCount > 0 && (
-										<button
-											type="button"
-											onClick={revealOlderMessages}
-											style={{
-												display: "block",
-												width: "100%",
-												padding: "12px",
-												marginBottom: "16px",
-												background: "#18181b",
-												border: "1px dashed #3f3f46",
-												borderRadius: "12px",
-												color: "#71717a",
-												fontSize: "0.85rem",
-												cursor: "pointer",
-												textAlign: "center",
-											}}
-										>
-											↑ Mostrar {nextBatchCount} mensajes anteriores (
-											{collapsedCount} restantes)
-										</button>
-									)}
-									{visible.map((msg) => (
-										<ChatMessage key={msg.id} msg={msg} collapsed={false} />
-									))}
-								</>
-							);
-						})()}
-						{shouldShowAgentActivity && (
-							<AgentActivityPanel
-								activities={visibleAgentActivity}
-								multiAgentPlan={multiAgentPlan}
-								multiAgentWorkers={multiAgentWorkers}
-							/>
-						)}
-
 						<div
-							ref={messagesEndRef}
-							style={{ height: "1px", width: "100%" }}
-						/>
-					</div>
-				</div>
-				{showScrollToBottom && messages.length > 0 && (
-					<button
-						type="button"
-						onClick={() => scrollToBottom()}
-						data-tooltip="Volver al final del chat"
-						style={{
-							position: "absolute",
-							left: "50%",
-							bottom: "112px",
-							transform: "translateX(-50%)",
-							zIndex: 20,
-							display: "inline-flex",
-							alignItems: "center",
-							gap: "8px",
-							padding: "10px 14px",
-							borderRadius: "999px",
-							border: "1px solid rgba(99,102,241,.45)",
-							background: "rgba(24,24,27,.92)",
-							color: "#e0e7ff",
-							fontSize: "0.82rem",
-							fontWeight: 800,
-							fontFamily: "inherit",
-							cursor: "pointer",
-							boxShadow:
-								"0 12px 30px rgba(0,0,0,.32), 0 0 24px rgba(99,102,241,.18)",
-							backdropFilter: "blur(10px)",
-						}}
-					>
-						<svg
-							aria-hidden="true"
-							width="16"
-							height="16"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							strokeWidth="2"
-							strokeLinecap="round"
-							strokeLinejoin="round"
-						>
-							<path d="M12 5v14" />
-							<path d="m19 12-7 7-7-7" />
-						</svg>
-						Ir al final
-					</button>
-				)}
-
-				{/* Input Area */}
-				<div
-					className="chat-input-area"
-					style={{
-						padding: "0 20px 30px",
-						background:
-							"linear-gradient(180deg, rgba(9,9,11,0) 0%, rgba(9,9,11,1) 30%)",
-					}}
-				>
-					<div
-						className="chat-composer-shell"
-						style={{
-							maxWidth: "800px",
-							margin: "0 auto",
-							position: "relative",
-						}}
-					>
-						<div
+							className="chat-media-library-view"
 							style={{
-								display: "flex",
-								flexDirection: "column",
-								background: "#18181b",
-								borderRadius: "16px",
-								border: "1px solid #3f3f46",
-								padding: "8px 12px",
-								boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
-								transition: "border-color 0.2s",
+								flex: 1,
+								minHeight: 0,
+								overflow: "hidden",
+								background: "#000",
 							}}
 						>
-							{pendingAttachments.length > 0 && (
+							<Suspense
+								fallback={
+									<div
+										style={{
+											height: "100%",
+											display: "flex",
+											alignItems: "center",
+											justifyContent: "center",
+											color: "#a1a1aa",
+										}}
+									>
+										Cargando biblioteca...
+									</div>
+								}
+							>
+								<MediaLibraryPage />
+							</Suspense>
+						</div>
+					</>
+				) : (
+					<>
+						{/* Top bar */}
+						<div
+							className="chat-status-bar"
+							style={{
+								padding: "10px 24px",
+								background: "#09090b",
+								borderBottom: "1px solid #27272a",
+								display: "flex",
+								alignItems: "center",
+								gap: "10px",
+								flexWrap: "wrap",
+							}}
+						>
+							{!sidebarOpen && (
+								<button
+									type="button"
+									onClick={() => setSidebarOpen((v) => !v)}
+									style={{
+										background: "none",
+										border: "1px solid #3f3f46",
+										borderRadius: "8px",
+										color: "#a1a1aa",
+										cursor: "pointer",
+										padding: "6px 8px",
+										display: "flex",
+										alignItems: "center",
+										transition: "border-color 0.2s",
+									}}
+									onMouseEnter={(e) => {
+										e.currentTarget.style.borderColor = "#6366f1";
+									}}
+									onMouseLeave={(e) => {
+										e.currentTarget.style.borderColor = "#3f3f46";
+									}}
+									data-tooltip={sidebarOpen ? "Ocultar panel" : "Mostrar panel"}
+								>
+									<svg
+										aria-hidden="true"
+										width="16"
+										height="16"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										strokeWidth="2"
+										strokeLinecap="round"
+										strokeLinejoin="round"
+									>
+										<rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+										<line x1="9" y1="3" x2="9" y2="21" />
+									</svg>
+								</button>
+							)}
+
+							<div
+								style={{
+									display: "flex",
+									alignItems: "center",
+									gap: "8px",
+									padding: "6px 12px",
+									borderRadius: "8px",
+									background: isConnected
+										? "rgba(16, 185, 129, 0.1)"
+										: "rgba(239, 68, 68, 0.1)",
+									border: `1px solid ${isConnected ? "rgba(16, 185, 129, 0.3)" : "rgba(239, 68, 68, 0.3)"}`,
+								}}
+							>
+								<div
+									style={{
+										width: "8px",
+										height: "8px",
+										borderRadius: "50%",
+										background: isConnected ? "#10b981" : "#ef4444",
+										flexShrink: 0,
+										boxShadow: isConnected
+											? "0 0 8px rgba(16, 185, 129, 0.5)"
+											: "0 0 8px rgba(239, 68, 68, 0.5)",
+										animation: isConnected ? "pulse 2s infinite" : "none",
+									}}
+								/>
+								<span
+									style={{
+										color: isConnected ? "#10b981" : "#ef4444",
+										fontSize: "0.85rem",
+										fontWeight: 700,
+									}}
+								>
+									{isConnected ? "● CONECTADO" : "○ DESCONECTADO"}
+								</span>
+							</div>
+
+							{/* Agent selector */}
+							<select
+								id="chat-agent-selector"
+								name="agentId"
+								value={selectedAgentId}
+								onChange={(e) => setSelectedAgentId(e.target.value)}
+								style={{
+									marginLeft: "12px",
+									padding: "6px 12px",
+									borderRadius: "8px",
+									border: "1px solid #3f3f46",
+									background: "#18181b",
+									color: "#f4f4f5",
+									fontSize: "0.8rem",
+									outline: "none",
+									cursor: "pointer",
+									fontFamily: "inherit",
+								}}
+							>
+								<option value="">Seleccionar agente</option>
+								{agents.map((agent) => (
+									<option key={agent.id} value={agent.id}>
+										{agent.name}
+									</option>
+								))}
+							</select>
+
+							<button
+								type="button"
+								onClick={() => {
+									const next = !streamEnabled;
+									setStreamEnabled(next);
+									try {
+										localStorage.setItem("octopus-stream", String(next));
+									} catch {}
+								}}
+								data-tooltip={
+									streamEnabled
+										? "Streaming activado (respuesta en tiempo real)"
+										: "Streaming desactivado (respuesta completa)"
+								}
+								style={{
+									marginLeft: "8px",
+									padding: "6px 12px",
+									borderRadius: "8px",
+									border: `1px solid ${streamEnabled ? "rgba(99, 102, 241, 0.4)" : "#3f3f46"}`,
+									background: streamEnabled
+										? "rgba(99, 102, 241, 0.1)"
+										: "#18181b",
+									color: streamEnabled ? "#818cf8" : "#71717a",
+									fontSize: "0.8rem",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									gap: "6px",
+									fontWeight: 500,
+									transition: "all 0.2s",
+									fontFamily: "inherit",
+								}}
+							>
+								<svg
+									aria-hidden="true"
+									width="14"
+									height="14"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="2"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+								>
+									<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+								</svg>
+								{streamEnabled ? "Stream" : "Completo"}
+							</button>
+
+							<div style={{ flex: 1 }} />
+							{status?.provider && (
+								<div
+									className="chat-status-meta"
+									style={{ display: "flex", alignItems: "center", gap: "8px" }}
+								>
+									{status.thinking && status.thinking !== "none" && (
+										<span
+											style={{
+												fontSize: "0.75rem",
+												padding: "4px 10px",
+												borderRadius: "20px",
+												background: "rgba(16, 185, 129, 0.1)",
+												color: "#10b981",
+												border: "1px solid rgba(16, 185, 129, 0.2)",
+												fontWeight: 500,
+											}}
+										>
+											Razonamiento: {status.thinking}
+										</span>
+									)}
+									<span
+										style={{
+											fontSize: "0.75rem",
+											padding: "4px 10px",
+											borderRadius: "20px",
+											background: "rgba(99, 102, 241, 0.1)",
+											color: "#818cf8",
+											border: "1px solid rgba(99, 102, 241, 0.2)",
+											fontWeight: 500,
+										}}
+									>
+										Modelo: {status.provider}
+									</span>
+								</div>
+							)}
+						</div>
+
+						{/* Messages */}
+						<div
+							ref={messagesContainerRef}
+							className="chat-messages"
+							onScroll={handleMessagesScroll}
+							style={{ flex: 1, overflowY: "auto", padding: "30px 20px" }}
+						>
+							<div
+								className="chat-messages-inner"
+								style={{ maxWidth: "800px", margin: "0 auto" }}
+							>
+								{messages.length === 0 && (
+									<div className="chat-welcome">
+										<div className="chat-welcome-plan">
+											Plan local · Octopus AI
+										</div>
+										<div className="chat-welcome-title-row">
+											<img
+												src="/logo_Pulpo_octavio.png"
+												alt="Octopus"
+												className="chat-welcome-logo"
+											/>
+											<h1 className="chat-welcome-title">
+												Buenos dias, {userDisplayName}
+											</h1>
+										</div>
+										<p className="chat-welcome-subtitle">
+											Como puedo ayudarte hoy?
+										</p>
+										<div className="chat-welcome-chips">
+											{[
+												{ label: "Escribir", prompt: "Ayudame a escribir " },
+												{ label: "Aprender", prompt: "Explicame paso a paso " },
+												{
+													label: "Codigo",
+													prompt: "Ayudame con este codigo: ",
+												},
+												{
+													label: "Vida personal",
+													prompt: "Ayudame a organizar ",
+												},
+												{
+													label: "Multimedia",
+													prompt: "Genera una imagen de ",
+												},
+											].map((suggestion) => (
+												<button
+													key={suggestion.label}
+													type="button"
+													className="chat-welcome-chip"
+													onClick={() => {
+														setInput(suggestion.prompt);
+														inputRef.current?.focus();
+													}}
+												>
+													{suggestion.label}
+												</button>
+											))}
+										</div>
+									</div>
+								)}
+								{(() => {
+									const visibleCount = Math.min(
+										visibleMessageCount,
+										messages.length,
+									);
+									const visible = messages.slice(-visibleCount);
+									const collapsedCount = messages.length - visible.length;
+									const nextBatchCount = Math.min(
+										MESSAGE_PAGE_SIZE,
+										collapsedCount,
+									);
+									return (
+										<>
+											{collapsedCount > 0 && (
+												<button
+													type="button"
+													onClick={revealOlderMessages}
+													style={{
+														display: "block",
+														width: "100%",
+														padding: "12px",
+														marginBottom: "16px",
+														background: "#18181b",
+														border: "1px dashed #3f3f46",
+														borderRadius: "12px",
+														color: "#71717a",
+														fontSize: "0.85rem",
+														cursor: "pointer",
+														textAlign: "center",
+													}}
+												>
+													↑ Mostrar {nextBatchCount} mensajes anteriores (
+													{collapsedCount} restantes)
+												</button>
+											)}
+											{visible.map((msg) => (
+												<ChatMessage key={msg.id} msg={msg} collapsed={false} />
+											))}
+										</>
+									);
+								})()}
+								{shouldShowAgentActivity && (
+									<AgentActivityPanel
+										activities={visibleAgentActivity}
+										multiAgentPlan={multiAgentPlan}
+										multiAgentWorkers={multiAgentWorkers}
+									/>
+								)}
+
+								<div
+									ref={messagesEndRef}
+									style={{ height: "1px", width: "100%" }}
+								/>
+							</div>
+						</div>
+						{showScrollToBottom && messages.length > 0 && (
+							<button
+								type="button"
+								onClick={() => scrollToBottom()}
+								data-tooltip="Volver al final del chat"
+								style={{
+									position: "absolute",
+									left: "50%",
+									bottom: "112px",
+									transform: "translateX(-50%)",
+									zIndex: 20,
+									display: "inline-flex",
+									alignItems: "center",
+									gap: "8px",
+									padding: "10px 14px",
+									borderRadius: "999px",
+									border: "1px solid rgba(99,102,241,.45)",
+									background: "rgba(24,24,27,.92)",
+									color: "#e0e7ff",
+									fontSize: "0.82rem",
+									fontWeight: 800,
+									fontFamily: "inherit",
+									cursor: "pointer",
+									boxShadow:
+										"0 12px 30px rgba(0,0,0,.32), 0 0 24px rgba(99,102,241,.18)",
+									backdropFilter: "blur(10px)",
+								}}
+							>
+								<svg
+									aria-hidden="true"
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="2"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+								>
+									<path d="M12 5v14" />
+									<path d="m19 12-7 7-7-7" />
+								</svg>
+								Ir al final
+							</button>
+						)}
+
+						{/* Input Area */}
+						<div
+							className="chat-input-area"
+							style={{
+								padding: "0 20px 30px",
+								background:
+									"linear-gradient(180deg, rgba(9,9,11,0) 0%, rgba(9,9,11,1) 30%)",
+							}}
+						>
+							<div
+								className="chat-composer-shell"
+								style={{
+									maxWidth: "800px",
+									margin: "0 auto",
+									position: "relative",
+								}}
+							>
 								<div
 									style={{
 										display: "flex",
-										flexWrap: "wrap",
-										gap: "8px",
-										paddingBottom: "8px",
-										borderBottom: "1px solid #27272a",
-										marginBottom: "8px",
+										flexDirection: "column",
+										background: "#18181b",
+										borderRadius: "16px",
+										border: "1px solid #3f3f46",
+										padding: "8px 12px",
+										boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
+										transition: "border-color 0.2s",
 									}}
 								>
-									{pendingAttachments.map((attachment, idx) => (
+									{pendingAttachments.length > 0 && (
 										<div
-											key={attachment.previewUrl}
 											style={{
-												position: "relative",
-												width: "60px",
-												height: "60px",
-												borderRadius: "8px",
-												overflow: "hidden",
-												border: "1px solid #3f3f46",
+												display: "flex",
+												flexWrap: "wrap",
+												gap: "8px",
+												paddingBottom: "8px",
+												borderBottom: "1px solid #27272a",
+												marginBottom: "8px",
 											}}
 										>
-											<img
-												src={attachment.previewUrl}
-												alt="adjunto"
-												style={{
-													width: "100%",
-													height: "100%",
-													objectFit: "cover",
-												}}
-											/>
+											{pendingAttachments.map((attachment, idx) => (
+												<div
+													key={attachment.previewUrl}
+													style={{
+														position: "relative",
+														width: "60px",
+														height: "60px",
+														borderRadius: "8px",
+														overflow: "hidden",
+														border: "1px solid #3f3f46",
+													}}
+												>
+													<button
+														type="button"
+														onClick={() =>
+															setMediaPreviewSrc(attachment.previewUrl)
+														}
+														aria-label="Ampliar imagen adjunta"
+														style={{
+															width: "100%",
+															height: "100%",
+															padding: 0,
+															border: 0,
+															background: "transparent",
+															cursor: "zoom-in",
+														}}
+													>
+														<img
+															src={attachment.previewUrl}
+															alt="adjunto"
+															style={{
+																width: "100%",
+																height: "100%",
+																objectFit: "cover",
+																display: "block",
+															}}
+														/>
+													</button>
+													<button
+														type="button"
+														onClick={() => removePendingAttachment(idx)}
+														style={{
+															position: "absolute",
+															top: "2px",
+															right: "2px",
+															background: "rgba(0,0,0,0.6)",
+															color: "white",
+															border: "none",
+															borderRadius: "50%",
+															width: "20px",
+															height: "20px",
+															display: "flex",
+															alignItems: "center",
+															justifyContent: "center",
+															cursor: "pointer",
+															fontSize: "12px",
+															zIndex: 1,
+														}}
+													>
+														✕
+													</button>
+												</div>
+											))}
+										</div>
+									)}
+									<div style={{ display: "flex", alignItems: "flex-end" }}>
+										<input
+											id="chat-image-upload"
+											name="imageUpload"
+											type="file"
+											ref={fileInputRef}
+											style={{ display: "none" }}
+											onChange={handleFileUpload}
+											accept="image/*"
+										/>
+										<button
+											type="button"
+											aria-label="Adjuntar imagen"
+											onClick={() => fileInputRef.current?.click()}
+											disabled={isUploadingImage}
+											data-tooltip="Adjuntar imagen"
+											style={{
+												width: "36px",
+												height: "36px",
+												borderRadius: "10px",
+												border: "none",
+												background: "transparent",
+												color: isUploadingImage ? "#6366f1" : "#a1a1aa",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+												cursor: isUploadingImage ? "wait" : "pointer",
+												transition: "all 0.2s",
+												marginBottom: "4px",
+												marginRight: "4px",
+												flexShrink: 0,
+											}}
+											onMouseEnter={(e) => {
+												if (!isUploadingImage)
+													e.currentTarget.style.color = "#f4f4f5";
+											}}
+											onMouseLeave={(e) => {
+												if (!isUploadingImage)
+													e.currentTarget.style.color = "#a1a1aa";
+											}}
+										>
+											{isUploadingImage ? (
+												<svg
+													aria-hidden="true"
+													width="20"
+													height="20"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													strokeWidth="2"
+													style={{ animation: "spin 2s linear infinite" }}
+												>
+													<circle cx="12" cy="12" r="9" strokeDasharray="30" />
+												</svg>
+											) : (
+												<svg
+													aria-hidden="true"
+													width="20"
+													height="20"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													strokeWidth="2"
+													strokeLinecap="round"
+													strokeLinejoin="round"
+												>
+													<path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+												</svg>
+											)}
+										</button>
+										<textarea
+											id="chat-message-input"
+											name="message"
+											ref={inputRef}
+											value={input}
+											onChange={handleInput}
+											onKeyDown={handleKeyDown}
+											placeholder={
+												isConnected
+													? "Escribe un mensaje..."
+													: "Conectando al servidor..."
+											}
+											disabled={!isConnected}
+											rows={1}
+											style={{
+												flex: 1,
+												padding: "10px 8px",
+												background: "transparent",
+												border: "none",
+												color: "#f4f4f5",
+												fontSize: "0.95rem",
+												outline: "none",
+												resize: "none",
+												maxHeight: "200px",
+												lineHeight: "1.5",
+												fontFamily: "inherit",
+											}}
+										/>
+										{activeBusy ? (
 											<button
 												type="button"
-												onClick={() => removePendingAttachment(idx)}
+												onClick={() => void handleStopExecution()}
+												aria-label="Parar tarea del agente"
+												data-tooltip="Parar tarea del agente"
 												style={{
-													position: "absolute",
-													top: "2px",
-													right: "2px",
-													background: "rgba(0,0,0,0.6)",
-													color: "white",
+													width: "36px",
+													height: "36px",
+													borderRadius: "10px",
 													border: "none",
-													borderRadius: "50%",
-													width: "20px",
-													height: "20px",
+													background: "#ef4444",
+													color: "#fff",
 													display: "flex",
 													alignItems: "center",
 													justifyContent: "center",
 													cursor: "pointer",
-													fontSize: "12px",
+													transition: "all 0.2s",
+													marginBottom: "4px",
+													flexShrink: 0,
 												}}
 											>
-												✕
+												<svg
+													width="16"
+													height="16"
+													viewBox="0 0 24 24"
+													fill="currentColor"
+													aria-hidden="true"
+												>
+													<title>Parar</title>
+													<rect x="6" y="6" width="12" height="12" rx="2" />
+												</svg>
 											</button>
-										</div>
-									))}
+										) : (
+											<button
+												type="button"
+												onClick={handleSend}
+												disabled={
+													(!input.trim() && pendingAttachments.length === 0) ||
+													!isConnected
+												}
+												style={{
+													width: "36px",
+													height: "36px",
+													borderRadius: "10px",
+													border: "none",
+													background:
+														(!input.trim() &&
+															pendingAttachments.length === 0) ||
+														!isConnected
+															? "#27272a"
+															: "#6366f1",
+													color:
+														(!input.trim() &&
+															pendingAttachments.length === 0) ||
+														!isConnected
+															? "#52525b"
+															: "#fff",
+													display: "flex",
+													alignItems: "center",
+													justifyContent: "center",
+													cursor:
+														(!input.trim() &&
+															pendingAttachments.length === 0) ||
+														!isConnected
+															? "not-allowed"
+															: "pointer",
+													transition: "all 0.2s",
+													marginBottom: "4px",
+													flexShrink: 0,
+												}}
+											>
+												<svg
+													width="18"
+													height="18"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													strokeWidth="2"
+													strokeLinecap="round"
+													strokeLinejoin="round"
+													aria-hidden="true"
+												>
+													<title>Enviar</title>
+													<line x1="22" y1="2" x2="11" y2="13" />
+													<polygon points="22 2 15 22 11 13 2 9 22 2" />
+												</svg>
+											</button>
+										)}
+									</div>
 								</div>
-							)}
-							<div style={{ display: "flex", alignItems: "flex-end" }}>
-								<input
-									id="chat-image-upload"
-									name="imageUpload"
-									type="file"
-									ref={fileInputRef}
-									style={{ display: "none" }}
-									onChange={handleFileUpload}
-									accept="image/*"
-								/>
-								<button
-									type="button"
-									aria-label="Adjuntar imagen"
-									onClick={() => fileInputRef.current?.click()}
-									disabled={isUploadingImage}
-									data-tooltip="Adjuntar imagen"
+								<div
 									style={{
-										width: "36px",
-										height: "36px",
-										borderRadius: "10px",
-										border: "none",
-										background: "transparent",
-										color: isUploadingImage ? "#6366f1" : "#a1a1aa",
-										display: "flex",
-										alignItems: "center",
-										justifyContent: "center",
-										cursor: isUploadingImage ? "wait" : "pointer",
-										transition: "all 0.2s",
-										marginBottom: "4px",
-										marginRight: "4px",
-										flexShrink: 0,
-									}}
-									onMouseEnter={(e) => {
-										if (!isUploadingImage)
-											e.currentTarget.style.color = "#f4f4f5";
-									}}
-									onMouseLeave={(e) => {
-										if (!isUploadingImage)
-											e.currentTarget.style.color = "#a1a1aa";
+										textAlign: "center",
+										marginTop: "10px",
+										fontSize: "0.7rem",
+										color: "#71717a",
 									}}
 								>
-									{isUploadingImage ? (
-										<svg
-											aria-hidden="true"
-											width="20"
-											height="20"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											strokeWidth="2"
-											style={{ animation: "spin 2s linear infinite" }}
-										>
-											<circle cx="12" cy="12" r="9" strokeDasharray="30" />
-										</svg>
-									) : (
-										<svg
-											aria-hidden="true"
-											width="20"
-											height="20"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											strokeWidth="2"
-											strokeLinecap="round"
-											strokeLinejoin="round"
-										>
-											<path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-										</svg>
-									)}
-								</button>
-								<textarea
-									id="chat-message-input"
-									name="message"
-									ref={inputRef}
-									value={input}
-									onChange={handleInput}
-									onKeyDown={handleKeyDown}
-									placeholder={
-										isConnected
-											? "Escribe un mensaje..."
-											: "Conectando al servidor..."
-									}
-									disabled={!isConnected}
-									rows={1}
-									style={{
-										flex: 1,
-										padding: "10px 8px",
-										background: "transparent",
-										border: "none",
-										color: "#f4f4f5",
-										fontSize: "0.95rem",
-										outline: "none",
-										resize: "none",
-										maxHeight: "200px",
-										lineHeight: "1.5",
-										fontFamily: "inherit",
-									}}
-								/>
-								{activeBusy ? (
-									<button
-										type="button"
-										onClick={() => void handleStopExecution()}
-										aria-label="Parar tarea del agente"
-										data-tooltip="Parar tarea del agente"
-										style={{
-											width: "36px",
-											height: "36px",
-											borderRadius: "10px",
-											border: "none",
-											background: "#ef4444",
-											color: "#fff",
-											display: "flex",
-											alignItems: "center",
-											justifyContent: "center",
-											cursor: "pointer",
-											transition: "all 0.2s",
-											marginBottom: "4px",
-											flexShrink: 0,
-										}}
-									>
-										<svg
-											width="16"
-											height="16"
-											viewBox="0 0 24 24"
-											fill="currentColor"
-											aria-hidden="true"
-										>
-											<title>Parar</title>
-											<rect x="6" y="6" width="12" height="12" rx="2" />
-										</svg>
-									</button>
-								) : (
-									<button
-										type="button"
-										onClick={handleSend}
-										disabled={
-											(!input.trim() && pendingAttachments.length === 0) ||
-											!isConnected
-										}
-										style={{
-											width: "36px",
-											height: "36px",
-											borderRadius: "10px",
-											border: "none",
-											background:
-												(!input.trim() && pendingAttachments.length === 0) ||
-												!isConnected
-													? "#27272a"
-													: "#6366f1",
-											color:
-												(!input.trim() && pendingAttachments.length === 0) ||
-												!isConnected
-													? "#52525b"
-													: "#fff",
-											display: "flex",
-											alignItems: "center",
-											justifyContent: "center",
-											cursor:
-												(!input.trim() && pendingAttachments.length === 0) ||
-												!isConnected
-													? "not-allowed"
-													: "pointer",
-											transition: "all 0.2s",
-											marginBottom: "4px",
-											flexShrink: 0,
-										}}
-									>
-										<svg
-											width="18"
-											height="18"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											strokeWidth="2"
-											strokeLinecap="round"
-											strokeLinejoin="round"
-											aria-hidden="true"
-										>
-											<title>Enviar</title>
-											<line x1="22" y1="2" x2="11" y2="13" />
-											<polygon points="22 2 15 22 11 13 2 9 22 2" />
-										</svg>
-									</button>
-								)}
+									Octopus AI puede cometer errores. Considera verificar la
+									información importante.
+								</div>
 							</div>
 						</div>
-						<div
-							style={{
-								textAlign: "center",
-								marginTop: "10px",
-								fontSize: "0.7rem",
-								color: "#71717a",
-							}}
-						>
-							Octopus AI puede cometer errores. Considera verificar la
-							información importante.
-						</div>
-					</div>
-				</div>
+					</>
+				)}
 			</div>
 
 			<style>{`
@@ -4069,7 +4493,7 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 					.agent-activity-steps { display: none; }
 					.multi-agent-workers { grid-template-columns: 1fr; }
 					.multi-agent-worker-steps { display: none; }
-					.media-image img { max-height: min(66vh, calc(100vh - 220px)); }
+					.media-image-thumb, .media-image-thumb img { width: 96px; height: 96px; }
 					.chat-welcome { min-height: calc(100vh - 240px); padding-top: 28px; }
 					.chat-welcome-plan { margin-bottom: 38px; }
 					.chat-welcome-title-row { flex-direction: column; gap: 10px; }
@@ -4091,14 +4515,59 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 				.markdown-body table { border-collapse: collapse; margin: 16px 0; width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid #27272a; }
 				.markdown-body th, .markdown-body td { border-bottom: 1px solid #27272a; padding: 10px 14px; text-align: left; }
 				.markdown-body th { background: #18181b; font-weight: 500; color: #e4e4e7; }
-				.media-embed { margin: 14px 0; display: flex; justify-content: center; align-items: center; width: 100%; }
-				.media-image img { display: block; width: auto; height: auto; max-width: 100%; max-height: min(72vh, calc(100vh - 260px)); object-fit: contain; margin: 0 auto; border-radius: 12px; border: 1px solid #27272a; transition: transform 0.2s, box-shadow 0.2s; cursor: pointer; }
-				.media-image img:hover { transform: scale(1.01); box-shadow: 0 4px 24px rgba(99, 102, 241, 0.2); }
-				.media-audio { padding: 8px 0; }
+				.media-embed { margin: 10px 0; display: flex; justify-content: flex-start; align-items: center; width: 100%; gap: 10px; flex-wrap: wrap; }
+				.markdown-body-assistant .media-embed { justify-content: center; }
+				.markdown-body-assistant .media-embed.media-image { display: flex; width: 100%; }
+				.markdown-body-assistant .media-video { width: 100%; max-width: 100%; align-items: center; margin-left: auto; margin-right: auto; }
+				.markdown-body-assistant .media-image { justify-content: center; }
+				.media-image { display: inline-flex; width: auto; max-width: 100%; }
+				.media-image-thumb { display: inline-flex; width: 128px; height: 128px; border-radius: 18px; overflow: hidden; border: 1px solid rgba(63,63,70,.9); background: #111113; box-shadow: 0 10px 26px rgba(0,0,0,.22); transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; cursor: zoom-in; }
+				.media-image-thumb:hover { transform: translateY(-1px); border-color: rgba(129,140,248,.7); box-shadow: 0 14px 34px rgba(99,102,241,.2); }
+				.media-image-thumb img { display: block; width: 128px; height: 128px; object-fit: cover; margin: 0; border: 0; border-radius: 0; }
+				.media-download-frame { position: relative; display: inline-flex; max-width: 100%; line-height: 0; }
+				.markdown-body a.media-image-full, .media-image-full { display: inline-flex; max-width: 100%; cursor: zoom-in; line-height: 0; border: 0 !important; border-bottom: 0 !important; text-decoration: none !important; outline: none; }
+				.media-image-full img { display: block; width: auto; height: auto; max-width: 100%; max-height: min(72vh, calc(100vh - 260px)); object-fit: contain; margin: 0 auto; border-radius: 12px; border: 1px solid #27272a; transition: transform 0.2s, box-shadow 0.2s; }
+				.markdown-body a.media-image-full:hover, .media-image-full:hover { border: 0 !important; border-bottom: 0 !important; }
+				.media-image-full:hover img { transform: scale(1.01); box-shadow: 0 0 28px rgba(99, 102, 241, 0.22); }
+				.media-audio { padding: 8px 0; align-items: center; }
+				.media-audio-card { position: relative; width: min(520px, 100%); }
+				.media-audio-card.media-has-download { padding-bottom: 42px; }
 				.media-audio audio { width: 100%; max-width: 500px; border-radius: 8px; }
-				.media-video video { display: block; max-width: 100%; border-radius: 12px; border: 1px solid #27272a; }
-				.media-preview-overlay { position: fixed; inset: 0; z-index: 1050; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); cursor: pointer; border: 0; padding: 0; }
-				.media-preview-overlay img { max-width: 92vw; max-height: 90vh; border-radius: 12px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+				.media-video { align-items: flex-start; flex-direction: column; max-width: min(520px, 100%); }
+				.media-video-agent { max-width: 100%; }
+				.media-video-frame { width: 100%; justify-content: center; aspect-ratio: 16 / 9; }
+				.video-thumbnail { position: relative; width: 100%; max-width: 100%; aspect-ratio: 16 / 9; border-radius: 14px; border: 1px solid #27272a; background: #09090b; display: block; cursor: pointer; overflow: hidden; }
+				.video-thumbnail img { display: block; width: 100%; height: 100%; max-width: 100%; object-fit: contain; pointer-events: none; background: #000; }
+				.video-thumbnail-scrim { position: absolute; inset: 0; background: linear-gradient(180deg,rgba(0,0,0,.04),rgba(0,0,0,.46)); pointer-events: none; }
+				.video-thumbnail-play { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); width: 58px; height: 58px; border-radius: 50%; background: rgba(99,102,241,.9); display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; box-shadow: 0 10px 30px rgba(99,102,241,.35); padding-left: 4px; pointer-events: none; }
+				.video-thumbnail-label { position: absolute; left: 14px; bottom: 12px; color: #f4f4f5; font-size: .8rem; text-shadow: 0 1px 8px rgba(0,0,0,.75); pointer-events: none; }
+				.media-video-player { display: block; width: 100%; height: auto; max-width: 100%; max-height: min(82vh, calc(100vh - 210px)); object-fit: contain; border-radius: 12px; border: 1px solid #27272a; background: #000; }
+				.media-video-frame.is-horizontal-video { width: 100%; height: auto; }
+				.media-video-frame.is-horizontal-video .video-thumbnail, .media-video-frame.is-horizontal-video .media-video-player { width: 100%; height: auto; aspect-ratio: inherit; }
+				.media-video-frame.is-vertical-video { width: auto; height: min(82vh, calc(100vh - 210px)); max-width: 100%; aspect-ratio: inherit; }
+				.media-video-frame.is-vertical-video .video-thumbnail, .media-video-frame.is-vertical-video .media-video-player { width: auto; height: 100%; max-width: 100%; aspect-ratio: inherit; }
+				.media-download { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 10px; border-radius: 999px; border: 1px solid rgba(99,102,241,.38); background: rgba(99,102,241,.12); color: #c4b5fd !important; font-size: 0.74rem; font-weight: 800; line-height: 1; text-decoration: none !important; white-space: nowrap; transition: all .16s ease; }
+				.media-download:hover { border-color: rgba(129,140,248,.72); background: rgba(99,102,241,.2); color: #eef2ff !important; transform: translateY(-1px); }
+				.markdown-body a.media-download-corner, .media-download-corner { position: absolute; right: 12px; bottom: 12px; z-index: 4; width: 42px; height: 42px; padding: 0; border: 0 !important; border-bottom: 0 !important; border-radius: 999px; background: rgba(39,39,42,.52); color: rgba(244,244,245,.9) !important; box-shadow: 0 10px 24px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.08); backdrop-filter: blur(16px) saturate(1.25); -webkit-backdrop-filter: blur(16px) saturate(1.25); text-decoration: none !important; overflow: visible; outline: none !important; }
+				.media-download-corner svg { width: 21px; height: 21px; stroke-width: 2.35; filter: drop-shadow(0 1px 1px rgba(0,0,0,.34)); }
+				.markdown-body a.media-download-corner:hover, .media-download-corner:hover { background: rgba(63,63,70,.88); border: 0 !important; border-bottom: 0 !important; color: #fff !important; transform: scale(1.04); box-shadow: 0 14px 32px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12); }
+				.media-download-corner:focus, .media-download-corner:focus-visible, .media-download-corner:active { border: 0 !important; border-bottom: 0 !important; outline: none !important; box-shadow: 0 14px 32px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12); }
+				.media-download-corner::after { content: attr(aria-label); position: absolute; right: 0; bottom: calc(100% + 10px); padding: 7px 10px; border-radius: 10px; background: rgba(9,9,11,.96); color: #f4f4f5; border: 1px solid rgba(255,255,255,.14); box-shadow: 0 12px 32px rgba(0,0,0,.45); font-size: .75rem; font-weight: 800; line-height: 1; white-space: nowrap; opacity: 0; transform: translateY(4px) scale(.96); pointer-events: none; transition: opacity .14s ease, transform .14s ease; }
+				.media-download-corner::before { content: ""; position: absolute; right: 17px; bottom: calc(100% + 4px); width: 10px; height: 10px; background: rgba(9,9,11,.96); border-right: 1px solid rgba(255,255,255,.14); border-bottom: 1px solid rgba(255,255,255,.14); transform: rotate(45deg); opacity: 0; pointer-events: none; transition: opacity .14s ease; }
+				.media-download-corner:hover::after, .media-download-corner:focus-visible::after { opacity: 1; transform: translateY(0) scale(1); }
+				.media-download-corner:hover::before, .media-download-corner:focus-visible::before { opacity: 1; }
+				.media-file { justify-content: stretch; }
+				.media-file-card { position: relative; display: flex; align-items: center; gap: 12px; width: min(460px, 100%); padding: 12px; border: 1px solid rgba(63,63,70,.86); border-radius: 16px; background: linear-gradient(135deg, rgba(24,24,27,.92), rgba(39,39,42,.68)); box-shadow: 0 10px 28px rgba(0,0,0,.2); }
+				.media-file-card.media-has-download { padding-right: 128px; }
+				.media-file-icon { width: 38px; height: 38px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; background: rgba(99,102,241,.18); color: #c4b5fd; font-size: 1.1rem; font-weight: 900; }
+				.media-file-meta { min-width: 0; flex: 1; }
+				.media-file-title { color: #f4f4f5; font-size: 0.86rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				.media-file-name { margin-top: 3px; color: #a1a1aa; font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+				.media-preview-overlay { position: fixed; inset: 0; z-index: 1050; display: flex; align-items: center; justify-content: center; background: #000; cursor: zoom-out; border: 0; padding: 24px; opacity: 1; }
+				.media-preview-frame { display: inline-flex; align-items: center; justify-content: center; max-width: 94vw; max-height: 92vh; border-radius: 14px; background: #050505; box-shadow: 0 18px 70px rgba(0,0,0,0.9); overflow: hidden; }
+				.media-preview-overlay img { display: block; max-width: 94vw; max-height: 92vh; object-fit: contain; border-radius: 12px; opacity: 1 !important; background: #050505; filter: none !important; mix-blend-mode: normal !important; }
+				.media-preview-close { position: fixed; top: 18px; right: 18px; z-index: 1051; width: 38px; height: 38px; border-radius: 999px; border: 1px solid rgba(255,255,255,.22); background: rgba(24,24,27,.92); color: #f4f4f5; font-size: 22px; line-height: 1; cursor: pointer; }
+				.media-preview-close:hover { background: rgba(39,39,42,.98); }
 				::-webkit-scrollbar { width: 8px; height: 8px; }
 				::-webkit-scrollbar-track { background: transparent; }
 				::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; border: 2px solid #09090b; }
@@ -4107,9 +4576,11 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 
 			{/* Media preview overlay */}
 			{mediaPreviewSrc && (
-				<button
-					type="button"
+				<dialog
+					open
 					className="media-preview-overlay"
+					aria-modal="true"
+					aria-label="Vista previa de imagen"
 					onClick={(event) => {
 						if (event.target === event.currentTarget) setMediaPreviewSrc(null);
 					}}
@@ -4124,8 +4595,18 @@ export const ChatPage: React.FC<{ onNavigate?: (tab: string) => void }> = ({
 						}
 					}}
 				>
-					<img src={mediaPreviewSrc} alt="Preview" />
-				</button>
+					<div className="media-preview-frame">
+						<img src={mediaPreviewSrc} alt="Preview" />
+					</div>
+					<button
+						type="button"
+						className="media-preview-close"
+						aria-label="Cerrar vista previa"
+						onClick={() => setMediaPreviewSrc(null)}
+					>
+						×
+					</button>
+				</dialog>
 			)}
 		</div>
 	);
