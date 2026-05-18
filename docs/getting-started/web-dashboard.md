@@ -91,6 +91,8 @@ Visualiza y gestiona lo que Octopus AI recuerda:
 - **Resumen diario:** Actividad consolidada del día en curso
 - **Perfil de usuario:** Idioma, estilo, preferencias y expertise detectados
 - **Memoria procedural aprendida:** Procedimientos y antipatrones derivados de trabajos exitosos o fallidos
+- **Centro de Memoria:** Métricas, grafo navegable, inspector de nodos, filtros por fuente, minimapa, foco por conexiones y navegación hacia la memoria fuente
+- **Trazabilidad:** El runtime conserva una traza de las memorias utilizadas para explicar qué contexto influyó en una respuesta
 - **Búsqueda:** Busca entre los recuerdos de la IA
 - **Estadísticas:** Cuántos recuerdos tiene, tipo, antigüedad
 

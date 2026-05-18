@@ -19,6 +19,7 @@ Asistente AI autoalojado con memoria persistente, aprendizaje continuo, automati
 
 - [Visión General](./architecture/overview.md) — Monorepo, módulos y flujo de datos
 - [Sistema de Memoria](./architecture/memory.md) — STM, LTM, consolidación, decaimiento y memoria procedural
+- [Orquestación de Memoria](./architecture/memory-orchestration.md) — Integridad, scopes, evidencia, incertidumbre, contexto avanzado y Centro de Memoria
 - [Motor de Aprendizaje](./architecture/learning.md) — Experiencias, insights, feedback y auto-mejora controlada
 - [Agente Autónomo y Automatizaciones](./architecture/automation.md) — Daemon, heartbeat, cron, delegación y sandbox
 - [Skill Forge](./architecture/skills.md) — Creación automática, mejora, A/B testing

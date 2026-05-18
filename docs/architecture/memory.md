@@ -4,7 +4,7 @@
   <img src="../../logo aplicacion.png" alt="Octopus AI" width="80" />
 </p>
 
-Octopus AI implementa un sistema de memoria inspirado en la memoria humana, con memoria a corto plazo (STM), memoria a largo plazo (LTM), resumen diario global y perfil persistente del usuario.
+Octopus AI implementa un sistema de memoria inspirado en la memoria humana, con memoria a corto plazo (STM), memoria a largo plazo (LTM), resumen diario global, perfil persistente del usuario y una capa avanzada de orquestación con integridad, evidencia, scopes, feedback, recordatorios prospectivos e incertidumbre explícita.
 
 ---
 
@@ -19,9 +19,11 @@ Mensaje del usuario
         ├── Resumen diario global ← Actividad reciente del día
         ├── Perfil del usuario ← Preferencias, idioma, expertise
         ↓ (consolidación automática)
-   Memoria a Largo Plazo (LTM) ← Hechos, eventos y procedimientos
-        ↓ (recuperación)
-   Contexto enriquecido para la IA → Respuesta personalizada
+   Memory Orchestrator ← integridad, evidencia, scopes, feedback
+        ↓
+   Memoria a Largo Plazo (LTM) ← hechos, eventos, procedimientos, usuario, org, agente, prospectiva
+        ↓ (recuperación híbrida + presupuesto)
+   ContextAssembler → Contexto enriquecido para la IA → Respuesta personalizada
 ```
 
 ---
@@ -55,7 +57,12 @@ La LTM es el almacenamiento permanente donde se guardan los recuerdos importante
 |---|---|---|
 | **Episódica** | Eventos y experiencias con contexto temporal | "El 15 de marzo discutimos sobre el proyecto X" |
 | **Semántica** | Hechos y conocimientos del usuario | "María trabaja como diseñadora" |
-| **Asociativa** | Relaciones entre recuerdos | "María → trabaja en → Proyecto X → usa React" |
+| **Procedural** | Procedimientos y estrategias reutilizables | "Para extraer imágenes, primero usar DOM" |
+| **Usuario** | Preferencias, idioma, estilo y datos explícitos del usuario | "Edwin prefiere respuestas cortas en español" |
+| **Organización** | Reglas y contexto de proyecto/equipo | "El proyecto usa React y Vite" |
+| **Agente** | Lecciones internas del agente | "Evitar repetir una tool si falló dos veces" |
+| **Prospectiva** | Recordatorios y compromisos futuros | "Recordar revisar el sprint mañana" |
+| **Meta** | Información de control sobre memoria o sistema | "Cobertura baja en tema X" |
 
 ### Capas adicionales del runtime actual
 
@@ -81,6 +88,40 @@ El sistema usa SQLite con la extensión VSS (Vector Similarity Search) para bús
 - Operar completamente en local, sin depender de servicios externos
 
 Adicionalmente, el core exporta `FTSSearchEngine`, un componente basado en SQLite FTS5 para despliegues que necesiten complementar la búsqueda vectorial con coincidencias exactas de texto.
+
+---
+
+## Orquestación Avanzada
+
+La ruta avanzada de memoria está documentada en detalle en [Orquestación de Memoria](./memory-orchestration.md). Sus responsabilidades principales son:
+
+| Componente | Responsabilidad |
+|---|---|
+| `MemoryIntegrityLayer` | Valida candidatos, detecta instrucciones maliciosas o datos sensibles y aplica redacciones antes de persistir |
+| `MemoryOrchestrator` | Es la fachada central para escribir, leer, explicar, olvidar, aplicar feedback y mantener relaciones entre memorias |
+| `ContextAssembler` | Ensambla un paquete de contexto dentro de un presupuesto de tokens y preserva secciones obligatorias |
+| `ProactiveMemoryScanner` | Busca recordatorios prospectivos vencidos, próximos o pendientes |
+| `UncertaintyEstimator` | Calcula `HIGH_CONFIDENCE`, `LOW_CONFIDENCE` o `NO_COVERAGE` según cobertura, confianza y gaps |
+
+### Scopes y aislamiento
+
+Cada memoria puede quedar asociada a `tenantId`, `userId`, `projectId`, `agentRole`, `sessionId` y `taskId`. Las lecturas avanzadas filtran antes de limitar candidatos, evitando que recuerdos de otro usuario o proyecto oculten los resultados correctos. También se respeta `timeRange` y `minTrustLevel`.
+
+### Estados de memoria
+
+Las memorias pueden estar en estado `active`, `expired`, `superseded`, `contradicted` o `user_deleted`. Las rutas públicas de LTM, búsqueda vectorial, FTS, listados recientes y UI ocultan memorias inactivas por defecto.
+
+### Evidencia y trazabilidad
+
+La arquitectura persiste:
+
+- `memory_evidence`: origen y extracto que justifican una memoria.
+- `memory_usage`: cuándo una memoria fue usada y en qué sesión/tarea.
+- `memory_versions`: cambios, correcciones y borrados lógicos.
+- `memory_edges`: relaciones `supersedes`, `contradicts` y otras conexiones.
+- `memory_coverage`: cobertura por tópico y gaps conocidos.
+
+`AgentRuntime.getLastMemoryTrace()` permite auditar qué memorias y recordatorios influyeron en la última respuesta.
 
 ---
 
@@ -185,6 +226,9 @@ En el runtime actual, la recuperación de memorias se combina además con:
 - **Perfil del usuario** para ajustar idioma, tono, preferencias y expertise conocidos
 - **Learned Operating Guidance** para recordar procedimientos y antipatrones aprendidos de ejecuciones anteriores
 - **Contexto STM filtrado por conversación/canal** para no mezclar historiales activos distintos
+- **Búsqueda híbrida** vectorial + FTS con filtros de estado, scope, rango temporal y confianza
+- **Recordatorios prospectivos** para compromisos pendientes o próximos
+- **Known gaps** cuando la cobertura es insuficiente
 
 ---
 
@@ -208,7 +252,7 @@ En el runtime actual, la recuperación de memorias se combina además con:
 ### Dónde inspeccionarlo
 
 - CLI: `memory stats`, `memory search`, `memory consolidate`
-- Dashboard/API: STM, resumen diario, perfil del usuario y memorias recientes
+- Dashboard/API: Centro de Memoria, STM, LTM, resumen diario, perfil del usuario, aprendizajes, grafo de memoria y memorias recientes
 
 ### Gestionar la memoria manualmente
 

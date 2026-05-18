@@ -17,7 +17,7 @@ octopus-ai/
 │   │       ├── agent/           # Runtime, reflection, heartbeat, daemon
 │   │       ├── channels/        # Integraciones de mensajería
 │   │       ├── config/          # Loader, schema, defaults, env manager, SOUL parser
-│   │       ├── memory/          # STM, LTM, consolidación, daily memory, perfil
+│   │       ├── memory/          # STM, LTM, orquestación, integridad, daily memory, perfil
 │   │       ├── learning/        # Experiencias, insights, feedback y auto-mejora
 │   │       ├── plugins/         # Engine, registry, marketplace, MCP
 │   │       ├── skills/          # Registry, loader, forge, improver, evaluator
@@ -42,7 +42,7 @@ octopus-ai/
 |---|---|---|
 | `ai` | `router.ts`, `providers/*.ts` | Router con múltiples proveedores, razonamiento y cambio dinámico de provider/modelo |
 | `agent` | `runtime.ts`, `reflection.ts`, `heartbeat.ts`, `daemon.ts` | Ejecución conversacional, autoevaluación, trabajo proactivo y operación continua |
-| `memory` | `stm.ts`, `ltm.ts`, `consolidator.ts`, `daily.ts`, `user-profile.ts` | Contexto activo, memoria persistente, resumen diario y perfil del usuario |
+| `memory` | `stm.ts`, `ltm.ts`, `orchestrator.ts`, `integrity.ts`, `context-assembler.ts`, `daily.ts`, `user-profile.ts` | Contexto activo, memoria persistente, validación, evidencia, scopes, recuperación híbrida, resumen diario y perfil del usuario |
 | `learning` | `engine.ts`, `types.ts` | Registra experiencias, extrae aprendizajes reutilizables y los reinyecta como guia operacional |
 | `skills` | `loader.ts`, `forge.ts`, `improver.ts`, `evaluator.ts` | Carga progresiva, creación y mejora continua de skills |
 | `tools` | `registry.ts`, `executor.ts`, `browser.ts`, `sandbox-tool.ts`, `media.ts` | Catálogo de tools del agente, ejecución, browser automation, sandbox y media |
@@ -62,8 +62,12 @@ Entrada del usuario o trigger del sistema
                 ↓
             AgentRuntime
                 ├── User Profile + Daily Memory
-                ├── Memory Retrieval (STM + LTM)
-                ├── Skill Loader
+        ├── Context Assembler + Memory Orchestrator
+        │      ├── STM + LTM scoped retrieval
+        │      ├── integridad, evidencia y confianza
+        │      ├── recordatorios prospectivos
+        │      └── incertidumbre y known gaps
+        ├── Skill Loader
                 ├── LLM Router
                 └── Tool Executor
                        ├── filesystem / shell / code
@@ -73,7 +77,7 @@ Entrada del usuario o trigger del sistema
                 ↓
          Respuesta y eventos de estado
                 ↓
-   Consolidación + perfil + resumen diario + aprendizaje
+   Consolidación + perfil + resumen diario + aprendizaje + feedback de memoria
                 ↓
             Persistencia en SQLite
 ```
@@ -110,6 +114,17 @@ El servidor de transporte expone la API usada por el dashboard y por integracion
 - variables de entorno, MCP, canales y biblioteca multimedia
 
 Referencia completa: [API HTTP y WebSocket](../api/http.md)
+
+## Memoria y Contexto Avanzado
+
+El runtime usa dos rutas complementarias de memoria:
+
+- La ruta legacy `MemoryRetrieval` mantiene compatibilidad con STM/LTM y recuperación ponderada por relevancia, recencia y frecuencia.
+- La ruta avanzada `ContextAssembler` usa `MemoryOrchestrator` para recuperar memorias filtradas por tenant, usuario, proyecto, rol, rango temporal y nivel mínimo de confianza.
+
+La memoria avanzada persiste evidencia, usage, coverage, versiones y relaciones semánticas. Las memorias inactivas (`expired`, `superseded`, `user_deleted`) se ocultan de búsqueda vectorial, FTS, listados recientes y UI. El runtime expone trazas de memoria para explicar qué recuerdos influyeron en una respuesta.
+
+Detalle completo: [Orquestación de Memoria](./memory-orchestration.md)
 
 ## Tecnologías
 

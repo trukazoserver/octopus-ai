@@ -30,19 +30,33 @@ Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para c
 - [Proveedores de IA Soportados](#-proveedores-de-ia-soportados)
 - [Estructura del Proyecto](#-estructura-del-proyecto-monorepo)
 - [Documentación](#-documentación)
+- [Validación del Proyecto](#-validación-del-proyecto)
 - [Contribución](#-contribución)
 - [Licencia](#-licencia)
 
 ## ✨ Características Principales
 
 - 🧠 **Razonamiento Profundo (Thinking):** Soporte nativo para *chain-of-thought* en proveedores como OpenAI o-series, Anthropic, Google, Z.ai y DeepSeek Reasoner.
-- 💾 **Memoria Contextual Persistente:** STM + LTM con consolidación automática, resumen diario global y perfil de usuario que se actualiza conversación a conversación.
+- 💾 **Memoria Orquestada Persistente:** STM + LTM con integridad, evidencia, scopes, búsqueda híbrida vectorial/FTS, perfil de usuario, resumen diario, recordatorios prospectivos y trazabilidad de uso.
 - 📈 **Aprendizaje Continuo:** Registra experiencias, extrae procedimientos/antipatrones, aprende qué funcionó y reutiliza esos insights en tareas futuras.
 - 🤖 **Automatización Autónoma:** Tareas programadas por cron, heartbeat proactivo evaluado por LLM y runtime listo para ejecución continua en segundo plano.
 - 🛠️ **Sistema de Tools Extensible:** Filesystem, shell, browser automation, media, sandbox Docker, delegación multi-agente y tools dinámicas creadas en tiempo real.
 - 🌐 **Multi-Canal:** Integra el mismo agente con Telegram, Discord, Slack, Teams, webchat y otros canales manteniendo memoria compartida.
 - 💻 **Interfaces Flexibles:** CLI, API HTTP/WebSocket, dashboard web en React y aplicación de escritorio con la misma base de runtime.
 - 🔒 **Privacidad y Seguridad:** Compatibilidad con modelos locales, ejecución aislada para tareas sensibles y control fino del entorno de trabajo.
+
+### Novedades de memoria avanzada
+
+La capa de memoria actual incluye una arquitectura de orquestación pensada para uso multi-agente y auditoría:
+
+- `MemoryIntegrityLayer` valida candidatos antes de persistirlos, aplica redacciones y registra patrones sospechosos.
+- `MemoryOrchestrator` centraliza escrituras, lecturas, evidencia, feedback, forgetting activo, relaciones `supersedes`/`contradicts` y métricas de cobertura.
+- `ContextAssembler` arma paquetes de contexto con presupuesto de tokens, preservando memoria de usuario y recordatorios prospectivos.
+- `ProactiveMemoryScanner` detecta compromisos pendientes, vencidos o próximos.
+- `UncertaintyEstimator` etiqueta lecturas como `HIGH_CONFIDENCE`, `LOW_CONFIDENCE` o `NO_COVERAGE`.
+- La UI de memoria ahora muestra un Centro de Memoria con métricas, grafo navegable, inspector, filtros, minimapa y navegación contextual hacia STM, LTM, aprendizaje, perfil y resumen diario.
+
+Guía detallada: [Orquestación de Memoria](docs/architecture/memory-orchestration.md)
 
 ## 🎯 ¿Qué puede hacer Octopus AI?
 
@@ -185,7 +199,8 @@ octopus-ai/
 
 ### Arquitectura
 - [Visión General](docs/architecture/overview.md) — Monorepo, módulos y flujo de datos
-- [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, decaimiento y memoria procedural
+- [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, grafo, decaimiento y memoria procedural
+- [Orquestación de Memoria](docs/architecture/memory-orchestration.md) — Integridad, scopes, evidencia, incertidumbre, contexto avanzado y UI del Centro de Memoria
 - [Motor de Aprendizaje](docs/architecture/learning.md) — Experiencias, insights, feedback y auto-mejora controlada
 - [Agente Autónomo y Automatizaciones](docs/architecture/automation.md) — Daemon, heartbeat, cron, delegación y sandbox
 - [Motor de Habilidades (Skills)](docs/architecture/skills.md) — Creación automática, mejora, A/B testing
@@ -195,6 +210,23 @@ octopus-ai/
 - [Comandos CLI](docs/api/cli.md) — Referencia completa de todos los comandos
 - [API HTTP y WebSocket](docs/api/http.md) — Endpoints para configuración, memoria, skills, tools, tareas y canales
 - [Solución de Problemas](docs/advanced/troubleshooting.md) — Errores comunes y soluciones
+
+## ✅ Validación del Proyecto
+
+Antes de publicar cambios se recomienda ejecutar la matriz completa:
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+```
+
+La suite cubre runtime de agentes, memoria, learning, tools, CLI bootstrap y plugins oficiales. Para cambios de memoria, además se recomienda ejecutar:
+
+```bash
+pnpm --filter @octopus-ai/core test -- memory-systems.test.ts agent-runtime.test.ts
+```
 
 ## 🤝 Contribución
 
