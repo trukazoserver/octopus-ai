@@ -13,7 +13,9 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({
 	config,
 	onSave,
 }) => {
-	const [token, setToken] = useState((config.botToken as string) ?? "");
+	const tokenConfigured = Boolean(config.botTokenConfigured);
+	const tokenPreview = config.botTokenPreview as string | undefined;
+	const [token, setToken] = useState("");
 	const [saving, setSaving] = useState(false);
 
 	const handleSave = async () => {
@@ -84,7 +86,9 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({
 					}}
 				/>
 				<div style={{ fontSize: "0.7rem", color: "#52525b", marginTop: "4px" }}>
-					Obtenlo en Discord Developer Portal → Bot → Token
+					{tokenConfigured
+						? `Token configurado${tokenPreview ? ` (${tokenPreview})` : ""}. Escribe uno nuevo solo si quieres reemplazarlo.`
+						: "Obtenlo en Discord Developer Portal → Bot → Token"}
 				</div>
 			</div>
 			<button

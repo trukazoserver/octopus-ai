@@ -21,6 +21,12 @@ export class OllamaProvider extends BaseLLMProvider {
 
 	async chat(request: LLMRequest): Promise<LLMResponse> {
 		const model = this.mapModel(request.model);
+		const options = {
+			...(request.maxTokens != null ? { num_predict: request.maxTokens } : {}),
+			...(request.temperature != null
+				? { temperature: request.temperature }
+				: {}),
+		};
 		const body: Record<string, unknown> = {
 			model,
 			messages: request.messages.map((m) => ({
@@ -28,12 +34,7 @@ export class OllamaProvider extends BaseLLMProvider {
 				content: m.content,
 			})),
 			stream: false,
-			...(request.maxTokens != null
-				? { options: { num_predict: request.maxTokens } }
-				: {}),
-			...(request.temperature != null
-				? { options: { temperature: request.temperature } }
-				: {}),
+			...(Object.keys(options).length ? { options } : {}),
 			...(request.tools?.length ? { tools: request.tools } : {}),
 		};
 
@@ -91,6 +92,12 @@ export class OllamaProvider extends BaseLLMProvider {
 
 	async *chatStream(request: LLMRequest): AsyncIterable<LLMChunk> {
 		const model = this.mapModel(request.model);
+		const options = {
+			...(request.maxTokens != null ? { num_predict: request.maxTokens } : {}),
+			...(request.temperature != null
+				? { temperature: request.temperature }
+				: {}),
+		};
 		const body: Record<string, unknown> = {
 			model,
 			messages: request.messages.map((m) => ({
@@ -98,12 +105,7 @@ export class OllamaProvider extends BaseLLMProvider {
 				content: m.content,
 			})),
 			stream: true,
-			...(request.maxTokens != null
-				? { options: { num_predict: request.maxTokens } }
-				: {}),
-			...(request.temperature != null
-				? { options: { temperature: request.temperature } }
-				: {}),
+			...(Object.keys(options).length ? { options } : {}),
 		};
 
 		const response = await fetch(`${this.baseUrl}/api/chat`, {

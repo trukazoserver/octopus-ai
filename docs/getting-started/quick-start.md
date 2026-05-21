@@ -32,6 +32,12 @@ Antes de empezar, asegurémonos de que todo está en orden:
 node packages/cli/dist/index.js doctor
 ```
 
+Si usaste `pnpm run install:octopus`, el servidor normalmente ya queda activo en `http://127.0.0.1:18789`. Puedes comprobarlo con:
+
+```bash
+curl http://127.0.0.1:18789/api/status
+```
+
 Deberías ver todos los elementos con un check verde (✓):
 
 ```text
@@ -152,11 +158,22 @@ node packages/cli/dist/index.js agent --message "Revisa este código" --model op
 Si prefieres una interfaz gráfica en lugar de la terminal:
 
 ```bash
-# Iniciar servidor backend + frontend
-pnpm dev
+# Iniciar servidor estable con UI compilada
+pnpm start
+
+# O iniciar y abrir el navegador
+pnpm launch
 ```
 
-Luego abre tu navegador en **http://localhost:5173**
+Luego abre tu navegador en **http://127.0.0.1:18789**.
+
+Para desarrollo frontend con HMR:
+
+```bash
+pnpm run start:web
+```
+
+En ese modo, Vite sirve la UI en **http://localhost:3000** y se conecta al backend en `18789`.
 
 El panel web ofrece:
 - Chat en tiempo real con streaming
@@ -176,7 +193,7 @@ Para la experiencia nativa de escritorio:
 ```bash
 # Compilar y ejecutar
 pnpm build
-pnpm dev
+pnpm run start:desktop
 ```
 
 La app de escritorio (Electron) se abre como una ventana nativa de tu sistema operativo.
@@ -233,7 +250,7 @@ Después de completar tareas, Octopus registra experiencias y extrae aprendizaje
 
 ```bash
 # Iniciar backend si no está activo
-node packages/cli/dist/index.js start
+pnpm start
 
 # Ver aprendizajes recientes
 curl http://localhost:18789/api/learning/insights
@@ -364,7 +381,7 @@ node packages/cli/dist/index.js agent --message "Lee el archivo config.json de m
 ## Siguientes Pasos
 
 - ⚙️ **[Configuración detallada](./configuration.md)** — Cambiar modelos, ajustar memoria, configurar canales
-- 🐳 **[Usar con Docker](./docker.md)** — Ejecutar en contenedores
+- 🐳 **[Usar con Docker](./docker.md)** — Ejecutar en contenedores con `pnpm run docker:up`
 - 🖥️ **[App de Escritorio](./desktop.md)** — Experiencia nativa
 - 🌐 **[Panel Web](./web-dashboard.md)** — Interfaz en el navegador
 - 🧠 **[Cómo funciona la memoria](../architecture/memory.md)** — Arquitectura del sistema de memoria

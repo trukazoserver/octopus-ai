@@ -15,8 +15,16 @@ export { MemoryRetrieval } from "./retrieval.js";
 export { MemoryConsolidator } from "./consolidator.js";
 export type { LLMExtractCallback } from "./consolidator.js";
 export { SqliteVectorStore } from "./sqlite-vss.js";
+export { ExternalVectorStore } from "./external-vector-store.js";
+export type {
+	ExternalVectorBackend,
+	ExternalVectorStoreConfig,
+} from "./external-vector-store.js";
+export { PgVectorStore } from "./pgvector-store.js";
+export type { PgVectorStoreConfig } from "./pgvector-store.js";
 export { VectorStore } from "./store.js";
 export { createVectorStore } from "./factory.js";
+export type { VectorStoreFactoryOptions } from "./factory.js";
 export { KnowledgeGraph } from "./knowledge-graph.js";
 export { MemoryDecayEngine } from "./decay.js";
 export { FTSSearchEngine } from "./fts-search.js";
@@ -46,12 +54,37 @@ export { ContextAssembler } from "./context-assembler.js";
 export type { ContextAssemblerConfig } from "./context-assembler.js";
 export { MemoryIntegrityLayer } from "./integrity.js";
 export { MemoryOrchestrator } from "./orchestrator.js";
+export { MemoryRetentionScheduler } from "./retention-scheduler.js";
+export type {
+	MemoryRetentionRunner,
+	MemoryRetentionScheduleConfig,
+	MemoryRetentionSchedulerLike,
+	MemoryRetentionSchedulerLogger,
+} from "./retention-scheduler.js";
 export { ProactiveMemoryScanner } from "./proactive-scanner.js";
 export type { ProactiveMemoryScannerConfig } from "./proactive-scanner.js";
 export { UncertaintyEstimator } from "./uncertainty.js";
 export type { UncertaintyEstimatorConfig } from "./uncertainty.js";
 export type {
 	MemorySourceTrustLevel,
+	MemoryRelationType,
+	MemorySensitivity,
+	MemoryPermissions,
+	MemorySource,
+	MemoryVerification,
+	MemoryVerificationReport,
+	MemoryVerificationStatus,
+	MemoryGraphNode,
+	MemoryGraphRelation,
+	MemoryGraphPath,
+	MemoryGraphTraversalOptions,
+	MemoryGraphSnapshot,
+	MemoryAuditEntry,
+	MemoryActionLogEntry,
+	MemoryBackfillReport,
+	MemoryAuditIntegrityReport,
+	MemoryLogIntegrityResult,
+	RetrievalSignals,
 	MemoryStatus,
 	MemoryUncertaintyLevel,
 	MemoryScope,

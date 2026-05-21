@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { extname, join } from "node:path";
+import { basename, extname, join, resolve, sep } from "node:path";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
 const MEDIA_META_PATH = join(MEDIA_DIR, "meta.json");
+const MAX_SAVE_MEDIA_BASE64_BYTES = 8 * 1024 * 1024;
 
 interface MediaMetaItem {
 	id: string;
@@ -30,6 +38,25 @@ const MIME_EXTENSIONS: Record<string, string> = {
 	"video/webm": ".webm",
 };
 
+function guessMime(filename: string): string {
+	const ext = extname(filename).toLowerCase();
+	const mimeMap: Record<string, string> = {
+		".png": "image/png",
+		".jpg": "image/jpeg",
+		".jpeg": "image/jpeg",
+		".gif": "image/gif",
+		".webp": "image/webp",
+		".svg": "image/svg+xml",
+		".mp3": "audio/mpeg",
+		".wav": "audio/wav",
+		".ogg": "audio/ogg",
+		".m4a": "audio/mp4",
+		".mp4": "video/mp4",
+		".webm": "video/webm",
+	};
+	return mimeMap[ext] ?? "application/octet-stream";
+}
+
 function ensureMediaDir(): void {
 	if (!existsSync(MEDIA_DIR)) mkdirSync(MEDIA_DIR, { recursive: true });
 }
@@ -52,6 +79,43 @@ function saveMediaMeta(items: MediaMetaItem[]): void {
 function normalizeBase64Data(data: string): string {
 	const match = data.match(/^data:[^;]+;base64,(.+)$/s);
 	return match?.[1] ?? data;
+}
+
+function estimateBase64DecodedBytes(data: string): number {
+	const compact = data.replace(/\s/g, "");
+	const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+	return Math.floor((compact.length * 3) / 4) - padding;
+}
+
+function formatBytes(bytes: number): string {
+	return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function expandHome(filePath: string): string {
+	if (filePath === "~") return homedir();
+	if (filePath.startsWith(`~${sep}`) || filePath.startsWith("~/")) {
+		return join(homedir(), filePath.slice(2));
+	}
+	return filePath;
+}
+
+function isPathInside(child: string, parent: string): boolean {
+	return child === parent || child.startsWith(`${parent}${sep}`);
+}
+
+function resolveImportPath(filePath: string): string {
+	const resolved = resolve(expandHome(filePath));
+	const allowedRoots = [
+		homedir(),
+		join(homedir(), ".octopus"),
+		process.cwd(),
+	].map((root) => resolve(root));
+	if (!allowedRoots.some((root) => isPathInside(resolved, root))) {
+		throw new Error(
+			`Access denied: path '${resolved}' is not within allowed paths`,
+		);
+	}
+	return resolved;
 }
 
 export const mediaContext = {
@@ -117,12 +181,14 @@ export function createMediaTools(): ToolDefinition[] {
 			description:
 				"Save a generated media file (image, audio, video) to the Octopus AI media library. " +
 				"Provide the file data as base64, a filename, and the MIME type. " +
+				"Use this for small in-memory media only. For existing local files or large videos, use import_media_file instead of converting the file to base64. " +
 				"Returns a URL that can be embedded in your response to display the media to the user. " +
 				"Use this whenever you generate or create an image, audio, or video file.",
 			parameters: {
 				data: {
 					type: "string",
-					description: "Base64-encoded file data or a data URL",
+					description:
+						"Base64-encoded file data or a data URL. Keep under 8 MB decoded size; use import_media_file for larger local files.",
 					required: true,
 				},
 				filename: {
@@ -159,13 +225,23 @@ export function createMediaTools(): ToolDefinition[] {
 				}
 
 				try {
+					const normalizedData = normalizeBase64Data(data);
+					const estimatedSize = estimateBase64DecodedBytes(normalizedData);
+					if (estimatedSize > MAX_SAVE_MEDIA_BASE64_BYTES) {
+						return {
+							success: false,
+							output: "",
+							error: `save_media only accepts small base64 payloads up to ${formatBytes(MAX_SAVE_MEDIA_BASE64_BYTES)} decoded size. This payload is about ${formatBytes(estimatedSize)}. If the file already exists on disk, use import_media_file with its local path instead of converting it to base64.`,
+						};
+					}
+
 					const id = randomUUID();
 					const ext = extname(filename) || MIME_EXTENSIONS[mimetype] || "";
 					const storedName = id + ext;
 					const filePath = join(MEDIA_DIR, storedName);
 					ensureMediaDir();
 
-					const fileData = Buffer.from(normalizeBase64Data(data), "base64");
+					const fileData = Buffer.from(normalizedData, "base64");
 					writeFileSync(filePath, fileData);
 
 					const items = loadMediaMeta();
@@ -198,6 +274,108 @@ export function createMediaTools(): ToolDefinition[] {
 						success: false,
 						output: "",
 						error: `Failed to save media: ${err instanceof Error ? err.message : String(err)}`,
+					};
+				}
+			},
+		},
+		{
+			name: "import_media_file",
+			description:
+				"Import an existing local media file into the Octopus AI media library without base64. " +
+				"Use this for large generated files such as MP4 videos, ffmpeg outputs, audio, PDFs, or images that already exist on disk. " +
+				"Returns a /api/media/file/... URL that can be embedded in the response. Prefer this over save_media for files larger than a few MB.",
+			parameters: {
+				path: {
+					type: "string",
+					description:
+						"Absolute path or ~/ path of the local file to import into the media library",
+					required: true,
+				},
+				filename: {
+					type: "string",
+					description:
+						"Optional display filename with extension. Defaults to the source filename.",
+				},
+				mimetype: {
+					type: "string",
+					description:
+						"Optional MIME type. If omitted, it is inferred from the filename extension.",
+				},
+				description: {
+					type: "string",
+					description: "Brief description of the media content",
+				},
+			},
+			handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+				const inputPath = String(params.path || "").trim();
+				if (!inputPath) {
+					return {
+						success: false,
+						output: "",
+						error: "Missing required parameter: path",
+					};
+				}
+
+				try {
+					const sourcePath = resolveImportPath(inputPath);
+					if (!existsSync(sourcePath)) {
+						return {
+							success: false,
+							output: "",
+							error: `File not found: ${sourcePath}`,
+						};
+					}
+					const stats = statSync(sourcePath);
+					if (!stats.isFile()) {
+						return {
+							success: false,
+							output: "",
+							error: `Path is not a file: ${sourcePath}`,
+						};
+					}
+
+					const displayName = params.filename
+						? String(params.filename)
+						: basename(sourcePath);
+					const mimetype = params.mimetype
+						? String(params.mimetype)
+						: guessMime(displayName || sourcePath);
+					const ext = extname(displayName) || MIME_EXTENSIONS[mimetype] || "";
+					const id = randomUUID();
+					const storedName = id + ext;
+					const filePath = join(MEDIA_DIR, storedName);
+					ensureMediaDir();
+					copyFileSync(sourcePath, filePath);
+
+					const items = loadMediaMeta();
+					const item: MediaMetaItem = {
+						id,
+						filename: displayName,
+						mimetype,
+						size: stats.size,
+						createdAt: new Date().toISOString(),
+						description: params.description
+							? String(params.description)
+							: undefined,
+					};
+					items.push(item);
+					saveMediaMeta(items);
+
+					const mediaUrl = `/api/media/file/${storedName}`;
+					return {
+						success: true,
+						output: `Media imported successfully.\nURL: ${mediaUrl}\nFile: ${displayName}\nMIME: ${mimetype}\nSize: ${stats.size} bytes\n\nTo display this in your response, use markdown: ![${item.description || displayName}](${mediaUrl})`,
+						metadata: {
+							...item,
+							url: mediaUrl,
+							sourcePath,
+						},
+					};
+				} catch (err) {
+					return {
+						success: false,
+						output: "",
+						error: `Failed to import media file: ${err instanceof Error ? err.message : String(err)}`,
 					};
 				}
 			},

@@ -17,6 +17,10 @@ const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, "none">, number> = {
 };
 
 export class AnthropicProvider extends BaseLLMProvider {
+	private baseUrl = (
+		this.config.baseUrl ?? "https://api.anthropic.com/v1"
+	).replace(/\/+$/, "");
+
 	private mapModel(model: string): string {
 		return model.replace(/^anthropic\//, "");
 	}
@@ -179,7 +183,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 			"anthropic-version": "2023-06-01",
 		};
 
-		const response = await fetch("https://api.anthropic.com/v1/messages", {
+		const response = await fetch(`${this.baseUrl}/messages`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
@@ -283,7 +287,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 			"anthropic-version": "2023-06-01",
 		};
 
-		const response = await fetch("https://api.anthropic.com/v1/messages", {
+		const response = await fetch(`${this.baseUrl}/messages`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),

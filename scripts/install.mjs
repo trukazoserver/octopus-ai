@@ -7,6 +7,19 @@ import * as readline from "node:readline";
 
 const isWin = getPlatform() === "win32";
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
+const CLI_ARGS = new Set(process.argv.slice(2));
+const IN_DOCKER =
+	fs.existsSync("/.dockerenv") || process.env.OCTOPUS_DOCKER === "true";
+const AUTO_YES =
+	CLI_ARGS.has("--yes") ||
+	CLI_ARGS.has("-y") ||
+	process.env.CI === "true" ||
+	IN_DOCKER;
+const INTERACTIVE =
+	CLI_ARGS.has("--interactive") || (!AUTO_YES && process.stdin.isTTY);
+const SKIP_START = CLI_ARGS.has("--no-start");
+const SKIP_OPEN = CLI_ARGS.has("--no-open");
+const SKIP_SYSTEM_DEPS = CLI_ARGS.has("--no-system-deps");
 const CLI_ENTRY = path.join(
 	PROJECT_ROOT,
 	"packages",
@@ -50,6 +63,22 @@ function ask(rl, prompt) {
 	});
 }
 
+async function confirmInstall(prompt, defaultYes = true) {
+	if (!INTERACTIVE) return AUTO_YES && !SKIP_SYSTEM_DEPS;
+	const rl = readline.createInterface({
+		input: process.stdin,
+		output: process.stdout,
+	});
+	try {
+		const suffix = defaultYes ? "(S/n)" : "(s/N)";
+		const answer = await ask(rl, `  ${LOG_WARN}${prompt} ${suffix}: ${RESET}`);
+		if (!answer) return defaultYes;
+		return ["s", "si", "sí", "y", "yes"].includes(answer.toLowerCase());
+	} finally {
+		rl.close();
+	}
+}
+
 function banner() {
 	console.log();
 	console.log(
@@ -69,6 +98,9 @@ function banner() {
 		`${LOG_DIM}  Este instalador verificara e instalara los requisitos${RESET}`,
 	);
 	console.log(`${LOG_DIM}  necesarios para ejecutar Octopus AI.${RESET}`);
+	console.log(
+		`${LOG_DIM}  Enter acepta valores por defecto; usa --yes para modo automatico o --no-start para no iniciar al final.${RESET}`,
+	);
 	console.log();
 }
 
@@ -150,6 +182,59 @@ function installPython() {
 		console.log(`  ${LOG_OK} Python instalado`);
 		return true;
 	}
+	return false;
+}
+
+function checkDocker() {
+	const docker = run("docker --version");
+	const compose = run("docker compose version");
+	if (docker.ok && compose.ok) {
+		console.log(`  ${LOG_OK} ${docker.output}; ${compose.output}`);
+		return true;
+	}
+	return false;
+}
+
+function installDocker() {
+	if (isWin) {
+		console.log(`${LOG_INFO}  Instalando Docker Desktop via winget...${RESET}`);
+		const r = run(
+			"winget install Docker.DockerDesktop --accept-package-agreements --accept-source-agreements",
+			{ timeout: 600000 },
+		);
+		if (
+			r.ok ||
+			r.output.includes("Already installed") ||
+			r.output.includes("instalado")
+		) {
+			console.log(`  ${LOG_OK} Docker Desktop instalado`);
+			return true;
+		}
+		console.log(`${LOG_FAIL} Error instalando Docker: ${r.output}`);
+		return false;
+	}
+	if (getPlatform() === "darwin") {
+		console.log(`${LOG_INFO}  Instalando Docker Desktop via brew...${RESET}`);
+		const r = run("brew install --cask docker", { timeout: 600000 });
+		if (r.ok) {
+			console.log(`  ${LOG_OK} Docker instalado`);
+			return true;
+		}
+		console.log(`${LOG_FAIL} Error instalando Docker: ${r.output}`);
+		return false;
+	}
+	console.log(
+		`${LOG_INFO}  Instalando Docker Engine y Compose plugin...${RESET}`,
+	);
+	const r = run(
+		"sudo apt-get update -qq && sudo apt-get install -y docker.io docker-compose-plugin",
+		{ timeout: 600000 },
+	);
+	if (r.ok) {
+		console.log(`  ${LOG_OK} Docker instalado`);
+		return true;
+	}
+	console.log(`${LOG_FAIL} Error instalando Docker: ${r.output}`);
 	return false;
 }
 
@@ -253,31 +338,43 @@ function buildProject() {
 
 async function setupWizard() {
 	console.log(`\n${LOG_INFO}${LOG_BOLD}  Configuracion inicial${RESET}\n`);
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
+	let rl;
+	const envValue = (...names) => {
+		for (const name of names) {
+			const value = process.env[name];
+			if (value?.trim()) return value.trim();
+		}
+		return "";
+	};
 
-	const zhipuKey = await ask(
-		rl,
-		`${LOG_WARN}  Z.ai / ZhipuAI API Key (proveedor por defecto, Enter para saltar): ${RESET}`,
-	);
-	const anthropicKey = await ask(
-		rl,
-		`${LOG_WARN}  Anthropic API Key (Enter para saltar): ${RESET}`,
-	);
-	const openaiKey = await ask(
-		rl,
-		`${LOG_WARN}  OpenAI API Key (Enter para saltar): ${RESET}`,
-	);
-	const googleKey = await ask(
-		rl,
-		`${LOG_WARN}  Google AI API Key (Enter para saltar): ${RESET}`,
-	);
-	const deepseekKey = await ask(
-		rl,
-		`${LOG_WARN}  DeepSeek API Key (Enter para saltar): ${RESET}`,
-	);
+	let zhipuKey = envValue("ZHIPU_API_KEY", "ZAI_API_KEY");
+	let anthropicKey = envValue("ANTHROPIC_API_KEY");
+	let openaiKey = envValue("OPENAI_API_KEY");
+	let googleKey = envValue("GOOGLE_API_KEY", "GEMINI_API_KEY");
+	let deepseekKey = envValue("DEEPSEEK_API_KEY");
+
+	if (INTERACTIVE) {
+		rl = readline.createInterface({
+			input: process.stdin,
+			output: process.stdout,
+		});
+		const askKey = async (label, current = "") => {
+			const hint = current
+				? "detectada en entorno; Enter para conservar"
+				: "Enter para saltar";
+			const value = await ask(rl, `${LOG_WARN}  ${label} (${hint}): ${RESET}`);
+			return value || current;
+		};
+		zhipuKey = await askKey("Z.ai / ZhipuAI API Key", zhipuKey);
+		anthropicKey = await askKey("Anthropic API Key", anthropicKey);
+		openaiKey = await askKey("OpenAI API Key", openaiKey);
+		googleKey = await askKey("Google AI API Key", googleKey);
+		deepseekKey = await askKey("DeepSeek API Key", deepseekKey);
+	} else {
+		console.log(
+			`${LOG_DIM}  Modo automatico: usando API keys desde variables de entorno si existen. Podras configurar proveedor despues desde la interfaz web.${RESET}`,
+		);
+	}
 
 	console.log(`\n${LOG_INFO}  Creando estructura de directorios...${RESET}`);
 	const octopusDir = path.join(homedir(), ".octopus");
@@ -443,7 +540,7 @@ async function setupWizard() {
 	fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 	console.log(`  ${LOG_OK} Configuracion guardada en ~/.octopus/config.json`);
 
-	rl.close();
+	rl?.close();
 }
 
 function octopusDirPath(...segments) {
@@ -554,19 +651,35 @@ function openUrl(url) {
 }
 
 function startDetachedServer() {
-	ensureLogsDir();
+	const logsDir = ensureLogsDir();
+	const out = fs.openSync(path.join(logsDir, "server.log"), "a");
+	const err = fs.openSync(path.join(logsDir, "server.err.log"), "a");
 	const child = spawn(
 		process.execPath,
 		[CLI_ENTRY, "start", "--no-open", "--no-choice"],
 		{
 			cwd: PROJECT_ROOT,
 			detached: true,
-			stdio: "ignore",
+			stdio: ["ignore", out, err],
 			windowsHide: true,
 		},
 	);
 	child.unref();
 	console.log(`  ${LOG_OK} Octopus iniciado en segundo plano`);
+}
+
+async function waitForWeb(url, timeoutMs = 20000) {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		try {
+			const response = await fetch(url, { signal: AbortSignal.timeout(1200) });
+			if (response.ok) return true;
+		} catch {
+			/* retry */
+		}
+		await new Promise((resolve) => setTimeout(resolve, 750));
+	}
+	return false;
 }
 
 function installWindowsAutostart() {
@@ -625,6 +738,26 @@ function runCliForeground(args) {
 }
 
 async function postInstallActions() {
+	if (!INTERACTIVE) {
+		if (!SKIP_START) {
+			startDetachedServer();
+			const ready = await waitForWeb(WEB_URL);
+			if (ready) {
+				console.log(`  ${LOG_OK} Octopus listo en ${WEB_URL}`);
+				if (!SKIP_OPEN) openUrl(WEB_URL);
+			} else {
+				console.log(
+					`${LOG_WARN}  Octopus se inicio, pero la web aun no responde. Revisa ~/.octopus/logs/server.log o ejecuta: pnpm start${RESET}`,
+				);
+			}
+		} else {
+			console.log(
+				`${LOG_INFO}  Arranque omitido por --no-start. Ejecuta pnpm start para iniciar.${RESET}`,
+			);
+		}
+		return;
+	}
+
 	const rl = readline.createInterface({
 		input: process.stdin,
 		output: process.stdout,
@@ -694,16 +827,7 @@ async function main() {
 	let pythonOk = checkPython();
 	if (!pythonOk) {
 		console.log(`${LOG_WARN}  Python no encontrado.${RESET}`);
-		const rl = readline.createInterface({
-			input: process.stdin,
-			output: process.stdout,
-		});
-		const ans = await ask(
-			rl,
-			`  ${LOG_WARN}Instalar Python automaticamente? (S/n): ${RESET}`,
-		);
-		rl.close();
-		if (ans.toLowerCase() !== "n") {
+		if (await confirmInstall("Instalar Python automaticamente?", true)) {
 			pythonOk = installPython();
 		}
 		if (!pythonOk) {
@@ -719,39 +843,49 @@ async function main() {
 	let btOk = checkBuildTools();
 	if (!btOk) {
 		console.log(`${LOG_WARN}  Build Tools no detectado.${RESET}`);
-		const rl = readline.createInterface({
-			input: process.stdin,
-			output: process.stdout,
-		});
-		const ans = await ask(
-			rl,
-			`  ${LOG_WARN}Instalar Build Tools automaticamente? (S/n): ${RESET}`,
+		console.log(
+			`${LOG_DIM}  Requerido para dependencias nativas y soporte completo.${RESET}`,
 		);
-		rl.close();
-		if (ans.toLowerCase() !== "n") {
+		if (await confirmInstall("Instalar Build Tools automaticamente?", true)) {
 			btOk = installBuildTools();
 		}
 		if (!btOk) {
 			console.log(
 				`${LOG_WARN}  Sin Build Tools, solo fallaran dependencias nativas opcionales.${RESET}`,
 			);
-			const rl2 = readline.createInterface({
-				input: process.stdin,
-				output: process.stdout,
-			});
-			const cont = await ask(
-				rl2,
-				`  ${LOG_WARN}Continuar de todas formas? (s/N): ${RESET}`,
+			if (!(await confirmInstall("Continuar de todas formas?", false)))
+				process.exit(1);
+		}
+	}
+
+	console.log(
+		`\n${LOG_INFO}${LOG_BOLD}  Paso 4b/7: Verificando Docker${RESET}`,
+	);
+	let dockerOk = checkDocker();
+	if (!dockerOk) {
+		console.log(`${LOG_WARN}  Docker no encontrado.${RESET}`);
+		if (await confirmInstall("Instalar Docker automaticamente?", false)) {
+			dockerOk = installDocker();
+		}
+		if (!dockerOk) {
+			console.log(
+				`${LOG_WARN}  Docker queda omitido. Solo es necesario para despliegue/instalacion Docker.${RESET}`,
 			);
-			rl2.close();
-			if (cont.toLowerCase() !== "s") process.exit(1);
 		}
 	}
 
 	console.log(
 		`\n${LOG_INFO}${LOG_BOLD}  Paso 5/7: Instalando dependencias${RESET}`,
 	);
-	if (!installDeps()) process.exit(1);
+	let depsOk = installDeps();
+	if (!depsOk && !btOk) {
+		console.log(
+			`${LOG_WARN}  pnpm install fallo y no hay Build Tools. Instalando Build Tools y reintentando...${RESET}`,
+		);
+		btOk = installBuildTools();
+		if (btOk) depsOk = installDeps();
+	}
+	if (!depsOk) process.exit(1);
 
 	console.log(
 		`\n${LOG_INFO}${LOG_BOLD}  Paso 6/7: Compilando proyecto${RESET}`,

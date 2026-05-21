@@ -26,6 +26,7 @@ import {
 	MCPManager,
 	MemoryConsolidator,
 	MemoryOrchestrator,
+	MemoryRetentionScheduler,
 	MemoryRetrieval,
 	PluginMarketplace,
 	PluginRegistry,
@@ -75,6 +76,8 @@ export interface OctopusSystem {
 	dailyMemory: GlobalDailyMemory;
 	userProfileManager: UserProfileManager;
 	memoryOrchestrator: MemoryOrchestrator;
+	memoryRetentionScheduler: MemoryRetentionScheduler;
+	contextAssembler: ContextAssembler;
 	memoryRetrieval: MemoryRetrieval;
 	memoryConsolidator: MemoryConsolidator;
 	skillRegistry: SkillRegistry;
@@ -101,6 +104,7 @@ export interface OctopusSystem {
 	mcpManager: MCPManager;
 	browserTool: BrowserTool | null;
 	refreshBrowserTools: (nextConfig?: OctopusConfig) => Promise<boolean>;
+	refreshEmbeddingProvider: (nextConfig?: OctopusConfig) => Promise<boolean>;
 	reloadDynamicTool: (name: string) => Promise<boolean>;
 	embedFn: EmbeddingFunction;
 	shutdown: () => Promise<void>;
@@ -114,7 +118,15 @@ type DynamicToolParameter = {
 
 type OptionalProviderConfig = {
 	apiKey?: string;
+	apiKeyEnv?: string;
 	baseUrl?: string;
+	authMode?: string;
+	accessToken?: string;
+	accessTokenEnv?: string;
+	credentialsFile?: string;
+	credentialsJson?: string;
+	projectId?: string;
+	location?: string;
 };
 
 type BrowserRuntimeConfig = {
@@ -302,26 +314,143 @@ function registerDynamicTool(
 	return tool.name;
 }
 
+function readConfiguredEnv(name?: string): string {
+	return name ? process.env[name]?.trim() || "" : "";
+}
+
+function firstNonEmpty(...values: Array<string | undefined | null>): string {
+	return (
+		values.find((value) => typeof value === "string" && value.trim()) ?? ""
+	);
+}
+
+function isGoogleVertexConfigured(provider: OptionalProviderConfig): boolean {
+	return Boolean(
+		firstNonEmpty(
+			provider.accessToken,
+			readConfiguredEnv(provider.accessTokenEnv),
+			process.env.GOOGLE_VERTEX_ACCESS_TOKEN,
+			process.env.GOOGLE_ACCESS_TOKEN,
+			provider.credentialsFile,
+			process.env.GOOGLE_APPLICATION_CREDENTIALS,
+		),
+	);
+}
+
+function readServiceAccountProjectId(
+	credentialsJson?: string,
+	credentialsFile?: string,
+): string {
+	try {
+		const raw = credentialsJson?.trim()
+			? credentialsJson
+			: credentialsFile && existsSync(credentialsFile)
+				? readFileSync(credentialsFile, "utf8")
+				: "";
+		if (!raw) return "";
+		const parsed = JSON.parse(raw) as { project_id?: string };
+		return parsed.project_id?.trim() ?? "";
+	} catch {
+		return "";
+	}
+}
+
 // --- Real Embedding Provider (Multi-Provider) ---
-function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
+export function createEmbeddingProvider(
+	config: OctopusConfig,
+): EmbeddingProvider {
 	type ApiType = "openai" | "google" | "cohere" | "ollama";
+	type AuthMode = "api-key" | "vertex";
 
 	let apiKey = "";
 	let baseUrl = "";
 	let model = "";
 	let apiType: ApiType = "openai";
+	let authMode: AuthMode = "api-key";
+	let accessToken = "";
+	let accessTokenEnv = "";
+	let credentialsFile = "";
+	let credentialsJson = "";
+	let projectId = "";
+	let location = "";
 	let dimensions = 1024;
 	let providerName = "";
 
-	// Priority chain: zhipu → openai → google → deepseek → mistral → xai → cohere → ollama
 	const providers = config.ai.providers;
 	const optionalProviders = providers as Record<
 		string,
 		OptionalProviderConfig | undefined
 	>;
 
-	// 1. Zhipu/Z.ai (OpenAI-compatible)
-	if (!apiKey && providers.zhipu?.apiKey) {
+	const embeddingConfig = config.memory.embeddings;
+	const explicitApiKey = firstNonEmpty(
+		embeddingConfig.apiKey,
+		readConfiguredEnv(embeddingConfig.apiKeyEnv),
+		process.env.OCTOPUS_EMBEDDING_API_KEY,
+	);
+	const embeddingsEnabled = embeddingConfig.enabled === true;
+	const hasCustomDimensions = embeddingConfig.dimensions !== 1024;
+
+	if (!embeddingsEnabled) {
+		const provider = new EmbeddingProvider({
+			dimensions: embeddingConfig.dimensions,
+			maxBatchSize: embeddingConfig.maxBatchSize,
+			maxTextLength: embeddingConfig.maxTextLength,
+			cacheSize: embeddingConfig.cacheSize,
+			failureRetryMs: embeddingConfig.failureRetryMs,
+			task: embeddingConfig.task,
+		});
+		console.log(
+			"  ⚠ No embedding API — using hash fallback (semantic search limited)",
+		);
+		return provider;
+	}
+
+	const requestedProvider = embeddingConfig.provider;
+	const zhipuMode = providers.zhipu?.mode;
+	const zhipuSupportsAutoEmbeddings =
+		zhipuMode !== "coding-plan" && zhipuMode !== "coding-global";
+	const googleProvider = optionalProviders.google ?? {};
+	const googleAuthMode: AuthMode =
+		embeddingConfig.authMode === "vertex" ||
+		googleProvider.authMode === "vertex"
+			? "vertex"
+			: "api-key";
+	const googleApiKey = firstNonEmpty(
+		explicitApiKey,
+		googleProvider.apiKey,
+		readConfiguredEnv(googleProvider.apiKeyEnv),
+		process.env.GEMINI_API_KEY,
+		process.env.GOOGLE_API_KEY,
+	);
+	const openAiProvider = optionalProviders.openai ?? {};
+	const openAiApiKey = firstNonEmpty(
+		explicitApiKey,
+		openAiProvider.apiKey,
+		readConfiguredEnv(openAiProvider.apiKeyEnv),
+		process.env.OPENAI_API_KEY,
+	);
+
+	const autoProvider =
+		requestedProvider !== "auto"
+			? requestedProvider
+			: openAiApiKey
+				? "openai"
+				: googleApiKey
+					? "google"
+					: googleAuthMode === "vertex" &&
+							isGoogleVertexConfigured(googleProvider)
+						? "google"
+						: zhipuSupportsAutoEmbeddings && providers.zhipu?.apiKey
+							? "zhipu"
+							: "auto";
+
+	// 1. Zhipu/Z.ai (OpenAI-compatible). Coding Plan keys do not expose /embeddings.
+	if (
+		autoProvider === "zhipu" &&
+		providers.zhipu?.apiKey &&
+		zhipuSupportsAutoEmbeddings
+	) {
 		apiKey = providers.zhipu.apiKey;
 		// Always use global API for embeddings (embedding-3 only exists on api.z.ai)
 		baseUrl = "https://api.z.ai/api/paas/v4";
@@ -332,29 +461,105 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	}
 
 	// 2. OpenAI
-	if (!apiKey && providers.openai?.apiKey) {
-		apiKey = providers.openai.apiKey;
-		baseUrl = "https://api.openai.com/v1";
-		model = "text-embedding-3-small";
+	if (autoProvider === "openai") {
+		if (!openAiApiKey) {
+			throw new Error(
+				"OpenAI embeddings are enabled but no OpenAI API key was found. Set memory.embeddings.apiKeyEnv to OPENAI_API_KEY, set ai.providers.openai.apiKey, or export OPENAI_API_KEY. ChatGPT/Codex login tokens are not valid for /v1/embeddings.",
+			);
+		}
+		apiKey = openAiApiKey;
+		baseUrl =
+			embeddingConfig.baseUrl ||
+			openAiProvider.baseUrl ||
+			"https://api.openai.com/v1";
+		model = embeddingConfig.model || "text-embedding-3-small";
 		apiType = "openai";
-		dimensions = 1536;
+		dimensions = hasCustomDimensions ? embeddingConfig.dimensions : 1536;
 		providerName = "OpenAI";
 	}
 
 	// 3. Google/Gemini (native API)
-	if (!apiKey && providers.google?.apiKey) {
-		apiKey = providers.google.apiKey;
-		baseUrl = "https://generativelanguage.googleapis.com";
-		model = "text-embedding-004";
+	if (autoProvider === "google") {
+		authMode = googleAuthMode;
+		baseUrl =
+			embeddingConfig.baseUrl ||
+			googleProvider.baseUrl ||
+			(authMode === "vertex"
+				? ""
+				: "https://generativelanguage.googleapis.com/v1beta");
+		model = embeddingConfig.model || "gemini-embedding-2";
 		apiType = "google";
-		dimensions = 768;
-		providerName = "Google";
+		dimensions = hasCustomDimensions ? embeddingConfig.dimensions : 768;
+		providerName = authMode === "vertex" ? "Google Vertex AI" : "Google Gemini";
+
+		if (authMode === "api-key") {
+			if (!googleApiKey) {
+				throw new Error(
+					"Google Gemini embeddings are enabled but no API key was found. Set memory.embeddings.apiKeyEnv to GEMINI_API_KEY, set ai.providers.google.apiKey, or export GEMINI_API_KEY/GOOGLE_API_KEY.",
+				);
+			}
+			apiKey = googleApiKey;
+		} else {
+			apiKey = "vertex";
+			accessToken = firstNonEmpty(
+				embeddingConfig.accessToken,
+				googleProvider.accessToken,
+				process.env.GOOGLE_VERTEX_ACCESS_TOKEN,
+				process.env.GOOGLE_ACCESS_TOKEN,
+			);
+			const configuredAccessTokenEnv = firstNonEmpty(
+				embeddingConfig.accessTokenEnv,
+				googleProvider.accessTokenEnv,
+			);
+			accessTokenEnv =
+				configuredAccessTokenEnv === "GOOGLE_APPLICATION_CREDENTIALS"
+					? ""
+					: configuredAccessTokenEnv;
+			credentialsFile = firstNonEmpty(
+				embeddingConfig.credentialsFile,
+				googleProvider.credentialsFile,
+				process.env.GOOGLE_APPLICATION_CREDENTIALS,
+			);
+			credentialsJson = firstNonEmpty(
+				embeddingConfig.credentialsJson,
+				googleProvider.credentialsJson,
+			);
+			projectId = firstNonEmpty(
+				embeddingConfig.projectId,
+				googleProvider.projectId,
+				readServiceAccountProjectId(credentialsJson, credentialsFile),
+				process.env.GOOGLE_CLOUD_PROJECT,
+				process.env.GCLOUD_PROJECT,
+			);
+			location = firstNonEmpty(
+				embeddingConfig.location,
+				googleProvider.location,
+				process.env.GOOGLE_CLOUD_LOCATION,
+				process.env.GOOGLE_CLOUD_REGION,
+				"us-central1",
+			);
+			if (!projectId) {
+				throw new Error(
+					"Google Vertex embeddings are enabled but no project ID was found. Set memory.embeddings.projectId, ai.providers.google.projectId, or GOOGLE_CLOUD_PROJECT.",
+				);
+			}
+			if (
+				!accessToken &&
+				!readConfiguredEnv(accessTokenEnv) &&
+				!credentialsFile &&
+				!credentialsJson
+			) {
+				throw new Error(
+					"Google Vertex embeddings are enabled but no credentials were found. Set memory.embeddings.accessTokenEnv, ai.providers.google.accessTokenEnv, GOOGLE_VERTEX_ACCESS_TOKEN, GOOGLE_ACCESS_TOKEN, or GOOGLE_APPLICATION_CREDENTIALS.",
+				);
+			}
+		}
 	}
 
 	// 4. DeepSeek (OpenAI-compatible)
 	const deepseek = optionalProviders.deepseek;
 	const deepseekApiKey = deepseek?.apiKey;
-	if (!apiKey && deepseekApiKey) {
+	if (autoProvider === "deepseek" && deepseekApiKey) {
 		apiKey = deepseekApiKey;
 		baseUrl = deepseek.baseUrl || "https://api.deepseek.com/v1";
 		model = "deepseek-embed";
@@ -366,7 +571,7 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	// 5. Mistral (OpenAI-compatible)
 	const mistral = optionalProviders.mistral;
 	const mistralApiKey = mistral?.apiKey;
-	if (!apiKey && mistralApiKey) {
+	if (autoProvider === "mistral" && mistralApiKey) {
 		apiKey = mistralApiKey;
 		baseUrl = mistral.baseUrl || "https://api.mistral.ai/v1";
 		model = "mistral-embed";
@@ -378,7 +583,7 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	// 6. xAI/Grok (OpenAI-compatible)
 	const xaiProvider = optionalProviders.xai;
 	const xaiApiKey = xaiProvider?.apiKey;
-	if (!apiKey && xaiApiKey) {
+	if (autoProvider === "xai" && xaiApiKey) {
 		apiKey = xaiApiKey;
 		baseUrl = xaiProvider.baseUrl || "https://api.x.ai/v1";
 		model = "v1";
@@ -390,7 +595,7 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 	// 7. Cohere (native API)
 	const cohere = optionalProviders.cohere;
 	const cohereApiKey = cohere?.apiKey;
-	if (!apiKey && cohereApiKey) {
+	if (autoProvider === "cohere" && cohereApiKey) {
 		apiKey = cohereApiKey;
 		baseUrl = cohere.baseUrl || "https://api.cohere.com";
 		model = "embed-multilingual-v3.0";
@@ -399,8 +604,9 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 		providerName = "Cohere";
 	}
 
-	// 8. Ollama (local, no API key needed)
-	if (!apiKey && providers.local) {
+	// 8. Ollama (local, no API key needed). Use only when explicitly selected,
+	// because providers.local exists in defaults even when no Ollama daemon runs.
+	if (autoProvider === "ollama") {
 		const localUrl = providers.local.baseUrl || "http://localhost:11434";
 		apiKey = "ollama"; // Ollama doesn't need real key, but we use it as flag
 		baseUrl = localUrl;
@@ -410,15 +616,34 @@ function createEmbeddingProvider(config: OctopusConfig): EmbeddingProvider {
 		providerName = "Ollama";
 	}
 
+	if (apiKey && !model && embeddingConfig.model) {
+		model = embeddingConfig.model;
+	}
+	if (apiKey && embeddingConfig.baseUrl) {
+		baseUrl = embeddingConfig.baseUrl;
+	}
+
 	const provider = new EmbeddingProvider({
 		apiKey: apiKey === "ollama" ? "nokey" : apiKey,
 		baseUrl,
 		model,
 		apiType,
+		authMode,
+		accessToken,
+		accessTokenEnv,
+		credentialsFile,
+		credentialsJson,
+		projectId,
+		location,
+		task: embeddingConfig.task,
 		dimensions,
-		maxBatchSize: apiType === "ollama" ? 8 : 32,
-		maxTextLength: 8000,
-		cacheSize: 500,
+		maxBatchSize:
+			apiType === "ollama"
+				? Math.min(embeddingConfig.maxBatchSize, 8)
+				: embeddingConfig.maxBatchSize,
+		maxTextLength: embeddingConfig.maxTextLength,
+		cacheSize: embeddingConfig.cacheSize,
+		failureRetryMs: embeddingConfig.failureRetryMs,
 	});
 
 	if (apiKey) {
@@ -465,10 +690,20 @@ export async function bootstrap(options?: {
 	const loader = new ConfigLoader(options?.configPath);
 	let config = loader.load();
 
+	const storageConnectionString =
+		config.storage.connectionString ||
+		process.env.OCTOPUS_POSTGRES_URL ||
+		process.env.DATABASE_URL ||
+		"";
 	const db = createDatabaseAdapter(
 		config.storage.backend as "sqlite" | "postgresql" | "mysql" | "mongodb",
 		{
 			path: config.storage.path,
+			connectionString: storageConnectionString,
+			options:
+				config.storage.ssl || process.env.OCTOPUS_POSTGRES_SSL === "true"
+					? { ssl: { rejectUnauthorized: false } }
+					: undefined,
 		},
 	);
 	await db.initialize();
@@ -486,12 +721,24 @@ export async function bootstrap(options?: {
 		},
 	});
 
-	const vectorStore = createVectorStore(config.memory.longTerm.backend, db);
+	const vectorStore = createVectorStore(
+		config.memory.longTerm.backend,
+		db,
+		config.memory.longTerm.vectorStore,
+	);
 	const ltm = new LongTermMemory(vectorStore, db);
 
-	// Real Embedding Provider — replaces the old hash-based stub
-	const embeddingProvider = createEmbeddingProvider(config);
-	const embedFn: EmbeddingFunction = embeddingProvider.getEmbedFunction();
+	// Real Embedding Provider — kept behind a stable function so config changes
+	// can refresh embeddings without rebuilding every memory subsystem.
+	let embeddingProvider = createEmbeddingProvider(config);
+	const embedFn: EmbeddingFunction = (text, task) =>
+		embeddingProvider.embed(text, task);
+	const refreshEmbeddingProvider = async (
+		nextConfig: OctopusConfig = config,
+	): Promise<boolean> => {
+		embeddingProvider = createEmbeddingProvider(nextConfig);
+		return true;
+	};
 
 	const memoryRetrieval = new MemoryRetrieval(ltm, stm, embedFn, {
 		maxResults: config.memory.retrieval.maxResults,
@@ -527,6 +774,22 @@ export async function bootstrap(options?: {
 		reserveTokens: 128,
 		maxSimilarEpisodes: 4,
 		maxAgentLessons: 5,
+	});
+	(
+		memoryConsolidator as MemoryConsolidator & {
+			setMemoryOrchestrator?: (
+				orchestrator: MemoryOrchestrator,
+				scope: {
+					tenantId: string;
+					userId: string;
+					projectId: string;
+				},
+			) => void;
+		}
+	).setMemoryOrchestrator?.(memoryOrchestrator, {
+		tenantId: "local",
+		userId: "owner",
+		projectId: process.cwd(),
 	});
 
 	const providers: Record<string, ProviderConfig & { mode?: string }> = {};
@@ -776,6 +1039,145 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	}
 
 	registerSystemTool({
+		name: "recall_conversation",
+		description:
+			"Search raw saved conversation messages when the rolling summary is not specific enough. Use this to recover exact user wording, file paths, URLs, media IDs, command output, errors, or tool results from the current conversation before guessing.",
+		parameters: {
+			query: {
+				type: "string",
+				description:
+					"Exact keyword or phrase to search for. Prefer strings from [Retrieval Hints]: filename, path, URL, media ID, error fragment, command, or user phrase.",
+				required: true,
+			},
+			conversationId: {
+				type: "string",
+				description:
+					"Optional conversation id. If omitted, searches the active/current conversation when available.",
+			},
+			scope: {
+				type: "string",
+				description:
+					"Search scope: current or all. Defaults to current. Use all only if current has no matches.",
+			},
+			limit: {
+				type: "number",
+				description:
+					"Maximum matching messages to return, 1-20. Defaults to 8.",
+			},
+			contextRadius: {
+				type: "number",
+				description:
+					"Number of neighboring messages before/after each match when searching one conversation, 0-4. Defaults to 1.",
+			},
+		},
+		handler: async (params, context) => {
+			const query = typeof params.query === "string" ? params.query.trim() : "";
+			if (!query) {
+				return {
+					success: false,
+					output: "",
+					error: "query is required",
+				};
+			}
+
+			const clamp = (
+				value: unknown,
+				fallback: number,
+				min: number,
+				max: number,
+			) => {
+				const parsed = Number(value);
+				if (!Number.isFinite(parsed)) return fallback;
+				return Math.min(max, Math.max(min, Math.floor(parsed)));
+			};
+			const limit = clamp(params.limit, 8, 1, 20);
+			const contextRadius = clamp(params.contextRadius, 1, 0, 4);
+			const scope = params.scope === "all" ? "all" : "current";
+			const activeConversationId = context.agent?.channelId;
+			const requestedConversationId =
+				typeof params.conversationId === "string"
+					? params.conversationId.trim()
+					: "";
+			const conversationId =
+				requestedConversationId ||
+				(scope === "current" ? activeConversationId : undefined);
+			const truncate = (text: string, max = 700) =>
+				text.length > max
+					? `${text.slice(0, Math.floor(max / 2))}\n...[truncated]...\n${text.slice(-Math.floor(max / 2))}`
+					: text;
+			const queryLower = query.toLowerCase();
+			const terms = queryLower.split(/\s+/).filter((term) => term.length >= 3);
+			const matchesQuery = (content: string) => {
+				const lower = content.toLowerCase();
+				return (
+					lower.includes(queryLower) ||
+					(terms.length > 0 && terms.every((term) => lower.includes(term)))
+				);
+			};
+
+			if (conversationId) {
+				const messages = await chatManager.getConversationMessages(
+					conversationId,
+					{
+						limit: 5000,
+					},
+				);
+				const matchIndexes = messages
+					.map((message, index) => ({ message, index }))
+					.filter(({ message }) => matchesQuery(message.content))
+					.slice(0, limit);
+
+				if (matchIndexes.length === 0) {
+					return {
+						success: true,
+						output: `No raw messages matched "${query}" in conversation ${conversationId}. Try a shorter exact fragment, filename, URL, media ID, path, or set scope=all.`,
+						metadata: { conversationId, matches: 0 },
+					};
+				}
+
+				const blocks = matchIndexes.map(({ index }) => {
+					const start = Math.max(0, index - contextRadius);
+					const end = Math.min(messages.length, index + contextRadius + 1);
+					const contextLines = messages
+						.slice(start, end)
+						.map((message, offset) => {
+							const absoluteIndex = start + offset + 1;
+							const marker = start + offset === index ? "MATCH" : "context";
+							return `[${marker} #${absoluteIndex} ${message.timestamp} ${message.role} messageId=${message.id}]\n${truncate(message.content)}`;
+						});
+					return contextLines.join("\n");
+				});
+
+				return {
+					success: true,
+					output: `Found ${matchIndexes.length} match(es) for "${query}" in conversation ${conversationId}.\n\n${blocks.join("\n\n---\n\n")}`,
+					metadata: { conversationId, matches: matchIndexes.length },
+				};
+			}
+
+			const matches = await chatManager.searchMessages(query, { limit });
+			if (matches.length === 0) {
+				return {
+					success: true,
+					output: `No raw messages matched "${query}" across saved conversations. Try a shorter exact fragment, filename, URL, media ID, path, or user phrase.`,
+					metadata: { matches: 0, scope: "all" },
+				};
+			}
+
+			return {
+				success: true,
+				output: `Found ${matches.length} match(es) for "${query}" across saved conversations.\n\n${matches
+					.map(
+						(message, index) =>
+							`[MATCH ${index + 1} conversationId=${message.conversation_id} ${message.timestamp} ${message.role} messageId=${message.id}]\n${truncate(message.content)}`,
+					)
+					.join("\n\n---\n\n")}`,
+				metadata: { matches: matches.length, scope: "all" },
+			};
+		},
+	});
+
+	registerSystemTool({
 		name: "manage_tool_timeouts",
 		description:
 			"Read and update live tool execution timeouts. Use this when a tool needs more time than the default timeout.",
@@ -927,6 +1329,8 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		});
 		workerRuntime.setToolSystem(workerToolRegistry, workerToolExecutor);
 		workerRuntime.setLearningEngine(learningEngine);
+		workerRuntime.setMemoryOrchestrator(memoryOrchestrator);
+		workerRuntime.setContextAssembler(contextAssembler);
 
 		teamBlackboard.registerWorker(workerId, workerRuntime);
 
@@ -1496,6 +1900,14 @@ Always be concise, helpful, and thorough.`,
 
 	const systemScheduler = new Scheduler();
 	const bootstrapLogger = createLogger("bootstrap");
+	const memoryRetentionScheduler = new MemoryRetentionScheduler(
+		memoryOrchestrator,
+		systemScheduler,
+		config.memory.retention,
+		bootstrapLogger,
+	);
+	memoryRetentionScheduler.start();
+
 	systemScheduler.schedule("daily-memory-dump", "0 0 * * *", async () => {
 		try {
 			bootstrapLogger.info("Executing End-of-Day Global Memory Flush...");
@@ -1503,24 +1915,36 @@ Always be concise, helpful, and thorough.`,
 			const dump = await dailyMemory.dumpAndClear(todayStr);
 			if (dump) {
 				const fullContent = `Daily Digest:\n${dump}`;
-				const embedding = await embedFn(fullContent);
-				const memoryItem = {
-					id: `daily_${todayStr}`,
-					type: "episodic" as const,
-					content: fullContent,
-					embedding,
-					importance: 0.9,
-					accessCount: 0,
-					lastAccessed: new Date(),
-					createdAt: new Date(),
-					associations: [],
-					source: {
-						channelId: "system_cron",
-						conversationId: `daily_${todayStr}`,
-					},
-					metadata: { type: "daily_summary", date: todayStr },
+				const source = {
+					sourceId: `daily_${todayStr}`,
+					sourceType: "system" as const,
+					title: `Daily memory digest ${todayStr}`,
+					channelId: "system_cron",
+					conversationId: `daily_${todayStr}`,
+					quotedEvidence: dump.slice(0, 2000),
+					authorityScore: 1,
 				};
-				await ltm.store(memoryItem);
+				await memoryOrchestrator.write({
+					type: "episodic",
+					content: fullContent,
+					sourceTrust: "system",
+					scope: {
+						tenantId: "local",
+						userId: "owner",
+						projectId: process.cwd(),
+						sessionId: "system_cron",
+						taskId: `daily_${todayStr}`,
+					},
+					importance: 0.9,
+					confidence: 0.9,
+					source,
+					metadata: { type: "daily_summary", date: todayStr },
+					evidence: {
+						sourceType: "task_result",
+						sourceId: `daily_${todayStr}`,
+						excerpt: dump.slice(0, 1200),
+					},
+				});
 			}
 		} catch (err) {
 			bootstrapLogger.error(`Error during End-of-Day LTM sync: ${err}`);
@@ -1536,6 +1960,8 @@ Always be concise, helpful, and thorough.`,
 		dailyMemory,
 		userProfileManager,
 		memoryOrchestrator,
+		memoryRetentionScheduler,
+		contextAssembler,
 		memoryRetrieval,
 		memoryConsolidator,
 		skillRegistry,
@@ -1561,10 +1987,12 @@ Always be concise, helpful, and thorough.`,
 		mcpManager,
 		browserTool,
 		refreshBrowserTools,
+		refreshEmbeddingProvider,
 		reloadDynamicTool,
 		toolExecutor,
 		embedFn,
 		shutdown: async () => {
+			memoryRetentionScheduler.stop();
 			systemScheduler.cancel("daily-memory-dump");
 			await mcpManager.shutdown();
 			connectionManager.shutdown();

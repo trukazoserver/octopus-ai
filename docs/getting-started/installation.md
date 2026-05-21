@@ -12,7 +12,7 @@ Esta guía te ayudará a instalar Octopus AI paso a paso, sin importar tu nivel 
 
 - [Requisitos del Sistema](#-requisitos-del-sistema)
 - [Preparación por Sistema Operativo](#-preparación-por-sistema-operativo)
-- [Método 1: Instalador Automático (Recomendado)](#-método-1-instalador-automático-recomendado)
+- [Método 1: Instalador Interactivo (Recomendado)](#-método-1-instalador-interactivo-recomendado)
 - [Método 2: Instalación Manual](#-método-2-instalación-manual)
 - [Método 3: Docker](#-método-3-despliegue-con-docker)
 - [Verificación Post-Instalación](#-verificación-post-instalación)
@@ -38,17 +38,18 @@ Esta guía te ayudará a instalar Octopus AI paso a paso, sin importar tu nivel 
 |---|---|---|
 | **Node.js** | >= 22.0.0 | Entorno de ejecución principal |
 | **pnpm** | >= 10.0.0 | Gestor de paquetes del monorepo |
-| **Python** | >= 3.10 | Recomendado para herramientas auxiliares y ejecución de scripts |
-| **C++ Build Tools** | Ver abajo | Opcional para dependencias nativas de terceros; SQLite usa `sql.js` WASM |
+| **Python** | >= 3.10 | Tools auxiliares, scripts y compatibilidad completa |
+| **C++ Build Tools** | Ver abajo | Dependencias nativas y compatibilidad completa de instalación |
+| **Docker** | Compose v2 | Opcional para despliegue en contenedores y sandbox aislado |
 | **Git** | Cualquiera | Clonar el repositorio |
 
-> **¿No sabes qué es Node.js o pnpm?** No te preocupes. El instalador automático verifica e instala lo que falte.
+> **¿No sabes qué es Node.js, pnpm, Python, Docker o Build Tools?** No te preocupes. El instalador verifica cada requisito, instala solo lo que falte si aceptas y permite saltar pasos opcionales.
 
 ---
 
 ## 📦 Preparación por Sistema Operativo
 
-Antes de instalar Octopus AI necesitas Node.js, pnpm y Git. Python y Build Tools son recomendables para algunas tools o dependencias opcionales, pero la base de datos actual usa `sql.js` WASM y no requiere compilar `better-sqlite3`.
+Antes de instalar Octopus AI necesitas Node.js, pnpm y Git. Python, Build Tools y Docker se recomiendan para funcionamiento al 100%: scripts Python, dependencias nativas, browser/media tooling, despliegue Docker y sandbox aislado. El instalador detecta lo que ya existe y solo instala lo faltante.
 
 ### Windows
 
@@ -84,9 +85,9 @@ Cierra y reabre la terminal. Verifica con:
 python --version
 ```
 
-#### 4. Instalar Build Tools de C++ (opcional)
+#### 4. Instalar Build Tools de C++
 
-Esto solo es necesario si agregas dependencias nativas que usen `node-gyp`:
+Recomendado para instalación completa y dependencias nativas que usen `node-gyp`:
 
 ```powershell
 winget install Microsoft.VisualStudio.2022.BuildTools --force --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
@@ -100,7 +101,15 @@ winget install Microsoft.VisualStudio.2022.BuildTools --force --override "--add 
 winget install Git.Git
 ```
 
-#### 6. Instalar pnpm
+#### 6. Instalar Docker Desktop (opcional para Docker/sandbox)
+
+```powershell
+winget install Docker.DockerDesktop
+```
+
+Reinicia Windows si Docker Desktop lo solicita.
+
+#### 7. Instalar pnpm
 
 ```powershell
 npm install -g pnpm
@@ -210,32 +219,61 @@ npm install -g pnpm
 
 ---
 
-## 🚀 Método 1: Instalador Automático (Recomendado)
+## 🚀 Método 1: Instalador Interactivo (Recomendado)
 
-La forma más fácil y segura. El instalador detecta lo que falta, lo instala y configura todo por ti.
+La forma más fácil y segura. El instalador detecta lo que falta, te pregunta qué instalar y configura todo por ti. Puedes presionar Enter para aceptar valores por defecto o saltar API keys. Si quieres cero preguntas, usa `--yes`.
 
 ```bash
 # 1. Clonar el repositorio
 git clone https://github.com/trukazoserver/octopus-ai.git
 cd octopus-ai
 
-# 2. Ejecutar el instalador
+# 2. Ejecutar el instalador interactivo
 pnpm run install:octopus
+```
+
+Variantes útiles:
+
+```bash
+# Automático: acepta instalación de faltantes y usa variables de entorno si existen
+pnpm run install:octopus:auto
+
+# Instala/configura/compila, pero no arranca Octopus al final
+pnpm run install:octopus:skip-start
+
+# No abrir navegador al finalizar
+pnpm run install:octopus -- --no-open
+
+# Modo automático explícito
+pnpm run install:octopus -- --yes
 ```
 
 ### ¿Qué hace el instalador paso a paso?
 
-El instalador ejecuta **7 pasos automáticamente**:
+El instalador ejecuta **7 pasos principales** y una verificación adicional de Docker:
 
 | Paso | Acción | ¿Qué pasa si falla? |
 |---|---|---|
 | 1/7 | Verifica Node.js >= 22 | Te pide actualizar |
 | 2/7 | Verifica/instala pnpm | Lo instala con `npm install -g pnpm` |
-| 3/7 | Verifica Python | Lo recomienda para tools auxiliares |
-| 4/7 | Verifica Build Tools C++ | Lo marca como opcional salvo dependencias nativas |
+| 3/7 | Verifica/instala Python | Si falta, pregunta si quieres instalarlo; en `--yes` lo instala automáticamente |
+| 4/7 | Verifica/instala Build Tools C++ | Si falta, pregunta si quieres instalarlo; en `--yes` lo instala automáticamente |
+| 4b/7 | Verifica/instala Docker | Si falta, pregunta si quieres instalarlo; en `--yes` lo instala automáticamente |
 | 5/7 | `pnpm install` | Descarga todas las dependencias |
-| 6/7 | `pnpm build` | Compila los 11 paquetes TypeScript |
-| 7/7 | Asistente de API Keys | Te pregunta por las claves de cada proveedor de IA |
+| 6/7 | `pnpm build` | Compila los 12 paquetes TypeScript |
+| 7/7 | Configuración inicial | Crea config, lee API keys de entorno o pregunta por ellas |
+
+### Qué instala y qué no reinstala
+
+El instalador no reinstala lo que ya existe:
+
+- Si `pnpm` ya está disponible, lo reutiliza.
+- Si Python ya está instalado, no ejecuta winget/brew/apt.
+- Si Build Tools ya existen, no descarga Visual Studio Build Tools ni `build-essential`.
+- Si Docker ya existe, no instala Docker Desktop/Engine.
+- `pnpm install` usa el lockfile para descargar solo paquetes faltantes o desactualizados.
+
+En Docker el comportamiento es diferente por diseño: la imagen instala todo dentro del contenedor para ser autosuficiente y reproducible.
 
 ### Durante el paso 7 (Configuración inicial)
 
@@ -249,18 +287,22 @@ El instalador te pedirá las API Keys de los proveedores que quieras usar:
   DeepSeek API Key (Enter para saltar): ____
 ```
 
-> Puedes pulsar Enter para saltar cualquiera. Luego puedes configurarlas con el comando `config set`.
+> Puedes pulsar Enter para saltar cualquiera. Luego puedes configurarlas desde la interfaz web o con `config set`. Si exportas `ZHIPU_API_KEY`, `ZAI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY` o `DEEPSEEK_API_KEY`, el instalador las conserva automáticamente.
 
 Al finalizar, el instalador crea:
 - **Directorio** `~/.octopus/` (en Windows: `C:\Users\TuUsuario\.octopus\`)
 - **Configuración** `~/.octopus/config.json`
 - **Base de datos** `~/.octopus/data/octopus.db`
+- **Logs** `~/.octopus/logs/server.log` y `~/.octopus/logs/server.err.log`
+- **Comandos** `octopus` y `octopus-ai` en `~/.octopus/bin`
+
+Al finalizar, salvo `--no-start`, deja Octopus ejecutándose en segundo plano y abre `http://127.0.0.1:18789` salvo `--no-open`.
 
 ---
 
 ## 🛠️ Método 2: Instalación Manual
 
-Si prefieres tener control sobre cada paso o el instalador automático no funciona:
+Si prefieres tener control sobre cada paso o el instalador interactivo no funciona:
 
 ```bash
 # 1. Clonar e inicializar
@@ -273,8 +315,11 @@ pnpm install
 # 3. Compilar el monorepo (TypeScript)
 pnpm build
 
-# 4. Configuración inicial
+# 4. Configuración inicial interactiva del CLI
 node packages/cli/dist/index.js setup
+
+# 5. Iniciar servidor estable con UI/API/WebSocket
+pnpm start
 ```
 
 El comando `setup` lanzará un asistente interactivo para configurar tus API Keys.
@@ -290,9 +335,15 @@ Ideal para servidores o si no quieres instalar dependencias en tu máquina.
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
+También puedes usar el script incluido:
+
+```bash
+pnpm run docker:up
+```
+
 ### Variables de entorno
 
-Crea un archivo `.env` en la carpeta `docker/`:
+Crea un archivo `.env` en la raíz del repositorio o exporta las variables antes de levantar Docker:
 
 ```env
 ZHIPU_API_KEY=tu-key-zhipu
@@ -306,6 +357,8 @@ ZHIPU_API_KEY=tu-key-zhipu
 
 El despliegue actual usa un volumen persistente para `/data` y un bind mount para el workspace del contenedor, así que la base de datos, skills, logs y plantillas operativas sobreviven entre reinicios.
 
+El contenedor expone Octopus en `http://localhost:18789` y trae todo el runtime necesario instalado dentro de la imagen: Node.js 22, pnpm, Python, Build Tools, Chromium, ffmpeg, fonts y dependencias de producción.
+
 > Para instrucciones completas de Docker (instalación, configuración, actualización y solución de problemas), consulta la [Guía dedicada de Docker](./docker.md).
 
 ---
@@ -316,6 +369,12 @@ Ejecuta el diagnóstico para confirmar que todo funciona:
 
 ```bash
 node packages/cli/dist/index.js doctor
+```
+
+También puedes comprobar que el servidor responde:
+
+```bash
+curl http://127.0.0.1:18789/api/status
 ```
 
 Deberías ver algo como:
@@ -343,6 +402,7 @@ cd octopus-ai
 git pull origin main
 pnpm install
 pnpm build
+pnpm start
 ```
 
 Si la actualización incluye cambios en la base de datos, ejecuta también:
@@ -373,8 +433,9 @@ rm -rf ~/.octopus
 
 1. **Verifica la instalación:** `node packages/cli/dist/index.js doctor`
 2. **Configura tu proveedor de IA:** [Guía de Configuración](./configuration.md)
-3. **Tu primera conversación:** [Inicio Rápido](./quick-start.md)
-4. **Explora las interfaces:**
+3. **Abre la web:** `http://127.0.0.1:18789`
+4. **Tu primera conversación:** [Inicio Rápido](./quick-start.md)
+5. **Explora las interfaces:**
    - [Panel Web](./web-dashboard.md)
    - [App de Escritorio](./desktop.md)
    - [Docker](./docker.md)

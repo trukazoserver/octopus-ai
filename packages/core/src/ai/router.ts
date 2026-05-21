@@ -36,6 +36,266 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function firstNonEmpty(
+	...values: Array<string | undefined>
+): string | undefined {
+	for (const value of values) {
+		const trimmed = value?.trim();
+		if (trimmed) return trimmed;
+	}
+	return undefined;
+}
+
+function env(name: string | undefined): string | undefined {
+	return name ? firstNonEmpty(process.env[name]) : undefined;
+}
+
+function envByMode(mode: string, values: Record<string, string | undefined>) {
+	return values[mode];
+}
+
+function firstEnv(...names: string[]): string | undefined {
+	return firstNonEmpty(...names.map((name) => process.env[name]));
+}
+
+function envOverridesDefault(
+	value: string | undefined,
+	defaultValue: string,
+	...envValues: Array<string | undefined>
+): string | undefined {
+	const configured = firstNonEmpty(value);
+	const override = firstNonEmpty(...envValues);
+	if (configured && configured !== defaultValue) return configured;
+	return firstNonEmpty(override, configured);
+}
+
+function resolveZhipuMode(config: ProviderConfig): string {
+	const configuredMode = config.mode;
+	const hasConfiguredKey = Boolean(
+		firstNonEmpty(config.apiKey, config.codingApiKey),
+	);
+	if (
+		configuredMode &&
+		(hasConfiguredKey || configuredMode !== "coding-plan")
+	) {
+		return configuredMode;
+	}
+	if (process.env.ZAI_CODING_API_KEY) return "coding-global";
+	if (process.env.ZHIPU_CODING_API_KEY) return "coding-plan";
+	if (process.env.ZAI_API_KEY) return "global";
+	if (process.env.ZHIPU_API_KEY) return "api";
+	return configuredMode ?? "coding-plan";
+}
+
+export function resolveProviderConfig(
+	providerName: string,
+	config: ProviderConfig,
+): ProviderConfig {
+	const withConfiguredEnv = {
+		...config,
+		apiKey: firstNonEmpty(config.apiKey, env(config.apiKeyEnv)),
+		accessToken: firstNonEmpty(config.accessToken, env(config.accessTokenEnv)),
+	};
+	switch (providerName) {
+		case "openai": {
+			const authMode = envOverridesDefault(
+				withConfiguredEnv.authMode,
+				"api-key",
+				process.env.OPENAI_AUTH_MODE,
+			);
+			return {
+				...withConfiguredEnv,
+				authMode,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					authMode === "codex"
+						? process.env.CODEX_API_KEY
+						: process.env.OPENAI_API_KEY,
+				),
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"https://api.openai.com/v1",
+					process.env.OPENAI_BASE_URL,
+				),
+				accessToken: firstNonEmpty(
+					withConfiguredEnv.accessToken,
+					process.env.CODEX_ACCESS_TOKEN,
+				),
+			};
+		}
+		case "anthropic":
+			return {
+				...withConfiguredEnv,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					process.env.ANTHROPIC_API_KEY,
+					process.env.ANTHROPIC_AUTH_TOKEN,
+				),
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"https://api.anthropic.com/v1",
+					process.env.ANTHROPIC_BASE_URL,
+				),
+			};
+		case "google": {
+			const authMode = envOverridesDefault(
+				withConfiguredEnv.authMode,
+				"api-key",
+				process.env.GOOGLE_AUTH_MODE,
+				process.env.VERTEXAI === "true" ? "vertex" : undefined,
+			);
+			return {
+				...withConfiguredEnv,
+				authMode,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					process.env.GEMINI_API_KEY,
+					process.env.GOOGLE_API_KEY,
+				),
+				baseUrl: firstNonEmpty(
+					withConfiguredEnv.baseUrl,
+					authMode === "vertex"
+						? process.env.GOOGLE_VERTEX_BASE_URL
+						: firstEnv("GOOGLE_BASE_URL", "GEMINI_BASE_URL"),
+				),
+				projectId: firstNonEmpty(
+					withConfiguredEnv.projectId,
+					process.env.GOOGLE_CLOUD_PROJECT,
+					process.env.GCLOUD_PROJECT,
+				),
+				location: firstNonEmpty(
+					withConfiguredEnv.location,
+					process.env.GOOGLE_CLOUD_LOCATION,
+					process.env.GOOGLE_CLOUD_REGION,
+				),
+				accessToken: firstNonEmpty(
+					withConfiguredEnv.accessToken,
+					process.env.GOOGLE_VERTEX_ACCESS_TOKEN,
+				),
+				credentialsFile: firstNonEmpty(
+					withConfiguredEnv.credentialsFile,
+					process.env.GOOGLE_APPLICATION_CREDENTIALS,
+				),
+			};
+		}
+		case "zhipu": {
+			const codingApiKey = firstNonEmpty(
+				withConfiguredEnv.codingApiKey,
+				envByMode(resolveZhipuMode(withConfiguredEnv), {
+					"coding-global": process.env.ZAI_CODING_API_KEY,
+					"coding-plan": process.env.ZHIPU_CODING_API_KEY,
+				}),
+			);
+			const mode = resolveZhipuMode(withConfiguredEnv);
+			const normalApiKey = firstNonEmpty(
+				envByMode(mode, {
+					global: process.env.ZAI_API_KEY,
+					api: process.env.ZHIPU_API_KEY,
+				}),
+			);
+			const explicitApiKey = withConfiguredEnv.apiKey;
+			return {
+				...withConfiguredEnv,
+				mode,
+				apiKey: firstNonEmpty(
+					explicitApiKey,
+					mode.startsWith("coding") ? codingApiKey : normalApiKey,
+				),
+				baseUrl: firstNonEmpty(
+					withConfiguredEnv.baseUrl,
+					mode.startsWith("coding")
+						? withConfiguredEnv.codingBaseUrl
+						: undefined,
+					envByMode(mode, {
+						"coding-global": process.env.ZAI_CODING_BASE_URL,
+						"coding-plan": process.env.ZHIPU_CODING_BASE_URL,
+						global: process.env.ZAI_BASE_URL,
+						api: process.env.ZHIPU_BASE_URL,
+					}),
+				),
+			};
+		}
+		case "openrouter":
+			return {
+				...withConfiguredEnv,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					process.env.OPENROUTER_API_KEY,
+				),
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"https://openrouter.ai/api/v1",
+					process.env.OPENROUTER_BASE_URL,
+				),
+			};
+		case "deepseek":
+			return {
+				...withConfiguredEnv,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					process.env.DEEPSEEK_API_KEY,
+				),
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"https://api.deepseek.com",
+					process.env.DEEPSEEK_BASE_URL,
+				),
+			};
+		case "mistral":
+			return {
+				...withConfiguredEnv,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					process.env.MISTRAL_API_KEY,
+				),
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"https://api.mistral.ai/v1",
+					process.env.MISTRAL_BASE_URL,
+				),
+			};
+		case "xai":
+			return {
+				...withConfiguredEnv,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					process.env.XAI_API_KEY,
+				),
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"https://api.x.ai/v1",
+					process.env.XAI_BASE_URL,
+				),
+			};
+		case "cohere":
+			return {
+				...withConfiguredEnv,
+				apiKey: firstNonEmpty(
+					withConfiguredEnv.apiKey,
+					process.env.COHERE_API_KEY,
+					process.env.CO_API_KEY,
+				),
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"https://api.cohere.com/v2",
+					process.env.COHERE_BASE_URL,
+				),
+			};
+		case "local":
+			return {
+				...withConfiguredEnv,
+				baseUrl: envOverridesDefault(
+					withConfiguredEnv.baseUrl,
+					"http://localhost:11434",
+					process.env.OLLAMA_BASE_URL,
+					process.env.OLLAMA_HOST,
+				),
+			};
+		default:
+			return withConfiguredEnv;
+	}
+}
+
 function isRetryableProviderError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	return /fetch failed|network|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR|socket|terminated/i.test(
@@ -124,7 +384,7 @@ const PROVIDER_REGISTRY: Record<
 		factory: (c) =>
 			new OpenAICompatibleProvider({
 				...c,
-				baseUrl: "https://openrouter.ai/api/v1",
+				baseUrl: c.baseUrl ?? "https://openrouter.ai/api/v1",
 				prefix: "openrouter",
 				extraHeaders: {
 					"HTTP-Referer": "https://octopus-ai.dev",
@@ -151,7 +411,7 @@ const PROVIDER_REGISTRY: Record<
 		factory: (c) =>
 			new OpenAICompatibleProvider({
 				...c,
-				baseUrl: "https://api.deepseek.com",
+				baseUrl: c.baseUrl ?? "https://api.deepseek.com",
 				prefix: "deepseek",
 			}),
 		defaultBaseUrl: "https://api.deepseek.com",
@@ -169,7 +429,7 @@ const PROVIDER_REGISTRY: Record<
 		factory: (c) =>
 			new OpenAICompatibleProvider({
 				...c,
-				baseUrl: "https://api.mistral.ai/v1",
+				baseUrl: c.baseUrl ?? "https://api.mistral.ai/v1",
 				prefix: "mistral",
 			}),
 		defaultBaseUrl: "https://api.mistral.ai/v1",
@@ -192,7 +452,7 @@ const PROVIDER_REGISTRY: Record<
 		factory: (c) =>
 			new OpenAICompatibleProvider({
 				...c,
-				baseUrl: "https://api.x.ai/v1",
+				baseUrl: c.baseUrl ?? "https://api.x.ai/v1",
 				prefix: "xai",
 			}),
 		defaultBaseUrl: "https://api.x.ai/v1",
@@ -245,6 +505,58 @@ export function getProviderRegistry() {
 	return PROVIDER_REGISTRY;
 }
 
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+	"gemini-2.5-pro": 1_048_576,
+	"gemini-2.5-flash": 1_048_576,
+	"gemini-2.0-flash": 1_048_576,
+	"gpt-4.1": 1_048_576,
+	"gpt-4o": 128_000,
+	"gpt-4o-mini": 128_000,
+	o3: 200_000,
+	"o4-mini": 200_000,
+	"claude-opus-4-7": 1_048_576,
+	"claude-opus-4-6": 1_048_576,
+	"claude-sonnet-4-6": 1_048_576,
+	"claude-haiku-4-5": 200_000,
+	"glm-5.1": 200_000,
+	"glm-5": 200_000,
+	"glm-5-turbo": 200_000,
+	"glm-4.7": 200_000,
+	"glm-4.6": 200_000,
+	"glm-5v-turbo": 200_000,
+	"glm-4.6v": 128_000,
+	"deepseek-v4-pro": 128_000,
+	"deepseek-v4-flash": 128_000,
+	"deepseek-chat": 128_000,
+	"deepseek-reasoner": 128_000,
+	"mistral-large-3": 128_000,
+	"mistral-medium-3-1": 128_000,
+	"mistral-medium-3-5": 128_000,
+	"mistral-small-4": 128_000,
+	"codestral-25-08": 256_000,
+	"grok-4.20-0309-reasoning": 1_048_576,
+	"grok-4.20-0309-non-reasoning": 1_048_576,
+	"grok-4-1-fast-reasoning": 1_048_576,
+	"grok-4.3": 1_048_576,
+	"command-a-03-2025": 256_000,
+	"command-a-vision-07-2025": 128_000,
+	"command-a-reasoning-08-2025": 256_000,
+	"command-a-plus-05-2026": 128_000,
+};
+
+export function getModelContextWindow(model: string): number {
+	const normalized = model.includes("/")
+		? model.slice(model.indexOf("/") + 1)
+		: model;
+	if (MODEL_CONTEXT_WINDOWS[normalized])
+		return MODEL_CONTEXT_WINDOWS[normalized];
+	for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+		if (normalized.startsWith(key.split("-").slice(0, 2).join("-")))
+			return value;
+	}
+	return 128_000;
+}
+
 export class LLMRouter {
 	private providers: Map<string, BaseLLMProvider> = new Map();
 	private config: LLMRouterConfig;
@@ -271,7 +583,9 @@ export class LLMRouter {
 			const registryEntry = PROVIDER_REGISTRY[name];
 			if (registryEntry) {
 				try {
-					const provider = registryEntry.factory(config);
+					const provider = registryEntry.factory(
+						resolveProviderConfig(name, config),
+					);
 					const available = await provider.isAvailable();
 					if (available) {
 						this.providers.set(name, provider);

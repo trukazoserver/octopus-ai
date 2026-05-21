@@ -58,6 +58,11 @@ const BrowserSchema = Type.Object({
 
 const AnthropicProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.String({ default: "https://api.anthropic.com/v1" }),
+	authMode: Type.Optional(
+		Type.Union([Type.Literal("api-key"), Type.Literal("bearer")]),
+	),
 	models: Type.Array(Type.String(), {
 		default: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
 	}),
@@ -65,6 +70,13 @@ const AnthropicProviderSchema = Type.Object({
 
 const OpenAIProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.String({ default: "https://api.openai.com/v1" }),
+	authMode: Type.Optional(
+		Type.Union([Type.Literal("api-key"), Type.Literal("codex")]),
+	),
+	accessToken: Type.Optional(Type.String()),
+	accessTokenEnv: Type.Optional(Type.String()),
 	models: Type.Array(Type.String(), {
 		default: ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
 	}),
@@ -72,6 +84,17 @@ const OpenAIProviderSchema = Type.Object({
 
 const GoogleProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.Optional(Type.String()),
+	authMode: Type.Optional(
+		Type.Union([Type.Literal("api-key"), Type.Literal("vertex")]),
+	),
+	accessToken: Type.Optional(Type.String()),
+	accessTokenEnv: Type.Optional(Type.String()),
+	credentialsFile: Type.Optional(Type.String()),
+	credentialsJson: Type.Optional(Type.String()),
+	projectId: Type.Optional(Type.String()),
+	location: Type.Optional(Type.String()),
 	models: Type.Array(Type.String(), {
 		default: ["gemini-2.5-pro", "gemini-2.5-flash"],
 	}),
@@ -79,6 +102,10 @@ const GoogleProviderSchema = Type.Object({
 
 const ZhipuProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.Optional(Type.String()),
+	codingApiKey: Type.Optional(Type.String()),
+	codingBaseUrl: Type.Optional(Type.String()),
 	mode: Type.Union(
 		[
 			Type.Literal("api"),
@@ -95,10 +122,21 @@ const ZhipuProviderSchema = Type.Object({
 
 const OpenRouterProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.String({ default: "https://openrouter.ai/api/v1" }),
+	models: Type.Array(Type.String(), {
+		default: [
+			"openai/gpt-4.1",
+			"anthropic/claude-sonnet-4-6",
+			"google/gemini-2.5-pro",
+		],
+	}),
 });
 
 const DeepSeekProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.String({ default: "https://api.deepseek.com" }),
 	models: Type.Array(Type.String(), {
 		default: ["deepseek-chat", "deepseek-reasoner"],
 	}),
@@ -106,6 +144,8 @@ const DeepSeekProviderSchema = Type.Object({
 
 const MistralProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.String({ default: "https://api.mistral.ai/v1" }),
 	models: Type.Array(Type.String(), {
 		default: ["mistral-large-3", "mistral-small-4", "codestral-25-08"],
 	}),
@@ -113,6 +153,8 @@ const MistralProviderSchema = Type.Object({
 
 const XaiProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.String({ default: "https://api.x.ai/v1" }),
 	models: Type.Array(Type.String(), {
 		default: ["grok-4.20-0309-reasoning", "grok-4-1-fast-reasoning"],
 	}),
@@ -120,6 +162,8 @@ const XaiProviderSchema = Type.Object({
 
 const CohereProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.String({ default: "https://api.cohere.com/v2" }),
 	models: Type.Array(Type.String(), {
 		default: ["command-a-03-2025", "command-a-vision-07-2025"],
 	}),
@@ -212,8 +256,21 @@ const AssociativeSchema = Type.Object({
 	cascadeThreshold: Type.Number({ default: 0.8 }),
 });
 
+const VectorStoreSchema = Type.Object({
+	url: Type.String({ default: "" }),
+	apiKey: Type.String({ default: "" }),
+	collection: Type.String({ default: "octopus_memory" }),
+	timeoutMs: Type.Number({ default: 10000, minimum: 1 }),
+	maxRetries: Type.Number({ default: 2, minimum: 0 }),
+	retryBaseDelayMs: Type.Number({ default: 100, minimum: 0 }),
+	dimension: Type.Optional(Type.Number({ minimum: 1 })),
+	database: Type.Optional(Type.String()),
+	ssl: Type.Optional(Type.Boolean()),
+});
+
 const LongTermSchema = Type.Object({
 	backend: Type.String({ default: "sqlite-vss" }),
+	vectorStore: VectorStoreSchema,
 	importanceThreshold: Type.Number({ default: 0.5 }),
 	maxItems: Type.Number({ default: 100000 }),
 	episodic: EpisodicSchema,
@@ -243,12 +300,71 @@ const RetrievalSchema = Type.Object({
 	}),
 });
 
+const EmbeddingsSchema = Type.Object({
+	enabled: Type.Boolean({ default: false }),
+	provider: Type.Union(
+		[
+			Type.Literal("auto"),
+			Type.Literal("zhipu"),
+			Type.Literal("openai"),
+			Type.Literal("google"),
+			Type.Literal("deepseek"),
+			Type.Literal("mistral"),
+			Type.Literal("xai"),
+			Type.Literal("cohere"),
+			Type.Literal("ollama"),
+		],
+		{ default: "auto" },
+	),
+	apiType: Type.Union(
+		[
+			Type.Literal("openai"),
+			Type.Literal("google"),
+			Type.Literal("cohere"),
+			Type.Literal("ollama"),
+		],
+		{ default: "openai" },
+	),
+	authMode: Type.Optional(
+		Type.Union([Type.Literal("api-key"), Type.Literal("vertex")]),
+	),
+	model: Type.String({ default: "" }),
+	baseUrl: Type.String({ default: "" }),
+	apiKey: Type.String({ default: "" }),
+	apiKeyEnv: Type.String({ default: "" }),
+	accessToken: Type.Optional(Type.String()),
+	accessTokenEnv: Type.Optional(Type.String()),
+	credentialsFile: Type.Optional(Type.String()),
+	credentialsJson: Type.Optional(Type.String()),
+	projectId: Type.Optional(Type.String()),
+	location: Type.Optional(Type.String()),
+	task: Type.Union(
+		[Type.Literal("document"), Type.Literal("query"), Type.Literal("none")],
+		{ default: "document" },
+	),
+	dimensions: Type.Number({ default: 1024, minimum: 1 }),
+	maxBatchSize: Type.Number({ default: 32, minimum: 1 }),
+	maxTextLength: Type.Number({ default: 8000, minimum: 1 }),
+	cacheSize: Type.Number({ default: 500, minimum: 1 }),
+	failureRetryMs: Type.Number({ default: 60000, minimum: 0 }),
+});
+
+const RetentionSchema = Type.Object({
+	enabled: Type.Boolean({ default: false }),
+	cron: Type.String({ default: "30 3 * * *" }),
+	unusedDays: Type.Number({ default: 90, minimum: 1 }),
+	lowImportanceThreshold: Type.Number({ default: 0.25, minimum: 0 }),
+	contradictionGraceDays: Type.Number({ default: 14, minimum: 0 }),
+});
+
 const MemorySchema = Type.Object({
 	enabled: Type.Boolean({ default: true }),
 	shortTerm: ShortTermSchema,
 	longTerm: LongTermSchema,
 	consolidation: ConsolidationSchema,
 	retrieval: RetrievalSchema,
+	embeddings: EmbeddingsSchema,
+	retention: RetentionSchema,
 });
 
 const ForgeSchema = Type.Object({
@@ -312,10 +428,13 @@ const PluginsSchema = Type.Object({
 const StorageSchema = Type.Object({
 	backend: Type.String({ default: "sqlite" }),
 	path: Type.String({ default: "~/.octopus/data/octopus.db" }),
+	connectionString: Type.String({ default: "" }),
+	ssl: Type.Boolean({ default: false }),
 });
 
 const SecuritySchema = Type.Object({
 	encryptionKey: Type.String({ default: "" }),
+	memoryApiKey: Type.String({ default: "" }),
 	allowedPaths: Type.Array(Type.String(), {
 		default: ["~/Documents", "~/Desktop"],
 	}),

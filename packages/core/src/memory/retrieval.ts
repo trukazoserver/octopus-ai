@@ -25,7 +25,7 @@ export class MemoryRetrieval {
 	) {}
 
 	async retrieveForContext(userMessage: string): Promise<MemoryContext> {
-		const embedding = await this.embedFn(userMessage);
+		const embedding = await this.embedFn(userMessage, "query");
 
 		const rawResults = await this.ltm.retrieveByEmbedding(embedding, {
 			maxResults: this.config.maxResults * 3,

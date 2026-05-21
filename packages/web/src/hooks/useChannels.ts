@@ -17,9 +17,9 @@ function deriveStatus(ch: {
 	if (!ch.enabled) return "disconnected";
 	const cfg = ch.config;
 	// Check if channel has its required config
-	if (ch.type === "telegram" && cfg.botToken) return "connected";
-	if (ch.type === "discord" && cfg.botToken) return "connected";
-	if (ch.type === "slack" && cfg.botToken) return "connected";
+	if (ch.type === "telegram" && cfg.botTokenConfigured) return "connected";
+	if (ch.type === "discord" && cfg.botTokenConfigured) return "connected";
+	if (ch.type === "slack" && cfg.botTokenConfigured) return "connected";
 	if (ch.type === "whatsapp" && cfg.phoneNumber) return "connected";
 	if (ch.type === "webchat") return "connected";
 	if (ch.enabled) return "unconfigured";

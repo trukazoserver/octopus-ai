@@ -4,5 +4,6 @@ dist
 .git
 *.md
 !docs
+!docker/templates/*.md
 nul
 *.log

@@ -1,3 +1,5 @@
+import { createSign } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import type {
 	LLMChunk,
 	LLMRequest,
@@ -16,14 +18,125 @@ const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, "none">, number> = {
 
 export class GoogleProvider extends BaseLLMProvider {
 	private apiKey: string;
+	private authMode: "api-key" | "vertex";
+	private tokenCache?: { token: string; expiresAt: number };
 
-	constructor(config: ProviderConfig) {
+	constructor(
+		config: ProviderConfig & {
+			authMode?: string;
+			accessToken?: string;
+			credentialsFile?: string;
+			projectId?: string;
+			location?: string;
+		},
+	) {
 		super(config);
 		this.apiKey = config.apiKey ?? "";
+		this.authMode = config.authMode === "vertex" ? "vertex" : "api-key";
 	}
 
 	private getBaseUrl(): string {
+		if (this.config.baseUrl) return this.config.baseUrl.replace(/\/+$/, "");
+		if (this.authMode === "vertex") {
+			const projectId = this.vertexProjectId();
+			const location = this.vertexLocation();
+			return `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/endpoints/openapi`;
+		}
 		return "https://generativelanguage.googleapis.com/v1beta/openai";
+	}
+
+	private vertexProjectId(): string {
+		return (
+			this.config.projectId ??
+			process.env.GOOGLE_CLOUD_PROJECT ??
+			process.env.GCLOUD_PROJECT ??
+			""
+		);
+	}
+
+	private vertexLocation(): string {
+		return (
+			this.config.location ??
+			process.env.GOOGLE_CLOUD_LOCATION ??
+			process.env.GOOGLE_CLOUD_REGION ??
+			"us-central1"
+		);
+	}
+
+	private async getHeaders(): Promise<Record<string, string>> {
+		if (this.authMode === "vertex") {
+			return {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${await this.vertexAccessToken()}`,
+			};
+		}
+		return {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${this.apiKey}`,
+		};
+	}
+
+	private async vertexAccessToken(): Promise<string> {
+		const configured =
+			this.config.accessToken ?? process.env.GOOGLE_VERTEX_ACCESS_TOKEN;
+		if (configured?.trim()) return configured.trim();
+		if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 60_000) {
+			return this.tokenCache.token;
+		}
+		const credentialsFile =
+			this.config.credentialsFile ?? process.env.GOOGLE_APPLICATION_CREDENTIALS;
+		if (!credentialsFile || !existsSync(credentialsFile)) {
+			throw new Error(
+				"Google Vertex auth requires GOOGLE_VERTEX_ACCESS_TOKEN or GOOGLE_APPLICATION_CREDENTIALS",
+			);
+		}
+		const credentials = JSON.parse(readFileSync(credentialsFile, "utf8")) as {
+			client_email?: string;
+			private_key?: string;
+			token_uri?: string;
+		};
+		if (!credentials.client_email || !credentials.private_key) {
+			throw new Error("Google service account credentials are incomplete");
+		}
+		const now = Math.floor(Date.now() / 1000);
+		const assertion = signJwt(
+			{ alg: "RS256", typ: "JWT" },
+			{
+				iss: credentials.client_email,
+				scope: "https://www.googleapis.com/auth/cloud-platform",
+				aud: credentials.token_uri ?? "https://oauth2.googleapis.com/token",
+				exp: now + 3600,
+				iat: now,
+			},
+			credentials.private_key,
+		);
+		const body = new URLSearchParams({
+			grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+			assertion,
+		});
+		const response = await fetch(
+			credentials.token_uri ?? "https://oauth2.googleapis.com/token",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body,
+			},
+		);
+		if (!response.ok) {
+			throw new Error(
+				`Google Vertex token request failed: ${response.status} ${await response.text()}`,
+			);
+		}
+		const token = (await response.json()) as {
+			access_token?: string;
+			expires_in?: number;
+		};
+		if (!token.access_token) throw new Error("Google Vertex token missing");
+		this.tokenCache = {
+			token: token.access_token,
+			expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000,
+		};
+		return token.access_token;
 	}
 
 	private buildThinkingConfig(request: LLMRequest): Record<string, unknown> {
@@ -59,10 +172,7 @@ export class GoogleProvider extends BaseLLMProvider {
 
 		const response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
 			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.apiKey}`,
-			},
+			headers: await this.getHeaders(),
 			body: JSON.stringify(body),
 			signal: AbortSignal.timeout(600000),
 		});
@@ -161,10 +271,7 @@ export class GoogleProvider extends BaseLLMProvider {
 
 		const response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
 			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.apiKey}`,
-			},
+			headers: await this.getHeaders(),
 			body: JSON.stringify(body),
 			signal: AbortSignal.timeout(600000),
 		});
@@ -300,6 +407,40 @@ export class GoogleProvider extends BaseLLMProvider {
 	}
 
 	async isAvailable(): Promise<boolean> {
+		if (this.authMode === "vertex") {
+			return Boolean(
+				this.vertexProjectId() &&
+					(this.config.accessToken ||
+						process.env.GOOGLE_VERTEX_ACCESS_TOKEN ||
+						this.config.credentialsFile ||
+						process.env.GOOGLE_APPLICATION_CREDENTIALS),
+			);
+		}
 		return !!this.apiKey;
 	}
+}
+
+function base64url(value: string): string {
+	return Buffer.from(value)
+		.toString("base64")
+		.replace(/=/g, "")
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_");
+}
+
+function signJwt(
+	header: Record<string, unknown>,
+	payload: Record<string, unknown>,
+	privateKey: string,
+): string {
+	const input = `${base64url(JSON.stringify(header))}.${base64url(
+		JSON.stringify(payload),
+	)}`;
+	const signature = createSign("RSA-SHA256")
+		.update(input)
+		.sign(privateKey, "base64")
+		.replace(/=/g, "")
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_");
+	return `${input}.${signature}`;
 }

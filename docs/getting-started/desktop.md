@@ -70,10 +70,10 @@ pnpm build
 
 ```bash
 # Desde la raíz del proyecto
-pnpm dev
+pnpm run start:desktop
 ```
 
-Esto iniciará tanto el backend (Core) como el frontend de la app.
+Esto inicia el proceso de desarrollo del paquete desktop. Para usarlo contra el backend estable, asegúrate de tener Octopus iniciado con `pnpm start` en otra terminal o haber completado `pnpm run install:octopus`.
 
 ---
 
@@ -106,7 +106,7 @@ packages/desktop/
 | Comando | Descripción |
 |---|---|
 | `pnpm build` | Compilar TypeScript (`tsc`) |
-| `pnpm dev` | Compilar en modo observador (`tsc --watch`) |
+| `pnpm dev` | Modo desarrollo del paquete desktop (`tsc --watch`, Vite y launcher Electron) |
 | `pnpm typecheck` | Verificar tipos sin compilar |
 | `pnpm lint` | Analizar código con Biome |
 | `pnpm clean` | Eliminar la carpeta `dist/` |
@@ -155,7 +155,7 @@ pnpm build
 Asegúrate de que el servidor Core esté corriendo:
 
 ```bash
-node packages/cli/dist/index.js start
+pnpm start
 ```
 
 El servidor debe estar en `http://127.0.0.1:18789`.

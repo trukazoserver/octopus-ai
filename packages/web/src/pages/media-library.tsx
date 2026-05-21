@@ -1,5 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
 import { showToast } from "../components/ui/Toast.js";
 import { API_BASE, apiDelete, apiGet } from "../hooks/useApi.js";
@@ -87,6 +88,8 @@ export const MediaLibraryPage: React.FC = () => {
 		if (!preview) return;
 		const dialog = previewDialogRef.current;
 		if (!dialog) return;
+		const previousOverflow = document.body.style.overflow;
+		document.body.style.overflow = "hidden";
 
 		try {
 			if (!dialog.open) dialog.showModal();
@@ -94,6 +97,11 @@ export const MediaLibraryPage: React.FC = () => {
 			dialog.setAttribute("open", "");
 		}
 		dialog.focus();
+
+		return () => {
+			document.body.style.overflow = previousOverflow;
+			if (dialog.open) dialog.close();
+		};
 	}, [preview]);
 
 	const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -454,181 +462,185 @@ export const MediaLibraryPage: React.FC = () => {
 			)}
 
 			{/* Preview modal */}
-			{preview && (
-				<dialog
-					ref={previewDialogRef}
-					aria-modal="true"
-					aria-label="Vista previa de archivo"
-					tabIndex={-1}
-					style={{
-						position: "fixed",
-						inset: 0,
-						width: "100vw",
-						height: "100vh",
-						maxWidth: "none",
-						maxHeight: "none",
-						zIndex: 1050,
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "center",
-						background: "rgba(0,0,0,0.8)",
-						backdropFilter: "blur(4px)",
-						animation: "fadeInFast 0.15s ease-out",
-						border: 0,
-						boxSizing: "border-box",
-						margin: 0,
-						padding: "24px",
-					}}
-					onClick={(event) => {
-						if (event.target === event.currentTarget) setPreview(null);
-					}}
-					onKeyDown={(event) => {
-						if (event.key === "Escape") setPreview(null);
-					}}
-					onCancel={(event) => {
-						event.preventDefault();
-						setPreview(null);
-					}}
-				>
-					<div
+			{preview &&
+				createPortal(
+					<dialog
+						ref={previewDialogRef}
+						aria-modal="true"
+						aria-label="Vista previa de archivo"
+						tabIndex={-1}
 						style={{
-							position: "relative",
-							maxWidth: "90vw",
-							maxHeight: "90vh",
+							position: "fixed",
+							inset: 0,
+							width: "100vw",
+							height: "100dvh",
+							maxWidth: "none",
+							maxHeight: "none",
+							zIndex: 10000,
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							background: "rgba(0,0,0,0.8)",
+							backdropFilter: "blur(4px)",
+							animation: "fadeInFast 0.15s ease-out",
+							border: 0,
+							boxSizing: "border-box",
+							margin: 0,
+							padding: "24px",
+						}}
+						onClick={(event) => {
+							if (event.target === event.currentTarget) setPreview(null);
+						}}
+						onKeyDown={(event) => {
+							if (event.key === "Escape") setPreview(null);
+						}}
+						onCancel={(event) => {
+							event.preventDefault();
+							setPreview(null);
 						}}
 					>
-						{(() => {
-							const item = items.find((i) => i.id === preview);
-							if (!item) return null;
-							return (
-								<div style={{ textAlign: "center" }}>
-									{isImage(item.mimetype) ? (
-										<img
-											src={mediaUrl(item.id)}
-											alt={item.filename}
+						<div
+							style={{
+								position: "relative",
+								maxWidth: "90vw",
+								maxHeight: "90vh",
+							}}
+						>
+							{(() => {
+								const item = items.find((i) => i.id === preview);
+								if (!item) return null;
+								return (
+									<div style={{ textAlign: "center" }}>
+										{isImage(item.mimetype) ? (
+											<img
+												src={mediaUrl(item.id)}
+												alt={item.filename}
+												style={{
+													maxWidth: "90vw",
+													maxHeight: "80vh",
+													borderRadius: "12px",
+												}}
+											/>
+										) : isVideo(item.mimetype) ? (
+											<video
+												src={mediaUrl(item.id)}
+												controls
+												style={{
+													maxWidth: "90vw",
+													maxHeight: "80vh",
+													borderRadius: "12px",
+												}}
+											>
+												<track kind="captions" label="Sin subtitulos" />
+											</video>
+										) : isAudio(item.mimetype) ? (
+											<audio
+												src={mediaUrl(item.id)}
+												controls
+												style={{ width: "min(400px, 88vw)" }}
+											>
+												<track kind="captions" label="Sin subtitulos" />
+											</audio>
+										) : (
+											<div style={{ padding: "40px", color: "#a1a1aa" }}>
+												<a
+													href={mediaUrl(item.id)}
+													download={item.filename}
+													style={{
+														color: "#818cf8",
+														textDecoration: "underline",
+														fontSize: "1.1rem",
+													}}
+												>
+													Descargar {item.filename}
+												</a>
+											</div>
+										)}
+										<div
 											style={{
-												maxWidth: "90vw",
-												maxHeight: "80vh",
-												borderRadius: "12px",
-											}}
-										/>
-									) : isVideo(item.mimetype) ? (
-										<video
-											src={mediaUrl(item.id)}
-											controls
-											style={{
-												maxWidth: "90vw",
-												maxHeight: "80vh",
-												borderRadius: "12px",
+												marginTop: "12px",
+												display: "flex",
+												justifyContent: "center",
+												gap: "12px",
 											}}
 										>
-											<track kind="captions" label="Sin subtitulos" />
-										</video>
-									) : isAudio(item.mimetype) ? (
-										<audio
-											src={mediaUrl(item.id)}
-											controls
-											style={{ width: "min(400px, 88vw)" }}
-										>
-											<track kind="captions" label="Sin subtitulos" />
-										</audio>
-									) : (
-										<div style={{ padding: "40px", color: "#a1a1aa" }}>
+											<span style={{ color: "#f4f4f5", fontSize: "0.9rem" }}>
+												{item.filename}
+											</span>
+											<span style={{ color: "#71717a", fontSize: "0.85rem" }}>
+												{formatSize(item.size)}
+											</span>
+											<button
+												type="button"
+												onClick={() =>
+													void handleDelete(item.id, item.filename)
+												}
+												style={{
+													padding: "4px 12px",
+													borderRadius: "6px",
+													border: "1px solid rgba(239,68,68,0.3)",
+													background: "rgba(239,68,68,0.1)",
+													color: "#ef4444",
+													fontSize: "0.75rem",
+													cursor: "pointer",
+												}}
+											>
+												{deleteConfirm === item.id ? "Confirmar" : "Eliminar"}
+											</button>
 											<a
 												href={mediaUrl(item.id)}
 												download={item.filename}
 												style={{
-													color: "#818cf8",
-													textDecoration: "underline",
-													fontSize: "1.1rem",
+													padding: "4px 12px",
+													borderRadius: "6px",
+													border: "1px solid #3f3f46",
+													color: "#a5b4fc",
+													fontSize: "0.75rem",
+													textDecoration: "none",
 												}}
 											>
-												Descargar {item.filename}
+												Descargar
 											</a>
+											<button
+												type="button"
+												onClick={() => void handleCopyUrl(item.id)}
+												style={{
+													padding: "4px 12px",
+													borderRadius: "6px",
+													border: "1px solid #3f3f46",
+													background: "#18181b",
+													color: "#a1a1aa",
+													fontSize: "0.75rem",
+													cursor: "pointer",
+												}}
+											>
+												Copiar URL
+											</button>
 										</div>
-									)}
-									<div
-										style={{
-											marginTop: "12px",
-											display: "flex",
-											justifyContent: "center",
-											gap: "12px",
-										}}
-									>
-										<span style={{ color: "#f4f4f5", fontSize: "0.9rem" }}>
-											{item.filename}
-										</span>
-										<span style={{ color: "#71717a", fontSize: "0.85rem" }}>
-											{formatSize(item.size)}
-										</span>
-										<button
-											type="button"
-											onClick={() => void handleDelete(item.id, item.filename)}
-											style={{
-												padding: "4px 12px",
-												borderRadius: "6px",
-												border: "1px solid rgba(239,68,68,0.3)",
-												background: "rgba(239,68,68,0.1)",
-												color: "#ef4444",
-												fontSize: "0.75rem",
-												cursor: "pointer",
-											}}
-										>
-											{deleteConfirm === item.id ? "Confirmar" : "Eliminar"}
-										</button>
-										<a
-											href={mediaUrl(item.id)}
-											download={item.filename}
-											style={{
-												padding: "4px 12px",
-												borderRadius: "6px",
-												border: "1px solid #3f3f46",
-												color: "#a5b4fc",
-												fontSize: "0.75rem",
-												textDecoration: "none",
-											}}
-										>
-											Descargar
-										</a>
-										<button
-											type="button"
-											onClick={() => void handleCopyUrl(item.id)}
-											style={{
-												padding: "4px 12px",
-												borderRadius: "6px",
-												border: "1px solid #3f3f46",
-												background: "#18181b",
-												color: "#a1a1aa",
-												fontSize: "0.75rem",
-												cursor: "pointer",
-											}}
-										>
-											Copiar URL
-										</button>
 									</div>
-								</div>
-							);
-						})()}
-						<button
-							type="button"
-							aria-label="Cerrar vista previa"
-							onClick={() => setPreview(null)}
-							style={{
-								position: "absolute",
-								top: "-40px",
-								right: 0,
-								background: "none",
-								border: "none",
-								color: "#a1a1aa",
-								fontSize: "1.5rem",
-								cursor: "pointer",
-							}}
-						>
-							✕
-						</button>
-					</div>
-				</dialog>
-			)}
+								);
+							})()}
+							<button
+								type="button"
+								aria-label="Cerrar vista previa"
+								onClick={() => setPreview(null)}
+								style={{
+									position: "absolute",
+									top: "-40px",
+									right: 0,
+									background: "none",
+									border: "none",
+									color: "#a1a1aa",
+									fontSize: "1.5rem",
+									cursor: "pointer",
+								}}
+							>
+								✕
+							</button>
+						</div>
+					</dialog>,
+					document.body,
+				)}
 		</div>
 	);
 };

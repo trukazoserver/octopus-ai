@@ -16,6 +16,17 @@ export class TelegramChannel implements Channel {
 	private readonly recentMessageKeys: string[] = [];
 	private isConnected = false;
 	private static readonly maxRecentMessages = 1000;
+	private static readonly botCommands = [
+		{ command: "ayuda", description: "Ver comandos de Octopus" },
+		{ command: "nueva", description: "Iniciar otra conversacion" },
+		{ command: "limpiar", description: "Limpiar la conversacion actual" },
+		{ command: "borrar", description: "Borrar una conversacion" },
+		{ command: "listar", description: "Listar conversaciones recientes" },
+		{ command: "buscar", description: "Buscar conversaciones" },
+		{ command: "abrir", description: "Abrir una conversacion" },
+		{ command: "renombrar", description: "Renombrar la conversacion actual" },
+		{ command: "actual", description: "Ver la conversacion activa" },
+	];
 
 	constructor(
 		public readonly id: string,
@@ -140,6 +151,15 @@ export class TelegramChannel implements Channel {
 		} catch (err) {
 			console.warn(
 				`Could not clear Telegram pending updates for channel ${this.id}:`,
+				err,
+			);
+		}
+
+		try {
+			await this.bot.api.setMyCommands(TelegramChannel.botCommands);
+		} catch (err) {
+			console.warn(
+				`Could not register Telegram commands for channel ${this.id}:`,
 				err,
 			);
 		}

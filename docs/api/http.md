@@ -10,8 +10,9 @@ La orden `start` levanta un servidor HTTP/WebSocket usado por el dashboard web, 
 
 ## Base URL
 
-- Desarrollo local: `http://localhost:18789`
-- Docker Compose: `http://localhost:3000`
+- Servidor local estable: `http://localhost:18789`
+- Docker Compose: `http://localhost:18789`
+- Desarrollo frontend Vite: `http://localhost:3000` solo sirve la UI y se conecta al backend en `18789`
 
 > La API no incorpora autenticacion por defecto. Si la expones fuera de tu maquina o red de confianza, protege el acceso con reverse proxy, VPN o reglas de red.
 

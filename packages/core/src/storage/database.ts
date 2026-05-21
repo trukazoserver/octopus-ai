@@ -1,3 +1,4 @@
+import { PostgresDatabase } from "./postgres.js";
 import { SqliteDatabase } from "./sqlite.js";
 
 export type DatabaseBackend = "sqlite" | "postgresql" | "mysql" | "mongodb";
@@ -61,9 +62,7 @@ export function createDatabaseAdapter(
 			return new SqliteDatabase(config.path ?? ":memory:");
 
 		case "postgresql":
-			throw new Error(
-				"PostgreSQL backend not yet implemented. Install 'pg' package and implement PostgresDatabase adapter.",
-			);
+			return new PostgresDatabase(config);
 
 		case "mysql":
 			throw new Error(

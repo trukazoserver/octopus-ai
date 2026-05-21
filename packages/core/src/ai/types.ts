@@ -87,7 +87,17 @@ export interface LLMChunk {
 
 export interface ProviderConfig {
 	apiKey?: string;
+	apiKeyEnv?: string;
 	baseUrl?: string;
+	authMode?: string;
+	accessToken?: string;
+	accessTokenEnv?: string;
+	credentialsFile?: string;
+	projectId?: string;
+	location?: string;
+	mode?: string;
+	codingApiKey?: string;
+	codingBaseUrl?: string;
 	models?: string[];
 }
 

@@ -617,7 +617,89 @@ describe("AgentRuntime", () => {
 					m.content.startsWith("Relevant memories from long-term storage:"),
 			);
 			expect(memoryMsg).toBeDefined();
+			expect(memoryMsg?.content).toContain(
+				"answer from these memories instead of saying you do not remember",
+			);
+			expect(memoryMsg?.content).toContain(
+				"A [REDACTED] span only withholds that span",
+			);
+			expect(memoryMsg?.content).toContain(
+				"If the user asks whether you remember a visible code",
+			);
+			expect(memoryMsg?.content).toContain(
+				"If Visible identifiers/codes contains the user-requested code",
+			);
+			expect(memoryMsg?.content).toContain(
+				"answer from Visible content, not from redacted source metadata",
+			);
+			expect(memoryMsg?.content).toContain(
+				"Do not describe visible identifiers as merely labels",
+			);
+			expect(memoryMsg?.content).toContain(
+				"Visible content: User prefers dark mode",
+			);
 			expect(memoryMsg?.content).toContain("User prefers dark mode");
+		});
+
+		it("should omit assistant denial echoes when direct memories exist", async () => {
+			mockMemoryRetrieval = createMockMemoryRetrieval({
+				memories: [
+					{
+						item: {
+							id: "direct-memory",
+							type: "semantic" as const,
+							content: "Public focused memory: code FocusCobaltPublic.",
+							embedding: [],
+							importance: 0.8,
+							accessCount: 0,
+							lastAccessed: new Date(),
+							createdAt: new Date(),
+							associations: [],
+							source: {},
+							metadata: {},
+						},
+						score: 0.9,
+					},
+					{
+						item: {
+							id: "denial-echo",
+							type: "episodic" as const,
+							content:
+								'Interaction summary: User asked: "FocusCobaltPublic" Assistant replied: "No lo recuerdo, no tengo registro."',
+							embedding: [],
+							importance: 0.5,
+							accessCount: 0,
+							lastAccessed: new Date(),
+							createdAt: new Date(),
+							associations: [],
+							source: {},
+							metadata: {},
+						},
+						score: 0.7,
+					},
+				],
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+
+			await runtime.processMessage("Remember FocusCobaltPublic");
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+			const memoryMsg = request.messages.find(
+				(m: { role: string; content: string }) =>
+					m.role === "system" &&
+					m.content.startsWith("Relevant memories from long-term storage:"),
+			);
+			expect(memoryMsg?.content).toContain("FocusCobaltPublic");
+			expect(memoryMsg?.content).toContain(
+				"Visible identifiers/codes: FocusCobaltPublic",
+			);
+			expect(memoryMsg?.content).not.toContain("No lo recuerdo");
 		});
 
 		it("should include condensed STM context from retrieval in the prompt", async () => {

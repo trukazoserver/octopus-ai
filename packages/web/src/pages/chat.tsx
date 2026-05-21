@@ -11,6 +11,7 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { showToast } from "../components/ui/Toast.js";
 import {
 	API_BASE,
@@ -32,6 +33,73 @@ const MediaLibraryPage = lazy(() =>
 		default: MediaLibraryPage,
 	})),
 );
+
+interface MediaPreviewModalProps {
+	src: string;
+	onClose: () => void;
+}
+
+const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
+	src,
+	onClose,
+}) => {
+	const dialogRef = useRef<HTMLDialogElement | null>(null);
+
+	useEffect(() => {
+		const dialog = dialogRef.current;
+		if (!dialog) return;
+
+		const previousOverflow = document.body.style.overflow;
+		document.body.style.overflow = "hidden";
+
+		try {
+			if (!dialog.open) dialog.showModal();
+		} catch {
+			dialog.setAttribute("open", "");
+		}
+
+		dialog.focus();
+
+		return () => {
+			document.body.style.overflow = previousOverflow;
+			if (dialog.open) dialog.close();
+		};
+	}, []);
+
+	return createPortal(
+		<dialog
+			ref={dialogRef}
+			className="media-preview-overlay"
+			aria-modal="true"
+			aria-label="Vista previa de imagen"
+			onCancel={(event) => {
+				event.preventDefault();
+				onClose();
+			}}
+			onClick={(event) => {
+				if (event.target === event.currentTarget) onClose();
+			}}
+			onKeyDown={(event) => {
+				if (event.key === "Escape") onClose();
+			}}
+		>
+			<div className="media-preview-content">
+				<div className="media-preview-frame">
+					<img src={src} alt="Preview" />
+				</div>
+				<button
+					type="button"
+					className="media-preview-close"
+					aria-label="Cerrar vista previa"
+					onClick={onClose}
+				>
+					×
+				</button>
+			</div>
+		</dialog>,
+		document.body,
+	);
+};
 
 interface StatusData {
 	provider?: string;
@@ -224,8 +292,62 @@ interface WorkspaceRequest {
 	view: WorkspaceView;
 }
 
+interface SpeechRecognitionAlternativeLike {
+	transcript: string;
+}
+
+interface SpeechRecognitionResultLike {
+	isFinal: boolean;
+	length: number;
+	[index: number]: SpeechRecognitionAlternativeLike;
+}
+
+interface SpeechRecognitionEventLike extends Event {
+	resultIndex: number;
+	results: {
+		length: number;
+		[index: number]: SpeechRecognitionResultLike;
+	};
+}
+
+interface SpeechRecognitionErrorEventLike extends Event {
+	error: string;
+}
+
+interface SpeechRecognitionLike {
+	continuous: boolean;
+	interimResults: boolean;
+	lang: string;
+	onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+	onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+	onend: (() => void) | null;
+	start: () => void;
+	stop: () => void;
+	abort: () => void;
+}
+
+type SpeechRecognitionConstructorLike = new () => SpeechRecognitionLike;
+
+interface SpeechRecognitionWindow extends Window {
+	SpeechRecognition?: SpeechRecognitionConstructorLike;
+	webkitSpeechRecognition?: SpeechRecognitionConstructorLike;
+}
+
 function nanoid(): string {
 	return crypto.randomUUID();
+}
+
+function getSpeechRecognitionConstructor():
+	| SpeechRecognitionConstructorLike
+	| undefined {
+	const speechWindow = window as SpeechRecognitionWindow;
+	return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+}
+
+function mergeDictationText(base: string, dictated: string): string {
+	if (!dictated) return base;
+	if (!base.trim()) return dictated.trimStart();
+	return `${base}${/\s$/.test(base) ? "" : " "}${dictated.trimStart()}`;
 }
 
 function formatTime(ts: number): string {
@@ -1784,9 +1906,16 @@ export const ChatPage: React.FC<{
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const messagesContainerRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
+	const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+	const dictationBaseRef = useRef("");
+	const dictationFinalRef = useRef("");
 	const pendingIdRef = useRef<string>("");
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [isUploadingImage, setIsUploadingImage] = useState(false);
+	const [isDictating, setIsDictating] = useState(false);
+	const [speechSupported] = useState(() =>
+		Boolean(getSpeechRecognitionConstructor()),
+	);
 	const [pendingAttachments, setPendingAttachments] = useState<
 		{ url: string; file: File; previewUrl: string }[]
 	>([]);
@@ -2852,6 +2981,95 @@ export const ChatPage: React.FC<{
 		}
 	}, [activeExecution, applyMultiAgentEvent]);
 
+	const resizeInputToContent = useCallback(() => {
+		const textarea = inputRef.current;
+		if (!textarea) return;
+		textarea.style.height = "auto";
+		textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
+	}, []);
+
+	const stopDictation = useCallback(() => {
+		const recognition = recognitionRef.current;
+		if (!recognition) return;
+		recognition.onend = null;
+		recognition.onerror = null;
+		recognition.onresult = null;
+		recognition.stop();
+		recognitionRef.current = null;
+		setIsDictating(false);
+		inputRef.current?.focus();
+	}, []);
+
+	const startDictation = useCallback(() => {
+		const SpeechRecognition = getSpeechRecognitionConstructor();
+		if (!SpeechRecognition) {
+			showToast("warning", "Dictado no soportado en este navegador.");
+			return;
+		}
+
+		if (recognitionRef.current) {
+			stopDictation();
+			return;
+		}
+
+		const recognition = new SpeechRecognition();
+		recognition.continuous = true;
+		recognition.interimResults = true;
+		recognition.lang = "es-ES";
+		dictationBaseRef.current = input;
+		dictationFinalRef.current = "";
+
+		recognition.onresult = (event) => {
+			let interimTranscript = "";
+			for (let i = event.resultIndex; i < event.results.length; i += 1) {
+				const result = event.results[i];
+				const transcript = result[0]?.transcript ?? "";
+				if (result.isFinal) {
+					dictationFinalRef.current =
+						`${dictationFinalRef.current} ${transcript}`.trim();
+				} else {
+					interimTranscript = `${interimTranscript} ${transcript}`.trim();
+				}
+			}
+
+			const dictated =
+				`${dictationFinalRef.current} ${interimTranscript}`.trim();
+			setInput(mergeDictationText(dictationBaseRef.current, dictated));
+			requestAnimationFrame(resizeInputToContent);
+		};
+
+		recognition.onerror = (event) => {
+			const message =
+				event.error === "not-allowed" || event.error === "service-not-allowed"
+					? "No se pudo acceder al microfono."
+					: "No se pudo continuar el dictado.";
+			showToast("error", message);
+			setIsDictating(false);
+			recognitionRef.current = null;
+		};
+
+		recognition.onend = () => {
+			setIsDictating(false);
+			recognitionRef.current = null;
+		};
+
+		try {
+			recognition.start();
+			recognitionRef.current = recognition;
+			setIsDictating(true);
+			inputRef.current?.focus();
+		} catch {
+			showToast("error", "No se pudo iniciar el dictado.");
+		}
+	}, [input, resizeInputToContent, stopDictation]);
+
+	useEffect(() => {
+		return () => {
+			recognitionRef.current?.abort();
+			recognitionRef.current = null;
+		};
+	}, []);
+
 	const handleSend = () => {
 		const text = input.trim();
 		if (
@@ -2860,6 +3078,7 @@ export const ChatPage: React.FC<{
 			activeBusy
 		)
 			return;
+		stopDictation();
 
 		let finalContent = text;
 		if (pendingAttachments.length > 0) {
@@ -2965,8 +3184,7 @@ export const ChatPage: React.FC<{
 
 	const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
 		setInput(e.target.value);
-		e.target.style.height = "auto";
-		e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+		resizeInputToContent();
 	};
 
 	const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3035,6 +3253,9 @@ export const ChatPage: React.FC<{
 			);
 		}
 	};
+
+	const dictationUnavailable =
+		!speechSupported || (!isDictating && (!isConnected || activeBusy));
 
 	return (
 		<div
@@ -4263,6 +4484,68 @@ export const ChatPage: React.FC<{
 												</svg>
 											)}
 										</button>
+										<button
+											type="button"
+											aria-label={
+												isDictating ? "Detener dictado" : "Iniciar dictado"
+											}
+											onClick={isDictating ? stopDictation : startDictation}
+											disabled={dictationUnavailable}
+											data-tooltip={
+												!speechSupported
+													? "Dictado no soportado"
+													: isDictating
+														? "Detener dictado"
+														: "Dictar mensaje"
+											}
+											style={{
+												order: 2,
+												width: "36px",
+												height: "36px",
+												borderRadius: "10px",
+												border: "none",
+												background: isDictating ? "#ef4444" : "transparent",
+												color: dictationUnavailable
+													? "#52525b"
+													: isDictating
+														? "#fff"
+														: "#a1a1aa",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+												cursor: dictationUnavailable
+													? "not-allowed"
+													: "pointer",
+												transition: "all 0.2s",
+												marginBottom: "4px",
+												marginRight: "4px",
+												flexShrink: 0,
+											}}
+											onMouseEnter={(e) => {
+												if (!isDictating && !dictationUnavailable)
+													e.currentTarget.style.color = "#f4f4f5";
+											}}
+											onMouseLeave={(e) => {
+												if (!isDictating && !dictationUnavailable)
+													e.currentTarget.style.color = "#a1a1aa";
+											}}
+										>
+											<svg
+												aria-hidden="true"
+												width="20"
+												height="20"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												strokeWidth="2"
+												strokeLinecap="round"
+												strokeLinejoin="round"
+											>
+												<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+												<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+												<line x1="12" y1="19" x2="12" y2="22" />
+											</svg>
+										</button>
 										<textarea
 											id="chat-message-input"
 											name="message"
@@ -4278,6 +4561,7 @@ export const ChatPage: React.FC<{
 											disabled={!isConnected}
 											rows={1}
 											style={{
+												order: 1,
 												flex: 1,
 												padding: "10px 8px",
 												background: "transparent",
@@ -4298,6 +4582,7 @@ export const ChatPage: React.FC<{
 												aria-label="Parar tarea del agente"
 												data-tooltip="Parar tarea del agente"
 												style={{
+													order: 3,
 													width: "36px",
 													height: "36px",
 													borderRadius: "10px",
@@ -4333,6 +4618,7 @@ export const ChatPage: React.FC<{
 													!isConnected
 												}
 												style={{
+													order: 3,
 													width: "36px",
 													height: "36px",
 													borderRadius: "10px",
@@ -4553,9 +4839,7 @@ export const ChatPage: React.FC<{
 				.markdown-body a.media-download-corner:hover, .media-download-corner:hover { background: rgba(63,63,70,.88); border: 0 !important; border-bottom: 0 !important; color: #fff !important; transform: scale(1.04); box-shadow: 0 14px 32px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12); }
 				.media-download-corner:focus, .media-download-corner:focus-visible, .media-download-corner:active { border: 0 !important; border-bottom: 0 !important; outline: none !important; box-shadow: 0 14px 32px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12); }
 				.media-download-corner::after { content: attr(aria-label); position: absolute; right: 0; bottom: calc(100% + 10px); padding: 7px 10px; border-radius: 10px; background: rgba(9,9,11,.96); color: #f4f4f5; border: 1px solid rgba(255,255,255,.14); box-shadow: 0 12px 32px rgba(0,0,0,.45); font-size: .75rem; font-weight: 800; line-height: 1; white-space: nowrap; opacity: 0; transform: translateY(4px) scale(.96); pointer-events: none; transition: opacity .14s ease, transform .14s ease; }
-				.media-download-corner::before { content: ""; position: absolute; right: 17px; bottom: calc(100% + 4px); width: 10px; height: 10px; background: rgba(9,9,11,.96); border-right: 1px solid rgba(255,255,255,.14); border-bottom: 1px solid rgba(255,255,255,.14); transform: rotate(45deg); opacity: 0; pointer-events: none; transition: opacity .14s ease; }
 				.media-download-corner:hover::after, .media-download-corner:focus-visible::after { opacity: 1; transform: translateY(0) scale(1); }
-				.media-download-corner:hover::before, .media-download-corner:focus-visible::before { opacity: 1; }
 				.media-file { justify-content: stretch; }
 				.media-file-card { position: relative; display: flex; align-items: center; gap: 12px; width: min(460px, 100%); padding: 12px; border: 1px solid rgba(63,63,70,.86); border-radius: 16px; background: linear-gradient(135deg, rgba(24,24,27,.92), rgba(39,39,42,.68)); box-shadow: 0 10px 28px rgba(0,0,0,.2); }
 				.media-file-card.media-has-download { padding-right: 128px; }
@@ -4563,10 +4847,12 @@ export const ChatPage: React.FC<{
 				.media-file-meta { min-width: 0; flex: 1; }
 				.media-file-title { color: #f4f4f5; font-size: 0.86rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 				.media-file-name { margin-top: 3px; color: #a1a1aa; font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-				.media-preview-overlay { position: fixed; inset: 0; z-index: 1050; display: flex; align-items: center; justify-content: center; background: #000; cursor: zoom-out; border: 0; padding: 24px; opacity: 1; }
-				.media-preview-frame { display: inline-flex; align-items: center; justify-content: center; max-width: 94vw; max-height: 92vh; border-radius: 14px; background: #050505; box-shadow: 0 18px 70px rgba(0,0,0,0.9); overflow: hidden; }
-				.media-preview-overlay img { display: block; max-width: 94vw; max-height: 92vh; object-fit: contain; border-radius: 12px; opacity: 1 !important; background: #050505; filter: none !important; mix-blend-mode: normal !important; }
-				.media-preview-close { position: fixed; top: 18px; right: 18px; z-index: 1051; width: 38px; height: 38px; border-radius: 999px; border: 1px solid rgba(255,255,255,.22); background: rgba(24,24,27,.92); color: #f4f4f5; font-size: 22px; line-height: 1; cursor: pointer; }
+				.media-preview-overlay { position: fixed; inset: 0; z-index: 10000; display: flex; width: 100vw; height: 100dvh; max-width: none; max-height: none; align-items: center; justify-content: center; box-sizing: border-box; margin: 0; border: 0; padding: 24px; background: rgba(0,0,0,.94); cursor: zoom-out; opacity: 1; }
+				.media-preview-overlay::backdrop { background: transparent; }
+				.media-preview-content { position: relative; max-width: min(94vw, 1440px); max-height: 92dvh; }
+				.media-preview-frame { display: flex; align-items: center; justify-content: center; max-width: min(94vw, 1440px); max-height: 92dvh; border-radius: 14px; background: #050505; box-shadow: 0 18px 70px rgba(0,0,0,0.9); overflow: hidden; cursor: default; }
+				.media-preview-overlay img { display: block; width: auto; height: auto; max-width: min(94vw, 1440px); max-height: 92dvh; object-fit: contain; border-radius: 12px; opacity: 1 !important; background: #050505; filter: none !important; mix-blend-mode: normal !important; }
+				.media-preview-close { position: absolute; top: 12px; right: 12px; z-index: 10001; width: 38px; height: 38px; border-radius: 999px; border: 1px solid rgba(255,255,255,.28); background: rgba(24,24,27,.86); color: #f4f4f5; font-size: 22px; line-height: 1; cursor: pointer; box-shadow: 0 10px 28px rgba(0,0,0,.45); backdrop-filter: blur(8px); }
 				.media-preview-close:hover { background: rgba(39,39,42,.98); }
 				::-webkit-scrollbar { width: 8px; height: 8px; }
 				::-webkit-scrollbar-track { background: transparent; }
@@ -4576,37 +4862,10 @@ export const ChatPage: React.FC<{
 
 			{/* Media preview overlay */}
 			{mediaPreviewSrc && (
-				<dialog
-					open
-					className="media-preview-overlay"
-					aria-modal="true"
-					aria-label="Vista previa de imagen"
-					onClick={(event) => {
-						if (event.target === event.currentTarget) setMediaPreviewSrc(null);
-					}}
-					onKeyDown={(event) => {
-						if (
-							event.key === "Escape" ||
-							event.key === "Enter" ||
-							event.key === " "
-						) {
-							event.preventDefault();
-							setMediaPreviewSrc(null);
-						}
-					}}
-				>
-					<div className="media-preview-frame">
-						<img src={mediaPreviewSrc} alt="Preview" />
-					</div>
-					<button
-						type="button"
-						className="media-preview-close"
-						aria-label="Cerrar vista previa"
-						onClick={() => setMediaPreviewSrc(null)}
-					>
-						×
-					</button>
-				</dialog>
+				<MediaPreviewModal
+					src={mediaPreviewSrc}
+					onClose={() => setMediaPreviewSrc(null)}
+				/>
 			)}
 		</div>
 	);

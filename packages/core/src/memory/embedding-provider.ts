@@ -15,12 +15,15 @@
  * - Auto-detección del proveedor por config
  */
 
-import { createHash } from "node:crypto";
+import { createHash, createSign } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { createLogger } from "../utils/logger.js";
+import type { EmbeddingTask } from "./types.js";
 
 const logger = createLogger("embedding-provider");
 
 export type EmbeddingApiType = "openai" | "google" | "cohere" | "ollama";
+export type EmbeddingAuthMode = "api-key" | "vertex";
 
 export interface EmbeddingProviderConfig {
 	/** Dimensiones del embedding */
@@ -33,23 +36,50 @@ export interface EmbeddingProviderConfig {
 	baseUrl: string;
 	/** Tipo de API del proveedor */
 	apiType: EmbeddingApiType;
+	/** Modo de autenticacion para APIs que soportan varios modos */
+	authMode: EmbeddingAuthMode;
+	/** OAuth/Vertex access token directo */
+	accessToken: string;
+	/** Variable de entorno para OAuth/Vertex access token */
+	accessTokenEnv: string;
+	/** Service account JSON para Vertex AI */
+	credentialsFile: string;
+	/** Service account JSON inline para Vertex AI */
+	credentialsJson: string;
+	/** Google Cloud project para Vertex AI */
+	projectId: string;
+	/** Google Cloud location para Vertex AI */
+	location: string;
+	/** Rol del texto para proveedores con prompts de retrieval */
+	task: EmbeddingTask;
 	/** Máximo de textos por batch */
 	maxBatchSize: number;
 	/** Máximo de caracteres por texto antes de truncar */
 	maxTextLength: number;
 	/** Tamaño del cache LRU */
 	cacheSize: number;
+	/** Tiempo antes de reintentar la API tras una falla */
+	failureRetryMs: number;
 }
 
 const DEFAULT_CONFIG: EmbeddingProviderConfig = {
 	dimensions: 1024,
-	model: "embedding-3",
+	model: "",
 	apiKey: "",
-	baseUrl: "https://api.z.ai/api/paas/v4",
+	baseUrl: "",
 	apiType: "openai",
+	authMode: "api-key",
+	accessToken: "",
+	accessTokenEnv: "",
+	credentialsFile: "",
+	credentialsJson: "",
+	projectId: "",
+	location: "us-central1",
+	task: "document",
 	maxBatchSize: 32,
 	maxTextLength: 8000,
 	cacheSize: 500,
+	failureRetryMs: 60_000,
 };
 
 /** Resultado de un embedding con metadata */
@@ -65,8 +95,10 @@ export class EmbeddingProvider {
 	private cache: Map<string, number[]> = new Map();
 	private cacheOrder: string[] = [];
 	private apiAvailable: boolean | null = null;
+	private lastApiFailureAt = 0;
 	private totalApiCalls = 0;
 	private totalCacheHits = 0;
+	private vertexTokenCache?: { token: string; expiresAt: number };
 
 	constructor(config: Partial<EmbeddingProviderConfig> = {}) {
 		this.config = { ...DEFAULT_CONFIG, ...config };
@@ -76,13 +108,16 @@ export class EmbeddingProvider {
 	 * Generar embedding para un texto.
 	 * Usa cache → API → fallback hash.
 	 */
-	async embed(text: string): Promise<number[]> {
+	async embed(
+		text: string,
+		task: EmbeddingTask = this.config.task,
+	): Promise<number[]> {
 		if (!text || text.trim().length === 0) {
 			return new Array(this.config.dimensions).fill(0);
 		}
 
 		const cleanText = text.trim().slice(0, this.config.maxTextLength);
-		const cacheKey = this.hashText(cleanText);
+		const cacheKey = this.hashText(`${task}:${cleanText}`);
 
 		// Check cache
 		const cached = this.cache.get(cacheKey);
@@ -92,22 +127,24 @@ export class EmbeddingProvider {
 		}
 
 		// Try API
-		if (this.config.apiKey && this.apiAvailable !== false) {
+		if (this.hasApiCredentials() && this.shouldTryApi()) {
 			try {
-				const result = await this.embedViaAPI([cleanText]);
+				const result = await this.embedViaAPI([cleanText], task);
 				if (result.length > 0) {
 					this.apiAvailable = true;
+					this.lastApiFailureAt = 0;
 					const embedding = result[0];
 					this.cacheSet(cacheKey, embedding);
 					return embedding;
 				}
 			} catch (err) {
-				if (this.apiAvailable === null) {
+				this.lastApiFailureAt = Date.now();
+				if (this.apiAvailable !== false) {
 					logger.warn(
-						`Embedding API not available, using hash fallback: ${String(err)}`,
+						`Embedding API not available, using hash fallback until retry window expires: ${String(err)}`,
 					);
-					this.apiAvailable = false;
 				}
+				this.apiAvailable = false;
 			}
 		}
 
@@ -120,7 +157,10 @@ export class EmbeddingProvider {
 	/**
 	 * Batch embedding — más eficiente para consolidación.
 	 */
-	async embedBatch(texts: string[]): Promise<number[][]> {
+	async embedBatch(
+		texts: string[],
+		task: EmbeddingTask = this.config.task,
+	): Promise<number[][]> {
 		if (texts.length === 0) return [];
 
 		const results: number[][] = new Array(texts.length);
@@ -130,7 +170,7 @@ export class EmbeddingProvider {
 		// Check cache first
 		for (let i = 0; i < texts.length; i++) {
 			const clean = (texts[i] || "").trim().slice(0, this.config.maxTextLength);
-			const key = this.hashText(clean);
+			const key = this.hashText(`${task}:${clean}`);
 			const cached = this.cache.get(key);
 			if (cached) {
 				results[i] = cached;
@@ -144,7 +184,7 @@ export class EmbeddingProvider {
 		if (uncachedTexts.length === 0) return results;
 
 		// Try API for uncached
-		if (this.config.apiKey && this.apiAvailable !== false) {
+		if (this.hasApiCredentials() && this.shouldTryApi()) {
 			try {
 				for (
 					let batch = 0;
@@ -159,23 +199,28 @@ export class EmbeddingProvider {
 						batch,
 						batch + this.config.maxBatchSize,
 					);
-					const embeddings = await this.embedViaAPI(batchTexts);
+					const embeddings = await this.embedViaAPI(batchTexts, task);
 
 					for (let j = 0; j < embeddings.length; j++) {
 						const idx = batchIndices[j];
 						results[idx] = embeddings[j];
-						this.cacheSet(this.hashText(batchTexts[j]), embeddings[j]);
+						this.cacheSet(
+							this.hashText(`${task}:${batchTexts[j]}`),
+							embeddings[j],
+						);
 					}
 				}
 				this.apiAvailable = true;
+				this.lastApiFailureAt = 0;
 				return results;
 			} catch (err) {
-				if (this.apiAvailable === null) {
+				this.lastApiFailureAt = Date.now();
+				if (this.apiAvailable !== false) {
 					logger.warn(
-						`Batch embedding API failed, using hash fallback: ${String(err)}`,
+						`Batch embedding API failed, using hash fallback until retry window expires: ${String(err)}`,
 					);
-					this.apiAvailable = false;
 				}
+				this.apiAvailable = false;
 			}
 		}
 
@@ -186,7 +231,7 @@ export class EmbeddingProvider {
 					.trim()
 					.slice(0, this.config.maxTextLength);
 				results[i] = this.hashEmbedding(clean);
-				this.cacheSet(this.hashText(clean), results[i]);
+				this.cacheSet(this.hashText(`${task}:${clean}`), results[i]);
 			}
 		}
 
@@ -196,8 +241,11 @@ export class EmbeddingProvider {
 	/**
 	 * Obtener la función de embedding compatible con EmbeddingFunction type.
 	 */
-	getEmbedFunction(): (text: string) => Promise<number[]> {
-		return (text: string) => this.embed(text);
+	getEmbedFunction(): (
+		text: string,
+		task?: EmbeddingTask,
+	) => Promise<number[]> {
+		return (text: string, task?: EmbeddingTask) => this.embed(text, task);
 	}
 
 	/**
@@ -227,10 +275,13 @@ export class EmbeddingProvider {
 	// API Adapters — one per provider type
 	// ==========================================================
 
-	private async embedViaAPI(texts: string[]): Promise<number[][]> {
+	private async embedViaAPI(
+		texts: string[],
+		task: EmbeddingTask,
+	): Promise<number[][]> {
 		switch (this.config.apiType) {
 			case "google":
-				return this.embedViaGoogle(texts);
+				return this.embedViaGoogle(texts, task);
 			case "cohere":
 				return this.embedViaCohere(texts);
 			case "ollama":
@@ -238,6 +289,29 @@ export class EmbeddingProvider {
 			default:
 				return this.embedViaOpenAI(texts);
 		}
+	}
+
+	private shouldTryApi(): boolean {
+		if (this.apiAvailable !== false) return true;
+		if (this.config.failureRetryMs <= 0) return true;
+		return Date.now() - this.lastApiFailureAt >= this.config.failureRetryMs;
+	}
+
+	private hasApiCredentials(): boolean {
+		if (this.config.apiType === "ollama") return true;
+		if (this.config.apiType === "google" && this.config.authMode === "vertex") {
+			return Boolean(
+				this.config.accessToken ||
+					(this.config.accessTokenEnv &&
+						process.env[this.config.accessTokenEnv]) ||
+					process.env.GOOGLE_VERTEX_ACCESS_TOKEN ||
+					process.env.GOOGLE_ACCESS_TOKEN ||
+					this.config.credentialsFile ||
+					this.config.credentialsJson ||
+					process.env.GOOGLE_APPLICATION_CREDENTIALS,
+			);
+		}
+		return Boolean(this.config.apiKey);
 	}
 
 	/**
@@ -256,15 +330,18 @@ export class EmbeddingProvider {
 
 		this.totalApiCalls++;
 
-		const response = await fetch(`${this.config.baseUrl}/embeddings`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.config.apiKey}`,
+		const response = await fetch(
+			`${this.trimTrailingSlash(this.config.baseUrl)}/embeddings`,
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${this.config.apiKey}`,
+				},
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(30_000),
 			},
-			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(30_000),
-		});
+		);
 
 		if (!response.ok) {
 			const errorText = await response.text().catch(() => "");
@@ -286,58 +363,42 @@ export class EmbeddingProvider {
 	}
 
 	/**
-	 * Google/Gemini API
-	 * POST /v1beta/models/{model}:embedContent (single)
-	 * POST /v1beta/models/{model}:batchEmbedContents (batch)
+	 * Google/Gemini API key and Vertex AI native embedding APIs.
 	 */
-	private async embedViaGoogle(texts: string[]): Promise<number[][]> {
-		this.totalApiCalls++;
+	private async embedViaGoogle(
+		texts: string[],
+		task: EmbeddingTask,
+	): Promise<number[][]> {
+		const formattedTexts = texts.map((text) =>
+			this.formatGoogleText(text, task),
+		);
+		const embeddings: number[][] = [];
 
-		if (texts.length === 1) {
-			// Single embedding
-			const response = await fetch(
-				`${this.config.baseUrl}/v1beta/models/${this.config.model}:embedContent?key=${this.config.apiKey}`,
-				{
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
-						model: `models/${this.config.model}`,
-						content: { parts: [{ text: texts[0] }] },
-					}),
-					signal: AbortSignal.timeout(30_000),
-				},
+		for (const text of formattedTexts) {
+			embeddings.push(
+				this.config.authMode === "vertex"
+					? await this.embedViaGoogleVertex(text)
+					: await this.embedViaGoogleApiKey(text),
 			);
-
-			if (!response.ok) {
-				const errorText = await response.text().catch(() => "");
-				throw new Error(
-					`Google Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
-				);
-			}
-
-			const data = (await response.json()) as {
-				embedding: { values: number[] };
-			};
-
-			if (!data.embedding?.values) {
-				throw new Error("Google Embedding API returned empty data");
-			}
-
-			return [this.normalize(data.embedding.values)];
 		}
 
-		// Batch embedding
-		const requests = texts.map((text) => ({
-			model: `models/${this.config.model}`,
-			content: { parts: [{ text }] },
-		}));
+		return embeddings;
+	}
 
+	private async embedViaGoogleApiKey(text: string): Promise<number[]> {
+		this.totalApiCalls++;
 		const response = await fetch(
-			`${this.config.baseUrl}/v1beta/models/${this.config.model}:batchEmbedContents?key=${this.config.apiKey}`,
+			`${this.googleGenerativeBaseUrl()}/models/${this.config.model}:embedContent`,
 			{
 				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ requests }),
+				headers: {
+					"Content-Type": "application/json",
+					"x-goog-api-key": this.config.apiKey,
+				},
+				body: JSON.stringify({
+					content: { parts: [{ text }] },
+					output_dimensionality: this.config.dimensions,
+				}),
 				signal: AbortSignal.timeout(30_000),
 			},
 		);
@@ -345,19 +406,49 @@ export class EmbeddingProvider {
 		if (!response.ok) {
 			const errorText = await response.text().catch(() => "");
 			throw new Error(
-				`Google Batch Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
+				`Google Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
 			);
 		}
 
 		const data = (await response.json()) as {
-			embeddings: Array<{ values: number[] }>;
+			embedding?: { values?: number[] };
 		};
+		const values = data.embedding?.values;
+		if (!values) throw new Error("Google Embedding API returned empty data");
+		return this.normalize(values);
+	}
 
-		if (!data.embeddings || data.embeddings.length === 0) {
-			throw new Error("Google Batch Embedding API returned empty data");
+	private async embedViaGoogleVertex(text: string): Promise<number[]> {
+		this.totalApiCalls++;
+		const response = await fetch(this.googleVertexEndpoint(), {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${await this.vertexAccessToken()}`,
+			},
+			body: JSON.stringify({
+				content: { parts: [{ text }] },
+				embedContentConfig: {
+					outputDimensionality: this.config.dimensions,
+				},
+			}),
+			signal: AbortSignal.timeout(30_000),
+		});
+
+		if (!response.ok) {
+			const errorText = await response.text().catch(() => "");
+			throw new Error(
+				`Google Vertex Embedding API error: ${response.status} ${errorText.slice(0, 200)}`,
+			);
 		}
 
-		return data.embeddings.map((e) => this.normalize(e.values));
+		const data = (await response.json()) as {
+			embedding?: { values?: number[] };
+		};
+		const values = data.embedding?.values;
+		if (!values)
+			throw new Error("Google Vertex Embedding API returned empty data");
+		return this.normalize(values);
 	}
 
 	/**
@@ -436,6 +527,145 @@ export class EmbeddingProvider {
 		return data.embeddings.map((e) => this.normalize(e));
 	}
 
+	private formatGoogleText(text: string, task: EmbeddingTask): string {
+		if (this.config.model !== "gemini-embedding-2") return text;
+		switch (task) {
+			case "query":
+				return `task: search result | query: ${text}`;
+			case "document":
+				return `title: none | text: ${text}`;
+			default:
+				return text;
+		}
+	}
+
+	private googleGenerativeBaseUrl(): string {
+		const base = this.trimTrailingSlash(
+			this.config.baseUrl || "https://generativelanguage.googleapis.com/v1beta",
+		);
+		return /\/v\d+(beta)?$/.test(base) ? base : `${base}/v1beta`;
+	}
+
+	private googleVertexEndpoint(): string {
+		const baseUrl = this.config.baseUrl.trim();
+		if (baseUrl) return this.trimTrailingSlash(baseUrl);
+		const projectId = this.googleProjectId();
+		const location = this.googleLocation();
+		const host =
+			location === "global"
+				? "aiplatform.googleapis.com"
+				: `${location}-aiplatform.googleapis.com`;
+		return `https://${host}/v1/projects/${projectId}/locations/${location}/publishers/google/models/${this.config.model}:embedContent`;
+	}
+
+	private googleProjectId(): string {
+		return (
+			this.config.projectId ||
+			this.serviceAccountCredentials()?.project_id ||
+			process.env.GOOGLE_CLOUD_PROJECT ||
+			process.env.GCLOUD_PROJECT ||
+			""
+		);
+	}
+
+	private googleLocation(): string {
+		return (
+			this.config.location ||
+			process.env.GOOGLE_CLOUD_LOCATION ||
+			process.env.GOOGLE_CLOUD_REGION ||
+			"us-central1"
+		);
+	}
+
+	private async vertexAccessToken(): Promise<string> {
+		const configured =
+			this.config.accessToken ||
+			(this.config.accessTokenEnv
+				? process.env[this.config.accessTokenEnv]
+				: "") ||
+			process.env.GOOGLE_VERTEX_ACCESS_TOKEN ||
+			process.env.GOOGLE_ACCESS_TOKEN ||
+			"";
+		if (configured.trim()) return configured.trim();
+		if (
+			this.vertexTokenCache &&
+			this.vertexTokenCache.expiresAt > Date.now() + 60_000
+		) {
+			return this.vertexTokenCache.token;
+		}
+
+		const credentials = this.serviceAccountCredentials();
+		if (!credentials) {
+			throw new Error(
+				"Google Vertex embeddings require GOOGLE_VERTEX_ACCESS_TOKEN, GOOGLE_ACCESS_TOKEN, or GOOGLE_APPLICATION_CREDENTIALS",
+			);
+		}
+		if (!credentials.client_email || !credentials.private_key) {
+			throw new Error("Google service account credentials are incomplete");
+		}
+
+		const now = Math.floor(Date.now() / 1000);
+		const assertion = signJwt(
+			{ alg: "RS256", typ: "JWT" },
+			{
+				iss: credentials.client_email,
+				scope: "https://www.googleapis.com/auth/cloud-platform",
+				aud: credentials.token_uri ?? "https://oauth2.googleapis.com/token",
+				exp: now + 3600,
+				iat: now,
+			},
+			credentials.private_key,
+		);
+		const response = await fetch(
+			credentials.token_uri ?? "https://oauth2.googleapis.com/token",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+					assertion,
+				}),
+			},
+		);
+		if (!response.ok) {
+			throw new Error(
+				`Google Vertex token request failed: ${response.status} ${await response.text()}`,
+			);
+		}
+		const token = (await response.json()) as {
+			access_token?: string;
+			expires_in?: number;
+		};
+		if (!token.access_token) throw new Error("Google Vertex token missing");
+		this.vertexTokenCache = {
+			token: token.access_token,
+			expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000,
+		};
+		return token.access_token;
+	}
+
+	private trimTrailingSlash(value: string): string {
+		return value.replace(/\/+$/, "");
+	}
+
+	private serviceAccountCredentials():
+		| {
+				client_email?: string;
+				private_key?: string;
+				project_id?: string;
+				token_uri?: string;
+		  }
+		| undefined {
+		const inline = this.config.credentialsJson?.trim();
+		if (inline) return JSON.parse(inline);
+		const credentialsFile =
+			this.config.credentialsFile ||
+			process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+			"";
+		if (!credentialsFile || !existsSync(credentialsFile)) return undefined;
+		return JSON.parse(readFileSync(credentialsFile, "utf8"));
+	}
+
 	// ==========================================================
 	// Hash fallback + utils
 	// ==========================================================
@@ -509,4 +739,32 @@ export class EmbeddingProvider {
 		this.cache.set(key, value);
 		this.cacheOrder.push(key);
 	}
+}
+
+function base64url(input: string): string {
+	return Buffer.from(input)
+		.toString("base64")
+		.replace(/=/g, "")
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_");
+}
+
+function signJwt(
+	header: Record<string, unknown>,
+	payload: Record<string, unknown>,
+	privateKey: string,
+): string {
+	const encodedHeader = base64url(JSON.stringify(header));
+	const encodedPayload = base64url(JSON.stringify(payload));
+	const signingInput = `${encodedHeader}.${encodedPayload}`;
+	const signer = createSign("RSA-SHA256");
+	signer.update(signingInput);
+	signer.end();
+	const signature = signer
+		.sign(privateKey)
+		.toString("base64")
+		.replace(/=/g, "")
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_");
+	return `${signingInput}.${signature}`;
 }

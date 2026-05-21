@@ -2,10 +2,12 @@ import { nanoid } from "nanoid";
 import type { ConversationTurn, TaskState } from "../agent/types.js";
 import type { DatabaseAdapter } from "../storage/database.js";
 import type { LongTermMemory } from "./ltm.js";
+import type { MemoryOrchestrator } from "./orchestrator.js";
 import type { ShortTermMemory } from "./stm.js";
 import type {
 	ConsolidationResult,
 	EmbeddingFunction,
+	MemoryCandidate,
 	MemoryItem,
 	MemoryType,
 } from "./types.js";
@@ -29,6 +31,8 @@ export type LLMExtractCallback = (conversationText: string) => Promise<{
 export class MemoryConsolidator {
 	private db: DatabaseAdapter;
 	private llmExtractor: LLMExtractCallback | null = null;
+	private orchestrator?: MemoryOrchestrator;
+	private orchestratorScope: MemoryCandidate["scope"] = { tenantId: "local" };
 	constructor(
 		private ltm: LongTermMemory,
 		db: DatabaseAdapter,
@@ -50,6 +54,21 @@ export class MemoryConsolidator {
 	 */
 	setLLMExtractor(fn: LLMExtractCallback): void {
 		this.llmExtractor = fn;
+	}
+
+	setMemoryOrchestrator(
+		orchestrator: MemoryOrchestrator,
+		scope: Partial<MemoryCandidate["scope"]> = {},
+	): void {
+		this.orchestrator = orchestrator;
+		this.orchestratorScope = {
+			tenantId: scope.tenantId ?? "local",
+			userId: scope.userId,
+			projectId: scope.projectId,
+			agentRole: scope.agentRole,
+			sessionId: scope.sessionId,
+			taskId: scope.taskId,
+		};
 	}
 
 	async consolidate(stm: ShortTermMemory): Promise<ConsolidationResult> {
@@ -93,23 +112,12 @@ export class MemoryConsolidator {
 		const storedItems: MemoryItem[] = [];
 		for (const item of allItems) {
 			if (item.importance >= this.config.importanceThreshold) {
-				const embedding = await this.embedFn(item.content);
-				const memoryItem: MemoryItem = {
-					id: nanoid(),
-					type: item.type,
-					content: item.content,
-					embedding,
-					importance: item.importance,
-					accessCount: item.accessCount,
-					lastAccessed: item.lastAccessed,
-					createdAt: new Date(),
-					associations: [],
-					source: item.source,
-					metadata: item.metadata,
-				};
-				await this.ltm.store(memoryItem);
-				storedItems.push(memoryItem);
-				result.stored++;
+				const memoryItem = await this.storeItem(item);
+				if (memoryItem) {
+					storedItems.push(memoryItem);
+					if (memoryItem.metadata.duplicateReinforcedAt) result.updated++;
+					else result.stored++;
+				}
 			}
 		}
 
@@ -120,6 +128,214 @@ export class MemoryConsolidator {
 		result.forgotten = decayResult.forgotten;
 
 		return result;
+	}
+
+	private async storeItem(
+		item: PartialMemoryItem & { importance: number },
+	): Promise<MemoryItem | undefined> {
+		const enrichedItem = this.withStructuredMetadata(item);
+		if (this.orchestrator) {
+			const write = await this.orchestrator.write({
+				type: enrichedItem.type,
+				content: enrichedItem.content,
+				sourceTrust: this.inferSourceTrust(enrichedItem),
+				scope: this.scopeForItem(enrichedItem),
+				confidence: Math.min(0.85, Math.max(0.45, enrichedItem.importance)),
+				importance: enrichedItem.importance,
+				source: {
+					...enrichedItem.source,
+					sourceType: enrichedItem.source.sourceType ?? "conversation",
+					quotedEvidence:
+						enrichedItem.source.quotedEvidence ?? enrichedItem.content,
+				},
+				metadata: enrichedItem.metadata,
+				evidence: {
+					sourceType: "message",
+					sourceId:
+						enrichedItem.source.conversationId ??
+						enrichedItem.source.channelId ??
+						enrichedItem.source.taskId,
+					excerpt: enrichedItem.content,
+				},
+			});
+			if (!write.accepted || !write.memoryId) return undefined;
+			return this.ltm.getById(write.memoryId);
+		}
+
+		const embedding = await this.embedFn(enrichedItem.content, "document");
+		const memoryItem: MemoryItem = {
+			id: nanoid(),
+			type: enrichedItem.type,
+			content: enrichedItem.content,
+			embedding,
+			importance: enrichedItem.importance,
+			accessCount: enrichedItem.accessCount,
+			lastAccessed: enrichedItem.lastAccessed,
+			createdAt: new Date(),
+			associations: [],
+			source: enrichedItem.source,
+			metadata: enrichedItem.metadata,
+		};
+		await this.ltm.store(memoryItem);
+		return memoryItem;
+	}
+
+	private inferSourceTrust(
+		item: PartialMemoryItem & { importance: number },
+	): MemoryCandidate["sourceTrust"] {
+		const extractedFrom = item.metadata.extractedFrom;
+		if (extractedFrom === "conversation" || extractedFrom === "llm") {
+			return "user_inferred";
+		}
+		if (item.source.taskId) return "agent";
+		return "agent";
+	}
+
+	private scopeForItem(
+		item: PartialMemoryItem & { importance: number },
+	): MemoryCandidate["scope"] {
+		return {
+			...this.orchestratorScope,
+			sessionId:
+				this.orchestratorScope.sessionId ??
+				item.source.channelId ??
+				item.source.conversationId,
+			taskId: this.orchestratorScope.taskId ?? item.source.taskId,
+		};
+	}
+
+	private withStructuredMetadata<
+		T extends PartialMemoryItem & { importance: number },
+	>(item: T): T {
+		const structured = this.extractStructuredMetadata(item.content);
+		if (Object.keys(structured).length === 0) return item;
+		return {
+			...item,
+			metadata: this.mergeStructuredMetadata(item.metadata, structured),
+		};
+	}
+
+	private extractStructuredMetadata(content: string): Record<string, unknown> {
+		const sentence = content
+			.replace(/^(?:Decision:|Error encountered:|Task completed:)\s*/i, "")
+			.trim()
+			.replace(/[.!?]+$/g, "");
+		return (
+			this.extractPreferenceClaim(sentence) ??
+			this.extractUsesClaim(sentence) ??
+			this.extractSlaClaim(sentence) ??
+			this.extractIndustryClaim(sentence) ??
+			{}
+		);
+	}
+
+	private extractPreferenceClaim(
+		sentence: string,
+	): Record<string, unknown> | undefined {
+		const match = sentence.match(
+			/^(?:the\s+)?(?<entity>user|client|customer|team|project|[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*(?:\s+[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*){0,3})\s+(?:prefers?|likes?|prefiere|prefieren)\s+(?<value>[^.;]{2,120})$/iu,
+		);
+		if (!match?.groups) return undefined;
+		const entity = cleanClaimPart(match.groups.entity);
+		const value = cleanClaimPart(match.groups.value);
+		if (!entity || !value) return undefined;
+		return this.claimMetadata(entity, "preference", value, "prefers");
+	}
+
+	private extractUsesClaim(
+		sentence: string,
+	): Record<string, unknown> | undefined {
+		const match = sentence.match(
+			/^(?:the\s+)?(?<entity>user|client|customer|team|project|[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*(?:\s+[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*){0,3})\s+(?:uses?|utiliza|usa|usan)\s+(?<value>[^.;]{2,120})$/iu,
+		);
+		if (!match?.groups) return undefined;
+		const entity = cleanClaimPart(match.groups.entity);
+		const value = cleanClaimPart(match.groups.value);
+		if (!entity || !value) return undefined;
+		return this.claimMetadata(entity, "tooling", value, "uses");
+	}
+
+	private extractSlaClaim(
+		sentence: string,
+	): Record<string, unknown> | undefined {
+		const match = sentence.match(
+			/^(?<entity>[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*(?:\s+[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*){0,3}).*\bSLA\b.*\b(?:is|es)\s+(?<value>[\d.]+\s*%?)$/iu,
+		);
+		if (!match?.groups) return undefined;
+		const entity = cleanClaimPart(match.groups.entity);
+		const value = cleanClaimPart(match.groups.value);
+		if (!entity || !value) return undefined;
+		return this.claimMetadata(entity, "sla", value, "associated");
+	}
+
+	private extractIndustryClaim(
+		sentence: string,
+	): Record<string, unknown> | undefined {
+		const match = sentence.match(
+			/^(?<entity>[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*(?:\s+[A-ZÁÉÍÓÚÑ][\p{L}\p{N}&_.-]*){0,3})\s+(?:belongs to|is in|pertenece al|pertenece a)\s+(?:the\s+)?(?<value>[^.;]{2,80})\s+(?:industry|sector)?$/iu,
+		);
+		if (!match?.groups) return undefined;
+		const entity = cleanClaimPart(match.groups.entity);
+		const value = cleanClaimPart(match.groups.value);
+		if (!entity || !value) return undefined;
+		return this.claimMetadata(entity, "industry", value, "associated");
+	}
+
+	private claimMetadata(
+		entity: string,
+		key: string,
+		value: string,
+		relationType: string,
+	): Record<string, unknown> {
+		return {
+			claimEntity: entity,
+			claimKey: key,
+			claimValue: value,
+			claim: { entity, key, value },
+			entities: [
+				{ name: entity, type: this.entityType(entity), confidence: 0.72 },
+				{ name: value, type: key, confidence: 0.68 },
+			],
+			relations: [
+				{
+					from: entity,
+					type: relationType,
+					to: value,
+					context: key,
+					confidence: 0.7,
+				},
+			],
+		};
+	}
+
+	private entityType(entity: string): string {
+		return /^(user|client|customer|team|project)$/i.test(entity)
+			? entity.toLowerCase()
+			: "entity";
+	}
+
+	private mergeStructuredMetadata(
+		metadata: Record<string, unknown>,
+		structured: Record<string, unknown>,
+	): Record<string, unknown> {
+		return {
+			...structured,
+			...metadata,
+			claim:
+				metadata.claim && typeof metadata.claim === "object"
+					? metadata.claim
+					: structured.claim,
+			entities: mergeDescriptorArrays(
+				structured.entities,
+				metadata.entities,
+				"name",
+			),
+			relations: mergeDescriptorArrays(
+				structured.relations,
+				metadata.relations,
+				"from:type:to",
+			),
+		};
 	}
 
 	private async ensureAssociationTable(): Promise<void> {
@@ -725,4 +941,47 @@ export class MemoryConsolidator {
 
 		return { compressed, forgotten };
 	}
+}
+
+function cleanClaimPart(value: string | undefined): string {
+	return (value ?? "")
+		.trim()
+		.replace(/^(?:that|the|a|an|el|la|los|las)\s+/i, "")
+		.replace(/\s+/g, " ")
+		.slice(0, 120);
+}
+
+function mergeDescriptorArrays(
+	primary: unknown,
+	secondary: unknown,
+	keyMode: "name" | "from:type:to",
+): unknown[] {
+	const result: unknown[] = [];
+	const seen = new Set<string>();
+	for (const entry of [
+		...(Array.isArray(primary) ? primary : []),
+		...(Array.isArray(secondary) ? secondary : []),
+	]) {
+		if (!entry || typeof entry !== "object") continue;
+		const key = descriptorKey(entry as Record<string, unknown>, keyMode);
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		result.push(entry);
+	}
+	return result;
+}
+
+function descriptorKey(
+	entry: Record<string, unknown>,
+	keyMode: "name" | "from:type:to",
+): string | undefined {
+	if (keyMode === "name") {
+		return typeof entry.name === "string"
+			? entry.name.toLowerCase()
+			: undefined;
+	}
+	const from = typeof entry.from === "string" ? entry.from.toLowerCase() : "";
+	const type = typeof entry.type === "string" ? entry.type.toLowerCase() : "";
+	const to = typeof entry.to === "string" ? entry.to.toLowerCase() : "";
+	return from && type && to ? `${from}:${type}:${to}` : undefined;
 }

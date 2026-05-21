@@ -130,13 +130,17 @@ export class LongTermMemory {
 			minImportance?: number;
 		},
 	): Promise<MemoryItem[]> {
-		const embedding = await embeddingFn(query);
+		const normalizedQuery = query.trim();
+		if (!normalizedQuery) return [];
+
+		const embedding = await embeddingFn(query, "query");
 		const results = await this.vectorStore.search(embedding, {
 			limit: 50,
 			threshold: 0.5,
 			filter: (item) => this.isVisible(item),
 		});
 		let items = results.map((r) => r.item);
+		items = await this.appendLexicalMatches(normalizedQuery, items);
 		if (filters?.types && filters.types.length > 0) {
 			items = items.filter((i) => filters.types?.includes(i.type));
 		}
@@ -144,8 +148,41 @@ export class LongTermMemory {
 			const minImp = filters.minImportance;
 			items = items.filter((i) => i.importance >= minImp);
 		}
-		await Promise.all(items.map((item) => this.updateAccess(item.id)));
-		return items;
+		const selected = items.slice(0, 50);
+		await Promise.all(selected.map((item) => this.updateAccess(item.id)));
+		return selected;
+	}
+
+	private async appendLexicalMatches(
+		query: string,
+		items: MemoryItem[],
+	): Promise<MemoryItem[]> {
+		const words = query
+			.toLowerCase()
+			.replace(/[^\p{L}\p{N}\s_-]/gu, " ")
+			.split(/\s+/)
+			.filter((word) => word.length > 1)
+			.slice(0, 10);
+		if (words.length === 0) return items;
+
+		const seen = new Set(items.map((item) => item.id));
+		const allItems = await this.listAll(5000);
+		const lexicalMatches = allItems
+			.filter((item) => !seen.has(item.id))
+			.map((item) => {
+				const searchable =
+					`${item.content} ${JSON.stringify(item.source)} ${JSON.stringify(item.metadata)}`.toLowerCase();
+				const exactBoost = searchable.includes(query.toLowerCase()) ? 1 : 0;
+				const matchedWords = words.filter((word) => searchable.includes(word));
+				return { item, score: exactBoost + matchedWords.length / words.length };
+			})
+			.filter((match) => match.score > 0)
+			.sort(
+				(a, b) => b.score - a.score || b.item.importance - a.item.importance,
+			)
+			.map((match) => match.item);
+
+		return [...items, ...lexicalMatches];
 	}
 
 	async listRecent(limit: number): Promise<MemoryItem[]> {

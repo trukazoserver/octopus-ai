@@ -229,7 +229,8 @@ export const Select: React.FC<{
 	options: string[];
 	onChange: (v: string) => void;
 	description?: string;
-}> = ({ label, value, options, onChange, description }) => {
+	optionLabels?: Record<string, string>;
+}> = ({ label, value, options, onChange, description, optionLabels }) => {
 	const selectId = `select-${label.toLowerCase().replace(/\s+/g, "-")}`;
 	return (
 		<div style={{ marginBottom: "16px" }}>
@@ -289,7 +290,7 @@ export const Select: React.FC<{
 			>
 				{options.map((opt) => (
 					<option key={opt} value={opt}>
-						{opt}
+						{optionLabels?.[opt] ?? opt}
 					</option>
 				))}
 			</select>

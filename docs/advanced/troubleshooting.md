@@ -59,8 +59,8 @@ Cada ✗ indica un problema con sugerencia de corrección.
 
 **Windows:**
 ```bash
-# Opción 1: Via instalador automático
-node scripts/install.mjs
+# Opción 1: Via instalador interactivo
+pnpm run install:octopus
 
 # Opción 2: Instalar Build Tools manualmente
 winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
@@ -178,9 +178,9 @@ node packages/cli/dist/index.js config set ai.providers.zhipu.mode "coding-plan"
 
 **Solución:**
 ```bash
-node packages/cli/dist/index.js setup
+pnpm run install:octopus:skip-start
 # o
-node scripts/install.mjs
+node packages/cli/dist/index.js setup
 ```
 
 ---
@@ -307,25 +307,14 @@ docker compose -f docker/docker-compose.yml ps
 
 ---
 
-### Error: "pnpm start" falla dentro del contenedor
+### Error: `unhealthy` en Docker
 
-**Causa:** El `package.json` raíz no tiene un script `start`.
+**Causa:** El healthcheck no puede leer `http://127.0.0.1:18789/api/status` dentro del contenedor, normalmente por fallo de arranque, API/config inválida o puerto ocupado.
 
-**Solución:** Modifica el CMD en `docker/Dockerfile`:
-```dockerfile
-CMD ["node", "packages/cli/dist/index.js", "start"]
-```
-
----
-
-### Error: "Cannot find module" en Docker
-
-**Causa:** El proyecto no se compiló dentro del contenedor.
-
-**Solución:** Añade `RUN pnpm build` al Dockerfile:
-```dockerfile
-RUN pnpm install
-RUN pnpm build
+**Solución:**
+```bash
+docker compose -f docker/docker-compose.yml logs -f
+docker exec -it octopus-ai node packages/cli/dist/index.js doctor
 ```
 
 ---
@@ -342,6 +331,8 @@ lsof -i :18789
 # Windows
 netstat -ano | findstr :18789
 ```
+
+La URL correcta para Docker y servidor estable local es `http://localhost:18789`, no `3000` ni `5173`.
 
 ---
 
@@ -390,7 +381,7 @@ pnpm build
 
 Asegúrate de que el servidor Core esté corriendo:
 ```bash
-node packages/cli/dist/index.js start
+pnpm start
 ```
 
 El servidor debe estar en `http://127.0.0.1:18789`.
@@ -411,19 +402,21 @@ sudo dnf install -y gtk3 libnotify libXScrnSaver libXtst nss alsa-lib
 
 ## 🌐 Problemas con el Panel Web
 
-### "No se puede acceder a localhost:5173"
+### "No se puede acceder a 127.0.0.1:18789"
 
 ```bash
 # Verificar que el proceso está activo
 # Windows
-netstat -ano | findstr :5173
+netstat -ano | findstr :18789
 
 # macOS/Linux
-lsof -i :5173
+lsof -i :18789
 
 # Reiniciar
-pnpm dev
+pnpm start
 ```
+
+`localhost:3000` se usa solo para desarrollo del dashboard con `pnpm run start:web`. `localhost:5173` se usa para el renderer desktop/Vite.
 
 ---
 

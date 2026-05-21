@@ -10,16 +10,40 @@ services:
     container_name: octopus-ai
     restart: unless-stopped
     ports:
-      - "3000:3000"     # HTTP API / Health
+      - "18789:18789"   # Octopus Web UI / HTTP API / WebSocket
     volumes:
       - octopus-data:/data               # Persistent database + skills
       - ./workspace:/data/workspace       # SOUL.md, HEARTBEAT.md, etc.
     environment:
       NODE_ENV: production
+      CI: "true"
+      OCTOPUS_DOCKER: "true"
       OCTOPUS_DATA_DIR: /data
       OCTOPUS_DB_PATH: /data/db/octopus.db
       OCTOPUS_LOG_LEVEL: info
       OCTOPUS_DAEMON_MODE: "true"
+      OCTOPUS_API_KEY: ${OCTOPUS_API_KEY:-}
+      OCTOPUS_MEMORY_API_KEY: ${OCTOPUS_MEMORY_API_KEY:-}
+      OCTOPUS_ENCRYPTION_KEY: ${OCTOPUS_ENCRYPTION_KEY:-}
+      OCTOPUS_MEMORY_LOG_ENCRYPTION_KEY: ${OCTOPUS_MEMORY_LOG_ENCRYPTION_KEY:-}
+      OCTOPUS_POSTGRES_URL: ${OCTOPUS_POSTGRES_URL:-}
+      OCTOPUS_POSTGRES_SSL: ${OCTOPUS_POSTGRES_SSL:-false}
+      OCTOPUS_VECTOR_URL: ${OCTOPUS_VECTOR_URL:-}
+      OCTOPUS_VECTOR_API_KEY: ${OCTOPUS_VECTOR_API_KEY:-}
+      OCTOPUS_VECTOR_COLLECTION: ${OCTOPUS_VECTOR_COLLECTION:-}
+      OCTOPUS_VECTOR_DATABASE: ${OCTOPUS_VECTOR_DATABASE:-}
+      OCTOPUS_VECTOR_TIMEOUT_MS: ${OCTOPUS_VECTOR_TIMEOUT_MS:-}
+      OCTOPUS_VECTOR_MAX_RETRIES: ${OCTOPUS_VECTOR_MAX_RETRIES:-}
+      OCTOPUS_QDRANT_URL: ${OCTOPUS_QDRANT_URL:-}
+      OCTOPUS_QDRANT_API_KEY: ${OCTOPUS_QDRANT_API_KEY:-}
+      OCTOPUS_WEAVIATE_URL: ${OCTOPUS_WEAVIATE_URL:-}
+      OCTOPUS_WEAVIATE_API_KEY: ${OCTOPUS_WEAVIATE_API_KEY:-}
+      OCTOPUS_MILVUS_URL: ${OCTOPUS_MILVUS_URL:-}
+      OCTOPUS_MILVUS_API_KEY: ${OCTOPUS_MILVUS_API_KEY:-}
+      OCTOPUS_MILVUS_DATABASE: ${OCTOPUS_MILVUS_DATABASE:-}
+      OCTOPUS_PGVECTOR_URL: ${OCTOPUS_PGVECTOR_URL:-}
+      OCTOPUS_PGVECTOR_TABLE: ${OCTOPUS_PGVECTOR_TABLE:-}
+      OCTOPUS_PGVECTOR_SSL: ${OCTOPUS_PGVECTOR_SSL:-false}
       # --- AI Provider Keys (set in .env file) ---
       ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -31,7 +55,7 @@ services:
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:18789/api/status"]
       interval: 30s
       timeout: 10s
       start_period: 15s

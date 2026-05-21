@@ -18,7 +18,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
 	constructor(config: ProviderConfig) {
 		super({
 			...config,
-			baseUrl: "https://api.openai.com/v1",
+			baseUrl: config.baseUrl ?? "https://api.openai.com/v1",
 			prefix: "openai",
 		});
 	}

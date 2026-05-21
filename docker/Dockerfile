@@ -1,92 +1,81 @@
 # =============================================================================
-# Octopus AI — Production Dockerfile
-# Multi-stage build for optimized container size and security
+# Octopus AI - Production Dockerfile
+# Installs the full runtime stack inside the image with no interactive steps.
 # =============================================================================
 
-# Stage 1: Build
-# Install all dependencies, compile TypeScript, prune dev dependencies
-FROM node:22-alpine AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
-# Install build tools for native deps (better-sqlite3)
-RUN apk add --no-cache python3 make g++ git
+ENV CI=true \
+	OCTOPUS_DOCKER=true \
+	PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Full build/runtime prerequisites for native modules, media tools, browser tools,
+# and local automation in Docker. Docker images should be self-contained.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	ca-certificates \
+	chromium \
+	curl \
+	ffmpeg \
+	fonts-liberation \
+	g++ \
+	git \
+	make \
+	python3 \
+	python3-pip \
+	python3-venv \
+	&& rm -rf /var/lib/apt/lists/*
 
-# Copy workspace config
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json tsconfig.json turbo.json ./
+RUN corepack enable && corepack prepare pnpm@10.8.0 --activate
 
-# Copy all package.json files first (for better layer caching)
-COPY packages/core/package.json packages/core/
-COPY packages/cli/package.json packages/cli/
-COPY packages/web/package.json packages/web/
+COPY . .
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
-
-# Copy source code
-COPY packages/ packages/
-
-# Build everything
-RUN pnpm run build
-
-# Prune dev dependencies
-RUN pnpm prune --prod
+RUN pnpm install --frozen-lockfile && pnpm build && pnpm prune --prod
 
 # =============================================================================
-# Stage 2: Runtime
-# Minimal image with only production dependencies
+# Runtime
 # =============================================================================
-FROM node:22-alpine AS runtime
+
+FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 
-# Install runtime-only native dependencies
-RUN apk add --no-cache tini curl
+ENV NODE_ENV=production \
+	CI=true \
+	OCTOPUS_DOCKER=true \
+	OCTOPUS_DATA_DIR=/data \
+	OCTOPUS_DB_PATH=/data/db/octopus.db \
+	OCTOPUS_LOG_LEVEL=info \
+	PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+	CHROME_BIN=/usr/bin/chromium \
+	PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Create non-root user
-RUN addgroup -g 1001 octopus && \
-    adduser -D -u 1001 -G octopus octopus
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	ca-certificates \
+	chromium \
+	curl \
+	ffmpeg \
+	fonts-liberation \
+	python3 \
+	tini \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& groupadd -g 1001 octopus \
+	&& useradd -u 1001 -g octopus -m -s /usr/sbin/nologin octopus \
+	&& mkdir -p /data/db /data/skills /data/plugins /data/logs /data/workspace \
+	&& chown -R octopus:octopus /data /app
 
-# Copy production files from builder
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/packages/core/dist ./packages/core/dist
-COPY --from=builder /app/packages/core/package.json ./packages/core/
-COPY --from=builder /app/packages/cli/dist ./packages/cli/dist
-COPY --from=builder /app/packages/cli/package.json ./packages/cli/
-COPY --from=builder /app/packages/core/node_modules ./packages/core/node_modules
-COPY --from=builder /app/package.json ./
+COPY --from=builder --chown=octopus:octopus /app/package.json ./package.json
+COPY --from=builder --chown=octopus:octopus /app/node_modules ./node_modules
+COPY --from=builder --chown=octopus:octopus /app/packages ./packages
+COPY --from=builder --chown=octopus:octopus /app/docker/templates /data/workspace
 
-# Create data directories
-RUN mkdir -p /data/db /data/skills /data/logs /data/workspace && \
-    chown -R octopus:octopus /data
-
-# Copy SOUL.md templates
-COPY --chown=octopus:octopus docker/templates/ /data/workspace/
-
-# Switch to non-root user
 USER octopus
 
-# Environment
-ENV NODE_ENV=production
-ENV OCTOPUS_DATA_DIR=/data
-ENV OCTOPUS_DB_PATH=/data/db/octopus.db
-ENV OCTOPUS_LOG_LEVEL=info
-ENV OCTOPUS_DAEMON_MODE=true
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+	CMD curl -f http://127.0.0.1:18789/api/status || exit 1
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:3000/health || exit 1
+EXPOSE 18789
 
-# Expose ports
-# 3000 = HTTP API / Health
-# 5173 = Web Dashboard (if included)
-EXPOSE 3000
-
-# Use tini as init
-ENTRYPOINT ["/sbin/tini", "--"]
-
-# Start in daemon mode
-CMD ["node", "packages/cli/dist/index.js", "daemon"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "packages/cli/dist/index.js", "start", "--no-open", "--no-choice"]

@@ -42,7 +42,7 @@ Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para c
 - 🤖 **Automatización Autónoma:** Tareas programadas por cron, heartbeat proactivo evaluado por LLM y runtime listo para ejecución continua en segundo plano.
 - 🛠️ **Sistema de Tools Extensible:** Filesystem, shell, browser automation, media, sandbox Docker, delegación multi-agente y tools dinámicas creadas en tiempo real.
 - 🌐 **Multi-Canal:** Integra el mismo agente con Telegram, Discord, Slack, Teams, webchat y otros canales manteniendo memoria compartida.
-- 💻 **Interfaces Flexibles:** CLI, API HTTP/WebSocket, dashboard web en React y aplicación de escritorio con la misma base de runtime.
+- 💻 **Interfaces Flexibles:** CLI, API HTTP/WebSocket, dashboard web servido por el backend compilado, modo desarrollo React/Vite y aplicación de escritorio con la misma base de runtime.
 - 🔒 **Privacidad y Seguridad:** Compatibilidad con modelos locales, ejecución aislada para tareas sensibles y control fino del entorno de trabajo.
 
 ### Novedades de memoria avanzada
@@ -85,7 +85,7 @@ Octopus AI ofrece tres formas de interactuar:
 La forma más directa. Abre tu terminal y chatea con el asistente con toda la potencia de la memoria y las skills.
 
 ### Panel Web (Dashboard)
-Interfaz gráfica moderna en el navegador. Ideal para quienes prefieren no usar la terminal. Incluye chat, memoria, skills, tareas, automatizaciones, herramientas, variables y biblioteca multimedia. En desarrollo accede desde `http://localhost:5173`.
+Interfaz gráfica moderna en el navegador. Ideal para quienes prefieren no usar la terminal. Incluye chat, memoria, skills, tareas, automatizaciones, herramientas, variables y biblioteca multimedia. En instalación normal accede desde `http://127.0.0.1:18789`; en desarrollo frontend usa `http://localhost:3000`.
 
 ### Aplicación de Escritorio (Electron)
 App nativa para Windows, macOS y Linux. Experiencia de escritorio completa con todas las funcionalidades.
@@ -101,35 +101,54 @@ App nativa para Windows, macOS y Linux. Experiencia de escritorio completa con t
 | [Node.js](https://nodejs.org/) | >= 22 | Entorno de ejecución principal |
 | [pnpm](https://pnpm.io/) | >= 10 | Gestor de paquetes |
 | Python 3.x | >= 3.10 | Recomendado para herramientas y scripts auxiliares |
-| C++ Build Tools | — | Opcional para dependencias nativas de terceros; SQLite usa `sql.js` WASM |
+| C++ Build Tools | — | Recomendado para instalación completa y dependencias nativas |
+| Docker | Compose v2 | Opcional para despliegue Docker y sandbox aislado |
 
 > **Hardware recomendado:** 4 GB RAM, 2 GB almacenamiento libre.
 
-### Instalación Automática (Recomendada)
+### Instalación Interactiva (Recomendada)
 
 ```bash
 # 1. Clonar el repositorio
 git clone https://github.com/trukazoserver/octopus-ai.git
 cd octopus-ai
 
-# 2. Ejecutar el instalador
+# 2. Ejecutar el instalador interactivo
 pnpm run install:octopus
 ```
 
-El instalador hace todo por ti:
-1. Verifica Node.js, pnpm y Python
-2. Verifica herramientas del entorno si faltan
-3. Instala todas las dependencias
-4. Construye el proyecto completo
-5. Te guía para configurar tus API Keys
+El instalador hace todo por ti y cada paso opcional se puede saltar con Enter o `n`:
+1. Verifica Node.js, pnpm, Python, Build Tools y Docker.
+2. Instala solo las dependencias faltantes si aceptas o si usas modo automatico.
+3. Ejecuta `pnpm install` y `pnpm build` para compilar los 12 paquetes.
+4. Crea `~/.octopus/config.json`, `~/.octopus/data`, `~/.octopus/logs`, `~/.octopus/skills` y `~/.octopus/plugins`.
+5. Instala shims `octopus`/`octopus-ai` en `~/.octopus/bin`.
+6. Pregunta API keys, pero puedes saltarlas y configurarlas luego desde la web.
+7. Inicia Octopus en segundo plano y abre la web, salvo que uses `--no-start` o `--no-open`.
+
+Modos utiles:
+
+```bash
+# Instalacion automatica sin prompts
+pnpm run install:octopus:auto
+
+# Instalar todo pero no iniciar al final
+pnpm run install:octopus:skip-start
+
+# Modo manual equivalente
+pnpm run install:octopus -- --yes --no-open
+```
 
 > Guía completa: [Instalación paso a paso](docs/getting-started/installation.md)
 
 ### Uso Básico (CLI)
 
 ```bash
-# Iniciar el backend HTTP/WebSocket local
-node packages/cli/dist/index.js start
+# Iniciar el backend HTTP/WebSocket local y UI compilada
+pnpm start
+
+# Iniciar y abrir la web
+pnpm launch
 
 # Iniciar un chat interactivo con memoria
 node packages/cli/dist/index.js chat
@@ -149,11 +168,14 @@ node packages/cli/dist/index.js config set ai.providers.zhipu.apiKey "TU_KEY"
 Si prefieres usar Docker (ideal para servidores o si no quieres instalar dependencias):
 
 ```bash
-# Construir e iniciar
+# Construir e iniciar con scripts del repositorio
+pnpm run docker:up
+
+# Equivalente directo
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-El despliegue incluido levanta un servicio `octopus`, expone la API y el *healthcheck* en `http://localhost:3000`, persiste datos en `/data` y aprovisiona plantillas base (`SOUL.md` y `HEARTBEAT.md`) en el workspace del contenedor.
+El despliegue incluido levanta un servicio `octopus`, expone UI/API/WebSocket y healthcheck en `http://localhost:18789`, persiste datos en `/data` y aprovisiona plantillas base (`SOUL.md` y `HEARTBEAT.md`) en el workspace del contenedor. La imagen Docker instala el runtime completo dentro del contenedor: Node 22, pnpm, Python, build tools, Chromium, ffmpeg, fonts y dependencias de producción.
 
 > Guía completa: [Docker](docs/getting-started/docker.md)
 

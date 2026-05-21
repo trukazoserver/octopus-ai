@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { ZhipuProvider } from "../ai/providers/zhipu.js";
+import type { ZhipuApiMode } from "../ai/providers/zhipu.js";
 import { LLMRouter } from "../ai/router.js";
 import type { LLMRequest } from "../ai/types.js";
 
-const ZAI_API_KEY = process.env.ZAI_API_KEY || process.env.ZHIPU_API_KEY || "";
+const ZAI_API_KEY =
+	process.env.ZAI_CODING_API_KEY ||
+	process.env.ZHIPU_CODING_API_KEY ||
+	process.env.ZAI_API_KEY ||
+	process.env.ZHIPU_API_KEY ||
+	"";
+const ZAI_MODE: ZhipuApiMode = process.env.ZAI_CODING_API_KEY
+	? "coding-global"
+	: process.env.ZHIPU_CODING_API_KEY
+		? "coding-plan"
+		: process.env.ZAI_API_KEY
+			? "global"
+			: "api";
 const hasApiKey = ZAI_API_KEY.length > 0;
 
 function handleQuotaError(err: unknown, label: string): void {
@@ -23,7 +36,7 @@ function handleQuotaError(err: unknown, label: string): void {
 describe.skipIf(!hasApiKey)("Reasoning - ZhipuProvider directo", () => {
 	const provider = new ZhipuProvider({
 		apiKey: ZAI_API_KEY,
-		mode: "coding-plan",
+		mode: ZAI_MODE,
 	});
 
 	it("debe separar reasoning_content como thinking cuando hay contenido", async () => {
@@ -62,10 +75,10 @@ describe.skipIf(!hasApiKey)("Reasoning - ZhipuProvider directo", () => {
 				messages: [
 					{
 						role: "user",
-						content: "Explica por qué el cielo es azul, paso a paso.",
+						content: "Explica brevemente por qué el cielo es azul.",
 					},
 				],
-				maxTokens: 800,
+				maxTokens: 300,
 				reasoning: { effort: "medium", includeThinking: true },
 			})) {
 				if (chunk.content) contentChunks.push(chunk.content);
@@ -86,7 +99,7 @@ describe.skipIf(!hasApiKey)("Reasoning - ZhipuProvider directo", () => {
 		} catch (err) {
 			handleQuotaError(err, "zhipu-stream");
 		}
-	}, 60000);
+	}, 90000);
 });
 
 describe.skipIf(!hasApiKey)(
@@ -96,7 +109,7 @@ describe.skipIf(!hasApiKey)(
 			const router = new LLMRouter({
 				default: "zhipu",
 				providers: {
-					zhipu: { apiKey: ZAI_API_KEY, mode: "coding-plan" },
+					zhipu: { apiKey: ZAI_API_KEY, mode: ZAI_MODE },
 				},
 				thinking: "high",
 			});
@@ -132,7 +145,7 @@ describe.skipIf(!hasApiKey)(
 			const router = new LLMRouter({
 				default: "zhipu",
 				providers: {
-					zhipu: { apiKey: ZAI_API_KEY, mode: "coding-plan" },
+					zhipu: { apiKey: ZAI_API_KEY, mode: ZAI_MODE },
 				},
 				thinking: "medium",
 			});
@@ -175,7 +188,7 @@ describe.skipIf(!hasApiKey)(
 describe.skipIf(!hasApiKey)("Reasoning - sin reasoning (effort=none)", () => {
 	const provider = new ZhipuProvider({
 		apiKey: ZAI_API_KEY,
-		mode: "coding-plan",
+		mode: ZAI_MODE,
 	});
 
 	it("debe funcionar normalmente sin reasoning", async () => {
@@ -206,7 +219,7 @@ describe.skipIf(!hasApiKey)(
 	() => {
 		const provider = new ZhipuProvider({
 			apiKey: ZAI_API_KEY,
-			mode: "coding-plan",
+			mode: ZAI_MODE,
 		});
 
 		it("debe aceptar reasoning directo en el request", async () => {

@@ -45,6 +45,33 @@ La STM es la memoria "activa" — lo que la IA tiene fresco en su ventana de con
 - Incluye un "bloc de notas" de 2048 tokens donde la IA puede hacer cálculos y razonamientos
 - La evicción automática está siempre activa por defecto
 
+### Rolling Context y recuperación de agujas
+
+Además de la STM tradicional, `RollingContextManager` protege conversaciones largas contra pérdida de contexto:
+
+- Usa la ventana real del modelo activo, no un número fijo.
+- Cuando el contexto llega al 80% de la ventana del modelo, resume la parte antigua.
+- Conserva los últimos 20 turnos crudos sin resumir.
+- El resumen acumulado se condensa cuando crece demasiado.
+- Preserva tool outcomes, rutas, URLs, media IDs, comandos, errores y decisiones.
+- Incluye una sección obligatoria `[Retrieval Hints]`.
+
+`[Retrieval Hints]` funciona como mapa para buscar una aguja en un pajar. Contiene cadenas exactas como nombres de archivo, rutas, URLs, fragmentos de error, comandos, media IDs, frases del usuario y referencias `segment-message #NNN`.
+
+Si el agente necesita un detalle exacto que no aparece en el resumen, debe usar la tool interna `recall_conversation` antes de adivinar. Esa tool busca en los mensajes crudos guardados de la conversación actual o, si se pide, en todas las conversaciones guardadas.
+
+Ejemplos de búsqueda que el resumen puede sugerir:
+
+```text
+[Retrieval Hints]
+- path: "packages/core/src/agent/runtime.ts" near segment-message #014
+- error: "EPERM: operation not permitted" near segment-message #021
+- user-phrase: "mata procesos viejos y reinicia todo" near segment-message #033
+- media: "/api/media/file/..." near segment-message #041
+```
+
+Esto permite recuperar datos específicos aunque hayan quedado fuera del resumen denso.
+
 ---
 
 ## Memoria a Largo Plazo (LTM - Long-Term Memory)

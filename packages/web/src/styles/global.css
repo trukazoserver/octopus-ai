@@ -5,7 +5,6 @@
 	position: relative;
 }
 
-[data-tooltip]::before,
 [data-tooltip]::after {
 	position: fixed;
 	left: var(--tooltip-x, 50vw);
@@ -14,16 +13,6 @@
 	opacity: 0;
 	z-index: 3000;
 	transition: opacity 0.16s ease, transform 0.16s ease;
-}
-
-[data-tooltip]::before {
-	content: "";
-	width: 10px;
-	height: 10px;
-	background: rgba(9, 9, 11, 0.96);
-	border-right: 1px solid rgba(255, 255, 255, 0.14);
-	border-bottom: 1px solid rgba(255, 255, 255, 0.14);
-	transform: translate(-50%, -14px) rotate(45deg) scale(0.9);
 }
 
 [data-tooltip]::after {
@@ -44,12 +33,9 @@
 	transform: translate(-50%, calc(-100% - 16px)) scale(0.96);
 }
 
-[data-tooltip]:hover::before,
 [data-tooltip]:hover::after,
-[data-tooltip]:focus-visible::before,
 [data-tooltip]:focus-visible::after {
 	opacity: 1;
-	transform: translate(-50%, -12px) rotate(45deg) scale(1);
 }
 
 [data-tooltip]:hover::after,

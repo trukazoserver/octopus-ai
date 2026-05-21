@@ -35,14 +35,18 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		providers: {
 			anthropic: {
 				apiKey: "",
+				baseUrl: "https://api.anthropic.com/v1",
 				models: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
 			},
 			openai: {
 				apiKey: "",
+				baseUrl: "https://api.openai.com/v1",
+				authMode: "api-key",
 				models: ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
 			},
 			google: {
 				apiKey: "",
+				authMode: "api-key",
 				models: ["gemini-2.5-pro", "gemini-2.5-flash"],
 			},
 			zhipu: {
@@ -52,21 +56,31 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			},
 			openrouter: {
 				apiKey: "",
+				baseUrl: "https://openrouter.ai/api/v1",
+				models: [
+					"openai/gpt-4.1",
+					"anthropic/claude-sonnet-4-6",
+					"google/gemini-2.5-pro",
+				],
 			},
 			deepseek: {
 				apiKey: "",
+				baseUrl: "https://api.deepseek.com",
 				models: ["deepseek-chat", "deepseek-reasoner"],
 			},
 			mistral: {
 				apiKey: "",
+				baseUrl: "https://api.mistral.ai/v1",
 				models: ["mistral-large-3", "mistral-small-4", "codestral-25-08"],
 			},
 			xai: {
 				apiKey: "",
+				baseUrl: "https://api.x.ai/v1",
 				models: ["grok-4.20-0309-reasoning", "grok-4-1-fast-reasoning"],
 			},
 			cohere: {
 				apiKey: "",
+				baseUrl: "https://api.cohere.com/v2",
 				models: ["command-a-03-2025", "command-a-vision-07-2025"],
 			},
 			local: {
@@ -105,6 +119,14 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		},
 		longTerm: {
 			backend: "sqlite-vss",
+			vectorStore: {
+				url: "",
+				apiKey: "",
+				collection: "octopus_memory",
+				timeoutMs: 10000,
+				maxRetries: 2,
+				retryBaseDelayMs: 100,
+			},
 			importanceThreshold: 0.5,
 			maxItems: 100000,
 			episodic: {
@@ -141,6 +163,29 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 				recency: 0.3,
 				frequency: 0.2,
 			},
+		},
+		embeddings: {
+			enabled: false,
+			provider: "auto",
+			apiType: "openai",
+			model: "",
+			baseUrl: "",
+			apiKey: "",
+			apiKeyEnv: "",
+			credentialsJson: "",
+			task: "document",
+			dimensions: 1024,
+			maxBatchSize: 32,
+			maxTextLength: 8000,
+			cacheSize: 500,
+			failureRetryMs: 60000,
+		},
+		retention: {
+			enabled: false,
+			cron: "30 3 * * *",
+			unusedDays: 90,
+			lowImportanceThreshold: 0.25,
+			contradictionGraceDays: 14,
 		},
 	},
 	skills: {
@@ -196,9 +241,12 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 	storage: {
 		backend: "sqlite",
 		path: "~/.octopus/data/octopus.db",
+		connectionString: "",
+		ssl: false,
 	},
 	security: {
 		encryptionKey: "",
+		memoryApiKey: "",
 		allowedPaths: ["~/Documents", "~/Desktop"],
 		sandboxCommands: true,
 	},

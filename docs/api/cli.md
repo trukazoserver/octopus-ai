@@ -12,6 +12,8 @@
 node packages/cli/dist/index.js [comando] [opciones]
 ```
 
+Después de ejecutar `pnpm run install:octopus`, también puedes usar los shims globales `octopus` y `octopus-ai` desde una terminal nueva. Los scripts raíz `pnpm start`, `pnpm launch` y `pnpm start:console` usan el CLI compilado local y no dependen del PATH global.
+
 ---
 
 ## Comandos Disponibles
@@ -46,17 +48,24 @@ node packages/cli/dist/index.js start [opciones]
 | Opción | Descripción |
 |---|---|
 | `--channel <name>` | Inicia solo un canal específico además del servidor |
+| `--open` | Abre la interfaz web después de iniciar |
+| `--no-open` | No abre navegador |
+| `--console` | Entra al chat TUI tras iniciar |
+| `--no-choice` | No muestra selector interactivo de modo |
 
 **Ejemplos:**
 ```bash
-# Iniciar con la configuración actual
-node packages/cli/dist/index.js start
+# Iniciar con la configuración actual usando script raíz
+pnpm start
+
+# Iniciar y abrir la web
+pnpm launch
 
 # Iniciar solo Telegram además de la API
 node packages/cli/dist/index.js start --channel telegram
 
 # Cambiar puerto y host desde la configuración antes de arrancar
-node packages/cli/dist/index.js config set server.port 3000
+node packages/cli/dist/index.js config set server.port 18789
 node packages/cli/dist/index.js config set server.host "0.0.0.0"
 node packages/cli/dist/index.js start
 ```
@@ -64,6 +73,7 @@ node packages/cli/dist/index.js start
 **Expone además:**
 
 - `GET /health` y `GET /api/health`
+- `GET /api/status`
 - API administrativa para memoria, skills, tools, tareas, agentes y canales
 - streaming WebSocket usado por el dashboard
 

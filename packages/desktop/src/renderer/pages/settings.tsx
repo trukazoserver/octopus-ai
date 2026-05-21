@@ -4,7 +4,7 @@ import {
 } from "@octopus-ai/core/mascots/index";
 import type React from "react";
 import { useCallback, useState } from "react";
-import { apiGet, apiPut } from "../hooks/useApi.js";
+import { apiGet, apiPost, apiPut } from "../hooks/useApi.js";
 
 interface ConfigData {
 	ai?: {
@@ -21,6 +21,19 @@ interface ConfigData {
 		enabled?: boolean;
 		shortTerm?: Record<string, unknown>;
 		longTerm?: Record<string, unknown>;
+		embeddings?: {
+			enabled?: boolean;
+			provider?: string;
+			apiType?: string;
+			authMode?: string;
+			model?: string;
+			apiKeyEnv?: string;
+			accessTokenEnv?: string;
+			credentialsFile?: string;
+			projectId?: string;
+			location?: string;
+			dimensions?: number;
+		};
 	};
 	skills?: {
 		enabled?: boolean;
@@ -106,6 +119,7 @@ export const Settings: React.FC = () => {
 	const [config, setConfig] = useState<ConfigData | null>(null);
 	const [loading, setLoading] = useState(false);
 	const [saving, setSaving] = useState(false);
+	const [applyingEmbeddings, setApplyingEmbeddings] = useState(false);
 	const [message, setMessage] = useState<string | null>(null);
 
 	const loadConfig = useCallback(async () => {
@@ -134,6 +148,20 @@ export const Settings: React.FC = () => {
 			setMessage(`Failed to save ${key}`);
 		} finally {
 			setSaving(false);
+		}
+	}, []);
+
+	const applyEmbeddings = useCallback(async () => {
+		setApplyingEmbeddings(true);
+		setMessage(null);
+		try {
+			await apiPost("/api/config/apply/embeddings");
+			setMessage("Embeddings saved and applied without restart");
+			setTimeout(() => setMessage(null), 3000);
+		} catch {
+			setMessage("Failed to apply embeddings");
+		} finally {
+			setApplyingEmbeddings(false);
 		}
 	}, []);
 
@@ -170,6 +198,9 @@ export const Settings: React.FC = () => {
 	}
 
 	const selectedMascot = getMascotById(config.mascots?.defaultId);
+	const embeddings = config.memory?.embeddings ?? {};
+	const embeddingProvider = embeddings.provider ?? "auto";
+	const embeddingAuthMode = embeddings.authMode ?? "api-key";
 
 	return (
 		<div
@@ -452,6 +483,210 @@ export const Settings: React.FC = () => {
 						/>
 						Memory Enabled
 					</label>
+					<div
+						style={{
+							marginTop: "12px",
+							padding: "14px",
+							backgroundColor: "#0f1117",
+							borderRadius: "8px",
+							border: "1px solid #27272a",
+						}}
+					>
+						<h4 style={{ margin: "0 0 12px 0", fontSize: "14px" }}>
+							Advanced Embeddings
+						</h4>
+						<label
+							style={{
+								display: "flex",
+								alignItems: "center",
+								gap: "8px",
+								fontSize: "14px",
+								marginBottom: "12px",
+							}}
+						>
+							<input
+								type="checkbox"
+								defaultChecked={embeddings.enabled ?? false}
+								onChange={(e) =>
+									saveConfig("memory.embeddings.enabled", e.target.checked)
+								}
+							/>
+							Enable real semantic embeddings
+						</label>
+						<div
+							style={{
+								display: "grid",
+								gridTemplateColumns: "1fr 1fr",
+								gap: "12px",
+							}}
+						>
+							<div>
+								<span style={labelStyle}>Provider</span>
+								<select
+									defaultValue={embeddingProvider}
+									onChange={(e) => {
+										const nextProvider = e.target.value;
+										void saveConfig("memory.embeddings.provider", nextProvider);
+										void saveConfig(
+											"memory.embeddings.apiType",
+											nextProvider === "google" ? "google" : "openai",
+										);
+										if (nextProvider === "google") {
+											void saveConfig(
+												"memory.embeddings.model",
+												"gemini-embedding-2",
+											);
+											void saveConfig("memory.embeddings.dimensions", 768);
+										} else if (nextProvider === "openai") {
+											void saveConfig(
+												"memory.embeddings.model",
+												"text-embedding-3-small",
+											);
+											void saveConfig("memory.embeddings.dimensions", 1536);
+										}
+									}}
+									style={inputStyle}
+								>
+									<option value="auto">Auto</option>
+									<option value="openai">OpenAI</option>
+									<option value="google">Google Gemini</option>
+								</select>
+							</div>
+							{embeddingProvider === "google" && (
+								<div>
+									<span style={labelStyle}>Google Auth</span>
+									<select
+										defaultValue={embeddingAuthMode}
+										onChange={(e) =>
+											saveConfig("memory.embeddings.authMode", e.target.value)
+										}
+										style={inputStyle}
+									>
+										<option value="api-key">Gemini API Key</option>
+										<option value="vertex">Vertex AI</option>
+									</select>
+								</div>
+							)}
+							<div>
+								<span style={labelStyle}>Model</span>
+								<input
+									type="text"
+									defaultValue={
+										embeddings.model ||
+										(embeddingProvider === "google"
+											? "gemini-embedding-2"
+											: "text-embedding-3-small")
+									}
+									onBlur={(e) =>
+										saveConfig("memory.embeddings.model", e.target.value)
+									}
+									style={inputStyle}
+								/>
+							</div>
+							<div>
+								<span style={labelStyle}>Dimensions</span>
+								<input
+									type="number"
+									defaultValue={
+										embeddings.dimensions ??
+										(embeddingProvider === "google" ? 768 : 1536)
+									}
+									onBlur={(e) =>
+										saveConfig(
+											"memory.embeddings.dimensions",
+											Number(e.target.value),
+										)
+									}
+									style={inputStyle}
+								/>
+							</div>
+							{embeddingProvider === "google" &&
+							embeddingAuthMode === "vertex" ? (
+								<>
+									<div>
+										<span style={labelStyle}>Project ID</span>
+										<input
+											type="text"
+											defaultValue={embeddings.projectId ?? ""}
+											onBlur={(e) =>
+												saveConfig(
+													"memory.embeddings.projectId",
+													e.target.value,
+												)
+											}
+											style={inputStyle}
+										/>
+									</div>
+									<div>
+										<span style={labelStyle}>Credentials File</span>
+										<input
+											type="text"
+											defaultValue={embeddings.credentialsFile ?? ""}
+											onBlur={(e) =>
+												saveConfig(
+													"memory.embeddings.credentialsFile",
+													e.target.value,
+												)
+											}
+											style={inputStyle}
+										/>
+									</div>
+								</>
+							) : (
+								<div>
+									<span style={labelStyle}>API Key Env</span>
+									<input
+										type="text"
+										defaultValue={
+											embeddings.apiKeyEnv ||
+											(embeddingProvider === "google"
+												? "GEMINI_API_KEY"
+												: "OPENAI_API_KEY")
+										}
+										onBlur={(e) =>
+											saveConfig("memory.embeddings.apiKeyEnv", e.target.value)
+										}
+										style={inputStyle}
+									/>
+								</div>
+							)}
+						</div>
+						<div
+							style={{
+								display: "flex",
+								gap: "8px",
+								alignItems: "center",
+								marginTop: "12px",
+							}}
+						>
+							<button
+								type="button"
+								disabled={applyingEmbeddings}
+								onClick={applyEmbeddings}
+								style={{
+									padding: "8px 12px",
+									borderRadius: "8px",
+									backgroundColor: "#3b82f6",
+									color: "#fff",
+									border: "none",
+									cursor: applyingEmbeddings ? "wait" : "pointer",
+									opacity: applyingEmbeddings ? 0.7 : 1,
+								}}
+							>
+								{applyingEmbeddings
+									? "Applying..."
+									: "Save and apply embeddings"}
+							</button>
+							<span style={{ color: "#71717a", fontSize: "12px" }}>
+								Refreshes only the embedding provider.
+							</span>
+						</div>
+						<p style={{ color: "#fbbf24", fontSize: "12px", lineHeight: 1.5 }}>
+							Embedding changes are saved automatically and can be applied
+							without restart. Reindex existing memories to avoid mixing hash
+							vectors or old embedding models.
+						</p>
+					</div>
 				</div>
 			</div>
 

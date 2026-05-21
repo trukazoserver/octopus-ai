@@ -36,17 +36,29 @@ El panel web es una interfaz gráfica para Octopus AI que se ejecuta en tu naveg
 
 ## 🚀 Iniciar el Panel Web
 
-### Método rápido (modo desarrollo)
+### Método estable (instalación normal)
 
 Desde la raíz del proyecto:
 
 ```bash
-pnpm dev
+pnpm start
 ```
 
-Esto inicia dos procesos simultáneamente:
-1. **Servidor Backend** (Core de Octopus AI) — Puerto 18789
-2. **Servidor Frontend** (Dashboard Web) — Puerto 5173
+Esto inicia el backend compilado, la API HTTP/WebSocket y la UI web desde `packages/web/dist` en un solo puerto: `18789`.
+
+Para iniciar y abrir el navegador automáticamente:
+
+```bash
+pnpm launch
+```
+
+### Método rápido (modo desarrollo frontend)
+
+```bash
+pnpm run start:web
+```
+
+Esto inicia solo Vite para el dashboard web en `http://localhost:3000`; requiere que el backend estable ya esté escuchando en `18789`.
 
 ### Método paso a paso
 
@@ -55,11 +67,10 @@ Esto inicia dos procesos simultáneamente:
 pnpm build
 
 # 2. Iniciar el servidor backend
-node packages/cli/dist/index.js start
+pnpm start
 
 # 3. En otra terminal, iniciar el frontend
-cd packages/web
-pnpm dev
+pnpm run start:web
 ```
 
 ---
@@ -70,8 +81,8 @@ Una vez iniciado, abre tu navegador y ve a:
 
 | URL | Descripción |
 |---|---|
-| `http://localhost:5173` | Panel web (interfaz de usuario) |
-| `http://localhost:18789` | API del servidor backend |
+| `http://127.0.0.1:18789` | Panel web estable + API + WebSocket |
+| `http://localhost:3000` | Panel web en desarrollo con Vite/HMR |
 
 > **Navegadores soportados:** Chrome, Firefox, Safari, Edge (cualquier versión reciente).
 
@@ -176,7 +187,7 @@ Si quieres acceder al panel web desde otro dispositivo (por ejemplo, tu móvil):
    hostname -I
    ```
 
-3. Accede desde otro dispositivo: `http://TU_IP:5173`
+3. Accede desde otro dispositivo: `http://TU_IP:18789`
 
 ### Con túnel (acceso desde cualquier lugar)
 
@@ -184,24 +195,27 @@ Puedes usar servicios como ngrok o Cloudflare Tunnel para exponer tu panel web t
 
 ```bash
 # Ejemplo con ngrok
-ngrok http 5173
+ngrok http 18789
 ```
 
 ---
 
 ## 🔧 Solución de Problemas
 
-### "No se puede acceder a localhost:5173"
+### "No se puede acceder a 127.0.0.1:18789"
 
-Verifica que el frontend está corriendo:
+Verifica que el backend estable está corriendo:
 ```bash
-# ¿Está el proceso activo?
+pnpm start
+
 # Windows
-netstat -ano | findstr :5173
+netstat -ano | findstr :18789
 
 # macOS/Linux
-lsof -i :5173
+lsof -i :18789
 ```
+
+Si estás trabajando en desarrollo frontend y falla `localhost:3000`, verifica `pnpm run start:web`.
 
 ### El chat no responde
 

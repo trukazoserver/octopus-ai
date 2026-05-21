@@ -60,10 +60,13 @@ export class ZhipuProvider extends BaseLLMProvider {
 		DEFAULT_STREAM_READ_TIMEOUT_MS,
 	);
 
-	constructor(config: ProviderConfig & { mode?: ZhipuApiMode }) {
+	constructor(config: ProviderConfig & { mode?: string }) {
 		super(config);
-		this.mode = config.mode ?? "coding-plan";
-		this.baseUrl = ZHIPU_ENDPOINTS[this.mode];
+		this.mode = isZhipuApiMode(config.mode) ? config.mode : "coding-plan";
+		this.baseUrl = (config.baseUrl ?? ZHIPU_ENDPOINTS[this.mode]).replace(
+			/\/+$/,
+			"",
+		);
 	}
 
 	private mapModel(model: string): string {
@@ -317,4 +320,13 @@ export class ZhipuProvider extends BaseLLMProvider {
 	getBaseUrl(): string {
 		return this.baseUrl;
 	}
+}
+
+function isZhipuApiMode(value: string | undefined): value is ZhipuApiMode {
+	return (
+		value === "api" ||
+		value === "coding-plan" ||
+		value === "coding-global" ||
+		value === "global"
+	);
 }

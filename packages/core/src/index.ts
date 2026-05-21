@@ -119,9 +119,12 @@ export {
 	ContextAssembler,
 	MemoryIntegrityLayer,
 	MemoryOrchestrator,
+	MemoryRetentionScheduler,
 	ProactiveMemoryScanner,
 	UncertaintyEstimator,
 	SqliteVectorStore,
+	ExternalVectorStore,
+	PgVectorStore,
 	createVectorStore,
 	FTSSearchEngine,
 	UserProfileManager,
@@ -137,6 +140,10 @@ export type {
 	MemoryContext,
 	ScoredMemory,
 	VectorSearchResult,
+	ExternalVectorBackend,
+	ExternalVectorStoreConfig,
+	PgVectorStoreConfig,
+	VectorStoreFactoryOptions,
 	EmbeddingFunction,
 	FTSSearchConfig,
 	FTSResult,
@@ -148,6 +155,28 @@ export type {
 	WorkingState,
 	CondensationCallback,
 	MemorySourceTrustLevel,
+	MemoryRelationType,
+	MemorySensitivity,
+	MemoryPermissions,
+	MemorySource,
+	MemoryVerification,
+	MemoryVerificationReport,
+	MemoryVerificationStatus,
+	MemoryGraphNode,
+	MemoryGraphRelation,
+	MemoryGraphPath,
+	MemoryGraphTraversalOptions,
+	MemoryGraphSnapshot,
+	MemoryAuditEntry,
+	MemoryActionLogEntry,
+	MemoryBackfillReport,
+	MemoryAuditIntegrityReport,
+	MemoryLogIntegrityResult,
+	MemoryRetentionRunner,
+	MemoryRetentionScheduleConfig,
+	MemoryRetentionSchedulerLike,
+	MemoryRetentionSchedulerLogger,
+	RetrievalSignals,
 	MemoryStatus,
 	MemoryUncertaintyLevel,
 	MemoryScope,
@@ -247,7 +276,11 @@ export {
 } from "./transport/index.js";
 export type { ProtocolMessage } from "./transport/index.js";
 
-export { createDatabaseAdapter, SqliteDatabase } from "./storage/index.js";
+export {
+	createDatabaseAdapter,
+	PostgresDatabase,
+	SqliteDatabase,
+} from "./storage/index.js";
 export type { DatabaseAdapter } from "./storage/index.js";
 
 export { TTSEngine } from "./voice/tts.js";

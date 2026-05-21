@@ -1,0 +1,129 @@
+# Local integration dependencies for live memory/storage tests.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: octopus-integration-postgres
+    restart: unless-stopped
+    ports:
+      - "${OCTOPUS_INTEGRATION_POSTGRES_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: ${OCTOPUS_INTEGRATION_POSTGRES_USER:-octopus}
+      POSTGRES_PASSWORD: ${OCTOPUS_INTEGRATION_POSTGRES_PASSWORD:-octopus}
+      POSTGRES_DB: ${OCTOPUS_INTEGRATION_POSTGRES_DB:-octopus_test}
+    volumes:
+      - octopus-integration-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${OCTOPUS_INTEGRATION_POSTGRES_USER:-octopus} -d ${OCTOPUS_INTEGRATION_POSTGRES_DB:-octopus_test}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.6
+    container_name: octopus-integration-qdrant
+    restart: unless-stopped
+    ports:
+      - "${OCTOPUS_INTEGRATION_QDRANT_PORT:-6333}:6333"
+    volumes:
+      - octopus-integration-qdrant:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.26.6
+    container_name: octopus-integration-weaviate
+    restart: unless-stopped
+    ports:
+      - "${OCTOPUS_INTEGRATION_WEAVIATE_PORT:-8080}:8080"
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      AUTHORIZATION_ADMINLIST_ENABLED: "false"
+      CLUSTER_HOSTNAME: node1
+      DEFAULT_VECTORIZER_MODULE: none
+      ENABLE_MODULES: ""
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      QUERY_DEFAULTS_LIMIT: 25
+    volumes:
+      - octopus-integration-weaviate:/var/lib/weaviate
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q --spider http://127.0.0.1:8080/v1/.well-known/ready || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  minio:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: octopus-integration-minio
+    restart: unless-stopped
+    command: minio server /minio_data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${OCTOPUS_INTEGRATION_MINIO_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${OCTOPUS_INTEGRATION_MINIO_PASSWORD:-minioadmin}
+    volumes:
+      - octopus-integration-minio:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    container_name: octopus-integration-etcd
+    restart: unless-stopped
+    command: >
+      etcd
+      -advertise-client-urls=http://127.0.0.1:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    volumes:
+      - octopus-integration-etcd:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: octopus-integration-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "${OCTOPUS_INTEGRATION_MILVUS_PORT:-9091}:9091"
+      - "${OCTOPUS_INTEGRATION_MILVUS_GRPC_PORT:-19530}:19530"
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - octopus-integration-milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  octopus-integration-postgres:
+  octopus-integration-qdrant:
+  octopus-integration-weaviate:
+  octopus-integration-minio:
+  octopus-integration-etcd:
+  octopus-integration-milvus:

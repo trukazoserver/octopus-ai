@@ -8,6 +8,10 @@ import type {
 import { BaseLLMProvider } from "./base.js";
 
 export class CohereProvider extends BaseLLMProvider {
+	private baseUrl = (
+		this.config.baseUrl ?? "https://api.cohere.com/v2"
+	).replace(/\/+$/, "");
+
 	private mapModel(model: string): string {
 		return model.replace(/^cohere\//, "");
 	}
@@ -58,7 +62,7 @@ export class CohereProvider extends BaseLLMProvider {
 			}));
 		}
 
-		const response = await fetch("https://api.cohere.com/v2/chat", {
+		const response = await fetch(`${this.baseUrl}/chat`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -144,7 +148,7 @@ export class CohereProvider extends BaseLLMProvider {
 			stream: true,
 		};
 
-		const response = await fetch("https://api.cohere.com/v2/chat", {
+		const response = await fetch(`${this.baseUrl}/chat`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",

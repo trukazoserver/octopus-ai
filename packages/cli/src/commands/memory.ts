@@ -1,7 +1,10 @@
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { expandTildePath } from "@octopus-ai/core";
+import {
+	ConfigLoader,
+	type MemoryCandidate,
+	expandTildePath,
+} from "@octopus-ai/core";
 import chalk from "chalk";
 import { Command } from "commander";
 import { bootstrap } from "../bootstrap.js";
@@ -18,8 +21,6 @@ export function createMemoryCommand(): Command {
 			try {
 				const expanded = expandTildePath(inputPath);
 				const stat = fs.statSync(expanded);
-
-				const system = await bootstrap();
 				const filePaths: string[] = [];
 
 				if (stat.isFile()) {
@@ -36,31 +37,26 @@ export function createMemoryCommand(): Command {
 
 				console.log(chalk.cyan(`Indexing ${filePaths.length} file(s)...`));
 
+				const serverUrl = await getActiveMemoryServerUrl();
 				let indexed = 0;
-				for (const filePath of filePaths) {
+				if (serverUrl) {
+					indexed = await indexMemoryFiles(filePaths, async (payload) => {
+						const response = await postJson<MemoryCreateResponse>(
+							`${serverUrl}/api/memory/create`,
+							payload,
+						);
+						return response.ok || response.result?.accepted === true;
+					});
+				} else {
+					const system = await bootstrap();
 					try {
-						const content = fs.readFileSync(filePath, "utf-8");
-						if (content.trim().length === 0) continue;
-
-						const chunks = splitIntoChunks(content, 1000);
-						for (const chunk of chunks) {
-							const embedding = await system.embedFn(chunk);
-							await system.ltm.store({
-								id: crypto.randomUUID(),
-								type: "semantic",
-								content: `Source: ${path.basename(filePath)}\n${chunk}`,
-								embedding,
-								importance: 0.5,
-								accessCount: 0,
-								lastAccessed: new Date(),
-								createdAt: new Date(),
-								associations: [],
-								source: {},
-								metadata: { filePath, fileName: path.basename(filePath) },
-							});
-							indexed++;
-						}
-					} catch {}
+						indexed = await indexMemoryFiles(filePaths, async (payload) => {
+							const write = await system.memoryOrchestrator.write(payload);
+							return write.accepted;
+						});
+					} finally {
+						await system.shutdown();
+					}
 				}
 
 				console.log(
@@ -68,7 +64,6 @@ export function createMemoryCommand(): Command {
 						`✓ Indexed ${indexed} chunk(s) from ${filePaths.length} file(s)`,
 					),
 				);
-				await system.shutdown();
 			} catch (err) {
 				console.error(
 					chalk.red("Error:"),
@@ -83,26 +78,41 @@ export function createMemoryCommand(): Command {
 		.description("Search memory for relevant content")
 		.action(async (query: string) => {
 			try {
-				const system = await bootstrap();
-				const items = await system.ltm.search(query, system.embedFn, {});
-
-				if (items.length === 0) {
-					console.log(chalk.yellow("No results found"));
-				} else {
-					console.log(chalk.cyan(`Found ${items.length} result(s):\n`));
-					for (const item of items) {
-						console.log(
-							chalk.white(`  [${item.type}] ${item.content.slice(0, 120)}`),
-						);
-						console.log(
-							chalk.gray(
-								`    Importance: ${item.importance.toFixed(2)} | Accessed: ${item.accessCount} times`,
-							),
-						);
-					}
+				const serverUrl = await getActiveMemoryServerUrl();
+				if (serverUrl) {
+					const response = await getJson<MemorySearchResponse>(
+						`${serverUrl}/api/memory/search?q=${encodeURIComponent(query)}`,
+					);
+					printSearchResults(extractMemoryItems(response.results));
+					return;
 				}
 
-				await system.shutdown();
+				const system = await bootstrap();
+				try {
+					const pack = await system.memoryOrchestrator.read(
+						query,
+						{
+							tenantId: "local",
+							userId: "owner",
+							projectId: process.cwd(),
+							agentRole: "cli-memory",
+						},
+						1500,
+					);
+					const itemById = new Map(
+						pack.memories.map((memory) => [memory.item.id, memory.item]),
+					);
+					for (const item of await system.ltm.search(
+						query,
+						system.embedFn,
+						{},
+					)) {
+						itemById.set(item.id, item);
+					}
+					printSearchResults(Array.from(itemById.values()).slice(0, 50));
+				} finally {
+					await system.shutdown();
+				}
 			} catch (err) {
 				console.error(
 					chalk.red("Error:"),
@@ -117,34 +127,33 @@ export function createMemoryCommand(): Command {
 		.description("Show memory statistics")
 		.action(async () => {
 			try {
+				const serverUrl = await getActiveMemoryServerUrl();
+				if (serverUrl) {
+					const stats = await getJson<MemoryStatsResponse>(
+						`${serverUrl}/api/memory/stats`,
+					);
+					printStats(stats);
+					return;
+				}
+
 				const system = await bootstrap();
-				const stmLoad = system.stm.getLoad();
-				const stmTurns = system.stm.getContext().length;
-				const ltmCount = await system.ltm.count();
-
-				const allItems = await system.ltm.search("", system.embedFn, {});
-				const typeCounts: Record<string, number> = {};
-				for (const item of allItems) {
-					typeCounts[item.type] = (typeCounts[item.type] ?? 0) + 1;
-				}
-
-				console.log(chalk.cyan.bold("\n📊 Memory Statistics\n"));
-				console.log(chalk.white("Short-Term Memory:"));
-				console.log(chalk.gray(`  Load:    ${stmLoad.toFixed(1)}%`));
-				console.log(chalk.gray(`  Turns:   ${stmTurns}`));
-				console.log();
-				console.log(chalk.white("Long-Term Memory:"));
-				console.log(chalk.gray(`  Total:   ${ltmCount} items`));
-
-				if (Object.keys(typeCounts).length > 0) {
-					console.log(chalk.gray("  Types:"));
-					for (const [type, count] of Object.entries(typeCounts)) {
-						console.log(chalk.gray(`    ${type}: ${count}`));
+				try {
+					const allItems = await system.ltm.listAll(5000);
+					const typeCounts: Record<string, number> = {};
+					for (const item of allItems) {
+						typeCounts[item.type] = (typeCounts[item.type] ?? 0) + 1;
 					}
+					printStats({
+						shortTerm: {
+							load: system.stm.getLoad(),
+							count: system.stm.getContext().length,
+						},
+						longTerm: { count: await system.ltm.count() },
+						localTypeCounts: typeCounts,
+					});
+				} finally {
+					await system.shutdown();
 				}
-
-				console.log();
-				await system.shutdown();
 			} catch (err) {
 				console.error(
 					chalk.red("Error:"),
@@ -186,27 +195,54 @@ export function createMemoryCommand(): Command {
 		.description("Remove memories matching a query")
 		.action(async (query: string) => {
 			try {
-				const system = await bootstrap();
-				const items = await system.ltm.search(query, system.embedFn, {});
-
-				if (items.length === 0) {
-					console.log(chalk.yellow("No matching memories found"));
-					await system.shutdown();
+				const serverUrl = await getActiveMemoryServerUrl();
+				if (serverUrl) {
+					const search = await getJson<MemorySearchResponse>(
+						`${serverUrl}/api/memory/search?q=${encodeURIComponent(query)}`,
+					);
+					const items = extractMemoryItems(search.results);
+					if (items.length === 0) {
+						console.log(chalk.yellow("No matching memories found"));
+						return;
+					}
+					console.log(
+						chalk.cyan(`Found ${items.length} matching item(s), removing...`),
+					);
+					let removed = 0;
+					for (const item of items) {
+						await postJson(`${serverUrl}/api/memory/forget`, {
+							memoryId: item.id,
+							reason: "cli_forget",
+						});
+						removed++;
+					}
+					console.log(chalk.green(`✓ Removed ${removed} item(s)`));
 					return;
 				}
 
-				console.log(
-					chalk.cyan(`Found ${items.length} matching item(s), removing...`),
-				);
+				const system = await bootstrap();
+				try {
+					const items = await system.ltm.search(query, system.embedFn, {});
 
-				let removed = 0;
-				for (const item of items) {
-					await system.ltm.forget(item.id);
-					removed++;
+					if (items.length === 0) {
+						console.log(chalk.yellow("No matching memories found"));
+						return;
+					}
+
+					console.log(
+						chalk.cyan(`Found ${items.length} matching item(s), removing...`),
+					);
+
+					let removed = 0;
+					for (const item of items) {
+						await system.memoryOrchestrator.forget(item.id, "cli_forget");
+						removed++;
+					}
+
+					console.log(chalk.green(`✓ Removed ${removed} item(s)`));
+				} finally {
+					await system.shutdown();
 				}
-
-				console.log(chalk.green(`✓ Removed ${removed} item(s)`));
-				await system.shutdown();
 			} catch (err) {
 				console.error(
 					chalk.red("Error:"),
@@ -221,24 +257,36 @@ export function createMemoryCommand(): Command {
 		.description("Export all memories as JSON to stdout")
 		.action(async () => {
 			try {
+				const serverUrl = await getActiveMemoryServerUrl();
+				if (serverUrl) {
+					const response = await getJson<{ memories?: unknown[] }>(
+						`${serverUrl}/api/memory/ltm/recent?limit=5000`,
+					);
+					console.log(JSON.stringify(response.memories ?? [], null, 2));
+					return;
+				}
+
 				const system = await bootstrap();
-				const items = await system.ltm.search("", system.embedFn, {});
+				try {
+					const items = await system.ltm.listAll(5000);
 
-				const exportData = items.map((item) => ({
-					id: item.id,
-					type: item.type,
-					content: item.content,
-					importance: item.importance,
-					accessCount: item.accessCount,
-					lastAccessed: item.lastAccessed.toISOString(),
-					createdAt: item.createdAt.toISOString(),
-					associations: item.associations,
-					source: item.source,
-					metadata: item.metadata,
-				}));
+					const exportData = items.map((item) => ({
+						id: item.id,
+						type: item.type,
+						content: item.content,
+						importance: item.importance,
+						accessCount: item.accessCount,
+						lastAccessed: item.lastAccessed.toISOString(),
+						createdAt: item.createdAt.toISOString(),
+						associations: item.associations,
+						source: item.source,
+						metadata: item.metadata,
+					}));
 
-				console.log(JSON.stringify(exportData, null, 2));
-				await system.shutdown();
+					console.log(JSON.stringify(exportData, null, 2));
+				} finally {
+					await system.shutdown();
+				}
 			} catch (err) {
 				console.error(
 					chalk.red("Error:"),
@@ -269,4 +317,229 @@ function splitIntoChunks(text: string, maxChunkSize: number): string[] {
 	}
 
 	return chunks;
+}
+
+type MemoryIndexPayload = MemoryCandidate;
+
+type MemoryCreateResponse = {
+	ok?: boolean;
+	result?: { accepted?: boolean };
+};
+
+type CliMemoryItem = {
+	id: string;
+	type: string;
+	content: string;
+	importance?: number;
+	accessCount?: number;
+};
+
+type MemorySearchResponse = {
+	results?: unknown[];
+};
+
+type MemoryStatsResponse = {
+	shortTerm?: { load?: number; count?: number };
+	longTerm?: { count?: number };
+	localTypeCounts?: Record<string, number>;
+};
+
+async function getActiveMemoryServerUrl(): Promise<string | null> {
+	try {
+		const config = new ConfigLoader().load();
+		const host =
+			config.server.host === "0.0.0.0" || config.server.host === "::"
+				? "127.0.0.1"
+				: config.server.host;
+		const serverUrl = `http://${host}:${config.server.port}`;
+		const response = await fetch(`${serverUrl}/api/status`, {
+			signal: AbortSignal.timeout(1200),
+		});
+		if (!response.ok) return null;
+		const status = (await response.json()) as { status?: string };
+		return status.status === "running" ? serverUrl : null;
+	} catch {
+		return null;
+	}
+}
+
+async function getJson<T>(url: string): Promise<T> {
+	const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+	const text = await response.text();
+	if (!response.ok) {
+		throw new Error(`Server request failed ${response.status}: ${text}`);
+	}
+	return JSON.parse(text) as T;
+}
+
+async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
+	const response = await fetch(url, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+		signal: AbortSignal.timeout(15000),
+	});
+	const text = await response.text();
+	if (!response.ok) {
+		throw new Error(`Server request failed ${response.status}: ${text}`);
+	}
+	return JSON.parse(text) as T;
+}
+
+async function indexMemoryFiles(
+	filePaths: string[],
+	write: (payload: MemoryIndexPayload) => Promise<boolean>,
+): Promise<number> {
+	let indexed = 0;
+	for (const filePath of filePaths) {
+		try {
+			const content = fs.readFileSync(filePath, "utf-8");
+			if (content.trim().length === 0) continue;
+			const fileStat = fs.statSync(filePath);
+			const fileHash = cryptoHash(content);
+			const chunks = splitIntoChunks(content, 1000);
+
+			for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+				const payload = createIndexPayload({
+					filePath,
+					fileStat,
+					fileHash,
+					chunk: chunks[chunkIndex],
+					chunkIndex,
+					chunkCount: chunks.length,
+				});
+				if (await write(payload)) indexed++;
+			}
+		} catch {}
+	}
+	return indexed;
+}
+
+function createIndexPayload(args: {
+	filePath: string;
+	fileStat: fs.Stats;
+	fileHash: string;
+	chunk: string;
+	chunkIndex: number;
+	chunkCount: number;
+}): MemoryIndexPayload {
+	const fileName = path.basename(args.filePath);
+	const content = `Source: ${fileName}\n${args.chunk}`;
+	const sourceId = `file:${args.fileHash}:${args.chunkIndex}`;
+	return {
+		type: "semantic",
+		content,
+		sourceTrust: "external",
+		scope: {
+			tenantId: "local",
+			userId: "owner",
+			projectId: process.cwd(),
+			sessionId: "cli-memory-index",
+		},
+		confidence: 0.65,
+		importance: 0.5,
+		source: {
+			sourceId,
+			sourceType: "document",
+			channelId: "cli-memory-index",
+			title: fileName,
+			uri: `file://${args.filePath}`,
+			quotedEvidence: args.chunk.slice(0, 1200),
+			authorityScore: 0.55,
+			metadata: {
+				filePath: args.filePath,
+				fileName,
+				size: args.fileStat.size,
+				mtime: args.fileStat.mtime.toISOString(),
+				chunkIndex: args.chunkIndex,
+				chunkCount: args.chunkCount,
+				contentHash: args.fileHash,
+			},
+		},
+		metadata: {
+			filePath: args.filePath,
+			fileName,
+			chunkIndex: args.chunkIndex,
+			chunkCount: args.chunkCount,
+			contentHash: args.fileHash,
+			entities: [{ name: fileName, type: "document" }],
+		},
+		evidence: {
+			sourceType: "tool_output",
+			sourceId,
+			excerpt: args.chunk.slice(0, 1200),
+		},
+	};
+}
+
+function extractMemoryItems(results: unknown[] | undefined): CliMemoryItem[] {
+	const items = new Map<string, CliMemoryItem>();
+	for (const result of results ?? []) {
+		const record = isRecord(result) ? result : undefined;
+		const candidate = isRecord(record?.item) ? record.item : record;
+		if (!isRecord(candidate)) continue;
+		const id = typeof candidate.id === "string" ? candidate.id : undefined;
+		const content =
+			typeof candidate.content === "string" ? candidate.content : undefined;
+		if (!id || !content) continue;
+		items.set(id, {
+			id,
+			type: typeof candidate.type === "string" ? candidate.type : "unknown",
+			content,
+			importance:
+				typeof candidate.importance === "number"
+					? candidate.importance
+					: undefined,
+			accessCount:
+				typeof candidate.accessCount === "number"
+					? candidate.accessCount
+					: undefined,
+		});
+	}
+	return Array.from(items.values()).slice(0, 50);
+}
+
+function printSearchResults(items: CliMemoryItem[]): void {
+	if (items.length === 0) {
+		console.log(chalk.yellow("No results found"));
+		return;
+	}
+	console.log(chalk.cyan(`Found ${items.length} result(s):\n`));
+	for (const item of items) {
+		console.log(chalk.white(`  [${item.type}] ${item.content.slice(0, 120)}`));
+		console.log(
+			chalk.gray(
+				`    Importance: ${(item.importance ?? 0).toFixed(2)} | Accessed: ${item.accessCount ?? 0} times`,
+			),
+		);
+	}
+}
+
+function printStats(stats: MemoryStatsResponse): void {
+	console.log(chalk.cyan.bold("\n📊 Memory Statistics\n"));
+	console.log(chalk.white("Short-Term Memory:"));
+	console.log(
+		chalk.gray(`  Load:    ${(stats.shortTerm?.load ?? 0).toFixed(1)}%`),
+	);
+	console.log(chalk.gray(`  Turns:   ${stats.shortTerm?.count ?? 0}`));
+	console.log();
+	console.log(chalk.white("Long-Term Memory:"));
+	console.log(chalk.gray(`  Total:   ${stats.longTerm?.count ?? 0} items`));
+
+	if (stats.localTypeCounts && Object.keys(stats.localTypeCounts).length > 0) {
+		console.log(chalk.gray("  Types:"));
+		for (const [type, count] of Object.entries(stats.localTypeCounts)) {
+			console.log(chalk.gray(`    ${type}: ${count}`));
+		}
+	}
+
+	console.log();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cryptoHash(content: string): string {
+	return Buffer.from(content).toString("base64url").slice(0, 32);
 }

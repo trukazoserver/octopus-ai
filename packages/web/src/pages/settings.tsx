@@ -14,7 +14,7 @@ import {
 } from "../components/ConfigSection.js";
 import { AppIcon } from "../components/ui/AppIcon.js";
 import { BrandLogo } from "../components/ui/BrandLogo.js";
-import { apiGet, apiPut, apiPutJson } from "../hooks/useApi.js";
+import { apiGet, apiPost, apiPut, apiPutJson } from "../hooks/useApi.js";
 
 interface ProviderConfig {
 	apiKey?: string;
@@ -32,6 +32,24 @@ interface MemoryLongTermConfig {
 	importanceThreshold?: number;
 	maxItems?: number;
 	[key: string]: unknown;
+}
+
+interface MemoryEmbeddingsConfig {
+	enabled?: boolean;
+	provider?: "auto" | "openai" | "google" | string;
+	apiType?: "openai" | "google" | string;
+	authMode?: "api-key" | "vertex" | string;
+	model?: string;
+	apiKeyEnv?: string;
+	accessTokenEnv?: string;
+	credentialsFile?: string;
+	credentialsJson?: string;
+	projectId?: string;
+	location?: string;
+	task?: "document" | "query" | "none" | string;
+	dimensions?: number;
+	maxBatchSize?: number;
+	maxTextLength?: number;
 }
 
 interface SkillRegistryConfig {
@@ -67,6 +85,7 @@ interface ConfigData {
 		enabled?: boolean;
 		shortTerm?: MemoryShortTermConfig;
 		longTerm?: MemoryLongTermConfig;
+		embeddings?: MemoryEmbeddingsConfig;
 		consolidation?: unknown;
 		retrieval?: unknown;
 	};
@@ -275,11 +294,27 @@ function setConfigValue(
 	return result as ConfigData;
 }
 
+function readServiceAccountProjectId(credentialsJson?: string): string {
+	try {
+		const raw = credentialsJson?.trim();
+		if (!raw) return "";
+		const parsed = JSON.parse(raw) as { project_id?: string };
+		return parsed.project_id?.trim() ?? "";
+	} catch {
+		return "";
+	}
+}
+
 export const SettingsPage: React.FC = () => {
 	const [config, setConfig] = useState<ConfigData>({});
 	const [profile, setProfile] = useState<UserProfile | null>(null);
 	const [profileDraft, setProfileDraft] = useState<UserProfile | null>(null);
+	const [embeddingDraft, setEmbeddingDraft] = useState<MemoryEmbeddingsConfig>(
+		{},
+	);
 	const [loading, setLoading] = useState(true);
+	const [savingKey, setSavingKey] = useState<string | null>(null);
+	const [applyingEmbeddings, setApplyingEmbeddings] = useState(false);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
 	useEffect(() => {
@@ -289,6 +324,7 @@ export const SettingsPage: React.FC = () => {
 		])
 			.then(([c, profileResponse]) => {
 				setConfig(c);
+				setEmbeddingDraft(c.memory?.embeddings ?? {});
 				setProfile(profileResponse.profile);
 				setProfileDraft(profileResponse.profile);
 				setLoading(false);
@@ -301,6 +337,7 @@ export const SettingsPage: React.FC = () => {
 
 	const save = async (key: string, value: unknown) => {
 		setMsg(null);
+		setSavingKey(key);
 		let previousConfig: ConfigData | null = null;
 		setConfig((current) => {
 			previousConfig = current;
@@ -308,7 +345,12 @@ export const SettingsPage: React.FC = () => {
 		});
 		try {
 			await apiPut(`/api/config/${key}`, value);
-			setMsg({ text: `${key} guardado`, ok: true });
+			setMsg({
+				text: key.startsWith("memory.embeddings")
+					? `${key} guardado y aplicado`
+					: `${key} guardado`,
+				ok: true,
+			});
 
 			// Clear message after 3 seconds
 			setTimeout(() => {
@@ -320,7 +362,42 @@ export const SettingsPage: React.FC = () => {
 				text: e instanceof Error ? e.message : String(e),
 				ok: false,
 			});
+		} finally {
+			setSavingKey(null);
 		}
+	};
+
+	const saveAndApplyEmbeddings = async () => {
+		setMsg(null);
+		if (embeddingDraft.enabled && !canEnableEmbeddings) {
+			setMsg({ text: embeddingBlockers[0], ok: false });
+			return;
+		}
+		setApplyingEmbeddings(true);
+		try {
+			await apiPut("/api/config/memory.embeddings", embeddingDraft);
+			setConfig((current) =>
+				setConfigValue(current, "memory.embeddings", embeddingDraft),
+			);
+			await apiPost("/api/config/apply/embeddings");
+			setMsg({
+				text: "Embeddings guardados y aplicados sin reiniciar Octopus",
+				ok: true,
+			});
+			setTimeout(() => setMsg(null), 3000);
+		} catch (e) {
+			setMsg({
+				text: e instanceof Error ? e.message : String(e),
+				ok: false,
+			});
+		} finally {
+			setApplyingEmbeddings(false);
+		}
+	};
+
+	const updateEmbeddingDraft = (patch: Partial<MemoryEmbeddingsConfig>) => {
+		setMsg(null);
+		setEmbeddingDraft((current) => ({ ...current, ...patch }));
 	};
 
 	const saveProfile = async (patch: Partial<UserProfile>) => {
@@ -423,6 +500,39 @@ export const SettingsPage: React.FC = () => {
 	const tools = config.tools ?? {};
 	const toolIterationLimit = tools.iterationLimit ?? {};
 	const providers = ai.providers ?? {};
+	const embeddings = embeddingDraft;
+	const embeddingProvider = embeddings.provider ?? "auto";
+	const embeddingAuthMode = embeddings.authMode ?? "api-key";
+	const serviceAccountProjectId = readServiceAccountProjectId(
+		embeddings.credentialsJson,
+	);
+	const effectiveAccessTokenEnv =
+		embeddings.accessTokenEnv === "GOOGLE_APPLICATION_CREDENTIALS"
+			? ""
+			: (embeddings.accessTokenEnv ?? "");
+	const embeddingBlockers: string[] = [];
+	if (
+		embeddingProvider === "google" &&
+		embeddingAuthMode === "vertex" &&
+		!String(embeddings.projectId ?? "").trim() &&
+		!serviceAccountProjectId
+	) {
+		embeddingBlockers.push(
+			"Vertex AI necesita Google Cloud Project, salvo que pegues un Service Account JSON que incluya project_id.",
+		);
+	}
+	if (
+		embeddingProvider === "google" &&
+		embeddingAuthMode === "vertex" &&
+		!String(effectiveAccessTokenEnv).trim() &&
+		!String(embeddings.credentialsFile ?? "").trim() &&
+		!String(embeddings.credentialsJson ?? "").trim()
+	) {
+		embeddingBlockers.push(
+			"Vertex AI necesita GOOGLE_VERTEX_ACCESS_TOKEN, una ruta de service account o pegar el JSON de service account.",
+		);
+	}
+	const canEnableEmbeddings = embeddingBlockers.length === 0;
 	const userProfile = profileDraft ??
 		profile ?? {
 			displayName: "",
@@ -510,6 +620,29 @@ export const SettingsPage: React.FC = () => {
 					{msg.text}
 				</div>
 			)}
+
+			<div
+				style={{
+					padding: "10px 14px",
+					borderRadius: "14px",
+					marginBottom: "18px",
+					background: "#050505",
+					border: "1px solid #151515",
+					color: "#a1a1aa",
+					fontSize: "0.82rem",
+					display: "flex",
+					justifyContent: "space-between",
+					gap: "12px",
+					flexWrap: "wrap",
+				}}
+			>
+				<span>
+					La configuración general se guarda al modificar un campo. En
+					embeddings, los cambios quedan como borrador y solo se guardan al
+					presionar Guardar y aplicar embeddings.
+				</span>
+				{savingKey && <strong>Guardando {savingKey}...</strong>}
+			</div>
 
 			<ConfigSection
 				title="Perfil de usuario"
@@ -1036,6 +1169,295 @@ export const SettingsPage: React.FC = () => {
 								/>
 							</>
 						)}
+					</div>
+
+					<div
+						style={{
+							height: "1px",
+							background: "#151515",
+							margin: "12px 0",
+						}}
+					/>
+
+					<div
+						style={{
+							display: "grid",
+							gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+							gap: "20px",
+						}}
+					>
+						<div>
+							<Toggle
+								label="Embeddings avanzados"
+								description="Activa vectores reales para búsqueda semántica. No se guarda hasta presionar Guardar y aplicar embeddings."
+								value={embeddings.enabled ?? false}
+								onChange={(v) => {
+									if (v && !canEnableEmbeddings) {
+										setMsg({ text: embeddingBlockers[0], ok: false });
+										return;
+									}
+									updateEmbeddingDraft({ enabled: v });
+								}}
+							/>
+							{embeddingBlockers.length > 0 && (
+								<div
+									style={{
+										marginTop: "10px",
+										padding: "10px 12px",
+										borderRadius: "12px",
+										border: "1px solid rgba(248, 113, 113, 0.28)",
+										background: "rgba(127, 29, 29, 0.18)",
+										color: "#fca5a5",
+										fontSize: "0.78rem",
+										lineHeight: 1.45,
+									}}
+								>
+									{embeddingBlockers[0]}
+								</div>
+							)}
+							<Select
+								label="Proveedor de embeddings"
+								value={embeddingProvider}
+								options={["auto", "openai", "google"]}
+								optionLabels={{
+									auto: "Automático",
+									openai: "OpenAI",
+									google: "Google Gemini",
+								}}
+								description="OpenAI usa text-embedding-3-small. Google usa gemini-embedding-2 por defecto."
+								onChange={(v) => {
+									const patch: Partial<MemoryEmbeddingsConfig> = {
+										enabled: false,
+										provider: v,
+										apiType: v === "google" ? "google" : "openai",
+									};
+									if (v === "google") {
+										patch.authMode = "api-key";
+										patch.apiKeyEnv = "GEMINI_API_KEY";
+										patch.model = "gemini-embedding-2";
+										patch.dimensions = 768;
+									} else if (v === "openai") {
+										patch.authMode = "api-key";
+										patch.apiKeyEnv = "OPENAI_API_KEY";
+										patch.model = "text-embedding-3-small";
+										patch.dimensions = 1536;
+									}
+									updateEmbeddingDraft(patch);
+								}}
+							/>
+							{embeddingProvider === "google" && (
+								<Select
+									label="Autenticación Google"
+									value={embeddingAuthMode}
+									options={["api-key", "vertex"]}
+									optionLabels={{
+										"api-key": "Gemini API Key",
+										vertex: "Vertex AI",
+									}}
+									description="api-key usa Gemini API Key; vertex usa Google Cloud Vertex AI."
+									onChange={(v) => {
+										updateEmbeddingDraft({
+											enabled: false,
+											authMode: v,
+											...(v === "api-key"
+												? { apiKeyEnv: "GEMINI_API_KEY" }
+												: { accessTokenEnv: "GOOGLE_VERTEX_ACCESS_TOKEN" }),
+										});
+									}}
+								/>
+							)}
+						</div>
+
+						<div>
+							<Field
+								label="Modelo de embeddings"
+								value={
+									embeddings.model ||
+									(embeddingProvider === "google"
+										? "gemini-embedding-2"
+										: "text-embedding-3-small")
+								}
+								description="No mezcles modelos distintos sin reindexar las memorias existentes."
+								onChange={(v) => updateEmbeddingDraft({ model: v })}
+							/>
+							<Field
+								label="Dimensiones"
+								value={
+									embeddings.dimensions ??
+									(embeddingProvider === "google" ? 768 : 1536)
+								}
+								type="number"
+								description="Google recomienda 768, 1536 o 3072. OpenAI small usa 1536 por defecto."
+								onChange={(v) =>
+									updateEmbeddingDraft({
+										dimensions: Number.parseInt(v, 10) || 768,
+									})
+								}
+							/>
+						</div>
+
+						<div>
+							{embeddingProvider === "google" &&
+							embeddingAuthMode === "vertex" ? (
+								<>
+									<Field
+										label="Google Cloud Project"
+										value={embeddings.projectId ?? ""}
+										description="Opcional si el Service Account JSON incluye project_id. También puedes usar GOOGLE_CLOUD_PROJECT."
+										onChange={(v) => updateEmbeddingDraft({ projectId: v })}
+									/>
+									<Field
+										label="Google Cloud Location"
+										value={embeddings.location ?? "us-central1"}
+										onChange={(v) => updateEmbeddingDraft({ location: v })}
+									/>
+									<Field
+										label="Access Token Env"
+										value={
+											embeddings.accessTokenEnv ===
+											"GOOGLE_APPLICATION_CREDENTIALS"
+												? "GOOGLE_VERTEX_ACCESS_TOKEN"
+												: (embeddings.accessTokenEnv ??
+													"GOOGLE_VERTEX_ACCESS_TOKEN")
+										}
+										description="Variable con un access token Vertex. Para service account usa el campo Service Account JSON o GOOGLE_APPLICATION_CREDENTIALS fuera de Octopus."
+										onChange={(v) =>
+											updateEmbeddingDraft({ accessTokenEnv: v })
+										}
+									/>
+									<Field
+										label="Ruta de Service Account JSON"
+										value={embeddings.credentialsFile ?? ""}
+										placeholder="C:\\ruta\\service-account.json"
+										onChange={(v) =>
+											updateEmbeddingDraft({ credentialsFile: v })
+										}
+									/>
+									<div style={{ marginBottom: "16px" }}>
+										<label
+											htmlFor="service-account-json"
+											style={{
+												display: "block",
+												fontSize: "0.85rem",
+												color: "#a1a1aa",
+												marginBottom: "6px",
+												fontWeight: 700,
+											}}
+										>
+											Pegar Service Account JSON
+										</label>
+										<div
+											style={{
+												fontSize: "0.76rem",
+												color: "#737373",
+												marginBottom: "9px",
+												lineHeight: 1.45,
+											}}
+										>
+											Puedes pegar el JSON completo. Si incluye project_id, no
+											necesitas llenar Google Cloud Project.
+										</div>
+										<textarea
+											id="service-account-json"
+											value={embeddings.credentialsJson ?? ""}
+											placeholder={
+												'{"type":"service_account","project_id":"..."}'
+											}
+											onChange={(e) =>
+												updateEmbeddingDraft({
+													credentialsJson: e.target.value,
+												})
+											}
+											style={{
+												width: "100%",
+												minHeight: "150px",
+												padding: "12px 14px",
+												borderRadius: "12px",
+												border: "1px solid #202020",
+												background: "#000",
+												color: "#f4f4f5",
+												fontSize: "0.85rem",
+												fontFamily:
+													"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+												outline: "none",
+												boxSizing: "border-box",
+												resize: "vertical",
+											}}
+										/>
+										{serviceAccountProjectId && (
+											<div
+												style={{
+													color: "#86efac",
+													fontSize: "0.76rem",
+													marginTop: "8px",
+												}}
+											>
+												project_id detectado: {serviceAccountProjectId}
+											</div>
+										)}
+									</div>
+								</>
+							) : (
+								<Field
+									label={
+										embeddingProvider === "google"
+											? "GEMINI_API_KEY"
+											: "OPENAI_API_KEY"
+									}
+									value={
+										embeddings.apiKeyEnv ||
+										(embeddingProvider === "google"
+											? "GEMINI_API_KEY"
+											: "OPENAI_API_KEY")
+									}
+									description="Nombre de variable de entorno. También se reutilizan las claves en Proveedores AI si están guardadas."
+									onChange={(v) => updateEmbeddingDraft({ apiKeyEnv: v })}
+								/>
+							)}
+						</div>
+					</div>
+
+					<div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+						<button
+							type="button"
+							onClick={() => void saveAndApplyEmbeddings()}
+							disabled={applyingEmbeddings}
+							style={{
+								...settingsPrimaryButtonStyle,
+								opacity: applyingEmbeddings ? 0.65 : 1,
+								cursor: applyingEmbeddings ? "wait" : "pointer",
+							}}
+						>
+							{applyingEmbeddings
+								? "Aplicando..."
+								: "Guardar y aplicar embeddings"}
+						</button>
+						<span
+							style={{
+								alignSelf: "center",
+								color: "#737373",
+								fontSize: "0.78rem",
+							}}
+						>
+							No reinicia el servidor; refresca solo el proveedor de embeddings.
+						</span>
+					</div>
+
+					<div
+						style={{
+							padding: "12px 14px",
+							borderRadius: "14px",
+							border: "1px solid rgba(251, 191, 36, 0.22)",
+							background: "rgba(251, 191, 36, 0.08)",
+							color: "#fbbf24",
+							fontSize: "0.82rem",
+							lineHeight: 1.5,
+						}}
+					>
+						Los cambios de embeddings no se guardan automáticamente. Se guardan
+						y aplican solo al presionar Guardar y aplicar embeddings. Si activas
+						un proveedor real, reindexa las memorias existentes para no mezclar
+						vectores hash o modelos antiguos.
 					</div>
 				</div>
 			</ConfigSection>

@@ -1,5 +1,6 @@
 import type { DatabaseAdapter } from "../storage/database.js";
 import { createLogger } from "../utils/logger.js";
+import { isAssistantMemoryDenialEcho } from "./denial-echo.js";
 import type { EmbeddingFunction, MemoryItem, ScoredMemory } from "./types.js";
 
 /**
@@ -72,7 +73,7 @@ export class FTSSearchEngine {
 			this.initialized = true;
 			logger.info("FTS5 search engine initialized");
 		} catch (err) {
-			logger.error(`Failed to initialize FTS5: ${String(err)}`);
+			logger.warn(`FTS5 unavailable; using lexical fallback: ${String(err)}`);
 			// FTS5 may not be available in all SQLite builds
 			// Gracefully degrade — hybrid search will just use vector
 			this.initialized = false;
@@ -144,7 +145,7 @@ export class FTSSearchEngine {
 				 WHERE memory_fts MATCH ?
 				 ORDER BY rank
 				 LIMIT ?`,
-				[sanitized, this.config.maxFTSResults * 20],
+				[sanitized, this.config.maxFTSResults * 100],
 			);
 
 			// We need to fetch full MemoryItem data from memory_items
@@ -187,7 +188,10 @@ export class FTSSearchEngine {
 						Math.min(1, 1 / (1 + Math.abs(row.rank))),
 					);
 
-					results.push({ item, ftsScore: normalizedScore });
+					results.push({
+						item,
+						ftsScore: this.applyRankingSignals(item, normalizedScore),
+					});
 				}
 			}
 
@@ -304,6 +308,7 @@ export class FTSSearchEngine {
 	private async fallbackSearch(query: string): Promise<FTSResult[]> {
 		const words = this.queryWords(query);
 		if (words.length === 0) return [];
+		const exactTokens = new Set(words.filter((word) => word.length >= 8));
 
 		try {
 			const rows = await this.db.all<{
@@ -343,9 +348,15 @@ export class FTSSearchEngine {
 						searchable.includes(word),
 					);
 					if (matchedWords.length === 0) return null;
+					const exactTokenBoost = matchedWords.filter((word) =>
+						exactTokens.has(word),
+					).length;
 					return {
 						item,
-						ftsScore: matchedWords.length / words.length,
+						ftsScore: this.applyRankingSignals(
+							item,
+							matchedWords.length / words.length + exactTokenBoost,
+						),
 					} satisfies FTSResult;
 				})
 				.filter((result): result is FTSResult => result !== null)
@@ -377,6 +388,24 @@ export class FTSSearchEngine {
 			.split(/\s+/)
 			.filter((w) => w.length > 1)
 			.slice(0, 10);
+	}
+
+	private applyRankingSignals(item: MemoryItem, score: number): number {
+		const denialPenalty = isAssistantMemoryDenialEcho(item.content) ? 0.75 : 0;
+		return Math.max(
+			0.01,
+			score + this.directMemoryTypeBoost(item) - denialPenalty,
+		);
+	}
+
+	private directMemoryTypeBoost(item: MemoryItem): number {
+		return item.type === "semantic" ||
+			item.type === "user" ||
+			item.type === "org"
+			? 0.75
+			: item.type === "episodic"
+				? -0.2
+				: 0;
 	}
 
 	private isVisible(item: MemoryItem): boolean {

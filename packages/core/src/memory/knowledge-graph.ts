@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import type { DatabaseAdapter } from "../storage/database.js";
+import type { MemoryRelationType } from "./types.js";
 
 export class KnowledgeGraph {
 	constructor(
@@ -40,7 +41,7 @@ export class KnowledgeGraph {
 	async addEdge(
 		fromId: string,
 		toId: string,
-		relation: string,
+		relation: MemoryRelationType,
 		weight: number,
 	): Promise<void> {
 		await this.ensureAssociationTable();
@@ -61,12 +62,17 @@ export class KnowledgeGraph {
 		minWeight = 0,
 		maxDepth = 1,
 	): Promise<
-		Array<{ id: string; relation: string; weight: number; path: string[] }>
+		Array<{
+			id: string;
+			relation: MemoryRelationType;
+			weight: number;
+			path: string[];
+		}>
 	> {
 		await this.ensureAssociationTable();
 		const results: Array<{
 			id: string;
-			relation: string;
+			relation: MemoryRelationType;
 			weight: number;
 			path: string[];
 		}> = [];
@@ -84,7 +90,7 @@ export class KnowledgeGraph {
 			const edges = await this.db.all<{
 				source_id: string;
 				target_id: string;
-				relation: string;
+				relation: MemoryRelationType;
 				strength: number;
 			}>(
 				"SELECT source_id, target_id, relation, strength FROM memory_associations WHERE source_id = ? AND strength >= ?",
@@ -97,7 +103,7 @@ export class KnowledgeGraph {
 					const nextPath = [...current.path, edge.target_id];
 					results.push({
 						id: edge.target_id,
-						relation: edge.relation || "associated",
+						relation: normalizeRelation(edge.relation),
 						weight: edge.strength,
 						path: nextPath,
 					});
@@ -194,4 +200,28 @@ export class KnowledgeGraph {
 			);
 		}
 	}
+}
+
+function normalizeRelation(value: string): MemoryRelationType {
+	const allowed = new Set<MemoryRelationType>([
+		"associated",
+		"mentions",
+		"supports",
+		"contradicts",
+		"supersedes",
+		"derived_from",
+		"depends_on",
+		"caused",
+		"blocked_by",
+		"entity_of",
+		"same_entity_as",
+		"prefers",
+		"uses",
+		"created",
+		"updated",
+		"confirmed_by",
+	]);
+	return allowed.has(value as MemoryRelationType)
+		? (value as MemoryRelationType)
+		: "associated";
 }

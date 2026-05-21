@@ -101,9 +101,10 @@ El streaming del agente tambien emite estados de UI como `thinking`, `tool`, `to
 La imagen y el `docker-compose.yml` actuales estan preparados para operacion continua:
 
 - servicio unico `octopus`
-- puerto `3000` para HTTP y *healthcheck*
+- puerto `18789` para UI web, HTTP API, WebSocket y *healthcheck*
 - volumen persistente en `/data`
 - workspace montado en `/data/workspace`
 - plantillas base `SOUL.md` y `HEARTBEAT.md`
+- runtime completo dentro del contenedor: Python, Build Tools, Chromium, ffmpeg, fonts, curl y tini
 
 Esas plantillas sirven como punto de partida para personalizar personalidad, reglas y checklist operativa del asistente en despliegues autoalojados.

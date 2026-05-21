@@ -27,6 +27,15 @@ import type { UsageStats } from "../ai/types.js";
 import { ConfigLoader } from "../config/loader.js";
 import type { OctopusConfig } from "../config/schema.js";
 import { ConfigValidator } from "../config/validator.js";
+import type {
+	ActiveForgettingOptions,
+	MemoryActionLogEntry,
+	MemoryAuditEntry,
+	MemoryFeedbackType,
+	MemoryGraphTraversalOptions,
+	MemoryReadContext,
+	MemoryRelationType,
+} from "../memory/types.js";
 import type { MCPManagedServer } from "../plugins/mcp/manager.js";
 import { getZaiMCPConfigs } from "../plugins/mcp/zai-servers.js";
 import type { Skill } from "../skills/types.js";
@@ -62,10 +71,79 @@ type SystemContext = {
 const CORS_HEADERS = {
 	"Access-Control-Allow-Origin": "*",
 	"Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, PATCH, OPTIONS",
-	"Access-Control-Allow-Headers": "Content-Type, Range",
+	"Access-Control-Allow-Headers":
+		"Content-Type, Range, Authorization, X-Octopus-Api-Key",
 	"Access-Control-Expose-Headers":
 		"Content-Length, Content-Range, Accept-Ranges",
 };
+
+const MEMORY_FEEDBACK_TYPES = new Set<Exclude<MemoryFeedbackType, "none">>([
+	"explicit_approve",
+	"explicit_correct",
+	"explicit_delete",
+	"implicit_positive",
+	"implicit_negative",
+	"implicit_neutral",
+]);
+
+const MEMORY_RELATION_TYPES = new Set<MemoryRelationType>([
+	"associated",
+	"mentions",
+	"supports",
+	"contradicts",
+	"supersedes",
+	"derived_from",
+	"depends_on",
+	"caused",
+	"blocked_by",
+	"entity_of",
+	"same_entity_as",
+	"prefers",
+	"uses",
+	"created",
+	"updated",
+	"confirmed_by",
+]);
+
+const SENSITIVE_API_PREFIXES = [
+	"/api/automations",
+	"/api/channels",
+	"/api/config",
+	"/api/env",
+	"/api/learning",
+	"/api/mcp",
+	"/api/memory",
+	"/api/skills",
+	"/api/tasks",
+];
+
+const CHANNEL_SECRET_CONFIG_KEYS = new Set([
+	"botToken",
+	"signingSecret",
+	"appToken",
+]);
+
+function getSecretPreview(value: string): string {
+	if (value.length <= 8) return "configured";
+	return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function redactChannelConfig(
+	config: Record<string, unknown>,
+): Record<string, unknown> {
+	const redacted: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(config)) {
+		if (!CHANNEL_SECRET_CONFIG_KEYS.has(key)) {
+			redacted[key] = value;
+			continue;
+		}
+
+		const configured = typeof value === "string" && value.trim().length > 0;
+		redacted[`${key}Configured`] = configured;
+		if (configured) redacted[`${key}Preview`] = getSecretPreview(value.trim());
+	}
+	return redacted;
+}
 
 export interface MediaItem {
 	id: string;
@@ -127,6 +205,15 @@ function sortMediaNewestFirst(items: MediaItem[]): MediaItem[] {
 	return [...items].sort((a, b) => mediaCreatedAtMs(b) - mediaCreatedAtMs(a));
 }
 
+function parseStoredJsonObject(value: string): Record<string, unknown> {
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		return isRecord(parsed) ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
 function normalizeBase64Data(data: string): string {
 	const match = data.match(/^data:[^;]+;base64,(.+)$/s);
 	return match?.[1] ?? data;
@@ -176,6 +263,41 @@ function readBody(req: IncomingMessage): Promise<string> {
 		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
 		req.on("error", reject);
 	});
+}
+
+function parseMemoryIds(params: URLSearchParams): string[] {
+	const ids = params.get("ids") ?? params.get("id") ?? "";
+	return ids
+		.split(",")
+		.map((id) => id.trim())
+		.filter(Boolean);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeMemorySourceTrust(value: unknown): string {
+	return value === "system" ||
+		value === "agent" ||
+		value === "user_explicit" ||
+		value === "user_inferred" ||
+		value === "external"
+		? value
+		: "user_explicit";
+}
+
+function normalizeMemoryType(value: unknown): string {
+	return value === "episodic" ||
+		value === "semantic" ||
+		value === "procedural" ||
+		value === "user" ||
+		value === "org" ||
+		value === "agent" ||
+		value === "prospective" ||
+		value === "meta"
+		? value
+		: "semantic";
 }
 
 function getNestedValue(
@@ -257,6 +379,13 @@ function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 		) {
 			sec.encryptionKey = "****";
 		}
+		if (
+			sec.memoryApiKey &&
+			typeof sec.memoryApiKey === "string" &&
+			(sec.memoryApiKey as string).length > 0
+		) {
+			sec.memoryApiKey = "****";
+		}
 	}
 	if (masked.browser && typeof masked.browser === "object") {
 		const browser = masked.browser as Record<string, unknown>;
@@ -264,6 +393,50 @@ function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 		browser.decodoProxyUrl = maskUrlCredentials(browser.decodoProxyUrl);
 	}
 	return masked;
+}
+
+function configuredApiKey(config: OctopusConfig | undefined): string {
+	return (
+		config?.security.memoryApiKey?.trim() ||
+		process.env.OCTOPUS_MEMORY_API_KEY?.trim() ||
+		process.env.OCTOPUS_API_KEY?.trim() ||
+		""
+	);
+}
+
+function isLoopbackHost(host: string): boolean {
+	const normalized = host.trim().toLowerCase();
+	return (
+		normalized === "localhost" ||
+		normalized === "127.0.0.1" ||
+		normalized === "::1" ||
+		normalized === "[::1]"
+	);
+}
+
+function isSensitiveApiPath(pathname: string): boolean {
+	return SENSITIVE_API_PREFIXES.some(
+		(prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+	);
+}
+
+function headerValue(value: string | string[] | undefined): string {
+	return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
+function extractApiKey(req: IncomingMessage): string {
+	const explicitKey = headerValue(req.headers["x-octopus-api-key"]).trim();
+	if (explicitKey) return explicitKey;
+	const authorization = headerValue(req.headers.authorization).trim();
+	const match = authorization.match(/^Bearer\s+(.+)$/i);
+	return match?.[1]?.trim() ?? "";
+}
+
+function timingSafeTokenEquals(actual: string, expected: string): boolean {
+	if (!actual || !expected) return false;
+	const actualHash = crypto.createHash("sha256").update(actual).digest();
+	const expectedHash = crypto.createHash("sha256").update(expected).digest();
+	return crypto.timingSafeEqual(actualHash, expectedHash);
 }
 
 function describeModelRef(
@@ -338,6 +511,26 @@ export class TransportServer {
 		this.system = system;
 	}
 
+	private authorizeSensitiveApiRequest(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): boolean {
+		const expectedKey = configuredApiKey(this.system?.config);
+		if (!expectedKey) {
+			if (isLoopbackHost(this.host)) return true;
+			jsonRes(res, 403, {
+				error:
+					"Sensitive API requests require OCTOPUS_API_KEY when listening on a non-loopback host",
+			});
+			return false;
+		}
+		const providedKey = extractApiKey(req);
+		if (timingSafeTokenEquals(providedKey, expectedKey)) return true;
+		res.setHeader("WWW-Authenticate", 'Bearer realm="octopus-api"');
+		jsonRes(res, 401, { error: "Unauthorized API request" });
+		return false;
+	}
+
 	async start(): Promise<void> {
 		this.httpServer = createServer(
 			(req: IncomingMessage, res: ServerResponse) => {
@@ -368,8 +561,23 @@ export class TransportServer {
 					return;
 				}
 
+				if (
+					isSensitiveApiPath(pathname) &&
+					!this.authorizeSensitiveApiRequest(req, res)
+				) {
+					return;
+				}
+
 				if (req.method === "GET" && pathname === "/api/config") {
 					this.handleGetConfig(res);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					pathname === "/api/config/apply/embeddings"
+				) {
+					void this.handleApplyEmbeddingConfig(res);
 					return;
 				}
 
@@ -398,6 +606,86 @@ export class TransportServer {
 				if (req.method === "GET" && pathname === "/api/memory/search") {
 					const q = url.searchParams.get("q") ?? "";
 					void this.handleMemorySearch(res, q);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					pathname === "/api/memory/context/retrieve"
+				) {
+					void this.handleMemoryContextRetrieve(req, res);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/memory/create") {
+					void this.handleMemoryCreate(req, res);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/memory/feedback") {
+					void this.handleMemoryFeedback(req, res);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/memory/forget") {
+					void this.handleMemoryForget(req, res);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/memory/backfill") {
+					void this.handleMemoryBackfill(req, res);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/memory/retention/run") {
+					void this.handleMemoryRetentionRun(req, res);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/memory/sources") {
+					void this.handleMemorySources(res, url.searchParams);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/memory/graph") {
+					void this.handleMemoryGraph(res, url.searchParams);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					pathname === "/api/memory/graph/traverse"
+				) {
+					void this.handleMemoryGraphTraverse(req, res);
+					return;
+				}
+
+				if (
+					req.method === "GET" &&
+					pathname === "/api/memory/audit/integrity"
+				) {
+					void this.handleMemoryAuditIntegrity(res);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/memory/audit") {
+					void this.handleMemoryAudit(res, url.searchParams);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/memory/actions") {
+					void this.handleMemoryActions(res, url.searchParams);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/memory/verify") {
+					const id = url.searchParams.get("id") ?? "";
+					void this.handleMemoryVerify(res, id ? [id] : [], url.searchParams);
+					return;
+				}
+
+				if (req.method === "POST" && pathname === "/api/memory/verify") {
+					void this.handleMemoryVerifyPost(req, res);
 					return;
 				}
 
@@ -1113,10 +1401,26 @@ export class TransportServer {
 				return;
 			}
 
-			loader.save(configObj as unknown as OctopusConfig);
+			const nextConfig = configObj as unknown as OctopusConfig;
+			const changesEmbeddings =
+				keyPath === "memory.embeddings" ||
+				keyPath.startsWith("memory.embeddings.");
+			if (changesEmbeddings) {
+				try {
+					await this.system?.refreshEmbeddingProvider?.(nextConfig);
+				} catch (err) {
+					jsonRes(res, 400, {
+						error: err instanceof Error ? err.message : String(err),
+						applied: false,
+					});
+					return;
+				}
+			}
+
+			loader.save(nextConfig);
 
 			if (this.system) {
-				this.system.config = configObj as unknown as OctopusConfig;
+				this.system.config = nextConfig;
 				if (keyPath === "browser" || keyPath.startsWith("browser.")) {
 					await this.system.refreshBrowserTools?.(this.system.config);
 				}
@@ -1156,7 +1460,30 @@ export class TransportServer {
 				}
 			}
 
-			jsonRes(res, 200, { ok: true, key: keyPath });
+			jsonRes(res, 200, { ok: true, key: keyPath, applied: changesEmbeddings });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleApplyEmbeddingConfig(res: ServerResponse): Promise<void> {
+		try {
+			if (!this.system?.refreshEmbeddingProvider) {
+				jsonRes(res, 501, {
+					error: "Embedding provider refresh is not available in this runtime",
+				});
+				return;
+			}
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			this.system.config = config;
+			await this.system.refreshEmbeddingProvider(config);
+			jsonRes(res, 200, {
+				ok: true,
+				message: "Embedding provider applied without restart",
+			});
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -1174,6 +1501,7 @@ export class TransportServer {
 			const dailyCount = this.system?.dailyMemory?.getMessageCount
 				? await this.system.dailyMemory.getMessageCount().catch(() => 0)
 				: 0;
+			const advanced = await this.getAdvancedMemoryStats();
 			const profile = this.system?.userProfileManager?.getProfile
 				? await this.system.userProfileManager
 						.getProfile("owner")
@@ -1192,6 +1520,7 @@ export class TransportServer {
 				consolidation: config.memory.consolidation,
 				retrieval: config.memory.retrieval,
 				daily: { rawMessageCount: dailyCount },
+				advanced,
 				profile: {
 					exists: Boolean(profile),
 					conversationCount: profile?.conversationCount ?? 0,
@@ -1202,6 +1531,351 @@ export class TransportServer {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
+	}
+
+	private async getAdvancedMemoryStats(): Promise<Record<string, number>> {
+		const db = this.system?.db;
+		if (!db?.get) return {};
+		const tables = [
+			"memory_sources",
+			"memory_nodes",
+			"memory_relations",
+			"memory_permissions",
+			"memory_action_logs",
+			"memory_audit_logs",
+			"memory_usage",
+		];
+		const stats: Record<string, number> = {};
+		for (const table of tables) {
+			const row = (await db
+				.get(`SELECT COUNT(*) as count FROM ${table}`)
+				.catch(() => ({ count: 0 }))) as { count?: number } | undefined;
+			stats[table] = row?.count ?? 0;
+		}
+		stats.memory_requires_confirmation = await this.countMemoryRows(
+			"SELECT COUNT(*) as count FROM memory_permissions WHERE requires_user_confirmation_before_use = 1",
+		);
+		stats.memory_contradictions =
+			(await this.countMemoryRows(
+				"SELECT COUNT(*) as count FROM memory_edges WHERE type = 'contradicts'",
+			)) +
+			(await this.countMemoryRows(
+				"SELECT COUNT(*) as count FROM memory_relations WHERE edge_type = 'contradicts'",
+			));
+
+		const sensitivityRows = await this.queryMemoryRows<{
+			sensitivity: string;
+			count: number;
+		}>(
+			"SELECT sensitivity, COUNT(*) as count FROM memory_permissions GROUP BY sensitivity",
+		);
+		for (const row of sensitivityRows) {
+			stats[`memory_sensitivity_${this.safeMetricKey(row.sensitivity)}`] =
+				Number(row.count ?? 0);
+		}
+
+		const feedbackRows = await this.queryMemoryRows<{
+			feedback_type: string;
+			count: number;
+		}>(
+			"SELECT feedback_type, COUNT(*) as count FROM memory_usage WHERE feedback_type != 'none' GROUP BY feedback_type",
+		);
+		for (const row of feedbackRows) {
+			const count = Number(row.count ?? 0);
+			stats.memory_feedback_total = (stats.memory_feedback_total ?? 0) + count;
+			stats[`memory_feedback_${this.safeMetricKey(row.feedback_type)}`] = count;
+		}
+		stats.memory_feedback_total ??= 0;
+
+		const actionRows = await this.queryMemoryRows<{
+			action_type: string;
+			output: string;
+		}>(
+			`SELECT action_type, output FROM memory_action_logs
+				WHERE action_type IN ('memory.read', 'memory.access_denied')
+				ORDER BY created_at DESC LIMIT 5000`,
+		);
+		const retrievalDurations: number[] = [];
+		for (const row of actionRows) {
+			const output = parseStoredJsonObject(row.output);
+			if (row.action_type === "memory.read") {
+				stats.memory_retrieval_count = (stats.memory_retrieval_count ?? 0) + 1;
+				stats.memory_redacted_total =
+					(stats.memory_redacted_total ?? 0) +
+					this.metricNumber(output.redactedCount);
+				const durationMs = this.metricNumber(output.durationMs);
+				if (durationMs > 0) retrievalDurations.push(durationMs);
+			}
+			if (row.action_type === "memory.access_denied") {
+				stats.memory_access_denied_total =
+					(stats.memory_access_denied_total ?? 0) +
+					this.metricNumber(output.deniedCount);
+				stats.memory_sensitive_access_denied_total =
+					(stats.memory_sensitive_access_denied_total ?? 0) +
+					this.metricNumber(output.sensitiveDeniedCount);
+				stats.memory_confirmation_denied_total =
+					(stats.memory_confirmation_denied_total ?? 0) +
+					this.metricNumber(output.confirmationDeniedCount);
+			}
+		}
+		stats.memory_retrieval_count ??= 0;
+		stats.memory_redacted_total ??= 0;
+		stats.memory_access_denied_total ??= 0;
+		stats.memory_sensitive_access_denied_total ??= 0;
+		stats.memory_confirmation_denied_total ??= 0;
+		if (retrievalDurations.length > 0) {
+			stats.memory_retrieval_latency_avg_ms = Math.round(
+				retrievalDurations.reduce((sum, value) => sum + value, 0) /
+					retrievalDurations.length,
+			);
+			stats.memory_retrieval_latency_max_ms = Math.max(...retrievalDurations);
+		}
+		return stats;
+	}
+
+	private async countMemoryRows(sql: string): Promise<number> {
+		const db = this.system?.db;
+		if (!db?.get) return 0;
+		const row = (await db.get(sql).catch(() => ({ count: 0 }))) as
+			| { count?: number }
+			| undefined;
+		return Number(row?.count ?? 0);
+	}
+
+	private async queryMemoryRows<T>(sql: string): Promise<T[]> {
+		const db = this.system?.db;
+		if (!db?.all) return [];
+		return (await db.all(sql).catch(() => [])) as T[];
+	}
+
+	private safeMetricKey(value: string): string {
+		return value
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "_")
+			.replace(/^_|_$/g, "");
+	}
+
+	private metricNumber(value: unknown): number {
+		return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	}
+
+	private memoryContextFromParams(params: URLSearchParams): MemoryReadContext {
+		return {
+			tenantId: params.get("tenantId") ?? "local",
+			userId: params.get("userId") ?? "owner",
+			projectId: params.get("projectId") ?? process.cwd(),
+			agentRole: params.get("agentRole") ?? params.get("agentId") ?? undefined,
+			includeSources: params.get("includeSources") === "true",
+			includeGraph: params.get("includeGraph") === "true",
+			userConfirmed: params.get("userConfirmed") === "true",
+			trackUsage: false,
+		};
+	}
+
+	private memoryContextFromBody(
+		body: Record<string, unknown>,
+	): MemoryReadContext {
+		return {
+			tenantId: typeof body.tenantId === "string" ? body.tenantId : "local",
+			userId: typeof body.userId === "string" ? body.userId : "owner",
+			projectId:
+				typeof body.projectId === "string" ? body.projectId : process.cwd(),
+			agentRole:
+				typeof body.agentRole === "string"
+					? body.agentRole
+					: typeof body.agentId === "string"
+						? body.agentId
+						: undefined,
+			includeSources: body.includeSources === true,
+			includeGraph: body.includeGraph === true,
+			userConfirmed: body.userConfirmed === true,
+			trackUsage: false,
+		};
+	}
+
+	private memoryGraphOptionsFromParams(
+		params: URLSearchParams,
+	): MemoryGraphTraversalOptions {
+		return {
+			maxDepth: this.optionalNumber(params.get("maxDepth")),
+			maxNodes: this.optionalNumber(params.get("maxNodes")),
+			relationTypes: this.parseRelationTypes(params.get("relationTypes")),
+		};
+	}
+
+	private memoryGraphOptionsFromBody(
+		body: Record<string, unknown>,
+	): MemoryGraphTraversalOptions {
+		return {
+			maxDepth: typeof body.maxDepth === "number" ? body.maxDepth : undefined,
+			maxNodes: typeof body.maxNodes === "number" ? body.maxNodes : undefined,
+			relationTypes: this.parseRelationTypes(body.relationTypes),
+		};
+	}
+
+	private optionalNumber(value: string | null): number | undefined {
+		if (value === null || value.trim() === "") return undefined;
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : undefined;
+	}
+
+	private parseRelationTypes(value: unknown): MemoryRelationType[] | undefined {
+		const raw = Array.isArray(value)
+			? value
+			: typeof value === "string"
+				? value.split(",")
+				: [];
+		const relationTypes = raw
+			.map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+			.filter((entry): entry is MemoryRelationType =>
+				MEMORY_RELATION_TYPES.has(entry as MemoryRelationType),
+			);
+		return relationTypes.length > 0 ? relationTypes : undefined;
+	}
+
+	private async filterReadableMemoryIds(
+		memoryIds: string[],
+		context: MemoryReadContext,
+	): Promise<string[]> {
+		return this.system?.memoryOrchestrator?.filterReadableMemoryIds
+			? await this.system.memoryOrchestrator.filterReadableMemoryIds(
+					memoryIds,
+					context,
+				)
+			: [];
+	}
+
+	private sanitizeAuditEntries(audit: MemoryAuditEntry[]): MemoryAuditEntry[] {
+		return audit.map((entry) => ({
+			...entry,
+			before: this.sanitizeAuditSnapshot(entry.before),
+			after: this.sanitizeAuditSnapshot(entry.after),
+		}));
+	}
+
+	private sanitizeAuditSnapshot(
+		snapshot: Record<string, unknown> | undefined,
+	): Record<string, unknown> | undefined {
+		if (!snapshot) return undefined;
+		return {
+			id: snapshot.id,
+			type: snapshot.type,
+			confidence: snapshot.confidence,
+			status: snapshot.status,
+			redacted: true,
+		};
+	}
+
+	private sanitizeActionLogs(
+		actions: MemoryActionLogEntry[],
+	): MemoryActionLogEntry[] {
+		return actions.map((entry) => ({
+			...entry,
+			input: this.sanitizeLogPayload(entry.input),
+			output: this.sanitizeLogPayload(entry.output),
+		}));
+	}
+
+	private sanitizeLogPayload(
+		payload: Record<string, unknown>,
+	): Record<string, unknown> {
+		return {
+			memoryId:
+				typeof payload.memoryId === "string" ? payload.memoryId : undefined,
+			type: typeof payload.type === "string" ? payload.type : undefined,
+			status: typeof payload.status === "string" ? payload.status : undefined,
+			redacted: Object.keys(payload).length > 0,
+		};
+	}
+
+	private sanitizeMemoryPackForTransport<T>(
+		pack: T,
+		userConfirmed: boolean,
+	): T {
+		if (!isRecord(pack)) return pack;
+		const sanitized: Record<string, unknown> = { ...pack };
+		for (const key of [
+			"memories",
+			"userMemory",
+			"projectMemory",
+			"similarEpisodes",
+			"agentLessons",
+			"prospectiveReminders",
+		]) {
+			const value = sanitized[key];
+			if (Array.isArray(value)) {
+				sanitized[key] = value.map((entry) =>
+					this.sanitizeScoredMemoryForTransport(entry, userConfirmed),
+				);
+			}
+		}
+		return sanitized as T;
+	}
+
+	private sanitizeScoredMemoryForTransport(
+		entry: unknown,
+		userConfirmed: boolean,
+	): unknown {
+		if (!isRecord(entry) || !isRecord(entry.item)) return entry;
+		const item = entry.item;
+		const metadata = isRecord(item.metadata) ? item.metadata : {};
+		const permissions = isRecord(metadata.permissions)
+			? metadata.permissions
+			: {};
+		const restricted =
+			metadata.redacted === true ||
+			metadata.sensitivity === "restricted" ||
+			permissions.sensitivity === "restricted" ||
+			permissions.requiresUserConfirmationBeforeUse === true;
+		if (!restricted || userConfirmed) return entry;
+
+		return {
+			...entry,
+			item: {
+				id: typeof item.id === "string" ? item.id : undefined,
+				type: typeof item.type === "string" ? item.type : undefined,
+				content: "[Memory withheld: requires_user_confirmation_before_use]",
+				importance:
+					typeof item.importance === "number" ? item.importance : undefined,
+				accessCount:
+					typeof item.accessCount === "number" ? item.accessCount : undefined,
+				createdAt: item.createdAt,
+				lastAccessed: item.lastAccessed,
+				associations: Array.isArray(item.associations) ? item.associations : [],
+				source: this.sanitizeRestrictedMemorySource(item.source),
+				metadata: this.sanitizeRestrictedMemoryMetadata(metadata),
+			},
+		};
+	}
+
+	private sanitizeRestrictedMemorySource(
+		source: unknown,
+	): Record<string, unknown> {
+		if (!isRecord(source)) return {};
+		return {
+			sourceId:
+				typeof source.sourceId === "string" ? source.sourceId : undefined,
+			sourceType:
+				typeof source.sourceType === "string" ? source.sourceType : undefined,
+		};
+	}
+
+	private sanitizeRestrictedMemoryMetadata(
+		metadata: Record<string, unknown>,
+	): Record<string, unknown> {
+		return {
+			tenantId: metadata.tenantId,
+			userId: metadata.userId,
+			projectId: metadata.projectId,
+			agentRole: metadata.agentRole,
+			sourceTrust: metadata.sourceTrust,
+			confidence: metadata.confidence,
+			status: metadata.status,
+			sensitivity: metadata.sensitivity ?? "restricted",
+			permissions: metadata.permissions,
+			redacted: true,
+			redactionReason: "requires_user_confirmation_before_use",
+		};
 	}
 
 	private handleMemoryConfigGet(res: ServerResponse): void {
@@ -1218,10 +1892,593 @@ export class TransportServer {
 		}
 		try {
 			let results: unknown[] = [];
-			if (this.system?.ltm?.search && this.system.embedFn) {
+			// biome-ignore lint/suspicious/noExplicitAny: memory orchestrator is injected by the CLI runtime.
+			let memoryPack: any = null;
+			if (this.system?.memoryOrchestrator?.read) {
+				memoryPack = await this.system.memoryOrchestrator.read(
+					query,
+					{
+						tenantId: "local",
+						userId: "owner",
+						projectId: process.cwd(),
+						includeSources: true,
+						includeGraph: true,
+						userConfirmed: false,
+						trackUsage: false,
+					},
+					2000,
+				);
+				memoryPack = this.sanitizeMemoryPackForTransport(memoryPack, false);
+				results = memoryPack.memories ?? [];
+			} else if (this.system?.ltm?.search && this.system.embedFn) {
 				results = await this.system.ltm.search(query, this.system.embedFn);
 			}
-			jsonRes(res, 200, { query, results });
+			jsonRes(res, 200, { query, results, memoryPack });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryContextRetrieve(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			let body: Record<string, unknown>;
+			try {
+				body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+			const goal = typeof body.goal === "string" ? body.goal : "";
+			if (!goal.trim()) {
+				jsonRes(res, 400, { error: "Missing 'goal'" });
+				return;
+			}
+			const budgetTokens =
+				typeof body.maxTokens === "number" ? body.maxTokens : 3000;
+			const context = {
+				tenantId: typeof body.tenantId === "string" ? body.tenantId : "local",
+				userId: typeof body.userId === "string" ? body.userId : "owner",
+				projectId:
+					typeof body.projectId === "string" ? body.projectId : process.cwd(),
+				agentRole: typeof body.agentId === "string" ? body.agentId : undefined,
+				includeSources: body.includeSources !== false,
+				includeGraph: body.includeGraph !== false,
+				userConfirmed: body.userConfirmed === true,
+				trackUsage: body.trackUsage === true,
+			};
+			if (this.system?.contextAssembler?.assemble) {
+				const assembled = await this.system.contextAssembler.assemble({
+					objective: goal,
+					...context,
+					budgetTokens,
+				});
+				const contextPack = this.sanitizeMemoryPackForTransport(
+					assembled.memoryPack,
+					context.userConfirmed,
+				);
+				jsonRes(res, 200, {
+					goal,
+					contextPack,
+					assembled: { ...assembled, memoryPack: contextPack },
+				});
+				return;
+			}
+			if (this.system?.memoryOrchestrator?.read) {
+				const contextPack = await this.system.memoryOrchestrator.read(
+					goal,
+					context,
+					budgetTokens,
+				);
+				jsonRes(res, 200, {
+					goal,
+					contextPack: this.sanitizeMemoryPackForTransport(
+						contextPack,
+						context.userConfirmed,
+					),
+				});
+				return;
+			}
+			jsonRes(res, 503, { error: "Advanced memory is not available" });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryCreate(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			let body: Record<string, unknown>;
+			try {
+				body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+			if (!this.system?.memoryOrchestrator?.write) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const content =
+				typeof body.content === "string" ? body.content.trim() : "";
+			if (!content) {
+				jsonRes(res, 400, { error: "Missing 'content'" });
+				return;
+			}
+			const scopeBody = isRecord(body.scope) ? body.scope : {};
+			const result = await this.system.memoryOrchestrator.write({
+				type: normalizeMemoryType(body.memory_type ?? body.type),
+				content,
+				sourceTrust: normalizeMemorySourceTrust(body.sourceTrust),
+				scope: {
+					tenantId:
+						typeof scopeBody.tenantId === "string"
+							? scopeBody.tenantId
+							: "local",
+					userId:
+						typeof scopeBody.userId === "string" ? scopeBody.userId : "owner",
+					projectId:
+						typeof scopeBody.projectId === "string"
+							? scopeBody.projectId
+							: process.cwd(),
+					agentRole:
+						typeof scopeBody.agentRole === "string"
+							? scopeBody.agentRole
+							: undefined,
+					sessionId:
+						typeof scopeBody.sessionId === "string"
+							? scopeBody.sessionId
+							: undefined,
+					taskId:
+						typeof scopeBody.taskId === "string" ? scopeBody.taskId : undefined,
+				},
+				confidence:
+					typeof body.confidence === "number" ? body.confidence : undefined,
+				importance:
+					typeof body.importance === "number" ? body.importance : undefined,
+				source: isRecord(body.source) ? body.source : undefined,
+				permissions: isRecord(body.permissions) ? body.permissions : undefined,
+				metadata: isRecord(body.metadata) ? body.metadata : undefined,
+				evidence: isRecord(body.evidence) ? body.evidence : undefined,
+			});
+			jsonRes(res, result.accepted ? 200 : 400, {
+				ok: result.accepted,
+				result,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryFeedback(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			let body: Record<string, unknown>;
+			try {
+				body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+			if (!this.system?.memoryOrchestrator?.applyFeedback) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const memoryId = typeof body.memoryId === "string" ? body.memoryId : "";
+			const feedbackType =
+				typeof body.feedbackType === "string" ? body.feedbackType : "";
+			if (!memoryId || !feedbackType) {
+				jsonRes(res, 400, { error: "Missing 'memoryId' or 'feedbackType'" });
+				return;
+			}
+			if (
+				!MEMORY_FEEDBACK_TYPES.has(
+					feedbackType as Exclude<MemoryFeedbackType, "none">,
+				)
+			) {
+				jsonRes(res, 400, { error: "Invalid 'feedbackType'" });
+				return;
+			}
+			const result = await this.system.memoryOrchestrator.applyFeedback({
+				memoryId,
+				feedbackType: feedbackType as Exclude<MemoryFeedbackType, "none">,
+				sessionId:
+					typeof body.sessionId === "string" ? body.sessionId : undefined,
+				taskId: typeof body.taskId === "string" ? body.taskId : undefined,
+				agentRole:
+					typeof body.agentRole === "string" ? body.agentRole : undefined,
+				outcome: typeof body.outcome === "string" ? body.outcome : undefined,
+				correction:
+					typeof body.correction === "string" ? body.correction : undefined,
+				changedBy:
+					body.changedBy === "system" ||
+					body.changedBy === "agent" ||
+					body.changedBy === "user"
+						? body.changedBy
+						: "user",
+			});
+			jsonRes(res, result ? 200 : 404, { ok: Boolean(result), result });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryForget(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			let body: Record<string, unknown>;
+			try {
+				body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+			if (!this.system?.memoryOrchestrator?.forget) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const memoryId = typeof body.memoryId === "string" ? body.memoryId : "";
+			if (!memoryId) {
+				jsonRes(res, 400, { error: "Missing 'memoryId'" });
+				return;
+			}
+			await this.system.memoryOrchestrator.forget(
+				memoryId,
+				typeof body.reason === "string" ? body.reason : "api_forget",
+			);
+			jsonRes(res, 200, { ok: true, memoryId });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryBackfill(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			let body: Record<string, unknown> = {};
+			const raw = await readBody(req);
+			if (raw.trim()) {
+				try {
+					body = JSON.parse(raw) as Record<string, unknown>;
+				} catch {
+					jsonRes(res, 400, { error: "Invalid JSON body" });
+					return;
+				}
+			}
+			if (!this.system?.memoryOrchestrator?.backfillAdvancedMemory) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const limit = typeof body.limit === "number" ? body.limit : 1000;
+			const report =
+				await this.system.memoryOrchestrator.backfillAdvancedMemory(limit);
+			jsonRes(res, 200, { ok: true, report });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryRetentionRun(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const body = await this.readOptionalJsonBody(req, res);
+			if (!body) return;
+			if (!this.system?.memoryOrchestrator?.runActiveForgetting) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const now = typeof body.now === "string" ? new Date(body.now) : undefined;
+			if (now && Number.isNaN(now.getTime())) {
+				jsonRes(res, 400, { error: "Invalid 'now' timestamp" });
+				return;
+			}
+			const options: ActiveForgettingOptions = {
+				now,
+				unusedDays:
+					typeof body.unusedDays === "number" ? body.unusedDays : undefined,
+				lowImportanceThreshold:
+					typeof body.lowImportanceThreshold === "number"
+						? body.lowImportanceThreshold
+						: undefined,
+				contradictionGraceDays:
+					typeof body.contradictionGraceDays === "number"
+						? body.contradictionGraceDays
+						: undefined,
+			};
+			const report =
+				await this.system.memoryOrchestrator.runActiveForgetting(options);
+			jsonRes(res, 200, { ok: true, report });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async readOptionalJsonBody(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<Record<string, unknown> | undefined> {
+		const raw = await readBody(req);
+		if (!raw.trim()) return {};
+		try {
+			return JSON.parse(raw) as Record<string, unknown>;
+		} catch {
+			jsonRes(res, 400, { error: "Invalid JSON body" });
+			return undefined;
+		}
+	}
+
+	private async handleMemorySources(
+		res: ServerResponse,
+		params: URLSearchParams,
+	): Promise<void> {
+		const memoryId = params.get("id") ?? "";
+		if (!memoryId) {
+			jsonRes(res, 400, { error: "Missing memory id" });
+			return;
+		}
+		try {
+			if (!this.system?.memoryOrchestrator?.getSources) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const readable = await this.filterReadableMemoryIds(
+				[memoryId],
+				this.memoryContextFromParams(params),
+			);
+			if (readable.length === 0) {
+				jsonRes(res, 403, { error: "Memory is not accessible" });
+				return;
+			}
+			const sources = await this.system.memoryOrchestrator.getSources(memoryId);
+			jsonRes(res, 200, { memoryId, sources });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryGraph(
+		res: ServerResponse,
+		params: URLSearchParams,
+	): Promise<void> {
+		const entityName = params.get("entity")?.trim();
+		if (entityName) {
+			try {
+				if (!this.system?.memoryOrchestrator?.getGraphByEntity) {
+					jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+					return;
+				}
+				const graph = await this.system.memoryOrchestrator.getGraphByEntity(
+					entityName,
+					this.memoryContextFromParams(params),
+					this.memoryGraphOptionsFromParams(params),
+				);
+				jsonRes(res, 200, { entity: entityName, graph });
+			} catch (err) {
+				jsonRes(res, 500, {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+			return;
+		}
+
+		const memoryIds = parseMemoryIds(params);
+		if (memoryIds.length === 0) {
+			jsonRes(res, 400, { error: "Missing memory id(s)" });
+			return;
+		}
+		try {
+			if (!this.system?.memoryOrchestrator?.getGraph) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const readable = await this.filterReadableMemoryIds(
+				memoryIds,
+				this.memoryContextFromParams(params),
+			);
+			if (readable.length === 0) {
+				jsonRes(res, 403, { error: "No requested memories are accessible" });
+				return;
+			}
+			const graph = await this.system.memoryOrchestrator.getGraph(readable);
+			jsonRes(res, 200, { memoryIds: readable, graph });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryGraphTraverse(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			let body: Record<string, unknown>;
+			try {
+				body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+			if (!this.system?.memoryOrchestrator?.traverseGraph) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const memoryIds = Array.isArray(body.memoryIds)
+				? body.memoryIds.filter((id): id is string => typeof id === "string")
+				: [];
+			if (memoryIds.length === 0) {
+				jsonRes(res, 400, { error: "Missing memory id(s)" });
+				return;
+			}
+			const graph = await this.system.memoryOrchestrator.traverseGraph(
+				memoryIds,
+				this.memoryContextFromBody(body),
+				this.memoryGraphOptionsFromBody(body),
+			);
+			jsonRes(res, 200, { memoryIds, graph });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryAudit(
+		res: ServerResponse,
+		params: URLSearchParams,
+	): Promise<void> {
+		try {
+			if (!this.system?.memoryOrchestrator?.listAudit) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const limit = Number(params.get("limit") ?? 50);
+			const memoryId = params.get("id") ?? undefined;
+			if (!memoryId) {
+				jsonRes(res, 400, { error: "Missing memory id" });
+				return;
+			}
+			const readable = await this.filterReadableMemoryIds(
+				[memoryId],
+				this.memoryContextFromParams(params),
+			);
+			if (readable.length === 0) {
+				jsonRes(res, 403, { error: "Memory is not accessible" });
+				return;
+			}
+			const audit = await this.system.memoryOrchestrator.listAudit(
+				memoryId,
+				Number.isFinite(limit) ? limit : 50,
+			);
+			jsonRes(res, 200, {
+				memoryId,
+				audit: this.sanitizeAuditEntries(audit),
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryAuditIntegrity(res: ServerResponse): Promise<void> {
+		try {
+			if (!this.system?.memoryOrchestrator?.verifyAuditIntegrity) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const report =
+				await this.system.memoryOrchestrator.verifyAuditIntegrity();
+			jsonRes(res, 200, { report });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryActions(
+		res: ServerResponse,
+		params: URLSearchParams,
+	): Promise<void> {
+		try {
+			if (!this.system?.memoryOrchestrator?.listActionLogs) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const limit = Number(params.get("limit") ?? 50);
+			const actions = await this.system.memoryOrchestrator.listActionLogs(
+				Number.isFinite(limit) ? limit : 50,
+			);
+			jsonRes(res, 200, { actions: this.sanitizeActionLogs(actions) });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryVerifyPost(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			let body: Record<string, unknown>;
+			try {
+				body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+			const ids = Array.isArray(body.memoryIds)
+				? body.memoryIds.filter((id): id is string => typeof id === "string")
+				: [];
+			await this.handleMemoryVerify(res, ids, this.memoryContextFromBody(body));
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleMemoryVerify(
+		res: ServerResponse,
+		memoryIds: string[],
+		contextOrParams: MemoryReadContext | URLSearchParams,
+	): Promise<void> {
+		if (memoryIds.length === 0) {
+			jsonRes(res, 400, { error: "Missing memory id(s)" });
+			return;
+		}
+		try {
+			if (!this.system?.memoryOrchestrator?.explain) {
+				jsonRes(res, 503, { error: "Memory orchestrator is not available" });
+				return;
+			}
+			const context =
+				contextOrParams instanceof URLSearchParams
+					? this.memoryContextFromParams(contextOrParams)
+					: contextOrParams;
+			const readable = await this.filterReadableMemoryIds(memoryIds, context);
+			if (readable.length === 0) {
+				jsonRes(res, 403, { error: "No requested memories are accessible" });
+				return;
+			}
+			const verification = this.system.memoryOrchestrator.verify
+				? await this.system.memoryOrchestrator.verify(readable)
+				: [];
+			const explanations =
+				await this.system.memoryOrchestrator.explain(readable);
+			jsonRes(res, 200, { memoryIds: readable, verification, explanations });
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -3247,7 +4504,7 @@ export class TransportServer {
 					enabled: boolean;
 					[k: string]: unknown;
 				};
-				return { name, enabled, type: name, config: rest };
+				return { name, enabled, type: name, config: redactChannelConfig(rest) };
 			});
 			jsonRes(res, 200, channels);
 		} catch (err) {

@@ -235,13 +235,29 @@ export class ChatExecutionManager {
 				conversationId,
 				{ limit: this.opts.conversationHistoryLimit, recent: true },
 			);
-			for (const message of history.slice(0, -1)) {
+			const previousMessages = history.slice(0, -1);
+			const toolOutcomes = this.extractToolOutcomes(previousMessages);
+
+			for (const message of previousMessages) {
 				if (message.role !== "user" && message.role !== "assistant") continue;
+				const metadata: Record<string, unknown> = { conversationId };
+				const toolData = toolOutcomes.get(message.id);
+				if (toolData && toolData.length > 0) {
+					metadata.toolResults = toolData;
+				}
+				if (message.metadata) {
+					try {
+						const parsed = JSON.parse(message.metadata);
+						if (parsed && typeof parsed === "object") {
+							metadata.originalMetadata = parsed;
+						}
+					} catch {}
+				}
 				targetAgent.stm.add({
 					role: message.role,
 					content: message.content,
 					timestamp: new Date(message.timestamp),
-					metadata: { conversationId },
+					metadata,
 				});
 			}
 
@@ -389,5 +405,39 @@ export class ChatExecutionManager {
 				},
 			});
 		}
+	}
+
+	private extractToolOutcomes(
+		messages: Array<{ id: string; role: string; content: string }>,
+	): Map<string, Array<{ tool: string; success: boolean; excerpt: string }>> {
+		const outcomes = new Map<
+			string,
+			Array<{ tool: string; success: boolean; excerpt: string }>
+		>();
+		const checkpointRe =
+			/Last tool: (\S+) \((success|error)\)(?:\s*\n[\s\S]*?)?Last result excerpt: ([^\n]{0,200})/g;
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			const results: Array<{
+				tool: string;
+				success: boolean;
+				excerpt: string;
+			}> = [];
+			const content = message.content;
+			checkpointRe.lastIndex = 0;
+			let match = checkpointRe.exec(content);
+			while (match !== null) {
+				results.push({
+					tool: match[1],
+					success: match[2] === "success",
+					excerpt: match[3].trim(),
+				});
+				match = checkpointRe.exec(content);
+			}
+			if (results.length > 0) {
+				outcomes.set(message.id, results);
+			}
+		}
+		return outcomes;
 	}
 }

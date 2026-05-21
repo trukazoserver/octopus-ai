@@ -148,7 +148,9 @@ node packages/cli/dist/index.js config set ai.providers.zhipu.mode "coding-plan"
 - `"coding-global"`: Endpoint global para suscriptores coding
 - `"global"`: Endpoint global regular
 
-**Modelos disponibles:** `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-5v-turbo`, `glm-4.6v`
+**Modelos disponibles:** `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-5v-turbo`, `glm-4.6`, `glm-4.6v`
+
+`glm-4.6` se documenta con ventana de contexto de `200_000` tokens. `glm-4.6v` conserva `128_000` tokens y está orientado a entradas multimodales.
 
 #### OpenAI
 

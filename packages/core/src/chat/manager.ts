@@ -252,6 +252,32 @@ export class ChatManager {
 		);
 	}
 
+	async searchMessages(
+		query: string,
+		opts?: { conversationId?: string; limit?: number; offset?: number },
+	): Promise<ChatMessage[]> {
+		const likeQuery = `%${query}%`;
+		const limit = opts?.limit ?? 20;
+		const offset = opts?.offset ?? 0;
+		if (opts?.conversationId) {
+			return this.db.all<ChatMessage>(
+				`SELECT * FROM messages
+				WHERE conversation_id = ? AND content LIKE ?
+				ORDER BY timestamp ASC
+				LIMIT ? OFFSET ?`,
+				[opts.conversationId, likeQuery, limit, offset],
+			);
+		}
+
+		return this.db.all<ChatMessage>(
+			`SELECT * FROM messages
+			WHERE content LIKE ?
+			ORDER BY timestamp DESC
+			LIMIT ? OFFSET ?`,
+			[likeQuery, limit, offset],
+		);
+	}
+
 	async createExecution(opts: {
 		requestId?: string;
 		conversationId: string;

@@ -19,13 +19,14 @@ const DEFAULT_CONFIG: GlobalDailyMemoryConfig = {
 
 const SUMMARIZE_PROMPT = `You are the episodic daily memory of Octopus AI. Your job is to compress recent messages into a cohesive, concise chronological summary of what has been happening today.
 You will be provided with the CURRENT SUMMARY of the day, followed by NEW MESSAGES.
-Your goal is to output a single, updated summary that integrates the new messages. 
 
 Rules:
 1. Preserve important technical context (e.g., file paths, code concepts, precise requests).
 2. Keep it concise. Focus on *what* was asked and *what* was done.
 3. Eliminate pleasantries and chatty text.
-4. Output ONLY the updated summary text. Do not include introductory or concluding remarks.`;
+4. Output ONLY the updated summary text. Do not include introductory or concluding remarks.
+5. CRITICAL: Pay attention to continuation checkpoints and tool outcomes in HTML comments (<!-- ... -->). These contain the ACTUAL results of tool executions (success/failure). Always trust the latest tool outcome — if a tool initially failed but a later checkpoint shows success, report it as successful. Do NOT report a tool as failed if a subsequent execution of the same tool succeeded (e.g., via automatic retries).
+6. Preserve the final state of multi-step operations. If images were generated, files were created, or tasks were completed, list what ACTUALLY exists at the end, not intermediate failures that were later resolved.`;
 
 interface RawMessage {
 	id: string;
@@ -238,7 +239,7 @@ export class GlobalDailyMemory {
 			rawText = `\n\n### Unsummarized Recent Activity\n${rawMessages
 				.map(
 					(m) =>
-						`- [${m.source}] ${m.role}: ${m.content.substring(0, 100).replace(/\\n/g, " ")}...`,
+						`- [${m.source}] ${m.role}: ${m.content.substring(0, 300).replace(/\\n/g, " ")}...`,
 				)
 				.join("\n")}`;
 		}

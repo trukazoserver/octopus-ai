@@ -1,5 +1,7 @@
 import { nanoid } from "nanoid";
 import type { DatabaseAdapter } from "../storage/database.js";
+import { encrypt } from "../utils/crypto.js";
+import { isAssistantMemoryDenialEcho } from "./denial-echo.js";
 import type {
 	MemoryCandidate,
 	MemorySourceTrustLevel,
@@ -36,6 +38,8 @@ const SENSITIVE_PATTERNS: RegExp[] = [
 	/\b(?:\+?\d[\d\s().-]{8,}\d)\b/g,
 ];
 
+const MEMORY_ENCRYPTION_PREFIX = "enc:v1:";
+
 export class MemoryIntegrityLayer {
 	private initialized = false;
 
@@ -68,6 +72,20 @@ export class MemoryIntegrityLayer {
 		).map(({ label }) => label);
 		const { content, redactions } = this.redactSensitive(candidate.content);
 		const confidenceCap = TRUST_CAPS[candidate.sourceTrust];
+		if (isAssistantMemoryDenialEcho(candidate.content)) {
+			await this.log(
+				candidate,
+				"Rejected assistant denial echo",
+				"assistant_denial_echo",
+			);
+			return {
+				allowed: false,
+				reason: "Rejected assistant denial echo",
+				detectedPatterns: [...detectedPatterns, "assistant_denial_echo"],
+				redactions,
+				confidenceCap,
+			};
+		}
 		const normalizedCandidate: MemoryCandidate = {
 			...candidate,
 			content,
@@ -158,11 +176,21 @@ export class MemoryIntegrityLayer {
 				candidate.scope.tenantId,
 				candidate.scope.userId ?? null,
 				candidate.scope.sessionId ?? null,
-				candidate.content.slice(0, 2000),
+				this.protectMemoryText(candidate.content, 2000),
 				rejectionReason,
 				detectedPattern,
 				new Date().toISOString(),
 			],
 		);
+	}
+
+	private protectMemoryText(value: string, maxLength: number): string {
+		const plain = value.slice(0, maxLength);
+		const key =
+			process.env.OCTOPUS_MEMORY_LOG_ENCRYPTION_KEY?.trim() ||
+			process.env.OCTOPUS_ENCRYPTION_KEY?.trim() ||
+			"";
+		if (!key || plain.startsWith(MEMORY_ENCRYPTION_PREFIX)) return plain;
+		return `${MEMORY_ENCRYPTION_PREFIX}${encrypt(plain, key)}`;
 	}
 }

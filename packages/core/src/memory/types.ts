@@ -24,6 +24,194 @@ export type MemoryStatus =
 	| "contradicted"
 	| "user_deleted";
 
+export type MemoryRelationType =
+	| "associated"
+	| "mentions"
+	| "supports"
+	| "contradicts"
+	| "supersedes"
+	| "derived_from"
+	| "depends_on"
+	| "caused"
+	| "blocked_by"
+	| "entity_of"
+	| "same_entity_as"
+	| "prefers"
+	| "uses"
+	| "created"
+	| "updated"
+	| "confirmed_by";
+
+export type MemorySensitivity = "low" | "medium" | "high" | "restricted";
+
+export type MemoryVerificationStatus =
+	| "supported"
+	| "weak"
+	| "unverified"
+	| "conflict"
+	| "expired"
+	| "restricted";
+
+export interface MemorySource {
+	conversationId?: string;
+	taskId?: string;
+	channelId?: string;
+	sourceId?: string;
+	sourceType?:
+		| "message"
+		| "conversation"
+		| "document"
+		| "tool_output"
+		| "task_result"
+		| "user_correction"
+		| "behavior_signal"
+		| "api"
+		| "system"
+		| "agent_observation";
+	title?: string;
+	uri?: string;
+	quotedEvidence?: string;
+	authorityScore?: number;
+	publishedAt?: string;
+	retrievedAt?: string;
+	metadata?: Record<string, unknown>;
+}
+
+export interface MemoryPermissions {
+	visibleToAgents?: string[];
+	hiddenFromAgents?: string[];
+	visibleToUsers?: string[];
+	requiresUserConfirmationBeforeUse?: boolean;
+	sensitivity?: MemorySensitivity;
+	retention?: {
+		policy?: "none" | "expire_after_days" | "expire_at";
+		days?: number;
+		expiresAt?: string;
+	};
+}
+
+export interface MemoryVerification {
+	status: MemoryVerificationStatus;
+	confidence: number;
+	signals: string[];
+	sourceIds: string[];
+	contradictions: string[];
+	recommendation: "use" | "verify" | "ask_user" | "ignore";
+}
+
+export interface MemoryVerificationReport {
+	memoryId: string;
+	content: string;
+	type: MemoryType;
+	verification: MemoryVerification;
+	sensitivity: MemorySensitivity;
+	sources: MemorySource[];
+}
+
+export interface MemoryGraphNode {
+	id: string;
+	type: string;
+	name: string;
+	summary?: string;
+	confidence: number;
+	status: string;
+	metadata: Record<string, unknown>;
+}
+
+export interface MemoryGraphRelation {
+	id: string;
+	fromId: string;
+	toId: string;
+	type: MemoryRelationType;
+	confidence: number;
+	context?: string;
+	status: string;
+	metadata: Record<string, unknown>;
+}
+
+export interface MemoryGraphPath {
+	fromMemoryId: string;
+	toMemoryId: string;
+	nodeIds: string[];
+	relationIds: string[];
+	depth: number;
+	explanation: string;
+}
+
+export interface MemoryGraphTraversalOptions {
+	maxDepth?: number;
+	maxNodes?: number;
+	relationTypes?: MemoryRelationType[];
+}
+
+export interface MemoryGraphSnapshot {
+	memoryIds: string[];
+	nodes: MemoryGraphNode[];
+	relations: MemoryGraphRelation[];
+	paths?: MemoryGraphPath[];
+}
+
+export interface MemoryAuditEntry {
+	id: string;
+	actorId: string;
+	action: string;
+	memoryId?: string;
+	before?: Record<string, unknown>;
+	after?: Record<string, unknown>;
+	createdAt: Date;
+	previousHash?: string;
+	entryHash?: string;
+}
+
+export interface MemoryActionLogEntry {
+	id: string;
+	sessionId?: string;
+	agentId?: string;
+	actionType: string;
+	input: Record<string, unknown>;
+	output: Record<string, unknown>;
+	status: string;
+	createdAt: Date;
+	previousHash?: string;
+	entryHash?: string;
+}
+
+export interface MemoryLogIntegrityResult {
+	table: "memory_audit_logs" | "memory_action_logs";
+	valid: boolean;
+	checked: number;
+	legacy: number;
+	missingHash: number;
+	mismatches: string[];
+	chainBreaks: string[];
+	firstInvalidId?: string;
+}
+
+export interface MemoryAuditIntegrityReport {
+	valid: boolean;
+	generatedAt: Date;
+	audit: MemoryLogIntegrityResult;
+	actions: MemoryLogIntegrityResult;
+}
+
+export interface MemoryBackfillReport {
+	scanned: number;
+	sourcesLinked: number;
+	permissionsCreated: number;
+	nodesLinked: number;
+	skipped: number;
+}
+
+export interface RetrievalSignals {
+	semanticScore: number;
+	confidence: number;
+	sourceAuthority: number;
+	freshness: number;
+	entityMatch: number;
+	contradictionPenalty: number;
+	permissionPenalty: number;
+}
+
 export type MemoryUncertaintyLevel =
 	| "HIGH_CONFIDENCE"
 	| "LOW_CONFIDENCE"
@@ -39,7 +227,7 @@ export interface MemoryItem {
 	lastAccessed: Date;
 	createdAt: Date;
 	associations: string[];
-	source: { conversationId?: string; taskId?: string; channelId?: string };
+	source: MemorySource;
 	metadata: Record<string, unknown>;
 }
 
@@ -59,7 +247,8 @@ export interface MemoryCandidate {
 	scope: MemoryScope;
 	confidence?: number;
 	importance?: number;
-	source?: { conversationId?: string; taskId?: string; channelId?: string };
+	source?: MemorySource;
+	permissions?: MemoryPermissions;
 	metadata?: Record<string, unknown>;
 	evidence?: {
 		sourceType:
@@ -96,6 +285,19 @@ export interface MemoryPack {
 	knownRisks: string[];
 	tokenBudgetUsed: number;
 	tokenBudgetRemaining: number;
+	verificationSummary?: Record<MemoryVerificationStatus, number>;
+	sourceSummary?: {
+		strongestSourceTrust?: MemorySourceTrustLevel;
+		freshestSourceAt?: Date;
+		averageAuthority: number;
+	};
+	entityMatches?: Array<{ entity: string; memoryIds: string[] }>;
+	graphRelations?: Array<{
+		sourceId: string;
+		targetId: string;
+		type: MemoryRelationType;
+		confidence: number;
+	}>;
 }
 
 export interface MemoryReadContext extends MemoryScope {
@@ -103,6 +305,10 @@ export interface MemoryReadContext extends MemoryScope {
 	timeRange?: { since?: Date; until?: Date };
 	minTrustLevel?: MemorySourceTrustLevel;
 	trackUsage?: boolean;
+	actorId?: string;
+	includeSources?: boolean;
+	includeGraph?: boolean;
+	userConfirmed?: boolean;
 }
 
 export interface MemoryWriteResult {
@@ -263,6 +469,8 @@ export interface MemoryContext {
 export interface ScoredMemory {
 	item: MemoryItem;
 	score: number;
+	verification?: MemoryVerification;
+	signals?: RetrievalSignals;
 }
 
 export interface VectorSearchResult {
@@ -270,4 +478,9 @@ export interface VectorSearchResult {
 	similarity: number;
 }
 
-export type EmbeddingFunction = (text: string) => Promise<number[]>;
+export type EmbeddingTask = "document" | "query" | "none";
+
+export type EmbeddingFunction = (
+	text: string,
+	task?: EmbeddingTask,
+) => Promise<number[]>;

@@ -40,14 +40,19 @@ import {
 	type OrchestratorConfig,
 	type OrchestratorEvent,
 } from "./orchestrator.js";
+import { RollingContextManager } from "./rolling-context.js";
 import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 18;
 const MAX_REPEATED_TOOL_SIGNATURES = 2;
 const MAX_TOOL_RESULT_CONTEXT_CHARS = 12000;
 const MAX_TOOL_RESULT_STORED_CHARS = 2000;
+const STM_MIN_TURNS = 30;
+const STM_MAX_TURNS = 60;
 const TOOL_IMAGE_RE = /\[IMG:(data:image\/[a-zA-Z0-9-]+;base64,[^\]]+)\]/;
 const MEDIA_FILE_RE = /\/api\/media\/file\/([^\s)\]]+)/g;
+const VISIBLE_MEMORY_IDENTIFIER_RE =
+	/\b(?=[A-Za-z0-9_-]{8,}\b)(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b/g;
 
 type ObjectiveKind = "media_collection" | "generic";
 
@@ -129,6 +134,7 @@ export class AgentRuntime {
 	private learningEngine?: LearningEngine;
 	private orchestrator?: OctopusOrchestrator;
 	private workingMemory: WorkingMemory = new WorkingMemory();
+	private rollingContext: RollingContextManager;
 	private lastMemoryTrace?: RuntimeMemoryTrace;
 
 	constructor(
@@ -145,6 +151,7 @@ export class AgentRuntime {
 		this.memoryRetrieval = memoryRetrieval;
 		this.memoryConsolidator = memoryConsolidator;
 		this.skillLoader = skillLoader;
+		this.rollingContext = new RollingContextManager(llmRouter);
 	}
 
 	setToolSystem(registry: ToolRegistry, executor: ToolExecutor): void {
@@ -1573,6 +1580,15 @@ export class AgentRuntime {
 			throwIfAborted(options.signal);
 			iterations++;
 
+			const compressedMessages = await this.rollingContext.maybeSummarize(
+				messages,
+				this.config.model ?? "default",
+			);
+			if (compressedMessages !== messages) {
+				messages.length = 0;
+				messages.push(...compressedMessages);
+			}
+
 			const request: LLMRequest = {
 				model: this.config.model ?? "default",
 				messages,
@@ -2098,6 +2114,15 @@ export class AgentRuntime {
 			throwIfAborted(options.signal);
 			iterations++;
 
+			const compressedMessages = await this.rollingContext.maybeSummarize(
+				messages,
+				this.config.model ?? "default",
+			);
+			if (compressedMessages !== messages) {
+				messages.length = 0;
+				messages.push(...compressedMessages);
+			}
+
 			const request: LLMRequest = {
 				model: this.config.model ?? "default",
 				messages,
@@ -2387,6 +2412,20 @@ export class AgentRuntime {
 			let advancedMemoryContext = "# Advanced Memory Context\n";
 			advancedMemoryContext += `- Uncertainty: ${advancedMemoryPack.uncertaintyLevel}\n`;
 			advancedMemoryContext += `- Token budget used: ${advancedMemoryPack.tokenBudgetUsed}\n`;
+			if (advancedMemoryPack.verificationSummary) {
+				advancedMemoryContext += `- Verification summary: ${Object.entries(
+					advancedMemoryPack.verificationSummary,
+				)
+					.map(([status, count]) => `${status}=${count}`)
+					.join(", ")}\n`;
+			}
+			if (advancedMemoryPack.sourceSummary) {
+				const sourceSummary = advancedMemoryPack.sourceSummary;
+				advancedMemoryContext += `- Source summary: strongestTrust=${sourceSummary.strongestSourceTrust ?? "unknown"}, averageAuthority=${sourceSummary.averageAuthority.toFixed(2)}\n`;
+			}
+			if (advancedMemoryPack.graphRelations?.length) {
+				advancedMemoryContext += `- Graph relations available: ${advancedMemoryPack.graphRelations.length}\n`;
+			}
 			if (knownGaps.length > 0) {
 				advancedMemoryContext += `- Known gaps: ${knownGaps.join("; ")}\n`;
 			}
@@ -2412,7 +2451,7 @@ export class AgentRuntime {
 			systemContent +=
 				"\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
 			systemContent +=
-				"\n\nMANDATORY MEDIA OUTPUT RULE: Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description)`) or the `save_media` tool. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
+				"\n\nMANDATORY MEDIA OUTPUT RULE (PERSISTENT, NON-NEGOTIABLE): Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description)`), the `save_media` tool ONLY for small base64 payloads, or `import_media_file` for any existing local file and any large output such as ffmpeg videos. If a file already exists on disk, NEVER convert it to base64; ALWAYS call `import_media_file` with the local path. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
 		}
 
 		systemContent += `\n\nCRITICAL SYSTEM INSTRUCTION:
@@ -2495,33 +2534,43 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 
 		messages.push({ role: "system", content: systemContent });
 
-		const memoryItems = advancedMemoryPack?.memories ?? memories.memories;
+		const memoryItems = this.filterMemoryPromptItems(
+			advancedMemoryPack?.memories ?? memories.memories,
+		);
 		if (memoryItems.length > 0) {
 			const memoryFacts = memoryItems
 				.map((m) => {
-					let sourceStr = "";
+					let sourceStr = "Source: unavailable";
 					const sourceChannel = m.item.source?.channelId;
 					if (sourceChannel) {
-						sourceStr = `[Channel: ${sourceChannel}] `;
+						sourceStr = `Source channel: ${sourceChannel}`;
 					} else if (m.item.source?.conversationId) {
-						sourceStr = `[Conversation: ${m.item.source.conversationId}] `;
+						sourceStr = `Source conversation: ${m.item.source.conversationId}`;
 					}
 
 					const timeMs = Date.now() - m.item.createdAt.getTime();
 					const hours = Math.round(timeMs / (1000 * 60 * 60));
 					const timeStr =
 						hours > 24
-							? `[${Math.round(hours / 24)} days ago] `
+							? `${Math.round(hours / 24)} days ago`
 							: hours > 0
-								? `[${hours} hours ago] `
-								: "[Recently] ";
+								? `${hours} hours ago`
+								: "Recently";
 
-					return `- ${sourceStr}${timeStr}${m.item.content}`;
+					const visibleIdentifiers = this.extractVisibleMemoryIdentifiers(
+						m.item.content,
+					);
+					const identifierStr =
+						visibleIdentifiers.length > 0
+							? `; Visible identifiers/codes: ${visibleIdentifiers.join(", ")}`
+							: "";
+
+					return `- ${sourceStr}; Time: ${timeStr}${identifierStr}; Visible content: ${m.item.content}`;
 				})
 				.join("\n");
 			messages.push({
 				role: "system",
-				content: `Relevant memories from ${advancedMemoryPack ? "orchestrated memory" : "long-term storage"}:\n${memoryFacts}`,
+				content: `Relevant memories from ${advancedMemoryPack ? "orchestrated memory" : "long-term storage"}:\nUse these retrieved memories as available context for the current answer. When the user asks what you remember or asks about a fact covered below, answer from these memories instead of saying you do not remember. Each memory line separates source metadata from Visible content; answer from Visible content, not from redacted source metadata. Respect any redacted memory markers and do not infer withheld content. A [REDACTED] span only withholds that span; still use the other visible facts and identifiers in the same memory. If the user asks whether you remember a visible code, codigo, token, name, or identifier and that exact value appears below, answer yes and provide the visible value. If Visible identifiers/codes contains the user-requested code or codigo, that is the exact public code you remember; do not say there is a separate missing value. Do not claim that value is hidden just because a different span in the same memory is [REDACTED]. Do not describe visible identifiers as merely labels or incomplete values unless the identifier itself contains [REDACTED].\n${memoryFacts}`,
 			});
 		}
 
@@ -2541,10 +2590,33 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 					t.metadata.conversationId === channelId,
 			);
 		}
-		const recentTurns = conversationTurns.slice(-20);
+		const maxTurns = Math.min(
+			STM_MAX_TURNS,
+			Math.max(STM_MIN_TURNS, conversationTurns.length),
+		);
+		const recentTurns = conversationTurns.slice(-maxTurns);
 		for (const turn of recentTurns) {
 			if (turn.role === "user" || turn.role === "assistant") {
-				messages.push({ role: turn.role, content: turn.content });
+				const toolResults = (turn.metadata as Record<string, unknown>)
+					?.toolResults as
+					| Array<{ tool: string; success: boolean; excerpt: string }>
+					| undefined;
+				let content = turn.content;
+				if (toolResults && toolResults.length > 0) {
+					const existingCheckpoints = (
+						content.match(/octopus-continuation-checkpoint/g) || []
+					).length;
+					if (existingCheckpoints === 0) {
+						const outcomes = toolResults
+							.map(
+								(r) =>
+									`- ${r.tool}: ${r.success ? "SUCCESS" : "FAILED"} — ${r.excerpt}`,
+							)
+							.join("\n");
+						content += `\n<!-- tool-outcomes\n${outcomes}\n-->`;
+					}
+				}
+				messages.push({ role: turn.role, content });
 			}
 		}
 
@@ -2582,6 +2654,47 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 		});
 
 		return parsedMessages;
+	}
+
+	private extractVisibleMemoryIdentifiers(content: string): string[] {
+		return Array.from(content.matchAll(VISIBLE_MEMORY_IDENTIFIER_RE))
+			.map((match) => match[0])
+			.filter((identifier) => !identifier.includes("REDACTED"))
+			.filter(
+				(identifier, index, identifiers) =>
+					identifiers.indexOf(identifier) === index,
+			)
+			.slice(0, 8);
+	}
+
+	private filterMemoryPromptItems<
+		T extends { item: { type: string; content: string } },
+	>(items: T[]): T[] {
+		const hasDirectMemory = items.some(
+			(memory) =>
+				memory.item.type !== "episodic" && memory.item.type !== "meta",
+		);
+		if (!hasDirectMemory) return items;
+
+		return items.filter(
+			(memory) =>
+				memory.item.type !== "episodic" ||
+				!this.isAssistantMemoryDenialEcho(memory.item.content),
+		);
+	}
+
+	private isAssistantMemoryDenialEcho(content: string): boolean {
+		const normalized = content.toLowerCase();
+		if (!normalized.includes("assistant replied")) return false;
+		return [
+			"no lo recuerdo",
+			"no recuerdo",
+			"no tengo registro",
+			"no tengo información",
+			"no existe ningún registro",
+			"no tengo acceso a conversaciones anteriores",
+			"each conversation starts fresh",
+		].some((phrase) => normalized.includes(phrase));
 	}
 
 	private updateActiveTask(responseText: string): void {

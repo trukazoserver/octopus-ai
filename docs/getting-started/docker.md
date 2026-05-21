@@ -4,57 +4,75 @@
   <img src="../../logo aplicacion.png" alt="Octopus AI" width="100" />
 </p>
 
-Guía actualizada para ejecutar Octopus AI en contenedores usando el `Dockerfile` y `docker-compose.yml` incluidos en el repositorio.
+Esta guía explica cómo ejecutar Octopus AI en contenedores usando el `Dockerfile` y `docker-compose.yml` incluidos. El despliegue Docker está pensado para instalación completa, reproducible y sin prompts.
 
 ---
 
-## Qué Despliega la Configuración Actual
+## Qué Despliega Docker
 
-El despliegue Docker del repositorio está orientado a operación continua y arranca un único servicio `octopus` con:
+El stack levanta un único servicio `octopus` con:
 
-- imagen multi-stage basada en Node.js 22
-- puerto `3000` para HTTP y healthcheck
-- volumen persistente en `/data`
-- workspace montado en `/data/workspace`
-- plantillas iniciales `SOUL.md` y `HEARTBEAT.md`
+- Imagen multi-stage basada en Node.js 22 Bookworm Slim.
+- Runtime completo dentro del contenedor: Node.js, pnpm, Python, Build Tools, Chromium, ffmpeg, fonts, curl y tini.
+- Servidor Octopus en `http://localhost:18789`.
+- API HTTP, WebSocket y UI web compilada en el mismo puerto `18789`.
+- Healthcheck contra `http://127.0.0.1:18789/api/status`.
+- Volumen persistente `/data` para base de datos, skills, plugins y logs.
+- Workspace en `/data/workspace` con plantillas `SOUL.md` y `HEARTBEAT.md`.
+
+A diferencia de una instalación local interactiva, Docker instala todo lo necesario dentro de la imagen aunque tu host no tenga Python, Build Tools, Chromium o ffmpeg.
 
 ---
 
-## Requisitos
+## Requisitos del Host
 
-- Docker Desktop o Docker Engine reciente
-- Docker Compose v2
+Solo necesitas:
 
-Verificación rápida:
+- Docker Desktop o Docker Engine reciente.
+- Docker Compose v2.
+
+Verificación:
 
 ```bash
 docker --version
 docker compose version
 ```
 
+Si usas el instalador local `pnpm run install:octopus`, también puede detectar Docker y ofrecer instalarlo si falta.
+
 ---
 
 ## Arranque Rápido
 
+Desde la raíz del repositorio:
+
 ```bash
-git clone https://github.com/trukazoserver/octopus-ai.git
-cd octopus-ai
+pnpm run docker:up
+```
+
+Comando equivalente:
+
+```bash
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
 Después del arranque:
 
-- API y healthcheck: `http://localhost:3000`
-- healthcheck simple: `http://localhost:3000/health`
+- UI/API/WebSocket: `http://localhost:18789`
+- Estado: `http://localhost:18789/api/status`
+- Healthcheck simple: `http://localhost:18789/health`
 
 ---
 
 ## Variables de Entorno
 
-Crea un archivo `.env` junto al `docker-compose.yml` dentro de `docker/` o exporta estas variables antes de levantar el stack:
+Puedes crear un archivo `.env` en la raíz del repositorio o exportar variables antes de levantar el stack. Docker Compose las inyecta al contenedor.
 
 ```env
+# Proveedor recomendado por defecto
 ZHIPU_API_KEY=tu-key-zhipu
+
+# Proveedores alternativos
 # OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-ant-...
 # GOOGLE_API_KEY=tu-key-google
@@ -64,15 +82,20 @@ ZHIPU_API_KEY=tu-key-zhipu
 # TELEGRAM_BOT_TOKEN=123456:ABCDEF
 # DISCORD_BOT_TOKEN=...
 # SLACK_BOT_TOKEN=...
+
+# Opcional: almacenamiento externo/vectorial
+# OCTOPUS_POSTGRES_URL=postgres://...
+# OCTOPUS_VECTOR_URL=https://...
+# OCTOPUS_QDRANT_URL=http://...
 ```
 
-El `docker-compose.yml` tambien exporta variables de proceso útiles para el contenedor, como `OCTOPUS_DATA_DIR`, `OCTOPUS_DB_PATH` y `OCTOPUS_LOG_LEVEL`.
+Si no defines API keys, el contenedor arranca igual. Podrás entrar a `http://localhost:18789` y configurar proveedores desde la UI o usando CLI dentro del contenedor.
 
 ---
 
 ## Persistencia de Datos
 
-La configuración incluida monta:
+La configuración monta:
 
 ```yaml
 volumes:
@@ -80,15 +103,20 @@ volumes:
   - ./workspace:/data/workspace
 ```
 
-Esto deja persistidos:
+Esto conserva:
 
-- base de datos en `/data/db/octopus.db`
-- skills y artefactos del sistema en `/data/skills`
-- experiencias y aprendizajes continuos en la misma base SQLite
-- logs en `/data/logs`
-- archivos operativos del workspace en `/data/workspace`
+- Base de datos en `/data/db/octopus.db`.
+- Skills en `/data/skills`.
+- Plugins en `/data/plugins`.
+- Logs en `/data/logs`.
+- Workspace operativo en `/data/workspace`.
+- Memoria, conversaciones, aprendizajes, tareas y automatizaciones.
 
-En el primer arranque se copian plantillas base como `SOUL.md` y `HEARTBEAT.md` al workspace del contenedor.
+Para borrar todo el estado persistente:
+
+```bash
+docker compose -f docker/docker-compose.yml down -v
+```
 
 ---
 
@@ -96,40 +124,63 @@ En el primer arranque se copian plantillas base como `SOUL.md` y `HEARTBEAT.md` 
 
 | Acción | Comando |
 |---|---|
-| Iniciar | `docker compose -f docker/docker-compose.yml up -d` |
-| Reconstruir | `docker compose -f docker/docker-compose.yml up -d --build` |
+| Construir imagen | `pnpm run docker:build` |
+| Iniciar/reconstruir | `pnpm run docker:up` |
+| Detener | `pnpm run docker:down` |
 | Ver logs | `docker compose -f docker/docker-compose.yml logs -f` |
 | Ver estado | `docker compose -f docker/docker-compose.yml ps` |
-| Detener | `docker compose -f docker/docker-compose.yml down` |
+| Entrar al contenedor | `docker exec -it octopus-ai sh` |
+| Diagnóstico interno | `docker exec -it octopus-ai node packages/cli/dist/index.js doctor` |
 
 ---
 
-## Dashboard Web
+## Configurar Proveedor Dentro del Contenedor
 
-El contenedor actual expone el backend HTTP/health. El dashboard React se usa normalmente aparte durante desarrollo con:
+Puedes pasar variables por `.env` o configurar después:
 
 ```bash
-pnpm dev
+docker exec -it octopus-ai node packages/cli/dist/index.js config set ai.providers.zhipu.apiKey "TU_KEY"
+docker exec -it octopus-ai node packages/cli/dist/index.js config set ai.default "zhipu/glm-5.1"
 ```
 
-Si deseas servir tambien la UI desde la misma imagen, necesitas incluir `packages/web/dist` en la imagen runtime o usar un contenedor adicional para frontend.
+La configuración se guarda en el volumen `/data`, por lo que sobrevive a recreaciones del contenedor.
+
+---
+
+## Qué Incluye la Imagen
+
+La imagen instala explícitamente:
+
+- `node:22-bookworm-slim`
+- `pnpm@10.8.0`
+- `python3`, `python3-pip`, `python3-venv`
+- `g++`, `make`, `git`
+- `chromium`
+- `ffmpeg`
+- `fonts-liberation`
+- `curl`
+- `tini`
+
+Esto cubre ejecución del backend, UI compilada, herramientas de media, browser automation, scripts Python y dependencias nativas.
 
 ---
 
 ## Healthcheck y Observabilidad
 
-La imagen incorpora:
-
-- `curl` para el healthcheck interno
-- `tini` como init process
-- healthcheck contra `http://localhost:3000/health`
-
-Para inspección manual:
+La imagen usa:
 
 ```bash
-docker compose -f docker/docker-compose.yml logs -f
-curl http://localhost:3000/health
+curl -f http://127.0.0.1:18789/api/status
 ```
+
+Inspección manual:
+
+```bash
+curl http://localhost:18789/api/status
+docker compose -f docker/docker-compose.yml logs -f
+```
+
+Si el contenedor aparece `unhealthy`, revisa logs y valida que no haya otro servicio usando el puerto `18789` en el host.
 
 ---
 
@@ -137,10 +188,10 @@ curl http://localhost:3000/health
 
 ```bash
 git pull origin main
-docker compose -f docker/docker-compose.yml up -d --build
+pnpm run docker:up
 ```
 
-El volumen `octopus-data` conserva la base de datos y el estado persistente entre recreaciones del contenedor.
+El comando reconstruye la imagen si cambió el código y conserva `octopus-data`.
 
 ---
 
@@ -152,21 +203,32 @@ El volumen `octopus-data` conserva la base de datos y el estado persistente entr
 docker compose -f docker/docker-compose.yml logs
 ```
 
-### El healthcheck falla
+Revisa errores de API keys, permisos de volumen o puerto ocupado.
 
-Comprueba que el contenedor esté exponiendo el puerto `3000` y que no haya otro proceso ocupándolo en tu host.
+### El puerto 18789 está ocupado
+
+Cambia el puerto publicado en `docker/docker-compose.yml`:
+
+```yaml
+ports:
+  - "18800:18789"
+```
+
+Luego accede por `http://localhost:18800`.
 
 ### No hay proveedores disponibles
 
-Configura al menos una API key válida en `docker/.env`, por ejemplo:
+Configura al menos una API key válida:
 
 ```env
 ZHIPU_API_KEY=tu-key-zhipu
 ```
 
-### Necesitas sandbox aislado dentro del asistente
+O configúrala dentro del contenedor con `config set`.
 
-La tool `sandbox_execute` depende de Docker disponible para el runtime donde se ejecute Octopus. Si la usas fuera del contenedor principal, instala Docker Desktop/Engine en esa máquina.
+### Necesitas sandbox aislado desde dentro de Octopus
+
+La tool `sandbox_execute` requiere Docker disponible para el runtime. Si quieres ejecutar contenedores desde dentro del contenedor principal, deberás montar el socket Docker del host bajo tu propio modelo de seguridad. No se monta por defecto.
 
 ---
 

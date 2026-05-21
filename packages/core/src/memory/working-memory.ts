@@ -155,6 +155,16 @@ export class WorkingMemory {
 		if (!success && errorMsg) {
 			this.addError(toolName, errorMsg.slice(0, 200));
 		}
+		if (success) {
+			const unresolved = this.state.errors.filter(
+				(e) => e.step === toolName && !e.resolution,
+			);
+			for (const err of unresolved) {
+				err.resolution =
+					"Auto-resolved: subsequent execution succeeded (likely via automatic retry)";
+			}
+			this.state.lastUpdated = new Date();
+		}
 	}
 
 	/**

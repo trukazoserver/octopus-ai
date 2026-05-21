@@ -21,6 +21,12 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.ai.providers.anthropic).toBeDefined();
 			expect(DEFAULT_CONFIG.ai.providers.openai).toBeDefined();
 			expect(DEFAULT_CONFIG.ai.providers.google).toBeDefined();
+			expect(DEFAULT_CONFIG.ai.providers.zhipu.mode).toBe("coding-plan");
+			expect(DEFAULT_CONFIG.ai.providers.openai.authMode).toBe("api-key");
+			expect(DEFAULT_CONFIG.ai.providers.google.authMode).toBe("api-key");
+			expect(DEFAULT_CONFIG.ai.providers.openrouter.baseUrl).toBe(
+				"https://openrouter.ai/api/v1",
+			);
 			expect(DEFAULT_CONFIG.ai.providers.local).toBeDefined();
 		});
 
@@ -55,9 +61,26 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.memory.enabled).toBe(true);
 			expect(DEFAULT_CONFIG.memory.shortTerm).toBeDefined();
 			expect(DEFAULT_CONFIG.memory.longTerm).toBeDefined();
+			expect(DEFAULT_CONFIG.memory.longTerm.vectorStore.collection).toBe(
+				"octopus_memory",
+			);
+			expect(DEFAULT_CONFIG.memory.longTerm.vectorStore.timeoutMs).toBe(10000);
+			expect(DEFAULT_CONFIG.memory.longTerm.vectorStore.maxRetries).toBe(2);
+			expect(DEFAULT_CONFIG.memory.longTerm.vectorStore.retryBaseDelayMs).toBe(
+				100,
+			);
 			expect(DEFAULT_CONFIG.memory.consolidation).toBeDefined();
 			expect(DEFAULT_CONFIG.memory.retrieval).toBeDefined();
 			expect(DEFAULT_CONFIG.memory.retrieval.weights).toBeDefined();
+			expect(DEFAULT_CONFIG.memory.embeddings.enabled).toBe(false);
+			expect(DEFAULT_CONFIG.memory.embeddings.provider).toBe("auto");
+			expect(DEFAULT_CONFIG.memory.embeddings.apiType).toBe("openai");
+			expect(DEFAULT_CONFIG.memory.embeddings.task).toBe("document");
+			expect(DEFAULT_CONFIG.memory.embeddings.dimensions).toBe(1024);
+			expect(DEFAULT_CONFIG.memory.embeddings.failureRetryMs).toBe(60000);
+			expect(DEFAULT_CONFIG.memory.retention.enabled).toBe(false);
+			expect(DEFAULT_CONFIG.memory.retention.cron).toBe("30 3 * * *");
+			expect(DEFAULT_CONFIG.memory.retention.unusedDays).toBe(90);
 		});
 
 		it("should have skills config with forge and improvement", () => {
@@ -87,10 +110,13 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.storage).toBeDefined();
 			expect(DEFAULT_CONFIG.storage.backend).toBe("sqlite");
 			expect(DEFAULT_CONFIG.storage.path).toContain(".octopus");
+			expect(DEFAULT_CONFIG.storage.connectionString).toBe("");
+			expect(DEFAULT_CONFIG.storage.ssl).toBe(false);
 		});
 
 		it("should have security config", () => {
 			expect(DEFAULT_CONFIG.security).toBeDefined();
+			expect(DEFAULT_CONFIG.security.memoryApiKey).toBe("");
 			expect(DEFAULT_CONFIG.security.sandboxCommands).toBe(true);
 		});
 

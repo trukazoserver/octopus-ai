@@ -1,11 +1,7 @@
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { BrowserWindow, app, ipcMain } from "electron";
 import { setupIpcHandlers } from "./ipc.js";
 import { createTray } from "./tray.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -28,7 +24,7 @@ function createWindow() {
 		mainWindow.loadURL("http://localhost:5173");
 		mainWindow.webContents.openDevTools();
 	} else {
-		mainWindow.loadFile(path.join(__dirname, "../../renderer/index.html"));
+		mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
 	}
 
 	mainWindow.once("ready-to-show", () => {

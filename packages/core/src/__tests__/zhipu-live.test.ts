@@ -2,26 +2,40 @@ import { describe, expect, it } from "vitest";
 import { ZhipuProvider } from "../ai/providers/zhipu.js";
 import type { ZhipuApiMode } from "../ai/providers/zhipu.js";
 
-const ZAI_API_KEY = process.env.ZAI_API_KEY || process.env.ZHIPU_API_KEY || "";
-const hasApiKey = ZAI_API_KEY.length > 0;
+const modeConfigs: Array<{
+	mode: ZhipuApiMode;
+	apiKey: string;
+	expectedBaseUrl: string;
+}> = [
+	{
+		mode: "coding-plan",
+		apiKey: process.env.ZHIPU_CODING_API_KEY ?? "",
+		expectedBaseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+	},
+	{
+		mode: "coding-global",
+		apiKey: process.env.ZAI_CODING_API_KEY ?? "",
+		expectedBaseUrl: "https://api.z.ai/api/coding/paas/v4",
+	},
+	{
+		mode: "api",
+		apiKey: process.env.ZHIPU_API_KEY ?? "",
+		expectedBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+	},
+	{
+		mode: "global",
+		apiKey: process.env.ZAI_API_KEY ?? "",
+		expectedBaseUrl: "https://api.z.ai/api/paas/v4",
+	},
+];
 
-const modes: ZhipuApiMode[] = ["coding-plan", "api"];
-
-for (const mode of modes) {
-	describe.skipIf(!hasApiKey)(`Z.ai GLM Provider (${mode})`, () => {
-		const provider = new ZhipuProvider({ apiKey: ZAI_API_KEY, mode });
+for (const { mode, apiKey, expectedBaseUrl } of modeConfigs) {
+	describe.skipIf(!apiKey)(`Z.ai GLM Provider (${mode})`, () => {
+		const provider = new ZhipuProvider({ apiKey, mode });
 
 		it("should initialize with correct endpoint", () => {
 			expect(provider.getMode()).toBe(mode);
-			if (mode === "coding-plan") {
-				expect(provider.getBaseUrl()).toBe(
-					"https://open.bigmodel.cn/api/coding/paas/v4",
-				);
-			} else {
-				expect(provider.getBaseUrl()).toBe(
-					"https://open.bigmodel.cn/api/paas/v4",
-				);
-			}
+			expect(provider.getBaseUrl()).toBe(expectedBaseUrl);
 		});
 
 		it("should be available with valid API key", async () => {

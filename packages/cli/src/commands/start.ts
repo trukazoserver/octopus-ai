@@ -5,6 +5,7 @@ import * as readline from "node:readline";
 import {
 	ChannelManager,
 	ChatExecutionManager,
+	type ChatManager,
 	ConfigLoader,
 	InputFile,
 	MessageType,
@@ -12,10 +13,10 @@ import {
 	TransportServer,
 	mediaContext,
 } from "@octopus-ai/core";
-import type { ChannelMessage } from "@octopus-ai/core";
+import type { ChannelMessage, Conversation } from "@octopus-ai/core";
 import chalk from "chalk";
 import { Command } from "commander";
-import { bootstrap } from "../bootstrap.js";
+import { type OctopusSystem, bootstrap } from "../bootstrap.js";
 import {
 	createLocalConsoleSession,
 	createRemoteConsoleSession,
@@ -41,6 +42,40 @@ const CONVERSATION_HISTORY_LIMIT = getPositiveIntEnv(
 	"OCTOPUS_CONVERSATION_HISTORY_LIMIT",
 	80,
 );
+
+export function buildTransportSystemContext(
+	system: OctopusSystem,
+	chatExecutionManager: ChatExecutionManager,
+): Pick<OctopusSystem, "config"> & Record<string, unknown> {
+	return {
+		config: system.config,
+		db: system.db,
+		router: system.router,
+		ltm: system.ltm,
+		memoryOrchestrator: system.memoryOrchestrator,
+		contextAssembler: system.contextAssembler,
+		memoryConsolidator: system.memoryConsolidator,
+		skillRegistry: system.skillRegistry,
+		pluginRegistry: system.pluginRegistry,
+		codeExecutor: system.codeExecutor,
+		chatManager: system.chatManager,
+		chatExecutionManager,
+		agentManager: system.agentManager,
+		taskManager: system.taskManager,
+		automationManager: system.automationManager,
+		envVarManager: system.envVarManager,
+		mcpManager: system.mcpManager,
+		refreshBrowserTools: system.refreshBrowserTools,
+		refreshEmbeddingProvider: system.refreshEmbeddingProvider,
+		reloadDynamicTool: system.reloadDynamicTool,
+		embedFn: system.embedFn,
+		userProfileManager: system.userProfileManager,
+		learningEngine: system.learningEngine,
+		agentRuntime: system.agentRuntime,
+		toolRegistry: system.toolRegistry,
+		dailyMemory: system.dailyMemory,
+	};
+}
 
 function getPositiveIntEnv(name: string, fallback: number): number {
 	const raw = process.env[name];
@@ -314,6 +349,343 @@ type TelegramBotLike = {
 	};
 };
 
+type TelegramConversationCommand =
+	| { action: "help" }
+	| { action: "new"; title?: string }
+	| { action: "clear" }
+	| { action: "delete"; ref?: string }
+	| { action: "list" }
+	| { action: "search"; query?: string }
+	| { action: "open"; ref?: string }
+	| { action: "rename"; title?: string }
+	| { action: "current" };
+
+function normalizeTelegramCommandName(name: string): string {
+	return name
+		.split("@")[0]
+		.normalize("NFD")
+		.replace(/\p{Diacritic}/gu, "")
+		.toLowerCase();
+}
+
+function parseTelegramConversationCommand(
+	content: string,
+): TelegramConversationCommand | null {
+	const trimmed = content.trim();
+	if (!trimmed.startsWith("/")) return null;
+	const [rawCommand = "", ...restParts] = trimmed.split(/\s+/);
+	const command = normalizeTelegramCommandName(rawCommand.slice(1));
+	const rest = restParts.join(" ").trim();
+
+	switch (command) {
+		case "start":
+		case "ayuda":
+		case "help":
+		case "comandos":
+			return { action: "help" };
+		case "nueva":
+		case "nuevo":
+		case "new":
+		case "reiniciar":
+		case "reset":
+			return { action: "new", title: rest || undefined };
+		case "limpiar":
+		case "clear":
+		case "vaciar":
+			return { action: "clear" };
+		case "borrar":
+		case "eliminar":
+		case "delete":
+		case "borrar_conversacion":
+		case "eliminar_conversacion":
+			return { action: "delete", ref: rest || undefined };
+		case "listar":
+		case "lista":
+		case "conversaciones":
+		case "historial":
+		case "chats":
+			return { action: "list" };
+		case "buscar":
+		case "search":
+			return { action: "search", query: rest || undefined };
+		case "abrir":
+		case "usar":
+		case "continuar":
+		case "switch":
+			return { action: "open", ref: rest || undefined };
+		case "renombrar":
+		case "nombre":
+		case "rename":
+			return { action: "rename", title: rest || undefined };
+		case "actual":
+		case "estado":
+		case "current":
+			return { action: "current" };
+		default:
+			return null;
+	}
+}
+
+function getTelegramConversationTitle(
+	msg: ChannelMessage,
+	channelLabel: string,
+	title?: string,
+): string {
+	if (title?.trim()) return title.trim().slice(0, 140);
+	const timestamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+	const owner = msg.senderName
+		? `${msg.senderName} (${channelLabel})`
+		: channelLabel;
+	return `${owner} ${timestamp}`;
+}
+
+async function getTelegramChatConversations(
+	chatManager: ChatManager,
+	convKey: string,
+	limit = 100,
+): Promise<Conversation[]> {
+	const conversations = await chatManager.listConversations({ limit });
+	return conversations.filter(
+		(conversation) => conversation.channel === convKey,
+	);
+}
+
+function formatConversationDate(conversation: Conversation): string {
+	return conversation.updated_at.replace("T", " ").slice(0, 16);
+}
+
+function formatConversationLine(
+	conversation: Conversation,
+	index: number,
+	activeId?: string,
+): string {
+	const active = conversation.id === activeId ? " <b>(actual)</b>" : "";
+	const title = conversation.title?.trim() || "Sin titulo";
+	return `${index}. <code>${escapeHtml(conversation.id.slice(0, 8))}</code> ${escapeHtml(title)} - ${escapeHtml(formatConversationDate(conversation))}${active}`;
+}
+
+function findConversationByRef(
+	conversations: Conversation[],
+	ref: string,
+): Conversation | null {
+	const normalized = ref.trim().toLowerCase();
+	if (!normalized) return null;
+	return (
+		conversations.find(
+			(conversation) =>
+				conversation.id.toLowerCase() === normalized ||
+				conversation.id.toLowerCase().startsWith(normalized),
+		) ??
+		conversations.find((conversation) =>
+			(conversation.title ?? "").toLowerCase().includes(normalized),
+		) ??
+		null
+	);
+}
+
+async function sendTelegramCommandMessage(
+	tgBot: TelegramBotLike["bot"],
+	chatId: string,
+	text: string,
+	replyTo?: string,
+): Promise<void> {
+	try {
+		await tgBot.api.sendMessage(chatId, text, {
+			parse_mode: "HTML",
+			reply_parameters: replyTo ? { message_id: Number(replyTo) } : undefined,
+		});
+	} catch {
+		await tgBot.api.sendMessage(
+			chatId,
+			text.replace(/<[^>]+>/g, ""),
+			replyTo
+				? { reply_parameters: { message_id: Number(replyTo) } }
+				: undefined,
+		);
+	}
+}
+
+function getTelegramHelpText(): string {
+	return [
+		"<b>Comandos de conversaciones</b>",
+		"/nueva [titulo] - inicia otro contexto. Telegram seguira mostrando el historial visual.",
+		"/limpiar - borra el contexto interno actual y empieza uno vacio.",
+		"/borrar [id|titulo] - borra la actual o una conversacion encontrada.",
+		"/listar - muestra las ultimas conversaciones de este chat.",
+		"/buscar &lt;texto&gt; - busca conversaciones por mensajes.",
+		"/abrir &lt;id|titulo&gt; - vuelve a una conversacion encontrada.",
+		"/renombrar &lt;titulo&gt; - cambia el titulo de la actual.",
+		"/actual - muestra la conversacion activa.",
+		"",
+		"Nota: Telegram no permite que el bot cree otra ventana de chat privado ni oculte mensajes anteriores. Estos comandos cambian lo que Octopus usa como memoria/contexto.",
+	].join("\n");
+}
+
+async function handleTelegramConversationCommand(opts: {
+	command: TelegramConversationCommand;
+	msg: ChannelMessage;
+	chatManager: ChatManager;
+	tgBot: TelegramBotLike["bot"];
+	channelLabel: string;
+	convKey: string;
+}): Promise<void> {
+	const { command, msg, chatManager, tgBot, channelLabel, convKey } = opts;
+	const conversations = await getTelegramChatConversations(
+		chatManager,
+		convKey,
+	);
+	const current = conversations[0];
+	const reply = (text: string) =>
+		sendTelegramCommandMessage(tgBot, msg.senderId, text, msg.id);
+
+	switch (command.action) {
+		case "help": {
+			await reply(getTelegramHelpText());
+			return;
+		}
+		case "new": {
+			const conv = await chatManager.createConversation({
+				title: getTelegramConversationTitle(msg, channelLabel, command.title),
+				channel: convKey,
+			});
+			await reply(
+				[
+					"<b>Nueva conversacion activa</b>",
+					`ID: <code>${escapeHtml(conv.id.slice(0, 8))}</code>`,
+					"Los mensajes anteriores siguen visibles en Telegram, pero Octopus ya no los usa como contexto de esta conversacion.",
+				].join("\n"),
+			);
+			return;
+		}
+		case "clear": {
+			const nextTitle =
+				current?.title ?? getTelegramConversationTitle(msg, channelLabel);
+			if (current) await chatManager.deleteConversation(current.id);
+			const conv = await chatManager.createConversation({
+				title: nextTitle,
+				channel: convKey,
+			});
+			await reply(
+				[
+					"<b>Contexto interno limpiado</b>",
+					`Nueva ID: <code>${escapeHtml(conv.id.slice(0, 8))}</code>`,
+					"Telegram seguira mostrando los mensajes anteriores, pero Octopus empieza desde una conversacion vacia.",
+				].join("\n"),
+			);
+			return;
+		}
+		case "delete": {
+			const target = command.ref
+				? findConversationByRef(conversations, command.ref)
+				: current;
+			if (!target) {
+				await reply("No encontre una conversacion para borrar.");
+				return;
+			}
+			await chatManager.deleteConversation(target.id);
+			if (target.id === current?.id) {
+				await chatManager.createConversation({
+					title: getTelegramConversationTitle(msg, channelLabel),
+					channel: convKey,
+				});
+			}
+			await reply(
+				`Conversacion borrada: <code>${escapeHtml(target.id.slice(0, 8))}</code>`,
+			);
+			return;
+		}
+		case "list": {
+			if (conversations.length === 0) {
+				await reply("No hay conversaciones guardadas para este chat.");
+				return;
+			}
+			const lines = conversations
+				.slice(0, 10)
+				.map((conversation, index) =>
+					formatConversationLine(conversation, index + 1, current?.id),
+				);
+			await reply(["<b>Conversaciones recientes</b>", ...lines].join("\n"));
+			return;
+		}
+		case "search": {
+			if (!command.query) {
+				await reply("Uso: /buscar &lt;texto&gt;");
+				return;
+			}
+			const messageMatches = (
+				await chatManager.searchConversations(command.query)
+			).filter((conversation) => conversation.channel === convKey);
+			const normalizedQuery = command.query.toLowerCase();
+			const titleMatches = conversations.filter((conversation) =>
+				(conversation.title ?? "").toLowerCase().includes(normalizedQuery),
+			);
+			const matches = [...titleMatches, ...messageMatches].filter(
+				(conversation, index, all) =>
+					all.findIndex((item) => item.id === conversation.id) === index,
+			);
+			if (matches.length === 0) {
+				await reply(`Sin resultados para: ${escapeHtml(command.query)}`);
+				return;
+			}
+			const lines = matches
+				.slice(0, 10)
+				.map((conversation, index) =>
+					formatConversationLine(conversation, index + 1, current?.id),
+				);
+			await reply(["<b>Resultados</b>", ...lines].join("\n"));
+			return;
+		}
+		case "open": {
+			if (!command.ref) {
+				await reply("Uso: /abrir &lt;id|titulo&gt;");
+				return;
+			}
+			const target = findConversationByRef(conversations, command.ref);
+			if (!target) {
+				await reply("No encontre esa conversacion en este chat.");
+				return;
+			}
+			await chatManager.updateConversation(target.id, {
+				title: target.title ?? getTelegramConversationTitle(msg, channelLabel),
+			});
+			await reply(
+				`Conversacion activa: <code>${escapeHtml(target.id.slice(0, 8))}</code> ${escapeHtml(target.title ?? "Sin titulo")}`,
+			);
+			return;
+		}
+		case "rename": {
+			if (!current) {
+				await reply("No hay una conversacion activa para renombrar.");
+				return;
+			}
+			if (!command.title) {
+				await reply("Uso: /renombrar &lt;titulo&gt;");
+				return;
+			}
+			await chatManager.updateConversation(current.id, {
+				title: command.title.slice(0, 140),
+			});
+			await reply(
+				`Titulo actualizado: ${escapeHtml(command.title.slice(0, 140))}`,
+			);
+			return;
+		}
+		case "current": {
+			if (!current) {
+				await reply("No hay una conversacion activa todavia.");
+				return;
+			}
+			await reply(
+				[
+					"<b>Conversacion actual</b>",
+					formatConversationLine(current, 1, current.id),
+				].join("\n"),
+			);
+			return;
+		}
+	}
+}
+
 export async function runStart(options: StartOptions): Promise<void> {
 	if (await handleExistingServer(options)) return;
 
@@ -402,15 +774,28 @@ export async function runStart(options: StartOptions): Promise<void> {
 			let accumulated = "";
 			let assistantCheckpointId: string | undefined;
 			let lastCheckpointAt = 0;
-			if (channel?.type === "telegram") {
-				const tg = channel as TelegramChannel;
-				await tg.sendTyping(msg.senderId).catch(() => {});
-				typingInterval = setInterval(
-					() => void tg.sendTyping(msg.senderId).catch(() => {}),
-					4000,
-				);
-			}
 			try {
+				if (channel?.type === "telegram") {
+					const telegramCommand = parseTelegramConversationCommand(msg.content);
+					if (telegramCommand) {
+						await handleTelegramConversationCommand({
+							command: telegramCommand,
+							msg,
+							chatManager,
+							tgBot: (channel as unknown as TelegramBotLike).bot,
+							channelLabel,
+							convKey: queueKey,
+						});
+						return;
+					}
+
+					const tg = channel as TelegramChannel;
+					await tg.sendTyping(msg.senderId).catch(() => {});
+					typingInterval = setInterval(
+						() => void tg.sendTyping(msg.senderId).catch(() => {}),
+						4000,
+					);
+				}
 				// Find or create persistent conversation
 				const convKey = queueKey;
 				const allConvs = await chatManager.listConversations({
@@ -735,30 +1120,9 @@ export async function runStart(options: StartOptions): Promise<void> {
 			},
 		});
 		await chatExecutionManager.initialize();
-		server.setSystemContext({
-			config: system.config,
-			router: system.router,
-			ltm: system.ltm,
-			memoryConsolidator: system.memoryConsolidator,
-			skillRegistry: system.skillRegistry,
-			pluginRegistry: system.pluginRegistry,
-			codeExecutor: system.codeExecutor,
-			chatManager: system.chatManager,
-			chatExecutionManager,
-			agentManager: system.agentManager,
-			taskManager: system.taskManager,
-			automationManager: system.automationManager,
-			envVarManager: system.envVarManager,
-			mcpManager: system.mcpManager,
-			refreshBrowserTools: system.refreshBrowserTools,
-			reloadDynamicTool: system.reloadDynamicTool,
-			embedFn: system.embedFn,
-			userProfileManager: system.userProfileManager,
-			learningEngine: system.learningEngine,
-			agentRuntime: system.agentRuntime,
-			toolRegistry: system.toolRegistry,
-			dailyMemory: system.dailyMemory,
-		});
+		server.setSystemContext(
+			buildTransportSystemContext(system, chatExecutionManager),
+		);
 		server.onMessage((clientId, message) => {
 			void (async () => {
 				if (!system || !server) return;
