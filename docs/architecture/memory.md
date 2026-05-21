@@ -34,7 +34,7 @@ La STM es la memoria "activa" — lo que la IA tiene fresco en su ventana de con
 
 | Parámetro | Valor por defecto | Descripción |
 |---|---|---|
-| `maxTokens` | 8192 | Tamaño máximo de la ventana de contexto |
+| `maxTokens` | 8192 | Presupuesto de STM antes de evicción, no la ventana total del modelo |
 | `scratchPadSize` | 2048 | Espacio reservado para razonamiento interno |
 | `autoEviction` | `true` | Elimina información antigua cuando se llena |
 

@@ -116,7 +116,14 @@ const ZhipuProviderSchema = Type.Object({
 		{ default: "coding-plan" },
 	),
 	models: Type.Array(Type.String(), {
-		default: ["glm-5.1", "glm-5", "glm-5-turbo", "glm-5v-turbo", "glm-4.6v"],
+		default: [
+			"glm-5.1",
+			"glm-5",
+			"glm-5-turbo",
+			"glm-5v-turbo",
+			"glm-4.6",
+			"glm-4.6v",
+		],
 	}),
 });
 

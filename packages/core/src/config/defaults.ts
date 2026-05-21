@@ -52,7 +52,14 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			zhipu: {
 				apiKey: "",
 				mode: "coding-plan",
-				models: ["glm-5.1", "glm-5", "glm-5-turbo", "glm-5v-turbo", "glm-4.6v"],
+				models: [
+					"glm-5.1",
+					"glm-5",
+					"glm-5-turbo",
+					"glm-5v-turbo",
+					"glm-4.6",
+					"glm-4.6v",
+				],
 			},
 			openrouter: {
 				apiKey: "",

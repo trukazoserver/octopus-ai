@@ -63,8 +63,9 @@ function ask(rl, prompt) {
 	});
 }
 
-async function confirmInstall(prompt, defaultYes = true) {
-	if (!INTERACTIVE) return AUTO_YES && !SKIP_SYSTEM_DEPS;
+async function confirmInstall(prompt, defaultYes = true, options = {}) {
+	if (options.systemDependency && SKIP_SYSTEM_DEPS) return false;
+	if (!INTERACTIVE) return AUTO_YES;
 	const rl = readline.createInterface({
 		input: process.stdin,
 		output: process.stdout,
@@ -415,6 +416,7 @@ async function setupWizard() {
 						"glm-5",
 						"glm-5-turbo",
 						"glm-5v-turbo",
+						"glm-4.6",
 						"glm-4.6v",
 					],
 				},
@@ -827,7 +829,11 @@ async function main() {
 	let pythonOk = checkPython();
 	if (!pythonOk) {
 		console.log(`${LOG_WARN}  Python no encontrado.${RESET}`);
-		if (await confirmInstall("Instalar Python automaticamente?", true)) {
+		if (
+			await confirmInstall("Instalar Python automaticamente?", true, {
+				systemDependency: true,
+			})
+		) {
 			pythonOk = installPython();
 		}
 		if (!pythonOk) {
@@ -846,7 +852,11 @@ async function main() {
 		console.log(
 			`${LOG_DIM}  Requerido para dependencias nativas y soporte completo.${RESET}`,
 		);
-		if (await confirmInstall("Instalar Build Tools automaticamente?", true)) {
+		if (
+			await confirmInstall("Instalar Build Tools automaticamente?", true, {
+				systemDependency: true,
+			})
+		) {
 			btOk = installBuildTools();
 		}
 		if (!btOk) {
@@ -864,7 +874,11 @@ async function main() {
 	let dockerOk = checkDocker();
 	if (!dockerOk) {
 		console.log(`${LOG_WARN}  Docker no encontrado.${RESET}`);
-		if (await confirmInstall("Instalar Docker automaticamente?", false)) {
+		if (
+			await confirmInstall("Instalar Docker automaticamente?", false, {
+				systemDependency: true,
+			})
+		) {
 			dockerOk = installDocker();
 		}
 		if (!dockerOk) {
@@ -878,7 +892,7 @@ async function main() {
 		`\n${LOG_INFO}${LOG_BOLD}  Paso 5/7: Instalando dependencias${RESET}`,
 	);
 	let depsOk = installDeps();
-	if (!depsOk && !btOk) {
+	if (!depsOk && !btOk && !SKIP_SYSTEM_DEPS) {
 		console.log(
 			`${LOG_WARN}  pnpm install fallo y no hay Build Tools. Instalando Build Tools y reintentando...${RESET}`,
 		);

@@ -246,6 +246,9 @@ pnpm run install:octopus -- --no-open
 
 # Modo automático explícito
 pnpm run install:octopus -- --yes
+
+# No intentar instalar dependencias del sistema; solo verificar y continuar si es posible
+pnpm run install:octopus -- --no-system-deps
 ```
 
 ### ¿Qué hace el instalador paso a paso?
@@ -274,6 +277,8 @@ El instalador no reinstala lo que ya existe:
 - `pnpm install` usa el lockfile para descargar solo paquetes faltantes o desactualizados.
 
 En Docker el comportamiento es diferente por diseño: la imagen instala todo dentro del contenedor para ser autosuficiente y reproducible.
+
+Usa `--no-system-deps` si no quieres que el instalador intente instalar Python, Build Tools o Docker. En ese modo solo verifica lo disponible y continúa con lo que ya tengas instalado.
 
 ### Durante el paso 7 (Configuración inicial)
 

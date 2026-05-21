@@ -135,6 +135,7 @@ export class AgentRuntime {
 	private orchestrator?: OctopusOrchestrator;
 	private workingMemory: WorkingMemory = new WorkingMemory();
 	private rollingContext: RollingContextManager;
+	private rollingContexts = new Map<string, RollingContextManager>();
 	private lastMemoryTrace?: RuntimeMemoryTrace;
 
 	constructor(
@@ -152,6 +153,17 @@ export class AgentRuntime {
 		this.memoryConsolidator = memoryConsolidator;
 		this.skillLoader = skillLoader;
 		this.rollingContext = new RollingContextManager(llmRouter);
+		this.rollingContexts.set("__default__", this.rollingContext);
+	}
+
+	private getRollingContext(channelId?: string): RollingContextManager {
+		const key = channelId || "__default__";
+		let manager = this.rollingContexts.get(key);
+		if (!manager) {
+			manager = new RollingContextManager(this.llmRouter);
+			this.rollingContexts.set(key, manager);
+		}
+		return manager;
 	}
 
 	setToolSystem(registry: ToolRegistry, executor: ToolExecutor): void {
@@ -1366,7 +1378,12 @@ export class AgentRuntime {
 		const tools = this.getAvailableTools();
 
 		throwIfAborted(options.signal);
-		const response = await this.executeWithTools(context, tools, options);
+		const response = await this.executeWithTools(
+			context,
+			tools,
+			options,
+			channelId,
+		);
 		throwIfAborted(options.signal);
 
 		const assistantTurn: ConversationTurn = {
@@ -1580,10 +1597,9 @@ export class AgentRuntime {
 			throwIfAborted(options.signal);
 			iterations++;
 
-			const compressedMessages = await this.rollingContext.maybeSummarize(
-				messages,
-				this.config.model ?? "default",
-			);
+			const compressedMessages = await this.getRollingContext(
+				channelId,
+			).maybeSummarize(messages, this.config.model ?? "default");
 			if (compressedMessages !== messages) {
 				messages.length = 0;
 				messages.push(...compressedMessages);
@@ -2096,6 +2112,7 @@ export class AgentRuntime {
 		context: LLMMessage[],
 		tools: LLMTool[],
 		options: AgentProcessOptions = {},
+		channelId?: string,
 	): Promise<{
 		content: string;
 		toolCallsExecuted: { name: string; result: string }[];
@@ -2114,10 +2131,9 @@ export class AgentRuntime {
 			throwIfAborted(options.signal);
 			iterations++;
 
-			const compressedMessages = await this.rollingContext.maybeSummarize(
-				messages,
-				this.config.model ?? "default",
-			);
+			const compressedMessages = await this.getRollingContext(
+				channelId,
+			).maybeSummarize(messages, this.config.model ?? "default");
 			if (compressedMessages !== messages) {
 				messages.length = 0;
 				messages.push(...compressedMessages);

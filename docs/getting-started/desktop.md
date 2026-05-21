@@ -90,6 +90,8 @@ pnpm dev
 
 Esto recompila automáticamente cuando modificas archivos TypeScript.
 
+En este modo, Vite sirve el renderer de Electron en `http://localhost:5173`. Es un puerto de desarrollo interno; el backend estable sigue usando `http://127.0.0.1:18789`.
+
 ### Estructura del paquete
 
 ```text
