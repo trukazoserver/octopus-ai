@@ -46,8 +46,8 @@ export const ZAI_MCP_SERVERS = {
 			"understand_technical_diagram",
 			"analyze_data_visualization",
 			"ui_diff_check",
-			"image_analysis",
-			"video_analysis",
+			"analyze_image",
+			"analyze_video",
 		],
 	},
 } as const;

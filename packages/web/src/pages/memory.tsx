@@ -16,6 +16,7 @@ type TabId =
 	| "learning"
 	| "stm"
 	| "ltm"
+	| "knowledge"
 	| "daily"
 	| "profile";
 
@@ -135,6 +136,32 @@ interface LearningExperience {
 		[key: string]: unknown;
 	};
 	createdAt: string;
+}
+
+interface KnowledgeCollection {
+	id: string;
+	name: string;
+	description: string | null;
+	updated_at: string;
+}
+
+interface KnowledgeItem {
+	id: string;
+	collection_id: string;
+	title: string | null;
+	source_type: string;
+	source_uri: string | null;
+	status: string;
+	updated_at: string;
+}
+
+interface KnowledgeSearchResult {
+	id: string;
+	item_id: string;
+	content: string;
+	modality: string;
+	item_title: string | null;
+	collection_id: string;
 }
 
 type LearningExperienceStatusFilter = "all" | LearningExperience["status"];
@@ -266,6 +293,21 @@ export const MemoryPage: React.FC = () => {
 	const [searchResults, setSearchResults] = useState<LTMItem[]>([]);
 	const [searching, setSearching] = useState(false);
 	const [searchPerformed, setSearchPerformed] = useState(false);
+	const [knowledgeCollections, setKnowledgeCollections] = useState<
+		KnowledgeCollection[]
+	>([]);
+	const [selectedKnowledgeCollectionId, setSelectedKnowledgeCollectionId] =
+		useState("");
+	const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeItem[]>([]);
+	const [knowledgeCollectionName, setKnowledgeCollectionName] = useState("");
+	const [knowledgeItemTitle, setKnowledgeItemTitle] = useState("");
+	const [knowledgeItemContent, setKnowledgeItemContent] = useState("");
+	const [knowledgeFilePath, setKnowledgeFilePath] = useState("");
+	const [knowledgeFileTitle, setKnowledgeFileTitle] = useState("");
+	const [knowledgeQuery, setKnowledgeQuery] = useState("");
+	const [knowledgeResults, setKnowledgeResults] = useState<
+		KnowledgeSearchResult[]
+	>([]);
 	const [learningInsights, setLearningInsights] = useState<LearningInsight[]>(
 		[],
 	);
@@ -407,6 +449,28 @@ export const MemoryPage: React.FC = () => {
 		[experienceStatusFilter, learningFilter],
 	);
 
+	const loadKnowledge = useCallback(
+		async (collectionId?: string) => {
+			const collections = await apiGet<KnowledgeCollection[]>(
+				"/api/memory/knowledge/collections",
+			).catch(() => []);
+			setKnowledgeCollections(collections);
+			const selected =
+				collectionId || selectedKnowledgeCollectionId || collections[0]?.id || "";
+			setSelectedKnowledgeCollectionId(selected);
+			if (selected) {
+				setKnowledgeItems(
+					await apiGet<KnowledgeItem[]>(
+						`/api/memory/knowledge/items?collectionId=${encodeURIComponent(selected)}`,
+					).catch(() => []),
+				);
+			} else {
+				setKnowledgeItems([]);
+			}
+		},
+		[selectedKnowledgeCollectionId],
+	);
+
 	const loadTab = useCallback(
 		async (tab: TabId) => {
 			setActiveTab(tab);
@@ -433,6 +497,8 @@ export const MemoryPage: React.FC = () => {
 						"/api/memory/ltm/recent?limit=30",
 					);
 					setLtmItems(data.memories ?? []);
+				} else if (tab === "knowledge") {
+					await loadKnowledge();
 				} else if (tab === "daily") {
 					const data = await apiGet<{
 						context: string;
@@ -455,7 +521,7 @@ export const MemoryPage: React.FC = () => {
 				setMsg(e instanceof Error ? e.message : String(e));
 			}
 		},
-		[loadLearningInsights],
+		[loadKnowledge, loadLearningInsights],
 	);
 
 	const handleSearch = async () => {
@@ -471,6 +537,72 @@ export const MemoryPage: React.FC = () => {
 			setMsg(e instanceof Error ? e.message : String(e));
 		} finally {
 			setSearching(false);
+		}
+	};
+
+	const handleCreateKnowledgeCollection = async () => {
+		if (!knowledgeCollectionName.trim()) return;
+		try {
+			const collection = await apiPost("/api/memory/knowledge/collections", {
+				name: knowledgeCollectionName.trim(),
+			});
+			setKnowledgeCollectionName("");
+			await loadKnowledge(String(collection.id ?? ""));
+			setMsg("✓ Colección creada");
+		} catch (e) {
+			setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+		}
+	};
+
+	const handleCreateKnowledgeTextItem = async () => {
+		if (!selectedKnowledgeCollectionId || !knowledgeItemContent.trim()) return;
+		try {
+			await apiPost("/api/memory/knowledge/items/text", {
+				collectionId: selectedKnowledgeCollectionId,
+				title: knowledgeItemTitle.trim() || "Nota de conocimiento",
+				content: knowledgeItemContent,
+			});
+			setKnowledgeItemTitle("");
+			setKnowledgeItemContent("");
+			await loadKnowledge(selectedKnowledgeCollectionId);
+			setMsg("✓ Conocimiento indexado");
+		} catch (e) {
+			setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+		}
+	};
+
+	const handleCreateKnowledgeFileItem = async () => {
+		if (!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()) return;
+		try {
+			await apiPost("/api/memory/knowledge/items/file", {
+				collectionId: selectedKnowledgeCollectionId,
+				filePath: knowledgeFilePath.trim(),
+				title: knowledgeFileTitle.trim() || undefined,
+				metadata: { source: "memory-page-file-ingest" },
+			});
+			setKnowledgeFilePath("");
+			setKnowledgeFileTitle("");
+			await loadKnowledge(selectedKnowledgeCollectionId);
+			setMsg("✓ Archivo multimodal indexado");
+		} catch (e) {
+			setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+		}
+	};
+
+	const handleKnowledgeSearch = async () => {
+		if (!knowledgeQuery.trim()) return;
+		try {
+			const params = new URLSearchParams({ q: knowledgeQuery, limit: "20" });
+			if (selectedKnowledgeCollectionId) {
+				params.set("collectionId", selectedKnowledgeCollectionId);
+			}
+			setKnowledgeResults(
+				await apiGet<KnowledgeSearchResult[]>(
+					`/api/memory/knowledge/search?${params.toString()}`,
+				),
+			);
+		} catch (e) {
+			setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
 		}
 	};
 
@@ -592,6 +724,7 @@ export const MemoryPage: React.FC = () => {
 		{ id: "learning", label: "Aprendizajes", icon: "check" },
 		{ id: "stm", label: "Corto Plazo", icon: "chat" },
 		{ id: "ltm", label: "Largo Plazo", icon: "database" },
+		{ id: "knowledge", label: "Conocimiento", icon: "folder" },
 		{ id: "daily", label: "Diaria", icon: "file" },
 		{ id: "profile", label: "Perfil", icon: "user" },
 	];
@@ -1630,6 +1763,156 @@ export const MemoryPage: React.FC = () => {
 												? `${m.content.substring(0, 300)}...`
 												: m.content
 											: JSON.stringify(m)}
+									</div>
+								</div>
+							))
+						)}
+					</div>
+				</>
+			)}
+
+			{/* Knowledge */}
+			{activeTab === "knowledge" && (
+				<>
+					<div style={S.section}>
+						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
+							Base de conocimiento multimodal
+						</h3>
+						<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+							<input
+								type="text"
+								value={knowledgeCollectionName}
+								onChange={(e) => setKnowledgeCollectionName(e.target.value)}
+								placeholder="Nueva colección"
+								style={S.input}
+							/>
+							<button
+								type="button"
+								onClick={handleCreateKnowledgeCollection}
+								style={{ padding: "10px 16px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700 }}
+							>
+								Crear colección
+							</button>
+						</div>
+						{knowledgeCollections.length > 0 && (
+							<select
+								value={selectedKnowledgeCollectionId}
+								onChange={(e) => void loadKnowledge(e.target.value)}
+								style={{ ...S.input, marginTop: 12, width: "100%" }}
+							>
+								{knowledgeCollections.map((collection) => (
+									<option key={collection.id} value={collection.id}>
+										{collection.name}
+									</option>
+								))}
+							</select>
+						)}
+					</div>
+
+					<div style={S.section}>
+						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
+							Añadir documento textual
+						</h3>
+						<input
+							type="text"
+							value={knowledgeItemTitle}
+							onChange={(e) => setKnowledgeItemTitle(e.target.value)}
+							placeholder="Título"
+							style={{ ...S.input, width: "100%", marginBottom: 8 }}
+						/>
+						<textarea
+							value={knowledgeItemContent}
+							onChange={(e) => setKnowledgeItemContent(e.target.value)}
+							placeholder="Texto, notas, transcripción, descripción de imagen/video/audio..."
+							rows={5}
+							style={{ ...S.input, width: "100%", resize: "vertical", fontFamily: "inherit" }}
+						/>
+						<button
+							type="button"
+							onClick={handleCreateKnowledgeTextItem}
+							disabled={!selectedKnowledgeCollectionId || !knowledgeItemContent.trim()}
+							style={{ marginTop: 10, padding: "10px 16px", borderRadius: 8, border: "none", background: "#10b981", color: "#fff", fontWeight: 700, opacity: !selectedKnowledgeCollectionId || !knowledgeItemContent.trim() ? 0.5 : 1 }}
+						>
+							Indexar conocimiento
+						</button>
+					</div>
+
+					<div style={S.section}>
+						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
+							Indexar archivo multimodal
+						</h3>
+						<p style={{ margin: "0 0 12px", color: "#a1a1aa", fontSize: "0.85rem", lineHeight: 1.5 }}>
+							Acepta texto, documentos, imágenes, audio y video desde rutas locales permitidas. Para OCR/transcripción/captions usa sidecars junto al archivo: <code>.ocr.txt</code>, <code>.transcript.txt</code>, <code>.captions.vtt</code>, <code>.captions.srt</code> o <code>.keyframes.json</code>.
+						</p>
+						<input
+							type="text"
+							value={knowledgeFileTitle}
+							onChange={(e) => setKnowledgeFileTitle(e.target.value)}
+							placeholder="Título opcional"
+							style={{ ...S.input, width: "100%", marginBottom: 8 }}
+						/>
+						<input
+							type="text"
+							value={knowledgeFilePath}
+							onChange={(e) => setKnowledgeFilePath(e.target.value)}
+							placeholder="Ruta local: ./docs/spec.md, C:\\Users\\...\\video.mp4, ~/.octopus/media/..."
+							style={{ ...S.input, width: "100%" }}
+						/>
+						<button
+							type="button"
+							onClick={handleCreateKnowledgeFileItem}
+							disabled={!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()}
+							style={{ marginTop: 10, padding: "10px 16px", borderRadius: 8, border: "none", background: "#0ea5e9", color: "#fff", fontWeight: 700, opacity: !selectedKnowledgeCollectionId || !knowledgeFilePath.trim() ? 0.5 : 1 }}
+						>
+							Indexar archivo
+						</button>
+					</div>
+
+					<div style={S.section}>
+						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
+							Buscar en conocimiento
+						</h3>
+						<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+							<input
+								type="text"
+								value={knowledgeQuery}
+								onChange={(e) => setKnowledgeQuery(e.target.value)}
+								onKeyDown={(e) => e.key === "Enter" && handleKnowledgeSearch()}
+								placeholder="Buscar chunks indexados..."
+								style={S.input}
+							/>
+							<button
+								type="button"
+								onClick={handleKnowledgeSearch}
+								style={{ padding: "10px 16px", borderRadius: 8, border: "none", background: "#7c3aed", color: "#fff", fontWeight: 700 }}
+							>
+								Buscar
+							</button>
+						</div>
+						{knowledgeResults.map((result) => (
+							<div key={result.id} style={{ padding: 10, borderRadius: 6, background: "#0f1117", marginTop: 8, borderLeft: "3px solid #7c3aed" }}>
+								<div style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: 4 }}>
+									{result.item_title ?? result.item_id} · {result.modality}
+								</div>
+								<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>{result.content}</div>
+							</div>
+						))}
+					</div>
+
+					<div style={S.section}>
+						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
+							Items de la colección
+						</h3>
+						{knowledgeItems.length === 0 ? (
+							<div style={{ color: "#71717a", fontSize: "0.85rem" }}>
+								Sin items indexados en esta colección.
+							</div>
+						) : (
+							knowledgeItems.map((item) => (
+								<div key={item.id} style={{ padding: 10, borderRadius: 6, background: "#0f1117", marginBottom: 6 }}>
+									<div style={{ color: "#e4e4e7", fontWeight: 700 }}>{item.title ?? item.id}</div>
+									<div style={{ color: "#71717a", fontSize: "0.76rem", marginTop: 4 }}>
+										{item.source_type} · {item.status} · {item.source_uri ?? "sin URI"}
 									</div>
 								</div>
 							))
@@ -3763,6 +4046,7 @@ function getTabDescription(tab: TabId): string {
 		learning: "patrones",
 		stm: "contexto actual",
 		ltm: "recuerdos",
+		knowledge: "multimodal",
 		daily: "hoy",
 		profile: "usuario",
 	};

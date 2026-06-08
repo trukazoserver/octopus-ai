@@ -28,8 +28,10 @@ El panel web es una interfaz gráfica para Octopus AI que se ejecuta en tu naveg
 - Interfaz de chat con mensajes en tiempo real (streaming)
 - Centro de control con estado del sistema
 - Gestión visual de memoria, skills, tareas y automatizaciones
+- Vista de agentes, inbox/mensajes y coordinación multi-agente
+- Workflows persistentes con subtareas, progreso, artifacts, recovery, retry y cancelación
 - Aprendizajes operacionales disponibles por API para auditoría y feedback
-- Herramientas, variables, media y configuración desde la interfaz
+- Herramientas, variables, media, MCP, auth de proveedores y configuración desde la interfaz
 - Diseño responsive (funciona en móviles y tablets)
 
 ---
@@ -59,6 +61,8 @@ pnpm run start:web
 ```
 
 Esto inicia solo Vite para el dashboard web en `http://localhost:3000`; requiere que el backend estable ya esté escuchando en `18789`.
+
+Si necesitas apuntar a otro backend, define `VITE_API_BASE_URL` antes de iniciar Vite. Sin esa variable, la UI resuelve automáticamente el backend estable en `http://localhost:18789`.
 
 ### Método paso a paso
 
@@ -94,6 +98,8 @@ Una vez iniciado, abre tu navegador y ve a:
 
 Envía mensajes al asistente y recibe respuestas con streaming. La interfaz muestra la respuesta generándose en tiempo real, igual que en ChatGPT.
 
+La vista de chat también muestra estados del runtime como `thinking`, ejecución de tools, errores de tool y eventos de progreso para que una tarea larga no parezca bloqueada.
+
 ### Gestión de Memoria
 
 Visualiza y gestiona lo que Octopus AI recuerda:
@@ -106,21 +112,24 @@ Visualiza y gestiona lo que Octopus AI recuerda:
 - **Trazabilidad:** El runtime conserva una traza de las memorias utilizadas para explicar qué contexto influyó en una respuesta
 - **Búsqueda:** Busca entre los recuerdos de la IA
 - **Estadísticas:** Cuántos recuerdos tiene, tipo, antigüedad
+- **Knowledge base:** Colecciones e items de conocimiento creados desde texto, media o archivos y buscables por `/api/memory/knowledge/search`
 
 ### Workspace Operativo
 
 La UI actual tambien incluye vistas específicas para:
 
-- agentes y conversaciones
-- tareas y automatizaciones
+- agentes, mensajes entre agentes e inbox de coordinación
+- tareas, workflows persistentes, subtareas, progreso, artifacts, recovery, retry y cancelación
 - herramientas y ejecución de código
-- variables gestionadas y biblioteca multimedia
+- variables gestionadas, MCP y biblioteca multimedia
 
 Los aprendizajes de `LearningEngine` se consultan por API en `/api/learning/insights`. Si detectas un aprendizaje incorrecto, puedes borrarlo con `DELETE /api/learning/insights/{id}` o enviar feedback con `POST /api/learning/feedback`.
 
 ### Configuración
 
 Cambia la configuración de Octopus AI directamente desde la interfaz web sin necesidad de editar archivos JSON ni usar la terminal.
+
+La pantalla de configuración permite gestionar proveedores con distintos modos de autenticación: `api-key`, `bearer`, `oauth`, `browser` y `vertex` cuando el proveedor lo soporte. El backend expone rutas `/api/auth/{provider}/start`, `/refresh`, `/browser-start`, `/browser-status`, `/browser-result` y `/api/auth/google/vertex-setup` para completar esos flujos.
 
 ### Estado del Sistema
 
@@ -163,6 +172,8 @@ node packages/cli/dist/index.js config set server.host "0.0.0.0"
 
 > **⚠️ Seguridad:** Exponer el servidor a `0.0.0.0` lo hace accesible desde cualquier dispositivo en tu red. Asegúrate de confiar en tu red local.
 
+Cuando el servidor escucha fuera de loopback, los endpoints sensibles requieren `security.memoryApiKey`, `OCTOPUS_MEMORY_API_KEY` u `OCTOPUS_API_KEY`. La UI envía esa clave como `X-Octopus-Api-Key` o `Authorization: Bearer` según el flujo disponible.
+
 ---
 
 ## 🌍 Acceso Remoto
@@ -187,7 +198,12 @@ Si quieres acceder al panel web desde otro dispositivo (por ejemplo, tu móvil):
    hostname -I
    ```
 
-3. Accede desde otro dispositivo: `http://TU_IP:18789`
+3. Configura una clave de API sensible antes de exponer rutas administrativas:
+   ```bash
+   node packages/cli/dist/index.js config set security.memoryApiKey "clave-local-segura"
+   ```
+
+4. Accede desde otro dispositivo: `http://TU_IP:18789`
 
 ### Con túnel (acceso desde cualquier lugar)
 

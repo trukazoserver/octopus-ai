@@ -20,6 +20,7 @@ import {
 	EnvVarManager,
 	FTSSearchEngine,
 	GlobalDailyMemory,
+	KnowledgeManager,
 	LLMRouter,
 	LearningEngine,
 	LongTermMemory,
@@ -43,9 +44,14 @@ import {
 	ToolExecutor,
 	ToolRegistry,
 	UserProfileManager,
+	WorkflowManager,
+	WorkflowScheduler,
+	createAgentCommsTools,
+	createAgentSpawnTools,
 	createAutomationTools,
 	createDatabaseAdapter,
 	createFileSystemTools,
+	createConfiguredKnowledgeExtractor,
 	createLogger,
 	createMediaTools,
 	createSandboxTools,
@@ -54,6 +60,7 @@ import {
 	createTeamTools,
 	createVectorStore,
 	expandTildePath,
+	generateEncryptionKey,
 	getZaiMCPConfigs,
 } from "@octopus-ai/core";
 import type {
@@ -96,6 +103,9 @@ export interface OctopusSystem {
 	chatManager: ChatManager;
 	agentManager: AgentManager;
 	agentMessageBus: AgentMessageBus;
+	workflowManager: WorkflowManager;
+	workflowScheduler: WorkflowScheduler;
+	knowledgeManager: KnowledgeManager;
 	envVarManager: EnvVarManager;
 	taskManager: TaskManager;
 	automationManager: AutomationManager;
@@ -684,6 +694,71 @@ function normalizeBrowserProxyUrl(
 	return undefined;
 }
 
+function parseJsonRecord(value?: string | null): Record<string, unknown> {
+	if (!value) return {};
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
+function parseJsonStringArray(value?: string | null): string[] {
+	if (!value) return [];
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		return Array.isArray(parsed)
+			? parsed.filter((item): item is string => typeof item === "string")
+			: [];
+	} catch {
+		return [];
+	}
+}
+
+function buildAgentRuntimeConfig(
+	agent: AgentRecord,
+	fallbackConfig: AgentConfig,
+): AgentConfig {
+	const config = parseJsonRecord(agent.config);
+	const defaultSkills = Array.isArray(config.defaultSkills)
+		? config.defaultSkills.filter((item): item is string => typeof item === "string")
+		: [];
+	const defaultTools = Array.isArray(config.defaultTools)
+		? config.defaultTools.filter((item): item is string => typeof item === "string")
+		: [];
+	const capabilities = parseJsonStringArray(agent.capabilities);
+	const identityParts = [
+		`# Active Agent Identity`,
+		`- Name: ${agent.name}`,
+		`- Role: ${agent.role}`,
+		agent.personality ? `- Personality: ${agent.personality}` : null,
+		capabilities.length > 0 ? `- Capabilities: ${capabilities.join(", ")}` : null,
+		defaultSkills.length > 0
+			? `- Preferred skills: ${defaultSkills.join(", ")}`
+			: null,
+		defaultTools.length > 0
+			? `- Preferred tools: ${defaultTools.join(", ")}`
+			: null,
+		agent.knowledge_base_ids
+			? `- Knowledge bases: ${parseJsonStringArray(agent.knowledge_base_ids).join(", ") || "none"}`
+			: null,
+	]
+		.filter(Boolean)
+		.join("\n");
+	return {
+		id: agent.id,
+		name: agent.name,
+		description: agent.description ?? fallbackConfig.description,
+		systemPrompt: `${identityParts}\n\n${agent.system_prompt || fallbackConfig.systemPrompt}`,
+		model: agent.model ?? fallbackConfig.model,
+		maxTokens: fallbackConfig.maxTokens,
+		toolIterationLimit: fallbackConfig.toolIterationLimit,
+	};
+}
+
 export async function bootstrap(options?: {
 	configPath?: string;
 }): Promise<OctopusSystem> {
@@ -792,24 +867,18 @@ export async function bootstrap(options?: {
 		projectId: process.cwd(),
 	});
 
-	const providers: Record<string, ProviderConfig & { mode?: string }> = {};
+	const providers: Record<string, ProviderConfig> = {};
 	const providerEntries = Object.entries(config.ai.providers) as Array<
-		[
-			string,
-			{ apiKey?: string; baseUrl?: string; models?: string[]; mode?: string },
-		]
+		[string, ProviderConfig]
 	>;
 	for (const [name, pConfig] of providerEntries) {
 		if (name === "local") {
 			providers.local = {
+				...pConfig,
 				baseUrl: pConfig.baseUrl || "http://localhost:11434",
 			};
-		} else if (pConfig.apiKey) {
-			providers[name] = {
-				apiKey: pConfig.apiKey,
-				...(pConfig.baseUrl ? { baseUrl: pConfig.baseUrl } : {}),
-				...(pConfig.mode ? { mode: pConfig.mode } : {}),
-			};
+		} else {
+			providers[name] = { ...pConfig };
 		}
 	}
 
@@ -949,8 +1018,34 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	const chatManager = new ChatManager(db);
 	const agentManager = new AgentManager(db);
 	const agentMessageBus = new AgentMessageBus();
+	const workflowManager = new WorkflowManager(db);
+	await workflowManager.markStaleRunsInterrupted();
+	const knowledgeManager = new KnowledgeManager(
+		db,
+		embedFn,
+		createConfiguredKnowledgeExtractor(router, config.ai),
+	);
 	const teamBlackboard = new TeamBlackboard();
-	const envVarManager = new EnvVarManager(db);
+	let envEncryptionKey =
+		config.security.encryptionKey ||
+		process.env.OCTOPUS_ENV_ENCRYPTION_KEY ||
+		process.env.OCTOPUS_ENCRYPTION_KEY ||
+		"";
+	if (!envEncryptionKey) {
+		envEncryptionKey = generateEncryptionKey();
+		config = {
+			...config,
+			security: { ...config.security, encryptionKey: envEncryptionKey },
+		};
+		try {
+			loader.save(config);
+		} catch {
+			/* config will still be used in-memory for this boot */
+		}
+	}
+	const envVarManager = new EnvVarManager(db, {
+		encryptionKey: envEncryptionKey,
+	});
 	const managedEnv = await envVarManager.toProcessEnv();
 	for (const [key, value] of Object.entries(managedEnv)) {
 		if (!(key in process.env)) {
@@ -1016,6 +1111,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		sandboxCommands: true,
 		allowedPaths,
 		timeouts: config.tools.timeouts,
+		rateLimits: config.tools.rateLimits,
 	});
 
 	const filesystemTools = createFileSystemTools(allowedPaths);
@@ -1041,7 +1137,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	registerSystemTool({
 		name: "recall_conversation",
 		description:
-			"Search raw saved conversation messages when the rolling summary is not specific enough. Use this to recover exact user wording, file paths, URLs, media IDs, command output, errors, or tool results from the current conversation before guessing.",
+			"Search raw saved conversation messages in the database. Use this before saying you do not remember when the user asks if you remember/recall something, refers to another conversation, or needs exact prior wording, file paths, URLs, media IDs, command output, errors, or tool results. It can search the current conversation and automatically fall back to all saved conversations.",
 		parameters: {
 			query: {
 				type: "string",
@@ -1052,12 +1148,12 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			conversationId: {
 				type: "string",
 				description:
-					"Optional conversation id. If omitted, searches the active/current conversation when available.",
+					"Optional conversation id. If omitted, searches the active/current conversation first, then all conversations if needed.",
 			},
 			scope: {
 				type: "string",
 				description:
-					"Search scope: current or all. Defaults to current. Use all only if current has no matches.",
+					"Search scope: current or all. Defaults to current with automatic fallback to all saved conversations when current has no matches.",
 			},
 			limit: {
 				type: "number",
@@ -1105,34 +1201,113 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 				text.length > max
 					? `${text.slice(0, Math.floor(max / 2))}\n...[truncated]...\n${text.slice(-Math.floor(max / 2))}`
 					: text;
-			const queryLower = query.toLowerCase();
-			const terms = queryLower.split(/\s+/).filter((term) => term.length >= 3);
-			const matchesQuery = (content: string) => {
-				const lower = content.toLowerCase();
-				return (
-					lower.includes(queryLower) ||
-					(terms.length > 0 && terms.every((term) => lower.includes(term)))
-				);
+			const normalizeText = (text: string) =>
+				text
+					.toLowerCase()
+					.normalize("NFD")
+					.replace(/\p{Diacritic}/gu, "");
+			const stopwords = new Set([
+				"acuerdas",
+				"recuerdas",
+				"recordar",
+				"recuerdo",
+				"como",
+				"dije",
+				"dijiste",
+				"dijimos",
+				"digo",
+				"deben",
+				"debe",
+				"hacer",
+				"hacen",
+				"sobre",
+				"algo",
+				"otra",
+				"otro",
+				"conversacion",
+				"conversación",
+				"hablamos",
+				"hablar",
+				"para",
+				"porque",
+				"cuando",
+				"donde",
+				"esto",
+				"esta",
+				"este",
+				"estos",
+				"estas",
+				"the",
+				"and",
+				"for",
+				"with",
+				"that",
+				"this",
+			]);
+			const queryNorm = normalizeText(query);
+			const terms = [
+				...new Set(
+					queryNorm
+						.split(/[^a-z0-9_/-]+/i)
+						.map((term) => term.trim())
+						.filter((term) => term.length >= 3 && !stopwords.has(term)),
+				),
+			].slice(0, 8);
+			const variantsFor = (term: string) => {
+				const variants = new Set([term]);
+				if (term.endsWith("s")) variants.add(term.slice(0, -1));
+				if (term.startsWith("extend")) {
+					variants.add("extend");
+					variants.add("extender");
+					variants.add("extension");
+					variants.add("extend_video");
+				}
+				if (term.startsWith("video")) {
+					variants.add("video");
+					variants.add("videos");
+				}
+				return [...variants];
 			};
-
-			if (conversationId) {
+			const scoreMessage = (content: string) => {
+				const contentNorm = normalizeText(content);
+				if (contentNorm.includes(queryNorm)) return 1000 + queryNorm.length;
+				let matchedTerms = 0;
+				let score = 0;
+				for (const term of terms) {
+					const matched = variantsFor(term).some((variant) =>
+						contentNorm.includes(variant),
+					);
+					if (matched) {
+						matchedTerms += 1;
+						score += 20 + Math.min(term.length, 20);
+					}
+				}
+				const requiredMatches =
+					terms.length >= 2 ? Math.min(2, terms.length) : 1;
+				return matchedTerms >= requiredMatches ? score : 0;
+			};
+			const formatConversationMatches = async (
+				searchConversationId: string,
+				prefix: string,
+			) => {
 				const messages = await chatManager.getConversationMessages(
-					conversationId,
+					searchConversationId,
 					{
 						limit: 5000,
 					},
 				);
 				const matchIndexes = messages
 					.map((message, index) => ({ message, index }))
-					.filter(({ message }) => matchesQuery(message.content))
+					.map((item) => ({
+						...item,
+						score: scoreMessage(item.message.content),
+					}))
+					.filter(({ score }) => score > 0)
+					.sort((a, b) => b.score - a.score || b.index - a.index)
 					.slice(0, limit);
 
 				if (matchIndexes.length === 0) {
-					return {
-						success: true,
-						output: `No raw messages matched "${query}" in conversation ${conversationId}. Try a shorter exact fragment, filename, URL, media ID, path, or set scope=all.`,
-						metadata: { conversationId, matches: 0 },
-					};
+					return null;
 				}
 
 				const blocks = matchIndexes.map(({ index }) => {
@@ -1150,29 +1325,85 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 
 				return {
 					success: true,
-					output: `Found ${matchIndexes.length} match(es) for "${query}" in conversation ${conversationId}.\n\n${blocks.join("\n\n---\n\n")}`,
-					metadata: { conversationId, matches: matchIndexes.length },
+					output: `${prefix}Found ${matchIndexes.length} raw match(es) for "${query}" in conversation ${searchConversationId}.\n\n${blocks.join("\n\n---\n\n")}`,
+					metadata: {
+						conversationId: searchConversationId,
+						matches: matchIndexes.length,
+						terms,
+					},
 				};
+			};
+
+			if (conversationId) {
+				const currentResult = await formatConversationMatches(
+					conversationId,
+					"",
+				);
+				if (currentResult) return currentResult;
+				if (requestedConversationId || scope === "all") {
+					return {
+						success: true,
+						output: `No raw messages matched "${query}" in conversation ${conversationId}. Try a shorter exact fragment, filename, URL, media ID, or path.`,
+						metadata: { conversationId, matches: 0, terms },
+					};
+				}
 			}
 
-			const matches = await chatManager.searchMessages(query, { limit });
+			const candidateLimit = Math.max(200, limit * 50);
+			const candidates = await chatManager.searchMessages(query, {
+				limit: candidateLimit,
+			});
+			const matches = candidates
+				.map((message) => ({ message, score: scoreMessage(message.content) }))
+				.filter(({ score }) => score > 0)
+				.sort(
+					(a, b) =>
+						b.score - a.score ||
+						b.message.timestamp.localeCompare(a.message.timestamp),
+				)
+				.slice(0, limit);
 			if (matches.length === 0) {
 				return {
 					success: true,
-					output: `No raw messages matched "${query}" across saved conversations. Try a shorter exact fragment, filename, URL, media ID, path, or user phrase.`,
-					metadata: { matches: 0, scope: "all" },
+					output: `No raw messages matched "${query}" across saved conversations. Try a shorter exact fragment, filename, URL, media ID, path, or user phrase. Search terms used: ${terms.join(", ") || "none"}.`,
+					metadata: { matches: 0, scope: "all", terms },
 				};
+			}
+
+			const blocks: string[] = [];
+			for (let index = 0; index < matches.length; index++) {
+				const match = matches[index]?.message;
+				if (!match) continue;
+				const messages = await chatManager.getConversationMessages(
+					match.conversation_id,
+					{ limit: 5000 },
+				);
+				const matchIndex = messages.findIndex((item) => item.id === match.id);
+				if (matchIndex === -1) {
+					blocks.push(
+						`[MATCH ${index + 1} conversationId=${match.conversation_id} ${match.timestamp} ${match.role} messageId=${match.id}]\n${truncate(match.content)}`,
+					);
+					continue;
+				}
+				const start = Math.max(0, matchIndex - contextRadius);
+				const end = Math.min(messages.length, matchIndex + contextRadius + 1);
+				blocks.push(
+					messages
+						.slice(start, end)
+						.map((message, offset) => {
+							const absoluteIndex = start + offset + 1;
+							const marker =
+								start + offset === matchIndex ? "MATCH" : "context";
+							return `[${marker} #${absoluteIndex} conversationId=${message.conversation_id} ${message.timestamp} ${message.role} messageId=${message.id}]\n${truncate(message.content)}`;
+						})
+						.join("\n"),
+				);
 			}
 
 			return {
 				success: true,
-				output: `Found ${matches.length} match(es) for "${query}" across saved conversations.\n\n${matches
-					.map(
-						(message, index) =>
-							`[MATCH ${index + 1} conversationId=${message.conversation_id} ${message.timestamp} ${message.role} messageId=${message.id}]\n${truncate(message.content)}`,
-					)
-					.join("\n\n---\n\n")}`,
-				metadata: { matches: matches.length, scope: "all" },
+				output: `${conversationId ? "No raw matches were found in the current conversation, so I searched all saved conversations.\n\n" : ""}Found ${matches.length} raw match(es) for "${query}" across saved conversations.\nSearch terms used: ${terms.join(", ") || "exact phrase only"}.\n\n${blocks.join("\n\n---\n\n")}`,
+				metadata: { matches: matches.length, scope: "all", terms },
 			};
 		},
 	});
@@ -1326,6 +1557,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			sandboxCommands: true,
 			allowedPaths,
 			timeouts: config.tools.timeouts,
+			rateLimits: config.tools.rateLimits,
 		});
 		workerRuntime.setToolSystem(workerToolRegistry, workerToolExecutor);
 		workerRuntime.setLearningEngine(learningEngine);
@@ -1344,6 +1576,13 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	// Register team communication tools globally
 	const teamCommTools = createTeamCommTools(teamBlackboard, "main_agent");
 	for (const tool of teamCommTools) {
+		registerSystemTool(tool);
+	}
+
+	for (const tool of createAgentCommsTools(agentManager)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createAgentSpawnTools(agentManager)) {
 		registerSystemTool(tool);
 	}
 
@@ -1516,8 +1755,16 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 					};
 
 				if (action === "get") {
-					const val = await envVarManager.get(key);
-					return { success: true, output: val ?? `Variable ${key} not found` };
+					const vars = await envVarManager.list(false);
+					const entry = vars.find((item) => item.key === key);
+					if (!entry)
+						return { success: true, output: `Variable ${key} not found` };
+					return {
+						success: true,
+						output: entry.is_secret
+							? `Variable ${key} is configured as a secret; value is hidden.`
+							: entry.value,
+					};
 				}
 				if (action === "set") {
 					if (!value)
@@ -1708,7 +1955,7 @@ You can:
 - Manage environment variables using the manage_env tool
 - Run shell commands using run_command
 - Install packages using install_package
-- Save images, audio, and video to the media library using save_media
+- Generate and save images, audio, and video using the dedicated media tools first; use save_media only for small base64 outputs that no dedicated tool saved for you
 - Remember information across conversations via your memory system
 - Schedule recurring automated tasks using schedule_task (cron expressions)
 - List all scheduled automations using list_tasks
@@ -1719,20 +1966,31 @@ IMPORTANT - Tool Usage Guidelines:
 1. When calling execute_code, you MUST provide BOTH "code" (the source code) AND "language" (one of: javascript, typescript, python, bash).
 2. When calling run_command, you MUST provide "command" (the shell command string).
 3. When calling manage_workspace, you MUST provide "action" (list/read/write/delete/mkdir) AND "path".
-4. When generating images, audio, or video: first generate the file using execute_code, then save it with save_media, and finally include the returned URL in your response using markdown: ![description](url)
+4. When generating images, audio, or video: use the dedicated generation tool (for example veo-video-generator, nano-banana-generate, nano-banana-edit, or TTS/audio tools) and reuse the media URL it returns. Do NOT build provider API calls manually with execute_code/run_command when a dedicated tool exists.
 5. When managing API keys or environment variables, ALWAYS use manage_env. NEVER try shell commands like export/set and NEVER write .env files manually.
 6. If a tool already returns a saved media URL, use that URL directly and DO NOT call save_media again.
 7. To find previously generated media, use the list_media tool. NEVER use manage_workspace to search for media files — media is stored in a separate library, not the workspace.
 8. If a tool times out but the task is still valid, use manage_tool_timeouts to increase that specific tool timeout before retrying. Prefer per-tool overrides instead of raising every timeout.
+9. API keys, tokens, credentials JSON, private keys, proxy credentials, cookies, and passwords MUST be stored with manage_env using isSecret=true. Never print, summarize, or reveal secret values; report only whether they are configured.
+
+IMPORTANT - Continuity & Reconnection:
+- Before replying, inspect the injected Task Ledger, Working Memory, and recent conversation context for active or recent work.
+- If the user says anything ambiguous such as "hola", "continua", "sigue", "donde ibamos", "se reconecto", or asks about prior progress, assume this may be a reconnection and verify continuity before responding.
+- When active or recent work exists, do not answer with a generic greeting. First state the recovered status: what was in progress, what is already complete, and what remains.
+- For media-generation or file-output tasks, verify real artifacts with list_media or workspace tools before claiming counts, regenerating assets, or continuing.
+- If injected context is insufficient, call recall_conversation before giving a status answer.
+
+IMPORTANT - Shell & Platform Compatibility:
+- run_command uses the host operating system's default shell. On Windows, prefer PowerShell/cmd-compatible commands instead of Unix-only commands such as head, grep, export, rm, or chmod unless the environment explicitly provides them.
 
 IMPORTANT - Media Handling:
 - Media files (images, audio, video) are stored in the Octopus media library, NOT in the workspace filesystem.
 - To find a previously generated image, use list_media (optionally with search/type filters).
 - Media URLs from your previous messages in the conversation history (like /api/media/file/...) are always valid and can be reused directly.
-- When you generate an image, audio, or video file, ALWAYS use the save_media tool to save it to the library.
-- The save_media tool requires: "data" (base64-encoded file content), "filename" (with extension), and "mimetype" (e.g. image/png).
-- After saving, include the media in your response using markdown image/audio syntax.
-- Example flow: execute_code to generate image -> save_media to store it -> respond with ![description](/api/media/file/xxx.png)
+- When a dedicated media tool returns a /api/media/file/... URL, use that URL directly and do not call save_media again.
+- Use save_media only when you already have a small base64 media payload and no dedicated tool saved it.
+- After saving or receiving a saved media URL, include the media in your response using markdown image/audio syntax.
+- Never output <tool_call>, <tool_call_block>, or pseudo-tool XML/HTML as text. Tool calls must be real structured tool calls only.
 
 IMPORTANT - Autonomy & Delegation:
 - When the user asks you to do something periodically (e.g. "every morning", "cada hora", "todos los domingos"), create an automation using schedule_task with the appropriate cron expression.
@@ -1765,11 +2023,11 @@ IMPORTANT - Sandbox Execution:
 - If Docker is not installed, inform the user they need Docker Desktop for sandbox features.
 
 				IMPORTANT - Z.AI MCP Tools:
-				- When a user shares an image, the message will contain a file path like: [Uploaded image: C:\\Users\\...\\media\\uuid.png]
-				- You have access to the Z.AI Vision MCP tools: image_analysis, extract_text_from_screenshot, diagnose_error_screenshot, understand_technical_diagram, analyze_data_visualization, ui_to_artifact, ui_diff_check, video_analysis
-				- Use these vision tools for image analysis when the active model is Z.ai/Zhipu GLM, or when direct image understanding is unavailable.
+				- When a user shares an image, the message can contain a media URL like ![Image](/api/media/file/uuid.png) plus a runtime-injected local media path, or a file path like [Uploaded image: C:\\Users\\...\\media\\uuid.png].
+				- Use the Z.AI Vision MCP tools listed in Available Tools for image analysis when the active model is Z.ai/Zhipu GLM, or when direct image understanding is unavailable. Tool names may be plain (analyze_image, extract_text_from_screenshot, diagnose_error_screenshot, understand_technical_diagram, analyze_data_visualization, ui_to_artifact, ui_diff_check, analyze_video) or namespaced aliases containing those names.
+				- If the user asks you to analyze an image and a vision tool is available, call it. Do not claim that image analysis is unavailable just because the image was referenced through /api/media/file/...; use the local media path injected by runtime.
 				- If the active provider/model is multimodal and is not Z.ai GLM, inspect image content directly and do not call Z.AI Vision MCP tools solely for screenshots.
-				- Example: if the user asks "what is in this image?" and the message contains [Uploaded image: /path/to/file.png], call image_analysis with image_path="/path/to/file.png"
+				- Example: if the user asks "what is in this image?" and the message contains or is followed by a local media path, call the available analyze_image tool (or its namespaced alias) with that path using the parameter required by the tool schema.
 				- Use extract_text_from_screenshot for screenshots with code or text
 				- Use understand_technical_diagram for diagrams and flowcharts
 				- Use analyze_data_visualization for charts and graphs
@@ -1801,9 +2059,21 @@ Always be concise, helpful, and thorough.`,
 	agentRuntime.setMemoryOrchestrator(memoryOrchestrator);
 	agentRuntime.setContextAssembler(contextAssembler);
 	agentRuntime.setLearningEngine(learningEngine);
-	agentRuntime.enableOrchestrator({
-		maxWorkers: 5,
-		complexityThreshold: 5,
+	agentRuntime.setChatManager(chatManager);
+	agentRuntime.setWorkflowManager(workflowManager);
+		agentRuntime.enableOrchestrator({
+			maxWorkers: config.orchestration?.maxArms ?? 8,
+			getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+			complexityThreshold: 5,
+		decompositionTimeoutMs:
+			config.orchestration?.decompositionTimeoutMs ?? 30_000,
+		synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,
+		synthesisMaxTokens: config.orchestration?.synthesisMaxTokens ?? 1200,
+		workerConfig: {
+			maxToolIterations:
+				config.orchestration?.maxToolIterationsPerArm ?? 32,
+			timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,
+		},
 	});
 	await agentRuntime.initialize();
 	teamBlackboard.registerOrchestrator(agentRuntime);
@@ -1848,7 +2118,58 @@ Always be concise, helpful, and thorough.`,
 			],
 		);
 	}
+	await agentManager.ensureBuiltinArmAgents(config.ai.default);
 	agentManager.registerRuntime(agentConfig.id, agentRuntime);
+	const persistedAgents = await agentManager.listAgents();
+	for (const agent of persistedAgents) {
+		if (agent.id === agentConfig.id) continue;
+		const runtimeConfig = buildAgentRuntimeConfig(agent, agentConfig);
+		const runtimeStm = new ShortTermMemory({
+			maxTokens: config.memory.shortTerm.maxTokens,
+			scratchPadSize: config.memory.shortTerm.scratchPadSize,
+			autoEviction: config.memory.shortTerm.autoEviction,
+			tokenCounter: {
+				countTokens: (text: string) => tokenCounter.countTokens(text),
+				countMessagesTokens: (msgs: { content: string }[]) =>
+					msgs.reduce(
+						(sum, m) => sum + tokenCounter.countTokens(m.content),
+						0,
+					),
+			},
+		});
+		const runtime = new AgentRuntime(
+			runtimeConfig,
+			router,
+			runtimeStm,
+			memoryRetrieval,
+			memoryConsolidator,
+			skillLoader,
+		);
+		runtime.setToolSystem(toolRegistry, toolExecutor);
+		runtime.setDailyMemory(dailyMemory);
+		runtime.setUserProfileManager(userProfileManager);
+		runtime.setMemoryOrchestrator(memoryOrchestrator);
+		runtime.setContextAssembler(contextAssembler);
+		runtime.setLearningEngine(learningEngine);
+		runtime.setChatManager(chatManager);
+		runtime.setWorkflowManager(workflowManager);
+			runtime.enableOrchestrator({
+				maxWorkers: config.orchestration?.maxArms ?? 8,
+				getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+				complexityThreshold: 5,
+			decompositionTimeoutMs:
+				config.orchestration?.decompositionTimeoutMs ?? 30_000,
+			synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,
+			synthesisMaxTokens: config.orchestration?.synthesisMaxTokens ?? 1200,
+			workerConfig: {
+				maxToolIterations:
+					config.orchestration?.maxToolIterationsPerArm ?? 32,
+				timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,
+			},
+		});
+		await runtime.initialize();
+		agentManager.registerRuntime(agent.id, runtime);
+	}
 
 	const connectionManager = new ConnectionManager({
 		retryMaxAttempts: config.connection.retryMaxAttempts,
@@ -1900,6 +2221,28 @@ Always be concise, helpful, and thorough.`,
 
 	const systemScheduler = new Scheduler();
 	const bootstrapLogger = createLogger("bootstrap");
+	const orchestrator = agentRuntime.getOrchestrator();
+	if (!orchestrator) {
+		throw new Error("Orchestrator was not initialized for durable workflows.");
+	}
+	const workflowScheduler = new WorkflowScheduler(workflowManager, orchestrator, {
+		limit: config.orchestration?.maxArms ?? 3,
+		onError: (error, run) => {
+			bootstrapLogger.error(
+				`Error resuming workflow '${run.id}': ${error instanceof Error ? error.message : String(error)}`,
+			);
+		},
+	});
+	const durableOrchestrationEnabled =
+		config.orchestration?.enabled !== false &&
+		config.orchestration?.mode !== "legacy";
+	if (durableOrchestrationEnabled) {
+		void workflowScheduler.tick();
+		systemScheduler.schedule("workflow-resume", "*/1 * * * *", async () => {
+			await workflowManager.markStaleRunsInterrupted();
+			await workflowScheduler.tick();
+		});
+	}
 	const memoryRetentionScheduler = new MemoryRetentionScheduler(
 		memoryOrchestrator,
 		systemScheduler,
@@ -1979,6 +2322,9 @@ Always be concise, helpful, and thorough.`,
 		chatManager,
 		agentManager,
 		agentMessageBus,
+		workflowManager,
+		workflowScheduler,
+		knowledgeManager,
 		taskManager,
 		automationManager,
 		automationRunner,
@@ -1993,6 +2339,7 @@ Always be concise, helpful, and thorough.`,
 		embedFn,
 		shutdown: async () => {
 			memoryRetentionScheduler.stop();
+			systemScheduler.cancel("workflow-resume");
 			systemScheduler.cancel("daily-memory-dump");
 			await mcpManager.shutdown();
 			connectionManager.shutdown();

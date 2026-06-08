@@ -1,4 +1,8 @@
-import type { AgentRuntime } from "../agent/runtime.js";
+import type {
+	AgentRuntime,
+	RuntimeSelectedAgentContext,
+} from "../agent/runtime.js";
+import type { ReconciliationService } from "../agent/reconciliation-service.js";
 import type {
 	ChatExecution,
 	ChatExecutionActivity,
@@ -11,6 +15,7 @@ const STATUS_RE =
 export interface ChatExecutionStartInput {
 	requestId?: string;
 	message: string;
+	messageMetadata?: Record<string, unknown>;
 	conversationId?: string;
 	agentId?: string;
 	stream?: boolean;
@@ -33,9 +38,13 @@ export interface ChatExecutionEvent {
 export interface ChatExecutionManagerOptions {
 	chatManager: ChatManager;
 	getAgentRuntime(agentId?: string): AgentRuntime;
+	getSelectedAgentContext?(
+		agentId?: string,
+	): Promise<RuntimeSelectedAgentContext | null> | RuntimeSelectedAgentContext | null;
 	emit(event: ChatExecutionEvent): void;
 	conversationHistoryLimit: number;
 	streamCheckpointIntervalMs: number;
+	reconciliationService?: ReconciliationService;
 }
 
 function decodeStatusField(value: string | undefined): string | null {
@@ -95,6 +104,7 @@ export class ChatExecutionManager {
 			conversationId,
 			"user",
 			input.message,
+			input.messageMetadata ? { metadata: input.messageMetadata } : undefined,
 		);
 		const execution = await this.opts.chatManager.createExecution({
 			requestId: input.requestId,
@@ -174,7 +184,10 @@ export class ChatExecutionManager {
 		controller: AbortController,
 	): Promise<void> {
 		const conversationId = execution.conversation_id;
-		const targetAgent = this.opts.getAgentRuntime(input.agentId);
+		const targetAgent = this.opts.getAgentRuntime();
+		const selectedAgentContext = this.opts.getSelectedAgentContext
+			? await this.opts.getSelectedAgentContext(input.agentId)
+			: null;
 		let activities: ChatExecutionActivity[] = [];
 		let fullText = "";
 		let assistantMessageId: string | undefined;
@@ -229,7 +242,6 @@ export class ChatExecutionManager {
 
 		try {
 			await updateExecution({ status: "running", currentStatus: "thinking" });
-
 			targetAgent.stm.clear();
 			const history = await this.opts.chatManager.getConversationMessages(
 				conversationId,
@@ -261,11 +273,44 @@ export class ChatExecutionManager {
 				});
 			}
 
+				// Reconcile interrupted runs and inject verified state into agent context
+				if (this.opts.reconciliationService) {
+					try {
+						const report = await this.opts.reconciliationService.reconcileOnResume({
+							conversationId,
+						});
+						if (report && report.verifiedContext) {
+							targetAgent.stm.add({
+								role: "system",
+								content: report.verifiedContext,
+								timestamp: new Date(),
+							});
+						}
+					} catch { /* non-critical, continue without reconciliation */ }
+				}
+			// Auto-resume: detect interrupted/failed previous execution and inject pending-work hint
+			try {
+				const lastExec = await this.opts.chatManager.getLatestExecutionForConversation(conversationId);
+				if (lastExec && (lastExec.status === "interrupted" || lastExec.status === "failed")) {
+					const resumeHint =
+						"[SESSION RESUME NOTICE] Previous execution was interrupted or failed. " +
+						"Check conversation history for what was completed and what remains. " +
+						"Use available tools to verify the state of any artifacts before continuing. " +
+						"Do NOT repeat work that was already completed successfully.";
+					targetAgent.stm.add({
+						role: "system",
+						content: resumeHint,
+						timestamp: new Date(),
+					});
+				}
+			} catch { /* non-critical */ }
+
+
 			if (input.stream !== false) {
 				for await (const chunk of targetAgent.processMessageStream(
 					input.message,
 					conversationId,
-					{ signal: controller.signal },
+					{ signal: controller.signal, selectedAgentContext },
 				)) {
 					const statusMatch = chunk.match(STATUS_RE);
 					if (statusMatch) {
@@ -308,8 +353,10 @@ export class ChatExecutionManager {
 						conversationId,
 						payload: {
 							content: chunk,
+							fullContent: fullText,
 							conversationId,
 							executionId: execution.id,
+							assistantMessageId,
 						},
 					});
 				}
@@ -325,15 +372,20 @@ export class ChatExecutionManager {
 					requestId: execution.request_id ?? undefined,
 					executionId: execution.id,
 					conversationId,
-					payload: { done: true, conversationId, executionId: execution.id },
+					payload: {
+						done: true,
+						conversationId,
+						executionId: execution.id,
+						assistantMessageId,
+					},
 				});
 			} else {
 				const response = await targetAgent.processMessage(
 					input.message,
 					conversationId,
-					{ signal: controller.signal },
+					{ signal: controller.signal, selectedAgentContext },
 				);
-				await this.opts.chatManager.addMessage(
+				const assistantMessage = await this.opts.chatManager.addMessage(
 					conversationId,
 					"assistant",
 					response,
@@ -345,6 +397,8 @@ export class ChatExecutionManager {
 						},
 					},
 				);
+				assistantMessageId = assistantMessage.id;
+				await updateExecution({ assistantMessageId });
 				await updateExecution({
 					status: "completed",
 					currentStatus: null,
@@ -359,6 +413,7 @@ export class ChatExecutionManager {
 						content: response,
 						conversationId,
 						executionId: execution.id,
+						assistantMessageId,
 					},
 				});
 			}
@@ -402,6 +457,7 @@ export class ChatExecutionManager {
 					done: cancelled,
 					conversationId,
 					executionId: execution.id,
+					assistantMessageId,
 				},
 			});
 		}

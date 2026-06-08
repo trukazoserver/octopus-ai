@@ -11,12 +11,13 @@ export const ConfigSection: React.FC<{
 	return (
 		<div
 			style={{
-				marginBottom: "14px",
-				borderRadius: "18px",
-				background: "#050505",
-				border: "1px solid #151515",
+				marginBottom: "18px",
+				borderRadius: "22px",
+				background: "linear-gradient(180deg, #111318 0%, #090a0d 100%)",
+				border: "1px solid #2a303a",
 				overflow: "hidden",
-				boxShadow: "0 14px 34px rgba(0, 0, 0, 0.24)",
+				boxShadow:
+					"0 22px 60px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.045)",
 			}}
 		>
 			<button
@@ -28,14 +29,16 @@ export const ConfigSection: React.FC<{
 					display: "flex",
 					alignItems: "center",
 					gap: "12px",
-					background: open ? "#0b0b0b" : "transparent",
+					background: open
+						? "linear-gradient(180deg, #151821 0%, #101218 100%)"
+						: "linear-gradient(180deg, #101218 0%, #0b0d11 100%)",
 					border: "none",
 					color: "#f4f4f5",
 					cursor: "pointer",
 					fontSize: "0.96rem",
 					fontWeight: 800,
 					textAlign: "left",
-					borderBottom: open ? "1px solid #151515" : "none",
+					borderBottom: open ? "1px solid #2a303a" : "none",
 					transition: "background 0.2s",
 				}}
 			>
@@ -45,8 +48,9 @@ export const ConfigSection: React.FC<{
 						width: "30px",
 						height: "30px",
 						borderRadius: "12px",
-						background: "#111",
-						border: "1px solid #202020",
+						background: "#1a1d25",
+						border: "1px solid #343a46",
+						boxShadow: "inset 0 1px 0 rgba(255,255,255,.06)",
 						display: "inline-flex",
 						alignItems: "center",
 						justifyContent: "center",
@@ -67,12 +71,12 @@ export const ConfigSection: React.FC<{
 				</span>
 			</button>
 			{open && (
-				<div style={{ padding: "18px" }}>
+				<div style={{ padding: "20px", background: "#08090c" }}>
 					{description && (
 						<p
 							style={{
 								margin: "0 0 16px",
-								color: "#8f8f94",
+								color: "#b4b8c3",
 								fontSize: "0.85rem",
 								lineHeight: "1.5",
 							}}
@@ -111,7 +115,7 @@ export const Toggle: React.FC<{
 				<div
 					style={{
 						fontSize: "0.8rem",
-						color: "#737373",
+						color: "#9ca3af",
 						marginTop: "5px",
 						lineHeight: 1.45,
 					}}
@@ -161,7 +165,7 @@ export const Field: React.FC<{
 	placeholder?: string;
 	description?: string;
 }> = ({ label, value, onChange, type = "text", placeholder, description }) => {
-	const fieldId = `field-${label.toLowerCase().replace(/\s+/g, "-")}`;
+	const fieldId = React.useId();
 	return (
 		<div style={{ marginBottom: "16px" }}>
 			<label
@@ -180,7 +184,7 @@ export const Field: React.FC<{
 				<div
 					style={{
 						fontSize: "0.76rem",
-						color: "#737373",
+						color: "#9ca3af",
 						marginBottom: "9px",
 						lineHeight: 1.45,
 					}}
@@ -200,8 +204,8 @@ export const Field: React.FC<{
 					width: "100%",
 					padding: "12px 14px",
 					borderRadius: "12px",
-					border: "1px solid #202020",
-					background: "#000",
+					border: "1px solid #343a46",
+					background: "#05070a",
 					color: "#f4f4f5",
 					fontSize: "0.95rem",
 					outline: "none",
@@ -213,10 +217,12 @@ export const Field: React.FC<{
 					boxSizing: "border-box",
 				}}
 				onFocus={(e) => {
-					e.target.style.borderColor = "#4a4a4a";
+					e.target.style.borderColor = "#818cf8";
+					e.target.style.boxShadow = "0 0 0 3px rgba(129, 140, 248, 0.16)";
 				}}
 				onBlur={(e) => {
-					e.target.style.borderColor = "#202020";
+					e.target.style.borderColor = "#343a46";
+					e.target.style.boxShadow = "none";
 				}}
 			/>
 		</div>
@@ -231,7 +237,7 @@ export const Select: React.FC<{
 	description?: string;
 	optionLabels?: Record<string, string>;
 }> = ({ label, value, options, onChange, description, optionLabels }) => {
-	const selectId = `select-${label.toLowerCase().replace(/\s+/g, "-")}`;
+	const selectId = React.useId();
 	return (
 		<div style={{ marginBottom: "16px" }}>
 			<label
@@ -250,7 +256,7 @@ export const Select: React.FC<{
 				<div
 					style={{
 						fontSize: "0.76rem",
-						color: "#737373",
+						color: "#9ca3af",
 						marginBottom: "9px",
 						lineHeight: 1.45,
 					}}
@@ -267,8 +273,8 @@ export const Select: React.FC<{
 					width: "100%",
 					padding: "12px 14px",
 					borderRadius: "12px",
-					border: "1px solid #202020",
-					background: "#000",
+					border: "1px solid #343a46",
+					backgroundColor: "#05070a",
 					color: "#f4f4f5",
 					fontSize: "0.95rem",
 					outline: "none",
@@ -282,10 +288,12 @@ export const Select: React.FC<{
 					boxSizing: "border-box",
 				}}
 				onFocus={(e) => {
-					e.target.style.borderColor = "#4a4a4a";
+					e.target.style.borderColor = "#818cf8";
+					e.target.style.boxShadow = "0 0 0 3px rgba(129, 140, 248, 0.16)";
 				}}
 				onBlur={(e) => {
-					e.target.style.borderColor = "#202020";
+					e.target.style.borderColor = "#343a46";
+					e.target.style.boxShadow = "none";
 				}}
 			>
 				{options.map((opt) => (

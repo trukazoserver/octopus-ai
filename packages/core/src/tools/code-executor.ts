@@ -9,6 +9,7 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
+import { resolveRelativePathInside } from "../utils/path-safety.js";
 import { mediaContext } from "./media.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
@@ -616,9 +617,9 @@ export class CodeExecutor {
 				const content = params.content ? String(params.content) : undefined;
 
 				const workspaceRoot = this.resolvePath(this.config.workspaceDir);
-				const fullPath = path.resolve(workspaceRoot, relPath);
+				const fullPath = resolveRelativePathInside(workspaceRoot, relPath);
 
-				if (!fullPath.startsWith(workspaceRoot)) {
+				if (!fullPath) {
 					return {
 						success: false,
 						output: "",

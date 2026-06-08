@@ -39,11 +39,12 @@ Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para c
 - 🧠 **Razonamiento Profundo (Thinking):** Soporte nativo para *chain-of-thought* en proveedores como OpenAI o-series, Anthropic, Google, Z.ai y DeepSeek Reasoner.
 - 💾 **Memoria Orquestada Persistente:** STM + LTM con integridad, evidencia, scopes, búsqueda híbrida vectorial/FTS, perfil de usuario, resumen diario, recordatorios prospectivos y trazabilidad de uso.
 - 📈 **Aprendizaje Continuo:** Registra experiencias, extrae procedimientos/antipatrones, aprende qué funcionó y reutiliza esos insights en tareas futuras.
-- 🤖 **Automatización Autónoma:** Tareas programadas por cron, heartbeat proactivo evaluado por LLM y runtime listo para ejecución continua en segundo plano.
-- 🛠️ **Sistema de Tools Extensible:** Filesystem, shell, browser automation, media, sandbox Docker, delegación multi-agente y tools dinámicas creadas en tiempo real.
+- 🤖 **Automatización Autónoma:** Tareas programadas por cron, heartbeat proactivo evaluado por LLM, workflows persistentes y runtime listo para ejecución continua en segundo plano.
+- 🐙 **Coordinación Multi-Agente:** Bus de coordinación, workers especializados, perfiles de brazos, tracking de subtareas, recuperación de workflows, revisión cruzada y reconciliación de resultados.
+- 🛠️ **Sistema de Tools Extensible:** Filesystem, shell, browser automation, media, sandbox Docker, comunicación/spawn de agentes, rate limiting y tools dinámicas creadas en tiempo real.
 - 🌐 **Multi-Canal:** Integra el mismo agente con Telegram, Discord, Slack, Teams, webchat y otros canales manteniendo memoria compartida.
 - 💻 **Interfaces Flexibles:** CLI, API HTTP/WebSocket, dashboard web servido por el backend compilado, modo desarrollo React/Vite y aplicación de escritorio con la misma base de runtime.
-- 🔒 **Privacidad y Seguridad:** Compatibilidad con modelos locales, ejecución aislada para tareas sensibles y control fino del entorno de trabajo.
+- 🔒 **Privacidad y Seguridad:** Compatibilidad con modelos locales, ejecución aislada para tareas sensibles, API key para endpoints sensibles fuera de loopback y control fino del entorno de trabajo.
 
 ### Novedades de memoria avanzada
 
@@ -57,6 +58,18 @@ La capa de memoria actual incluye una arquitectura de orquestación pensada para
 - La UI de memoria ahora muestra un Centro de Memoria con métricas, grafo navegable, inspector, filtros, minimapa y navegación contextual hacia STM, LTM, aprendizaje, perfil y resumen diario.
 
 Guía detallada: [Orquestación de Memoria](docs/architecture/memory-orchestration.md)
+
+### Novedades de coordinación y workflows
+
+El runtime multi-agente incorpora piezas persistentes para dividir, recuperar y auditar trabajos largos:
+
+- `AgentCoordinationBus` mantiene mensajería entre agentes, broadcasts e inbox por agente.
+- `WorkflowManager` y `WorkflowScheduler` persisten runs, subtareas, attempts, artifacts y eventos para permitir recovery/resume.
+- `SubtaskTracker`, `ArtifactVerifier`, `CrossReviewEngine` y `ReconciliationService` verifican entregables y sintetizan resultados de varios workers.
+- `RetryPolicy` evita bucles de reintento sin progreso usando `progress_signature`, `step_key` y contadores de estancamiento.
+- La API expone `/api/workflows`, acciones `retry`/`cancel`/`recover` y mensajería de agentes en `/api/agents/messages`.
+
+Guía detallada: [Workflows y Automatizaciones](docs/architecture/automation.md)
 
 ## 🎯 ¿Qué puede hacer Octopus AI?
 
@@ -85,7 +98,7 @@ Octopus AI ofrece tres formas de interactuar:
 La forma más directa. Abre tu terminal y chatea con el asistente con toda la potencia de la memoria y las skills.
 
 ### Panel Web (Dashboard)
-Interfaz gráfica moderna en el navegador. Ideal para quienes prefieren no usar la terminal. Incluye chat, memoria, skills, tareas, automatizaciones, herramientas, variables y biblioteca multimedia. En instalación normal accede desde `http://127.0.0.1:18789`; en desarrollo frontend usa `http://localhost:3000`.
+Interfaz gráfica moderna en el navegador. Ideal para quienes prefieren no usar la terminal. Incluye chat con streaming, memoria, agentes, workflows/tareas, automatizaciones, tools, variables, auth de proveedores y biblioteca multimedia. En instalación normal accede desde `http://127.0.0.1:18789`; en desarrollo frontend usa `http://localhost:3000`.
 
 ### Aplicación de Escritorio (Electron)
 App nativa para Windows, macOS y Linux. Experiencia de escritorio completa con todas las funcionalidades.
@@ -224,13 +237,13 @@ octopus-ai/
 - [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, grafo, decaimiento y memoria procedural
 - [Orquestación de Memoria](docs/architecture/memory-orchestration.md) — Integridad, scopes, evidencia, incertidumbre, contexto avanzado y UI del Centro de Memoria
 - [Motor de Aprendizaje](docs/architecture/learning.md) — Experiencias, insights, feedback y auto-mejora controlada
-- [Agente Autónomo y Automatizaciones](docs/architecture/automation.md) — Daemon, heartbeat, cron, delegación y sandbox
+- [Agente Autónomo, Workflows y Automatizaciones](docs/architecture/automation.md) — Daemon, heartbeat, cron, coordinación multi-agente, recovery y sandbox
 - [Motor de Habilidades (Skills)](docs/architecture/skills.md) — Creación automática, mejora, A/B testing
 - [Sistema de Plugins](docs/architecture/plugins.md) — Engine, MCP, marketplace
 
 ### Referencia
 - [Comandos CLI](docs/api/cli.md) — Referencia completa de todos los comandos
-- [API HTTP y WebSocket](docs/api/http.md) — Endpoints para configuración, memoria, skills, tools, tareas y canales
+- [API HTTP y WebSocket](docs/api/http.md) — Endpoints para auth, configuración, memoria, skills, tools, agentes, workflows, tareas y canales
 - [Solución de Problemas](docs/advanced/troubleshooting.md) — Errores comunes y soluciones
 
 ## ✅ Validación del Proyecto
@@ -244,10 +257,10 @@ pnpm test
 pnpm build
 ```
 
-La suite cubre runtime de agentes, memoria, learning, tools, CLI bootstrap y plugins oficiales. Para cambios de memoria, además se recomienda ejecutar:
+La suite cubre runtime de agentes, workflows, memoria, learning, tools, CLI bootstrap y plugins oficiales. Para cambios de memoria o coordinación multi-agente, además se recomienda ejecutar:
 
 ```bash
-pnpm --filter @octopus-ai/core test -- memory-systems.test.ts agent-runtime.test.ts
+pnpm --filter @octopus-ai/core test -- agent-runtime.test.ts workflow-scheduler.test.ts subtask-tracking.test.ts
 ```
 
 ## 🤝 Contribución

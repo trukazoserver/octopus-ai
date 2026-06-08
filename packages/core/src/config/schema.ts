@@ -61,8 +61,19 @@ const AnthropicProviderSchema = Type.Object({
 	apiKeyEnv: Type.Optional(Type.String()),
 	baseUrl: Type.String({ default: "https://api.anthropic.com/v1" }),
 	authMode: Type.Optional(
-		Type.Union([Type.Literal("api-key"), Type.Literal("bearer")]),
+		Type.Union([
+			Type.Literal("api-key"),
+			Type.Literal("bearer"),
+			Type.Literal("oauth"),
+		]),
 	),
+	oauthClientId: Type.Optional(Type.String()),
+	oauthClientSecret: Type.Optional(Type.String()),
+	oauthAccessToken: Type.Optional(Type.String()),
+	oauthRefreshToken: Type.Optional(Type.String()),
+	oauthExpiresAt: Type.Optional(Type.Number()),
+	browserCookies: Type.Optional(Type.String()),
+	browserUserAgent: Type.Optional(Type.String()),
 	models: Type.Array(Type.String(), {
 		default: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
 	}),
@@ -73,10 +84,22 @@ const OpenAIProviderSchema = Type.Object({
 	apiKeyEnv: Type.Optional(Type.String()),
 	baseUrl: Type.String({ default: "https://api.openai.com/v1" }),
 	authMode: Type.Optional(
-		Type.Union([Type.Literal("api-key"), Type.Literal("codex")]),
+		Type.Union([
+			Type.Literal("api-key"),
+			Type.Literal("codex"),
+			Type.Literal("oauth"),
+			Type.Literal("browser"),
+		]),
 	),
 	accessToken: Type.Optional(Type.String()),
 	accessTokenEnv: Type.Optional(Type.String()),
+	oauthClientId: Type.Optional(Type.String()),
+	oauthClientSecret: Type.Optional(Type.String()),
+	oauthAccessToken: Type.Optional(Type.String()),
+	oauthRefreshToken: Type.Optional(Type.String()),
+	oauthExpiresAt: Type.Optional(Type.Number()),
+	browserCookies: Type.Optional(Type.String()),
+	browserUserAgent: Type.Optional(Type.String()),
 	models: Type.Array(Type.String(), {
 		default: ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
 	}),
@@ -87,7 +110,12 @@ const GoogleProviderSchema = Type.Object({
 	apiKeyEnv: Type.Optional(Type.String()),
 	baseUrl: Type.Optional(Type.String()),
 	authMode: Type.Optional(
-		Type.Union([Type.Literal("api-key"), Type.Literal("vertex")]),
+		Type.Union([
+			Type.Literal("api-key"),
+			Type.Literal("vertex"),
+			Type.Literal("oauth"),
+			Type.Literal("browser"),
+		]),
 	),
 	accessToken: Type.Optional(Type.String()),
 	accessTokenEnv: Type.Optional(Type.String()),
@@ -95,6 +123,13 @@ const GoogleProviderSchema = Type.Object({
 	credentialsJson: Type.Optional(Type.String()),
 	projectId: Type.Optional(Type.String()),
 	location: Type.Optional(Type.String()),
+	oauthClientId: Type.Optional(Type.String()),
+	oauthClientSecret: Type.Optional(Type.String()),
+	oauthAccessToken: Type.Optional(Type.String()),
+	oauthRefreshToken: Type.Optional(Type.String()),
+	oauthExpiresAt: Type.Optional(Type.Number()),
+	browserCookies: Type.Optional(Type.String()),
+	browserUserAgent: Type.Optional(Type.String()),
 	models: Type.Array(Type.String(), {
 		default: ["gemini-2.5-pro", "gemini-2.5-flash"],
 	}),
@@ -144,6 +179,12 @@ const DeepSeekProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
 	apiKeyEnv: Type.Optional(Type.String()),
 	baseUrl: Type.String({ default: "https://api.deepseek.com" }),
+	authMode: Type.Optional(
+		Type.Union([Type.Literal("api-key"), Type.Literal("browser")]),
+	),
+	accessToken: Type.Optional(Type.String()),
+	browserCookies: Type.Optional(Type.String()),
+	browserUserAgent: Type.Optional(Type.String()),
 	models: Type.Array(Type.String(), {
 		default: ["deepseek-chat", "deepseek-reasoner"],
 	}),
@@ -162,6 +203,12 @@ const XaiProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
 	apiKeyEnv: Type.Optional(Type.String()),
 	baseUrl: Type.String({ default: "https://api.x.ai/v1" }),
+	authMode: Type.Optional(
+		Type.Union([Type.Literal("api-key"), Type.Literal("browser")]),
+	),
+	accessToken: Type.Optional(Type.String()),
+	browserCookies: Type.Optional(Type.String()),
+	browserUserAgent: Type.Optional(Type.String()),
 	models: Type.Array(Type.String(), {
 		default: ["grok-4.20-0309-reasoning", "grok-4-1-fast-reasoning"],
 	}),
@@ -458,14 +505,20 @@ const MCPServerEntrySchema = Type.Object({
 	enabled: Type.Optional(Type.Boolean()),
 });
 
-const MCPchema = Type.Object({
+const ContinuityGuardSchema = Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		maxAutoContinuations: Type.Integer({ default: 10, minimum: 1 }),
+		truncationDetection: Type.Boolean({ default: true }),
+	});
+
+	const MCPchema = Type.Object({
 	servers: Type.Record(Type.String(), MCPServerEntrySchema, { default: {} }),
 	autoDisabled: Type.Array(Type.String(), { default: [] }),
 });
 
 const ToolIterationLimitSchema = Type.Object({
 	enabled: Type.Boolean({ default: true }),
-	maxIterations: Type.Integer({ default: 18, minimum: 1 }),
+	maxIterations: Type.Integer({ default: 64, minimum: 1 }),
 });
 
 const ToolTimeoutsSchema = Type.Object({
@@ -478,18 +531,50 @@ const ToolTimeoutsSchema = Type.Object({
 	}),
 });
 
+const ToolRateLimitRuleSchema = Type.Object({
+	minIntervalMs: Type.Number({ default: 3000, minimum: 0 }),
+	maxConcurrent: Type.Integer({ default: 1, minimum: 1 }),
+	queueTimeoutMs: Type.Number({ default: 600000, minimum: 1000 }),
+});
+
+const ToolRateLimitsSchema = Type.Object({
+	enabled: Type.Boolean({ default: true }),
+	mediaDefault: ToolRateLimitRuleSchema,
+	byTool: Type.Record(Type.String(), ToolRateLimitRuleSchema, { default: {} }),
+});
+
 const ToolsConfigSchema = Type.Object({
 	disabled: Type.Array(Type.String(), { default: [] }),
 	iterationLimit: ToolIterationLimitSchema,
 	timeouts: ToolTimeoutsSchema,
+	rateLimits: Type.Optional(ToolRateLimitsSchema),
+});
+
+const OrchestrationConfigSchema = Type.Object({
+	enabled: Type.Boolean({ default: true }),
+	mode: Type.Union(
+		[Type.Literal("durable"), Type.Literal("legacy"), Type.Literal("hybrid")],
+		{ default: "durable" },
+	),
+	maxArms: Type.Integer({ default: 8, minimum: 1, maximum: 8 }),
+	workerTimeoutMs: Type.Number({ default: 600000, minimum: 1000 }),
+	maxToolIterationsPerArm: Type.Integer({ default: 32, minimum: 1 }),
+	decompositionTimeoutMs: Type.Number({ default: 30000, minimum: 1000 }),
+	synthesisTimeoutMs: Type.Number({ default: 10000, minimum: 1000 }),
+	synthesisMaxTokens: Type.Integer({ default: 1200, minimum: 128 }),
+	maxStagnantAttempts: Type.Integer({ default: 5, minimum: 1 }),
+	maxSpawnDepth: Type.Integer({ default: 2, minimum: 0, maximum: 5 }),
 });
 
 const MascotIdSchema = Type.Union(
 	[
+		Type.Literal("abeja-bibi"),
 		Type.Literal("anemona-anita"),
+		Type.Literal("arana-ari"),
 		Type.Literal("calamar-cali"),
 		Type.Literal("cangrejo-crabby"),
 		Type.Literal("estrella-estelita"),
+		Type.Literal("langosta-langi"),
 		Type.Literal("medusa-medi"),
 		Type.Literal("pulpo-octavio"),
 	],
@@ -515,6 +600,8 @@ export const ConfigSchema = Type.Object({
 	storage: StorageSchema,
 	security: SecuritySchema,
 	tools: ToolsConfigSchema,
+	orchestration: Type.Optional(OrchestrationConfigSchema),
+	continuityGuard: Type.Optional(ContinuityGuardSchema),
 	mcp: Type.Optional(MCPchema),
 });
 

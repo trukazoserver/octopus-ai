@@ -3,7 +3,7 @@ import {
 	getMascotOptions,
 } from "@octopus-ai/core/mascots/index";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
 	ConfigSection,
 	Field,
@@ -14,13 +14,36 @@ import {
 } from "../components/ConfigSection.js";
 import { AppIcon } from "../components/ui/AppIcon.js";
 import { BrandLogo } from "../components/ui/BrandLogo.js";
-import { apiGet, apiPost, apiPut, apiPutJson } from "../hooks/useApi.js";
+import {
+	apiDelete,
+	apiGet,
+	apiPost,
+	apiPut,
+	apiPutJson,
+} from "../hooks/useApi.js";
 
 interface ProviderConfig {
 	apiKey?: string;
+	apiKeyEnv?: string;
 	baseUrl?: string;
+	authMode?: string;
+	accessToken?: string;
+	accessTokenEnv?: string;
+	codingApiKey?: string;
+	codingBaseUrl?: string;
+	credentialsFile?: string;
+	credentialsJson?: string;
+	projectId?: string;
+	location?: string;
 	mode?: string;
 	models?: string[];
+	oauthClientId?: string;
+	oauthClientSecret?: string;
+	oauthAccessToken?: string;
+	oauthRefreshToken?: string;
+	oauthExpiresAt?: number;
+	browserCookies?: string;
+	browserUserAgent?: string;
 }
 
 interface MemoryShortTermConfig {
@@ -114,6 +137,15 @@ interface ConfigData {
 			maxIterations?: number;
 		};
 	};
+	orchestration?: {
+		enabled?: boolean;
+		mode?: "durable" | "legacy" | "hybrid";
+		maxArms?: number;
+		workerTimeoutMs?: number;
+		maxToolIterationsPerArm?: number;
+		maxStagnantAttempts?: number;
+		maxSpawnDepth?: number;
+	};
 }
 
 interface UserProfile {
@@ -127,6 +159,43 @@ interface UserProfileResponse {
 	profile: UserProfile | null;
 }
 
+interface StatusResponse {
+	availableProviders?: string[];
+}
+
+interface VertexSetupResponse {
+	projectId: string;
+	projectNumber?: string;
+	createdProject: boolean;
+	billingAccounts: Array<{
+		name: string;
+		displayName?: string;
+		open?: boolean;
+	}>;
+	linkedBillingAccount?: string;
+	enabledServices: string[];
+	iamRolesGranted: string[];
+	principalEmail?: string;
+	warnings: string[];
+}
+
+interface EnvVarEntry {
+	id: string;
+	key: string;
+	value: string;
+	description: string | null;
+	is_secret: number;
+	created_at: string;
+	updated_at: string;
+}
+
+interface EnvVarDraft {
+	key: string;
+	value: string;
+	description: string;
+	isSecret: boolean;
+}
+
 interface ProviderOption {
 	key: string;
 	name: string;
@@ -137,6 +206,9 @@ interface ProviderOption {
 	fallbackLabel?: string;
 	hasMode?: boolean;
 	isLocal?: boolean;
+	authModes?: Array<{ value: string; label: string }>;
+	defaultAuthMode?: string;
+	apiKeyEnvPlaceholder?: string;
 }
 
 const PROVIDERS: ProviderOption[] = [
@@ -147,6 +219,7 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "chat.z.ai",
 		fallbackLabel: "Z.ai",
 		hasMode: true,
+		apiKeyEnvPlaceholder: "ZHIPU_CODING_API_KEY",
 	},
 	{
 		key: "openai",
@@ -155,6 +228,14 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "openai.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
+		authModes: [
+			{ value: "api-key", label: "API key" },
+			{ value: "codex", label: "Codex" },
+			{ value: "oauth", label: "OAuth (Login)" },
+			{ value: "browser", label: "Browser (Login)" },
+		],
+		defaultAuthMode: "api-key",
+		apiKeyEnvPlaceholder: "OPENAI_API_KEY",
 	},
 	{
 		key: "anthropic",
@@ -163,6 +244,14 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "anthropic.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/anthropic.svg",
+		authModes: [
+			{ value: "api-key", label: "API key" },
+			{ value: "bearer", label: "Bearer token" },
+			{ value: "oauth", label: "OAuth (Login)" },
+			{ value: "browser", label: "Browser (Login)" },
+		],
+		defaultAuthMode: "api-key",
+		apiKeyEnvPlaceholder: "ANTHROPIC_API_KEY",
 	},
 	{
 		key: "google",
@@ -171,6 +260,14 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "google.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/google.svg",
+		authModes: [
+			{ value: "api-key", label: "API key" },
+			{ value: "vertex", label: "Vertex AI" },
+			{ value: "oauth", label: "OAuth (Login)" },
+			{ value: "browser", label: "Browser (Login)" },
+		],
+		defaultAuthMode: "api-key",
+		apiKeyEnvPlaceholder: "GEMINI_API_KEY",
 	},
 	{
 		key: "deepseek",
@@ -179,6 +276,12 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "deepseek.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/deepseek.svg",
+		authModes: [
+			{ value: "api-key", label: "API key" },
+			{ value: "browser", label: "Browser (Login)" },
+		],
+		defaultAuthMode: "api-key",
+		apiKeyEnvPlaceholder: "DEEPSEEK_API_KEY",
 	},
 	{
 		key: "mistral",
@@ -187,6 +290,7 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "mistral.ai",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/mistralai.svg",
+		apiKeyEnvPlaceholder: "MISTRAL_API_KEY",
 	},
 	{
 		key: "xai",
@@ -195,6 +299,12 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "x.ai",
 		logoSrc: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/x.svg",
 		fallbackLabel: "xAI",
+		authModes: [
+			{ value: "api-key", label: "API key" },
+			{ value: "browser", label: "Browser (Login)" },
+		],
+		defaultAuthMode: "api-key",
+		apiKeyEnvPlaceholder: "XAI_API_KEY",
 	},
 	{
 		key: "cohere",
@@ -203,6 +313,7 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "cohere.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/cohere.svg",
+		apiKeyEnvPlaceholder: "COHERE_API_KEY",
 	},
 	{
 		key: "openrouter",
@@ -210,6 +321,7 @@ const PROVIDERS: ProviderOption[] = [
 		url: "https://openrouter.ai/keys",
 		logoDomain: "openrouter.ai",
 		logoSrc: "https://openrouter.ai/favicon.ico",
+		apiKeyEnvPlaceholder: "OPENROUTER_API_KEY",
 	},
 	{
 		key: "local",
@@ -222,17 +334,56 @@ const PROVIDERS: ProviderOption[] = [
 
 const MASCOT_OPTIONS = getMascotOptions();
 
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+	"gemini-2.5-pro": 1_048_576,
+	"gemini-2.5-flash": 1_048_576,
+	"gemini-2.0-flash": 1_048_576,
+	"gpt-4.1": 1_048_576,
+	"gpt-4o": 128_000,
+	"gpt-4o-mini": 128_000,
+	o3: 200_000,
+	"o4-mini": 200_000,
+	"claude-opus-4-7": 1_048_576,
+	"claude-opus-4-6": 1_048_576,
+	"claude-sonnet-4-6": 1_048_576,
+	"claude-haiku-4-5": 200_000,
+	"glm-5.1": 200_000,
+	"glm-5": 200_000,
+	"glm-5-turbo": 200_000,
+	"glm-4.7": 200_000,
+	"glm-4.6": 200_000,
+	"glm-5v-turbo": 200_000,
+	"glm-4.6v": 128_000,
+	"deepseek-v4-pro": 128_000,
+	"deepseek-v4-flash": 128_000,
+	"deepseek-chat": 128_000,
+	"deepseek-reasoner": 128_000,
+	"mistral-large-3": 128_000,
+	"mistral-medium-3-1": 128_000,
+	"mistral-medium-3-5": 128_000,
+	"mistral-small-4": 128_000,
+	"codestral-25-08": 256_000,
+	"grok-4.20-0309-reasoning": 1_048_576,
+	"grok-4.20-0309-non-reasoning": 1_048_576,
+	"grok-4-1-fast-reasoning": 1_048_576,
+	"grok-4.3": 1_048_576,
+	"command-a-03-2025": 256_000,
+	"command-a-vision-07-2025": 128_000,
+	"command-a-reasoning-08-2025": 256_000,
+	"command-a-plus-05-2026": 128_000,
+};
+
 const settingsPanelStyle: React.CSSProperties = {
-	background: "#000",
+	background: "linear-gradient(180deg, #111318 0%, #090a0d 100%)",
 	padding: "18px",
 	borderRadius: "16px",
-	border: "1px solid #151515",
-	boxShadow: "0 12px 28px rgba(0,0,0,.18)",
+	border: "1px solid #2a303a",
+	boxShadow: "0 16px 42px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.04)",
 };
 
 const settingsMutedPanelStyle: React.CSSProperties = {
 	...settingsPanelStyle,
-	background: "#050505",
+	background: "linear-gradient(180deg, #151821 0%, #0c0e13 100%)",
 };
 
 const settingsPrimaryButtonStyle: React.CSSProperties = {
@@ -246,6 +397,41 @@ const settingsPrimaryButtonStyle: React.CSSProperties = {
 	cursor: "pointer",
 	fontFamily: "inherit",
 };
+
+const settingsSecondaryButtonStyle: React.CSSProperties = {
+	...settingsPrimaryButtonStyle,
+	border: "1px solid #343a46",
+	background: "transparent",
+	color: "#d4d4d8",
+};
+
+const settingsDangerButtonStyle: React.CSSProperties = {
+	...settingsPrimaryButtonStyle,
+	border: "1px solid rgba(239, 68, 68, 0.35)",
+	background: "rgba(239, 68, 68, 0.1)",
+	color: "#f87171",
+};
+
+const envInputStyle: React.CSSProperties = {
+	width: "100%",
+	padding: "10px 12px",
+	borderRadius: "10px",
+	border: "1px solid #343a46",
+	background: "#05070a",
+	color: "#f4f4f5",
+	fontSize: "0.86rem",
+	outline: "none",
+	boxSizing: "border-box",
+};
+
+const ENV_VAR_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const createEmptyEnvDraft = (): EnvVarDraft => ({
+	key: "",
+	value: "",
+	description: "",
+	isSecret: true,
+});
 
 const CompanyHeading: React.FC<{
 	domain: string;
@@ -305,8 +491,776 @@ function readServiceAccountProjectId(credentialsJson?: string): string {
 	}
 }
 
+function hasText(value: unknown): boolean {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function getModelContextWindow(model: string): number {
+	const slashIndex = model.lastIndexOf("/");
+	const normalized = slashIndex === -1 ? model : model.slice(slashIndex + 1);
+	if (MODEL_CONTEXT_WINDOWS[normalized])
+		return MODEL_CONTEXT_WINDOWS[normalized];
+	for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+		if (normalized.startsWith(key.split("-").slice(0, 2).join("-"))) {
+			return value;
+		}
+	}
+	return 128_000;
+}
+
+function formatModelContextWindow(tokens: number): string {
+	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+	if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+	return String(tokens);
+}
+
+function isProviderConfigured(
+	provider: ProviderConfig,
+	providerInfo?: ProviderOption,
+): boolean {
+	const isLocal = providerInfo?.isLocal;
+	if (isLocal) return hasText(provider.baseUrl);
+	if (provider.authMode === "oauth") {
+		return hasText(provider.oauthAccessToken);
+	}
+	if (providerInfo?.key === "google" && provider.authMode === "vertex") {
+		const vertexProjectId =
+			provider.projectId ||
+			readServiceAccountProjectId(provider.credentialsJson);
+		return (
+			hasText(vertexProjectId) &&
+			[
+				provider.accessToken,
+				provider.accessTokenEnv,
+				provider.oauthAccessToken,
+				provider.credentialsFile,
+				provider.credentialsJson,
+			].some(hasText)
+		);
+	}
+	if (providerInfo?.key === "openai" && provider.authMode === "codex") {
+		return [
+			provider.apiKey,
+			provider.apiKeyEnv,
+			provider.accessToken,
+			provider.accessTokenEnv,
+		].some(hasText);
+	}
+	return [
+		provider.apiKey,
+		provider.apiKeyEnv,
+		provider.accessToken,
+		provider.accessTokenEnv,
+		provider.codingApiKey,
+		provider.credentialsFile,
+		provider.credentialsJson,
+	].some(hasText);
+}
+
+function toModelRef(providerKey: string, model: string): string {
+	return model.startsWith(`${providerKey}/`)
+		? model
+		: `${providerKey}/${model}`;
+}
+
+function buildConfiguredModelOptions(
+	providers: Record<string, ProviderConfig>,
+	activeProviderKeys: Set<string>,
+): { labels: Record<string, string>; values: string[] } {
+	const values: string[] = [];
+	const labels: Record<string, string> = {};
+	const seen = new Set<string>();
+
+	for (const providerInfo of PROVIDERS) {
+		const provider = providers[providerInfo.key] ?? {};
+		if (
+			!isProviderConfigured(provider, providerInfo) &&
+			!activeProviderKeys.has(providerInfo.key)
+		) {
+			continue;
+		}
+
+		for (const model of provider.models ?? []) {
+			const value = toModelRef(providerInfo.key, model);
+			if (seen.has(value)) continue;
+			seen.add(value);
+			values.push(value);
+			labels[value] = `${providerInfo.name}: ${model}`;
+		}
+	}
+
+	return { labels, values };
+}
+
+function normalizeModelOption(
+	model: string | undefined,
+	availableModels: string[],
+): string | undefined {
+	if (!model) return undefined;
+	if (availableModels.includes(model)) return model;
+	if (!model.includes("/")) {
+		return availableModels.find((available) => available.endsWith(`/${model}`));
+	}
+	return undefined;
+}
+
+interface BrowserLoginSectionProps {
+	provider: string;
+	providerName: string;
+	isConfigured: boolean;
+	onLogin: () => void;
+}
+
+function BrowserLoginSection({
+	provider,
+	providerName,
+	isConfigured,
+	onLogin,
+}: BrowserLoginSectionProps) {
+	const [status, setStatus] = useState<
+		"idle" | "waiting" | "captured" | "error" | "closed"
+	>("idle");
+	const [error, setError] = useState<string | null>(null);
+	const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+	const handleLogin = async () => {
+		setError(null);
+		setStatus("waiting");
+
+		try {
+			const res = await fetch(`/api/auth/${provider}/browser-start`, {
+				method: "POST",
+			});
+			const data = (await res.json()) as { ok: boolean; error?: string };
+			if (!data.ok) {
+				setError(data.error ?? "Failed to start browser");
+				setStatus("error");
+				return;
+			}
+
+			pollRef.current = setInterval(async () => {
+				try {
+					const pollRes = await fetch(`/api/auth/${provider}/browser-status`);
+					const pollData = (await pollRes.json()) as {
+						status: string;
+					};
+					if (pollData.status === "captured") {
+						if (pollRef.current) clearInterval(pollRef.current);
+						const resultRes = await fetch(
+							`/api/auth/${provider}/browser-result`,
+							{ method: "POST" },
+						);
+						await resultRes.json();
+						setStatus("captured");
+						onLogin();
+					} else if (
+						pollData.status === "error" ||
+						pollData.status === "closed"
+					) {
+						if (pollRef.current) clearInterval(pollRef.current);
+						setStatus(pollData.status as "error" | "closed");
+					}
+				} catch {
+					if (pollRef.current) clearInterval(pollRef.current);
+				}
+			}, 3000);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Error starting browser");
+			setStatus("error");
+		}
+	};
+
+	useEffect(() => {
+		return () => {
+			if (pollRef.current) clearInterval(pollRef.current);
+		};
+	}, []);
+
+	return (
+		<div>
+			<div
+				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: 8,
+					marginBottom: 12,
+				}}
+			>
+				<span
+					style={{
+						display: "inline-block",
+						padding: "2px 8px",
+						borderRadius: 8,
+						fontSize: "0.7rem",
+						fontWeight: 600,
+						background:
+							status === "captured" || isConfigured
+								? "rgba(52,211,153,.15)"
+								: status === "waiting"
+									? "rgba(251,191,36,.15)"
+									: status === "error" || status === "closed"
+										? "rgba(239,68,68,.15)"
+										: "rgba(99,102,241,.15)",
+						color:
+							status === "captured" || isConfigured
+								? "#34d399"
+								: status === "waiting"
+									? "#fbbf24"
+									: status === "error" || status === "closed"
+										? "#f87171"
+										: "#818cf8",
+					}}
+				>
+					{status === "captured" || isConfigured
+						? "Conectado"
+						: status === "waiting"
+							? "Abriendo navegador..."
+							: status === "error" || status === "closed"
+								? "Error"
+								: "No conectado"}
+				</span>
+			</div>
+
+			{error && (
+				<div
+					style={{
+						padding: "6px 10px",
+						borderRadius: 8,
+						background: "rgba(239,68,68,.1)",
+						color: "#f87171",
+						fontSize: "0.75rem",
+						marginBottom: 8,
+					}}
+				>
+					{error}
+				</div>
+			)}
+
+			<div style={{ display: "flex", gap: 8 }}>
+				<button
+					type="button"
+					disabled={status === "waiting"}
+					onClick={handleLogin}
+					style={{
+						padding: "8px 16px",
+						borderRadius: 8,
+						border: "none",
+						background:
+							status === "waiting"
+								? "#374151"
+								: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+						color: "#fff",
+						fontSize: "0.8rem",
+						fontWeight: 500,
+						cursor: status === "waiting" ? "not-allowed" : "pointer",
+						opacity: status === "waiting" ? 0.7 : 1,
+					}}
+				>
+					{status === "waiting"
+						? "Esperando login en navegador..."
+						: `Iniciar sesion via ${providerName}`}
+				</button>
+			</div>
+
+			<div
+				style={{
+					marginTop: 8,
+					fontSize: "0.7rem",
+					color: "#475569",
+					lineHeight: 1.4,
+				}}
+			>
+				Abre la pagina de {providerName} en tu navegador para que inicies
+				sesion. Octopus AI captura la sesion automaticamente.
+			</div>
+		</div>
+	);
+}
+
+interface OAuthLoginSectionProps {
+	provider: string;
+	providerName: string;
+	oauthClientId: string;
+	oauthClientSecret: string;
+	oauthAccessToken: string;
+	oauthExpiresAt?: number;
+	onSaveClientId: (v: string) => void;
+	onSaveClientSecret: (v: string) => void;
+	onTokenSaved: () => void;
+}
+
+function OAuthLoginSection({
+	provider,
+	providerName,
+	oauthClientId,
+	oauthClientSecret,
+	oauthAccessToken,
+	oauthExpiresAt,
+	onSaveClientId,
+	onSaveClientSecret,
+	onTokenSaved,
+}: OAuthLoginSectionProps) {
+	const [clientId, setClientId] = useState(oauthClientId);
+	const [clientSecret, setClientSecret] = useState(oauthClientSecret);
+	const [loggingIn, setLoggingIn] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const [tokenStatus, setTokenStatus] = useState<"none" | "valid" | "expired">(
+		() => {
+			if (!oauthAccessToken) return "none";
+			if (oauthExpiresAt && Date.now() > oauthExpiresAt) return "expired";
+			return "valid";
+		},
+	);
+
+	const isLoggedIn = tokenStatus === "valid";
+
+	const handleLogin = async () => {
+		if (!clientId.trim()) {
+			setError("Client ID es requerido");
+			return;
+		}
+
+		setError(null);
+		setLoggingIn(true);
+
+		try {
+			onSaveClientId(clientId.trim());
+			if (clientSecret.trim()) onSaveClientSecret(clientSecret.trim());
+
+			const res = await fetch(`/api/auth/${provider}/start`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					clientId: clientId.trim(),
+					clientSecret: clientSecret.trim() || undefined,
+				}),
+			});
+
+			if (!res.ok) {
+				const data = (await res.json()) as { error?: string };
+				throw new Error(data.error ?? "OAuth start failed");
+			}
+
+			const data = (await res.json()) as { authorizationUrl: string };
+			const popup = window.open(
+				data.authorizationUrl,
+				"oauth_login",
+				"width=600,height=700,scrollbars=yes",
+			);
+
+			if (!popup) {
+				window.location.href = data.authorizationUrl;
+				return;
+			}
+
+			const checkClosed = setInterval(() => {
+				if (popup.closed) {
+					clearInterval(checkClosed);
+					setLoggingIn(false);
+					onTokenSaved();
+				}
+			}, 1000);
+
+			setTimeout(() => {
+				clearInterval(checkClosed);
+				setLoggingIn(false);
+				onTokenSaved();
+			}, 120000);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Error al iniciar OAuth");
+			setLoggingIn(false);
+		}
+	};
+
+	const handleRefresh = async () => {
+		setError(null);
+		try {
+			const res = await fetch(`/api/auth/${provider}/refresh`, {
+				method: "POST",
+			});
+			if (!res.ok) {
+				const data = (await res.json()) as { error?: string };
+				throw new Error(data.error ?? "Refresh failed");
+			}
+			setTokenStatus("valid");
+			onTokenSaved();
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Error al refrescar token");
+		}
+	};
+
+	return (
+		<div>
+			<div
+				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: 8,
+					marginBottom: 12,
+				}}
+			>
+				<span
+					style={{
+						display: "inline-block",
+						padding: "2px 8px",
+						borderRadius: 8,
+						fontSize: "0.7rem",
+						fontWeight: 600,
+						background: isLoggedIn
+							? "rgba(52,211,153,.15)"
+							: tokenStatus === "expired"
+								? "rgba(251,191,36,.15)"
+								: "rgba(99,102,241,.15)",
+						color: isLoggedIn
+							? "#34d399"
+							: tokenStatus === "expired"
+								? "#fbbf24"
+								: "#818cf8",
+					}}
+				>
+					{isLoggedIn
+						? "Conectado"
+						: tokenStatus === "expired"
+							? "Expirado"
+							: "No conectado"}
+				</span>
+				{isLoggedIn && oauthExpiresAt && (
+					<span style={{ fontSize: "0.7rem", color: "#64748b" }}>
+						Expira: {new Date(oauthExpiresAt).toLocaleString()}
+					</span>
+				)}
+			</div>
+
+			{!isLoggedIn && (
+				<>
+					<div style={{ marginBottom: 8 }}>
+						<label
+							htmlFor={`oauth-client-id-${provider}`}
+							style={{
+								display: "block",
+								fontSize: "0.75rem",
+								color: "#94a3b8",
+								marginBottom: 4,
+							}}
+						>
+							OAuth Client ID
+						</label>
+						<input
+							id={`oauth-client-id-${provider}`}
+							type="text"
+							value={clientId}
+							placeholder={`${provider} OAuth Client ID`}
+							onChange={(e) => setClientId(e.target.value)}
+							style={{
+								width: "100%",
+								padding: "8px 12px",
+								borderRadius: 8,
+								border: "1px solid #2a303a",
+								background: "#090a0d",
+								color: "#e2e8f0",
+								fontSize: "0.8rem",
+								boxSizing: "border-box",
+							}}
+						/>
+					</div>
+					<div style={{ marginBottom: 12 }}>
+						<label
+							htmlFor={`oauth-client-secret-${provider}`}
+							style={{
+								display: "block",
+								fontSize: "0.75rem",
+								color: "#94a3b8",
+								marginBottom: 4,
+							}}
+						>
+							OAuth Client Secret
+							<span style={{ color: "#475569", marginLeft: 4 }}>
+								(opcional)
+							</span>
+						</label>
+						<input
+							id={`oauth-client-secret-${provider}`}
+							type="password"
+							value={clientSecret}
+							placeholder={`${provider} OAuth Client Secret`}
+							onChange={(e) => setClientSecret(e.target.value)}
+							style={{
+								width: "100%",
+								padding: "8px 12px",
+								borderRadius: 8,
+								border: "1px solid #2a303a",
+								background: "#090a0d",
+								color: "#e2e8f0",
+								fontSize: "0.8rem",
+								boxSizing: "border-box",
+							}}
+						/>
+					</div>
+				</>
+			)}
+
+			{error && (
+				<div
+					style={{
+						padding: "6px 10px",
+						borderRadius: 8,
+						background: "rgba(239,68,68,.1)",
+						color: "#f87171",
+						fontSize: "0.75rem",
+						marginBottom: 8,
+					}}
+				>
+					{error}
+				</div>
+			)}
+
+			<div style={{ display: "flex", gap: 8 }}>
+				{!isLoggedIn ? (
+					<button
+						type="button"
+						disabled={loggingIn || !clientId.trim()}
+						onClick={handleLogin}
+						style={{
+							padding: "8px 16px",
+							borderRadius: 8,
+							border: "none",
+							background: loggingIn
+								? "#374151"
+								: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+							color: "#fff",
+							fontSize: "0.8rem",
+							fontWeight: 500,
+							cursor: loggingIn ? "not-allowed" : "pointer",
+							opacity: loggingIn ? 0.7 : 1,
+						}}
+					>
+						{loggingIn
+							? "Esperando autorizacion..."
+							: `Iniciar sesion con ${providerName}`}
+					</button>
+				) : (
+					<>
+						<button
+							type="button"
+							onClick={handleRefresh}
+							style={{
+								padding: "8px 16px",
+								borderRadius: 8,
+								border: "1px solid #2a303a",
+								background: "transparent",
+								color: "#94a3b8",
+								fontSize: "0.8rem",
+								cursor: "pointer",
+							}}
+						>
+							Refrescar token
+						</button>
+					</>
+				)}
+			</div>
+
+			<div
+				style={{
+					marginTop: 8,
+					fontSize: "0.7rem",
+					color: "#475569",
+					lineHeight: 1.4,
+				}}
+			>
+				Necesitas registrar una OAuth App en la consola de {providerName} para
+				obtener el Client ID. El redirect URI es:{" "}
+				<code
+					style={{
+						padding: "1px 4px",
+						borderRadius: 4,
+						background: "rgba(99,102,241,.1)",
+						color: "#818cf8",
+						fontSize: "0.65rem",
+					}}
+				>
+					http://127.0.0.1:18789/api/auth/{provider}/callback
+				</code>
+			</div>
+		</div>
+	);
+}
+
+interface VertexSetupSectionProps {
+	providerConfig: ProviderConfig;
+	onSaveClientId: (v: string) => void;
+	onSaveClientSecret: (v: string) => void;
+	onTokenSaved: () => void;
+	onComplete: () => void;
+}
+
+function VertexSetupSection({
+	providerConfig,
+	onSaveClientId,
+	onSaveClientSecret,
+	onTokenSaved,
+	onComplete,
+}: VertexSetupSectionProps) {
+	const [projectId, setProjectId] = useState(providerConfig.projectId ?? "");
+	const [location, setLocation] = useState(
+		providerConfig.location ?? "us-central1",
+	);
+	const [billingAccountName, setBillingAccountName] = useState("");
+	const [running, setRunning] = useState(false);
+	const [result, setResult] = useState<VertexSetupResponse | null>(null);
+	const [error, setError] = useState<string | null>(null);
+	const hasGoogleOAuth = hasText(providerConfig.oauthAccessToken);
+
+	const handleSetup = async () => {
+		setRunning(true);
+		setError(null);
+		setResult(null);
+		try {
+			const response = (await apiPost("/api/auth/google/vertex-setup", {
+				projectId: projectId.trim() || undefined,
+				location: location.trim() || "us-central1",
+				billingAccountName: billingAccountName.trim() || undefined,
+			})) as unknown as VertexSetupResponse;
+			setResult(response);
+			setProjectId(response.projectId);
+			onComplete();
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setRunning(false);
+		}
+	};
+
+	return (
+		<div style={{ display: "grid", gap: 10 }}>
+			{!hasGoogleOAuth ? (
+				<div
+					style={{
+						padding: 12,
+						borderRadius: 12,
+						border: "1px solid rgba(99,102,241,.28)",
+						background: "rgba(99,102,241,.08)",
+					}}
+				>
+					<div
+						style={{ color: "#e2e8f0", fontSize: "0.82rem", marginBottom: 10 }}
+					>
+						Primero inicia sesion con Google OAuth. Octopus usara los permisos
+						cloud-platform para preparar Vertex AI.
+					</div>
+					<OAuthLoginSection
+						provider="google"
+						providerName="Google Cloud"
+						oauthClientId={providerConfig.oauthClientId ?? ""}
+						oauthClientSecret={providerConfig.oauthClientSecret ?? ""}
+						oauthAccessToken={providerConfig.oauthAccessToken ?? ""}
+						oauthExpiresAt={providerConfig.oauthExpiresAt}
+						onSaveClientId={onSaveClientId}
+						onSaveClientSecret={onSaveClientSecret}
+						onTokenSaved={onTokenSaved}
+					/>
+				</div>
+			) : (
+				<div
+					style={{
+						padding: "6px 10px",
+						borderRadius: 8,
+						background: "rgba(52,211,153,.12)",
+						color: "#34d399",
+						fontSize: "0.75rem",
+					}}
+				>
+					Google OAuth conectado. Puedes crear un proyecto nuevo sin
+					organizacion o reutilizar un Project ID existente.
+				</div>
+			)}
+
+			<Field
+				label="Project ID"
+				description="Dejalo vacio para crear automaticamente un proyecto sin organizacion."
+				value={projectId}
+				placeholder="octopus-ai-vertex"
+				onChange={setProjectId}
+			/>
+			<Field
+				label="Region Vertex"
+				value={location}
+				placeholder="us-central1"
+				onChange={setLocation}
+			/>
+			<Field
+				label="Cuenta de facturacion"
+				description="Opcional. Usa billingAccounts/XXXXXX-XXXXXX-XXXXXX; vacio usa la primera cuenta abierta disponible."
+				value={billingAccountName}
+				placeholder="billingAccounts/000000-000000-000000"
+				onChange={setBillingAccountName}
+			/>
+
+			<button
+				type="button"
+				disabled={!hasGoogleOAuth || running}
+				onClick={handleSetup}
+				style={{
+					...settingsPrimaryButtonStyle,
+					opacity: !hasGoogleOAuth || running ? 0.65 : 1,
+					cursor: !hasGoogleOAuth || running ? "not-allowed" : "pointer",
+				}}
+			>
+				{running
+					? "Preparando Vertex AI..."
+					: "Preparar Vertex AI automaticamente"}
+			</button>
+
+			{error && (
+				<div
+					style={{ color: "#f87171", fontSize: "0.75rem", lineHeight: 1.45 }}
+				>
+					{error}
+				</div>
+			)}
+			{result && (
+				<div
+					style={{
+						padding: 10,
+						borderRadius: 10,
+						background: "rgba(15,23,42,.55)",
+						border: "1px solid #243044",
+						fontSize: "0.75rem",
+						color: "#cbd5e1",
+						lineHeight: 1.55,
+					}}
+				>
+					<div>Project ID: {result.projectId}</div>
+					<div>
+						Facturacion: {result.linkedBillingAccount ?? "sin vincular"}
+					</div>
+					<div>Servicios activados: {result.enabledServices.length}</div>
+					<div>Roles IAM ajustados: {result.iamRolesGranted.length}</div>
+					{result.billingAccounts.length > 0 && (
+						<div>
+							Cuentas de facturacion detectadas: {result.billingAccounts.length}
+						</div>
+					)}
+					{result.warnings.length > 0 && (
+						<div style={{ color: "#fbbf24", marginTop: 6 }}>
+							Advertencias: {result.warnings.join(" | ")}
+						</div>
+					)}
+				</div>
+			)}
+		</div>
+	);
+}
+
 export const SettingsPage: React.FC = () => {
 	const [config, setConfig] = useState<ConfigData>({});
+	const [status, setStatus] = useState<StatusResponse | null>(null);
+	const [envVars, setEnvVars] = useState<EnvVarEntry[]>([]);
+	const [envDraft, setEnvDraft] = useState<EnvVarDraft>(createEmptyEnvDraft);
+	const [envEditDrafts, setEnvEditDrafts] = useState<
+		Record<string, EnvVarDraft>
+	>({});
+	const [envEditingKey, setEnvEditingKey] = useState<string | null>(null);
+	const [envBusyKey, setEnvBusyKey] = useState<string | null>(null);
 	const [profile, setProfile] = useState<UserProfile | null>(null);
 	const [profileDraft, setProfileDraft] = useState<UserProfile | null>(null);
 	const [embeddingDraft, setEmbeddingDraft] = useState<MemoryEmbeddingsConfig>(
@@ -315,15 +1269,23 @@ export const SettingsPage: React.FC = () => {
 	const [loading, setLoading] = useState(true);
 	const [savingKey, setSavingKey] = useState<string | null>(null);
 	const [applyingEmbeddings, setApplyingEmbeddings] = useState(false);
+	const [secretEditors, setSecretEditors] = useState<Record<string, boolean>>(
+		{},
+	);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
-	useEffect(() => {
+	const loadConfig = () => {
+		setLoading(true);
 		Promise.all([
 			apiGet<ConfigData>("/api/config"),
 			apiGet<UserProfileResponse>("/api/memory/profile"),
+			apiGet<StatusResponse>("/api/status").catch(() => null),
+			apiGet<EnvVarEntry[]>("/api/env").catch(() => []),
 		])
-			.then(([c, profileResponse]) => {
+			.then(([c, profileResponse, statusResponse, envResponse]) => {
 				setConfig(c);
+				setStatus(statusResponse);
+				setEnvVars(envResponse);
 				setEmbeddingDraft(c.memory?.embeddings ?? {});
 				setProfile(profileResponse.profile);
 				setProfileDraft(profileResponse.profile);
@@ -333,9 +1295,14 @@ export const SettingsPage: React.FC = () => {
 				setMsg({ text: e.message, ok: false });
 				setLoading(false);
 			});
+	};
+
+	// biome-ignore lint/correctness/useExhaustiveDependencies: mount-only fetch
+	useEffect(() => {
+		loadConfig();
 	}, []);
 
-	const save = async (key: string, value: unknown) => {
+	const save = async (key: string, value: unknown): Promise<boolean> => {
 		setMsg(null);
 		setSavingKey(key);
 		let previousConfig: ConfigData | null = null;
@@ -345,6 +1312,11 @@ export const SettingsPage: React.FC = () => {
 		});
 		try {
 			await apiPut(`/api/config/${key}`, value);
+			if (key.startsWith("ai.")) {
+				apiGet<StatusResponse>("/api/status")
+					.then(setStatus)
+					.catch(() => undefined);
+			}
 			setMsg({
 				text: key.startsWith("memory.embeddings")
 					? `${key} guardado y aplicado`
@@ -356,14 +1328,108 @@ export const SettingsPage: React.FC = () => {
 			setTimeout(() => {
 				setMsg(null);
 			}, 3000);
+			return true;
 		} catch (e) {
 			if (previousConfig) setConfig(previousConfig);
 			setMsg({
 				text: e instanceof Error ? e.message : String(e),
 				ok: false,
 			});
+			return false;
 		} finally {
 			setSavingKey(null);
+		}
+	};
+
+	const setSecretEditing = (secretKey: string, editing: boolean) => {
+		setSecretEditors((current) => ({ ...current, [secretKey]: editing }));
+	};
+
+	const refreshConfig = () => loadConfig();
+
+	const refreshEnvVars = async () => {
+		setEnvVars(await apiGet<EnvVarEntry[]>("/api/env"));
+	};
+
+	const startEnvEdit = (entry: EnvVarEntry) => {
+		setMsg(null);
+		setEnvEditingKey(entry.key);
+		setEnvEditDrafts((current) => ({
+			...current,
+			[entry.key]: {
+				key: entry.key,
+				value: entry.is_secret ? "" : entry.value,
+				description: entry.description ?? "",
+				isSecret: entry.is_secret === 1,
+			},
+		}));
+	};
+
+	const saveEnvDraft = async (draft: EnvVarDraft, existing?: EnvVarEntry) => {
+		const key = draft.key.trim();
+		if (!ENV_VAR_KEY_PATTERN.test(key)) {
+			setMsg({
+				text: "Nombre inválido. Usa letras, números y guiones bajos; debe iniciar con letra o guion bajo.",
+				ok: false,
+			});
+			return;
+		}
+		if (!existing && !draft.value) {
+			setMsg({ text: "El valor de la variable es obligatorio", ok: false });
+			return;
+		}
+
+		const body: Record<string, unknown> = {
+			key,
+			description: draft.description.trim() || null,
+			isSecret: draft.isSecret,
+		};
+		if (!existing || !existing.is_secret || draft.value.length > 0) {
+			body.value = draft.value;
+		}
+
+		setMsg(null);
+		setEnvBusyKey(key);
+		try {
+			await apiPost("/api/env", body);
+			await refreshEnvVars();
+			if (existing) {
+				setEnvEditingKey(null);
+				setEnvEditDrafts((current) => {
+					const next = { ...current };
+					delete next[existing.key];
+					return next;
+				});
+			} else {
+				setEnvDraft(createEmptyEnvDraft());
+			}
+			setMsg({ text: `${key} guardado`, ok: true });
+			setTimeout(() => setMsg(null), 3000);
+		} catch (e) {
+			setMsg({
+				text: e instanceof Error ? e.message : String(e),
+				ok: false,
+			});
+		} finally {
+			setEnvBusyKey(null);
+		}
+	};
+
+	const deleteEnvVar = async (key: string) => {
+		setMsg(null);
+		setEnvBusyKey(key);
+		try {
+			await apiDelete(`/api/env/${encodeURIComponent(key)}`);
+			await refreshEnvVars();
+			setMsg({ text: `${key} eliminado`, ok: true });
+			setTimeout(() => setMsg(null), 3000);
+		} catch (e) {
+			setMsg({
+				text: e instanceof Error ? e.message : String(e),
+				ok: false,
+			});
+		} finally {
+			setEnvBusyKey(null);
 		}
 	};
 
@@ -499,6 +1565,7 @@ export const SettingsPage: React.FC = () => {
 	const selectedMascot = getMascotById(config.mascots?.defaultId);
 	const tools = config.tools ?? {};
 	const toolIterationLimit = tools.iterationLimit ?? {};
+	const orchestration = config.orchestration ?? {};
 	const providers = ai.providers ?? {};
 	const embeddings = embeddingDraft;
 	const embeddingProvider = embeddings.provider ?? "auto";
@@ -540,10 +1607,103 @@ export const SettingsPage: React.FC = () => {
 			preferredLanguage: "es",
 			preferences: {},
 		};
-	const allModels: string[] = [];
-	for (const [, p] of Object.entries(providers)) {
-		if (p.models) allModels.push(...p.models);
-	}
+	const activeProviderKeys = new Set(status?.availableProviders ?? []);
+	const configuredModels = buildConfiguredModelOptions(
+		providers,
+		activeProviderKeys,
+	);
+	const noConfiguredModelsOption = "(configura un proveedor primero)";
+	const modelOptions =
+		configuredModels.values.length > 0
+			? configuredModels.values
+			: [noConfiguredModelsOption];
+	const savedDefaultModel = ai.default ?? "zhipu/glm-5.1";
+	const normalizedDefaultModel = normalizeModelOption(
+		savedDefaultModel,
+		configuredModels.values,
+	);
+	const normalizedFallbackModel = normalizeModelOption(
+		ai.fallback,
+		configuredModels.values,
+	);
+	const defaultModelValue = normalizedDefaultModel ?? modelOptions[0];
+	const fallbackModelValue = normalizedFallbackModel ?? "(ninguno)";
+	const selectedContextWindow =
+		defaultModelValue === noConfiguredModelsOption
+			? null
+			: getModelContextWindow(defaultModelValue);
+	const renderSecretEditor = ({
+		configured,
+		fieldKey,
+		inputName,
+		lockedPlaceholder = "••••••••••••••••",
+		unlockedPlaceholder,
+	}: {
+		configured: boolean;
+		fieldKey: string;
+		inputName: string;
+		lockedPlaceholder?: string;
+		unlockedPlaceholder: string;
+	}) => {
+		const editing = !configured || secretEditors[fieldKey] === true;
+		return (
+			<form
+				onSubmit={(e) => {
+					e.preventDefault();
+					if (!editing) {
+						setSecretEditing(fieldKey, true);
+						return;
+					}
+					const form = e.currentTarget;
+					const formData = new FormData(form);
+					const value = String(formData.get(inputName) ?? "").trim();
+					if (value) {
+						void save(fieldKey, value).then((ok) => {
+							if (!ok) return;
+							form.reset();
+							setSecretEditing(fieldKey, false);
+						});
+					}
+				}}
+				style={{ display: "flex", gap: "8px" }}
+			>
+				<input
+					id={inputName}
+					name={inputName}
+					type="password"
+					autoComplete="off"
+					disabled={!editing}
+					placeholder={
+						configured && !editing ? lockedPlaceholder : unlockedPlaceholder
+					}
+					style={{
+						flex: 1,
+						padding: "8px 12px",
+						borderRadius: "8px",
+						border: "1px solid #343a46",
+						background: editing ? "#05070a" : "#07080b",
+						color: editing ? "#f4f4f5" : "#a1a1aa",
+						fontSize: "0.85rem",
+						outline: "none",
+						fontFamily: "ui-monospace, SFMono-Regular, Monaco, monospace",
+						transition: "border-color 0.2s",
+						cursor: editing ? "text" : "not-allowed",
+					}}
+					onFocus={(e) => {
+						e.target.style.borderColor = "#818cf8";
+						e.target.style.boxShadow = "0 0 0 3px rgba(129, 140, 248, 0.16)";
+					}}
+					onBlur={(e) => {
+						e.target.style.borderColor = "#343a46";
+						e.target.style.boxShadow = "none";
+					}}
+				/>
+				<button type="submit" style={settingsPrimaryButtonStyle}>
+					{editing ? "Guardar" : "Editar"}
+				</button>
+			</form>
+		);
+	};
 
 	return (
 		<div
@@ -556,7 +1716,8 @@ export const SettingsPage: React.FC = () => {
 				height: "100%",
 				width: "100%",
 				boxSizing: "border-box",
-				background: "#000",
+				background:
+					"radial-gradient(circle at 20% 0%, rgba(99,102,241,.09), transparent 34%), #030406",
 			}}
 		>
 			<div
@@ -570,7 +1731,7 @@ export const SettingsPage: React.FC = () => {
 				<div>
 					<div
 						style={{
-							color: "#737373",
+							color: "#9ca3af",
 							fontSize: "0.82rem",
 							fontWeight: 800,
 							letterSpacing: "0.08em",
@@ -626,9 +1787,10 @@ export const SettingsPage: React.FC = () => {
 					padding: "10px 14px",
 					borderRadius: "14px",
 					marginBottom: "18px",
-					background: "#050505",
-					border: "1px solid #151515",
-					color: "#a1a1aa",
+					background: "linear-gradient(180deg, #111318 0%, #090a0d 100%)",
+					border: "1px solid #2a303a",
+					color: "#c4c8d4",
+					boxShadow: "0 12px 30px rgba(0,0,0,.28)",
 					fontSize: "0.82rem",
 					display: "flex",
 					justifyContent: "space-between",
@@ -643,6 +1805,340 @@ export const SettingsPage: React.FC = () => {
 				</span>
 				{savingKey && <strong>Guardando {savingKey}...</strong>}
 			</div>
+
+			<ConfigSection
+				title="Variables de entorno"
+				icon={<AppIcon name="key" size={17} />}
+				description="Consulta, crea, edita y elimina variables guardadas. Los secretos se muestran enmascarados; para cambiarlos escribe un nuevo valor."
+				defaultOpen={false}
+			>
+				<div style={{ display: "grid", gap: "16px" }}>
+					<form
+						onSubmit={(e) => {
+							e.preventDefault();
+							void saveEnvDraft(envDraft);
+						}}
+						style={settingsPanelStyle}
+					>
+						<div
+							style={{
+								display: "grid",
+								gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+								gap: "12px",
+								alignItems: "end",
+							}}
+						>
+							<label style={{ display: "grid", gap: "6px", color: "#a1a1aa" }}>
+								<span style={{ fontSize: "0.78rem", fontWeight: 800 }}>
+									Nombre
+								</span>
+								<input
+									value={envDraft.key}
+									onChange={(e) =>
+										setEnvDraft((current) => ({
+											...current,
+											key: e.target.value.toUpperCase(),
+										}))
+									}
+									placeholder="GEMINI_API_KEY"
+									style={{
+										...envInputStyle,
+										fontFamily:
+											"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+									}}
+								/>
+							</label>
+							<label style={{ display: "grid", gap: "6px", color: "#a1a1aa" }}>
+								<span style={{ fontSize: "0.78rem", fontWeight: 800 }}>
+									Valor
+								</span>
+								<input
+									type={envDraft.isSecret ? "password" : "text"}
+									value={envDraft.value}
+									onChange={(e) =>
+										setEnvDraft((current) => ({
+											...current,
+											value: e.target.value,
+										}))
+									}
+									placeholder="Valor guardado"
+									autoComplete="off"
+									style={envInputStyle}
+								/>
+							</label>
+							<label style={{ display: "grid", gap: "6px", color: "#a1a1aa" }}>
+								<span style={{ fontSize: "0.78rem", fontWeight: 800 }}>
+									Descripción
+								</span>
+								<input
+									value={envDraft.description}
+									onChange={(e) =>
+										setEnvDraft((current) => ({
+											...current,
+											description: e.target.value,
+										}))
+									}
+									placeholder="Opcional"
+									style={envInputStyle}
+								/>
+							</label>
+						</div>
+						<div
+							style={{
+								display: "flex",
+								gap: "10px",
+								alignItems: "center",
+								justifyContent: "space-between",
+								flexWrap: "wrap",
+								marginTop: "14px",
+							}}
+						>
+							<label
+								style={{
+									display: "inline-flex",
+									gap: "8px",
+									alignItems: "center",
+									color: "#d4d4d8",
+									fontSize: "0.86rem",
+								}}
+							>
+								<input
+									type="checkbox"
+									checked={envDraft.isSecret}
+									onChange={(e) =>
+										setEnvDraft((current) => ({
+											...current,
+											isSecret: e.target.checked,
+										}))
+									}
+								/>
+								Guardar como secreto
+							</label>
+							<button
+								type="submit"
+								disabled={envBusyKey === envDraft.key.trim()}
+								style={settingsPrimaryButtonStyle}
+							>
+								{envBusyKey === envDraft.key.trim()
+									? "Guardando..."
+									: "Crear variable"}
+							</button>
+						</div>
+					</form>
+
+					<div style={{ display: "grid", gap: "10px" }}>
+						{envVars.length === 0 ? (
+							<div
+								style={{
+									...settingsMutedPanelStyle,
+									color: "#9ca3af",
+									fontSize: "0.88rem",
+								}}
+							>
+								No hay variables guardadas todavía.
+							</div>
+						) : (
+							envVars.map((entry) => {
+								const editing = envEditingKey === entry.key;
+								const draft = envEditDrafts[entry.key] ?? {
+									key: entry.key,
+									value: entry.is_secret ? "" : entry.value,
+									description: entry.description ?? "",
+									isSecret: entry.is_secret === 1,
+								};
+
+								return (
+									<div key={entry.id} style={settingsMutedPanelStyle}>
+										<div
+											style={{
+												display: "flex",
+												justifyContent: "space-between",
+												gap: "12px",
+												alignItems: "flex-start",
+												flexWrap: "wrap",
+											}}
+										>
+											<div>
+												<div
+													style={{
+														color: "#f4f4f5",
+														fontWeight: 850,
+														fontFamily:
+															"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+													}}
+												>
+													{entry.key}
+												</div>
+												<div
+													style={{
+														color: entry.is_secret ? "#fbbf24" : "#86efac",
+														fontSize: "0.76rem",
+														marginTop: "4px",
+													}}
+												>
+													{entry.is_secret ? "Secreto" : "Texto visible"}
+												</div>
+											</div>
+
+											{!editing && (
+												<div style={{ display: "flex", gap: "8px" }}>
+													<button
+														type="button"
+														onClick={() => startEnvEdit(entry)}
+														style={settingsSecondaryButtonStyle}
+													>
+														Editar
+													</button>
+													<button
+														type="button"
+														disabled={envBusyKey === entry.key}
+														onClick={() => void deleteEnvVar(entry.key)}
+														style={settingsDangerButtonStyle}
+													>
+														{envBusyKey === entry.key
+															? "Eliminando..."
+															: "Eliminar"}
+													</button>
+												</div>
+											)}
+										</div>
+
+										{editing ? (
+											<form
+												onSubmit={(e) => {
+													e.preventDefault();
+													void saveEnvDraft(draft, entry);
+												}}
+												style={{
+													display: "grid",
+													gap: "10px",
+													marginTop: "14px",
+												}}
+											>
+												<input
+													value={draft.value}
+													type={draft.isSecret ? "password" : "text"}
+													placeholder={
+														entry.is_secret
+															? "Nuevo valor secreto; déjalo vacío para conservarlo"
+															: "Valor"
+													}
+													autoComplete="off"
+													onChange={(e) =>
+														setEnvEditDrafts((current) => ({
+															...current,
+															[entry.key]: { ...draft, value: e.target.value },
+														}))
+													}
+													style={envInputStyle}
+												/>
+												<input
+													value={draft.description}
+													placeholder="Descripción opcional"
+													onChange={(e) =>
+														setEnvEditDrafts((current) => ({
+															...current,
+															[entry.key]: {
+																...draft,
+																description: e.target.value,
+															},
+														}))
+													}
+													style={envInputStyle}
+												/>
+												<div
+													style={{
+														display: "flex",
+														gap: "10px",
+														alignItems: "center",
+														justifyContent: "space-between",
+														flexWrap: "wrap",
+													}}
+												>
+													<label
+														style={{
+															display: "inline-flex",
+															gap: "8px",
+															alignItems: "center",
+															color: "#d4d4d8",
+															fontSize: "0.86rem",
+														}}
+													>
+														<input
+															type="checkbox"
+															checked={draft.isSecret}
+															onChange={(e) =>
+																setEnvEditDrafts((current) => ({
+																	...current,
+																	[entry.key]: {
+																		...draft,
+																		isSecret: e.target.checked,
+																	},
+																}))
+															}
+														/>
+														Guardar como secreto
+													</label>
+													<div style={{ display: "flex", gap: "8px" }}>
+														<button
+															type="submit"
+															style={settingsPrimaryButtonStyle}
+														>
+															{envBusyKey === entry.key
+																? "Guardando..."
+																: "Guardar"}
+														</button>
+														<button
+															type="button"
+															onClick={() => setEnvEditingKey(null)}
+															style={settingsSecondaryButtonStyle}
+														>
+															Cancelar
+														</button>
+													</div>
+												</div>
+											</form>
+										) : (
+											<div
+												style={{
+													marginTop: "14px",
+													display: "grid",
+													gap: "8px",
+												}}
+											>
+												<code
+													style={{
+														padding: "9px 11px",
+														borderRadius: "10px",
+														background: "#05070a",
+														border: "1px solid #222733",
+														color: "#d4d4d8",
+														fontSize: "0.82rem",
+														overflowWrap: "anywhere",
+													}}
+												>
+													{entry.value}
+												</code>
+												{entry.description && (
+													<div
+														style={{ color: "#a1a1aa", fontSize: "0.82rem" }}
+													>
+														{entry.description}
+													</div>
+												)}
+												<div style={{ color: "#71717a", fontSize: "0.74rem" }}>
+													Actualizada:{" "}
+													{new Date(entry.updated_at).toLocaleString()}
+												</div>
+											</div>
+										)}
+									</div>
+								);
+							})
+						)}
+					</div>
+				</div>
+			</ConfigSection>
 
 			<ConfigSection
 				title="Perfil de usuario"
@@ -878,6 +2374,89 @@ export const SettingsPage: React.FC = () => {
 			</ConfigSection>
 
 			<ConfigSection
+				title="Orquestación multi-agente"
+				icon={<AppIcon name="agent" size={17} />}
+				description="Controla workflows durables, brazos paralelos, reintentos y límites de subagentes. Algunos cambios aplican al reiniciar Octopus."
+				defaultOpen={false}
+			>
+				<div style={settingsPanelStyle}>
+					<Toggle
+						label="Habilitar orquestación durable"
+						value={orchestration.enabled ?? true}
+						onChange={(v) => save("orchestration.enabled", v)}
+						description="Permite que Octopus divida objetivos complejos entre sus brazos y persista runs, subtareas y artefactos."
+					/>
+					<Select
+						label="Modo de workflow"
+						value={orchestration.mode ?? "durable"}
+						options={["durable", "legacy", "hybrid"]}
+						onChange={(v) => save("orchestration.mode", v)}
+						description="durable es el camino principal; legacy queda como referencia/fallback interno."
+					/>
+					<Field
+						label="Máximo de brazos"
+						value={orchestration.maxArms ?? 8}
+						type="number"
+						description="Límite de agentes/brazos paralelos por ejecución. Máximo recomendado: 8."
+						onChange={(v) =>
+							save(
+								"orchestration.maxArms",
+								Math.min(8, Math.max(1, Number.parseInt(v, 10) || 8)),
+							)
+						}
+					/>
+					<Field
+						label="Timeout por brazo (ms)"
+						value={orchestration.workerTimeoutMs ?? 600000}
+						type="number"
+						description="Tiempo máximo por worker antes de considerarlo fallido o interrumpido."
+						onChange={(v) =>
+							save(
+								"orchestration.workerTimeoutMs",
+								Math.max(1000, Number.parseInt(v, 10) || 600000),
+							)
+						}
+					/>
+					<Field
+						label="Iteraciones por brazo"
+						value={orchestration.maxToolIterationsPerArm ?? 32}
+						type="number"
+						description="Máximo de ciclos con herramientas para cada brazo especializado."
+						onChange={(v) =>
+							save(
+								"orchestration.maxToolIterationsPerArm",
+								Math.max(1, Number.parseInt(v, 10) || 32),
+							)
+						}
+					/>
+					<Field
+						label="Intentos sin avance"
+						value={orchestration.maxStagnantAttempts ?? 5}
+						type="number"
+						description="Tras estos fallos en el mismo paso sin nueva evidencia, la subtarea se bloquea y reporta razón."
+						onChange={(v) =>
+							save(
+								"orchestration.maxStagnantAttempts",
+								Math.max(1, Number.parseInt(v, 10) || 5),
+							)
+						}
+					/>
+					<Field
+						label="Profundidad máxima de subagentes"
+						value={orchestration.maxSpawnDepth ?? 2}
+						type="number"
+						description="Controla recursión de subagentes para evitar ciclos o crecimiento indefinido."
+						onChange={(v) =>
+							save(
+								"orchestration.maxSpawnDepth",
+								Math.min(5, Math.max(0, Number.parseInt(v, 10) || 2)),
+							)
+						}
+					/>
+				</div>
+			</ConfigSection>
+
+			<ConfigSection
 				title="Modelos y Proveedores AI"
 				icon={<AppIcon name="brain" size={17} />}
 				description="Configura tus claves API y modelos para que Octopus AI pueda pensar."
@@ -893,20 +2472,39 @@ export const SettingsPage: React.FC = () => {
 				>
 					{PROVIDERS.map((p) => {
 						const prov = providers[p.key] ?? {};
-						const hasKey = p.isLocal
-							? !!prov.baseUrl
-							: !!prov.apiKey &&
-								prov.apiKey !== "" &&
-								!prov.apiKey.includes("...");
+						const currentAuthMode =
+							prov.authMode ?? p.defaultAuthMode ?? "api-key";
+						const apiKeyEnvPlaceholder =
+							p.key === "openai" && currentAuthMode === "codex"
+								? "CODEX_API_KEY"
+								: p.apiKeyEnvPlaceholder;
+						const configured = isProviderConfigured(prov, p);
+						const apiKeyConfigured = [
+							prov.apiKey,
+							prov.apiKeyEnv,
+							prov.codingApiKey,
+						].some(hasText);
+						const accessTokenConfigured = [
+							prov.accessToken,
+							prov.accessTokenEnv,
+						].some(hasText);
+						const active = activeProviderKeys.has(p.key);
+						const statusText = active
+							? "Activo"
+							: configured
+								? "Configurado"
+								: "No config.";
 						return (
 							<div
 								key={p.key}
 								style={{
 									padding: "16px",
 									borderRadius: "16px",
-									background: "#000",
-									border: "1px solid #151515",
-									boxShadow: "0 12px 28px rgba(0,0,0,.18)",
+									background:
+										"linear-gradient(180deg, #111318 0%, #090a0d 100%)",
+									border: "1px solid #2a303a",
+									boxShadow:
+										"0 16px 42px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.04)",
 									transition: "border-color 0.2s",
 								}}
 							>
@@ -937,10 +2535,7 @@ export const SettingsPage: React.FC = () => {
 										/>
 										{p.name}
 									</span>
-									<StatusBadge
-										ok={hasKey}
-										text={hasKey ? "Activo" : "No config."}
-									/>
+									<StatusBadge ok={active || configured} text={statusText} />
 								</div>
 								{p.isLocal ? (
 									<Field
@@ -950,51 +2545,111 @@ export const SettingsPage: React.FC = () => {
 									/>
 								) : (
 									<div style={{ marginBottom: "12px" }}>
-										<form
-											onSubmit={(e) => {
-												e.preventDefault();
-												const formData = new FormData(e.currentTarget);
-												const value = String(
-													formData.get(`provider-${p.key}-api-key`) ?? "",
-												).trim();
-												if (value)
-													void save(`ai.providers.${p.key}.apiKey`, value);
-											}}
-											style={{ display: "flex", gap: "8px" }}
-										>
-											<input
-												id={`provider-${p.key}-api-key`}
-												name={`provider-${p.key}-api-key`}
-												type="password"
-												data-provider={p.key}
-												autoComplete="off"
-												placeholder={
-													hasKey ? "••••••••••••••••" : "Introduce tu API Key"
+										{p.authModes && (
+											<Select
+												label="Metodo de conexion"
+												value={currentAuthMode}
+												options={p.authModes.map((mode) => mode.value)}
+												optionLabels={Object.fromEntries(
+													p.authModes.map((mode) => [mode.value, mode.label]),
+												)}
+												onChange={(v) =>
+													save(`ai.providers.${p.key}.authMode`, v)
 												}
-												style={{
-													flex: 1,
-													padding: "8px 12px",
-													borderRadius: "8px",
-													border: "1px solid #202020",
-													background: "#000",
-													color: "#f4f4f5",
-													fontSize: "0.85rem",
-													outline: "none",
-													fontFamily:
-														"ui-monospace, SFMono-Regular, Monaco, monospace",
-													transition: "border-color 0.2s",
-												}}
-												onFocus={(e) => {
-													e.target.style.borderColor = "#4a4a4a";
-												}}
-												onBlur={(e) => {
-													e.target.style.borderColor = "#202020";
-												}}
 											/>
-											<button type="submit" style={settingsPrimaryButtonStyle}>
-												Guardar
-											</button>
-										</form>
+										)}
+										{p.key === "google" && currentAuthMode === "vertex" ? (
+											<>
+												<VertexSetupSection
+													providerConfig={prov}
+													onSaveClientId={(v) =>
+														save(`ai.providers.${p.key}.oauthClientId`, v)
+													}
+													onSaveClientSecret={(v) =>
+														save(`ai.providers.${p.key}.oauthClientSecret`, v)
+													}
+													onTokenSaved={() => refreshConfig()}
+													onComplete={() => refreshConfig()}
+												/>
+												<div style={{ marginTop: 10 }}>
+													<Field
+														label="Archivo credenciales manual"
+														value={prov.credentialsFile ?? ""}
+														placeholder="C:\\ruta\\service-account.json"
+														onChange={(v) =>
+															save(`ai.providers.${p.key}.credentialsFile`, v)
+														}
+													/>
+												</div>
+											</>
+										) : currentAuthMode === "oauth" ? (
+											<OAuthLoginSection
+												provider={p.key}
+												providerName={p.name}
+												oauthClientId={prov.oauthClientId ?? ""}
+												oauthClientSecret={prov.oauthClientSecret ?? ""}
+												oauthAccessToken={prov.oauthAccessToken ?? ""}
+												oauthExpiresAt={prov.oauthExpiresAt}
+												onSaveClientId={(v) =>
+													save(`ai.providers.${p.key}.oauthClientId`, v)
+												}
+												onSaveClientSecret={(v) =>
+													save(`ai.providers.${p.key}.oauthClientSecret`, v)
+												}
+												onTokenSaved={() => refreshConfig()}
+											/>
+										) : currentAuthMode === "browser" ? (
+											<BrowserLoginSection
+												provider={p.key}
+												providerName={p.name}
+												isConfigured={Boolean(
+													prov.browserCookies || prov.accessToken,
+												)}
+												onLogin={() => refreshConfig()}
+											/>
+										) : (
+											<>
+												{renderSecretEditor({
+													configured: apiKeyConfigured,
+													fieldKey: `ai.providers.${p.key}.apiKey`,
+													inputName: `provider-${p.key}-api-key`,
+													unlockedPlaceholder:
+														currentAuthMode === "bearer"
+															? "Bearer token"
+															: apiKeyConfigured
+																? "Nueva API Key"
+																: "Introduce tu API Key",
+												})}
+												<Field
+													label="Variable API key"
+													value={prov.apiKeyEnv ?? ""}
+													placeholder={apiKeyEnvPlaceholder}
+													onChange={(v) =>
+														save(`ai.providers.${p.key}.apiKeyEnv`, v)
+													}
+												/>
+												{p.key === "openai" && currentAuthMode === "codex" && (
+													<>
+														{renderSecretEditor({
+															configured: accessTokenConfigured,
+															fieldKey: `ai.providers.${p.key}.accessToken`,
+															inputName: `provider-${p.key}-access-token`,
+															unlockedPlaceholder: accessTokenConfigured
+																? "Nuevo access token"
+																: "Access token Codex",
+														})}
+														<Field
+															label="Variable access token"
+															value={prov.accessTokenEnv ?? ""}
+															placeholder="CODEX_ACCESS_TOKEN"
+															onChange={(v) =>
+																save(`ai.providers.${p.key}.accessTokenEnv`, v)
+															}
+														/>
+													</>
+												)}
+											</>
+										)}
 									</div>
 								)}
 								{p.hasMode && (
@@ -1061,29 +2716,20 @@ export const SettingsPage: React.FC = () => {
 				>
 					<Select
 						label="Modelo por Defecto"
-						description="El modelo que Octopus usará para las interacciones."
-						value={ai.default ?? "zhipu/glm-5.1"}
-						options={
-							allModels.length > 0
-								? allModels
-								: [
-										"zhipu/glm-5.1",
-										"openai/gpt-4o",
-										"anthropic/claude-sonnet-4-6",
-										"google/gemini-2.5-pro",
-										"local/llama3.1",
-									]
-						}
-						onChange={(v) => save("ai.default", v)}
+						description="Solo muestra modelos de proveedores configurados o activos."
+						value={defaultModelValue}
+						options={modelOptions}
+						optionLabels={configuredModels.labels}
+						onChange={(v) => {
+							if (v !== noConfiguredModelsOption) void save("ai.default", v);
+						}}
 					/>
 					<Select
 						label="Modelo de Respaldo"
-						description="Se usará si el modelo por defecto falla."
-						value={ai.fallback ?? ""}
-						options={[
-							"(ninguno)",
-							...(allModels.length > 0 ? allModels : ["openai/gpt-4o"]),
-						]}
+						description="Se usará si el modelo por defecto falla; también se limita a proveedores configurados."
+						value={fallbackModelValue}
+						options={["(ninguno)", ...configuredModels.values]}
+						optionLabels={configuredModels.labels}
 						onChange={(v) => save("ai.fallback", v === "(ninguno)" ? "" : v)}
 					/>
 					<Select
@@ -1093,9 +2739,48 @@ export const SettingsPage: React.FC = () => {
 						options={["none", "low", "medium", "high"]}
 						onChange={(v) => save("ai.thinking", v)}
 					/>
+					<div style={{ marginBottom: "16px" }}>
+						<div
+							style={{
+								fontSize: "0.85rem",
+								color: "#a1a1aa",
+								marginBottom: "6px",
+								fontWeight: 700,
+							}}
+						>
+							Ventana de contexto del modelo
+						</div>
+						<div
+							style={{
+								fontSize: "0.76rem",
+								color: "#9ca3af",
+								marginBottom: "9px",
+								lineHeight: 1.45,
+							}}
+						>
+							Se calcula automaticamente segun el modelo seleccionado; no se
+							guarda manualmente.
+						</div>
+						<div
+							style={{
+								width: "100%",
+								padding: "12px 14px",
+								borderRadius: "12px",
+								border: "1px solid #343a46",
+								background: "#05070a",
+								color: "#f4f4f5",
+								fontSize: "0.95rem",
+								boxSizing: "border-box",
+							}}
+						>
+							{selectedContextWindow
+								? `${formatModelContextWindow(selectedContextWindow)} tokens`
+								: "Configura un proveedor primero"}
+						</div>
+					</div>
 					<Field
-						label="Límite Máximo de Tokens"
-						description="Contexto máximo permitido para la IA."
+						label="Maximo de tokens de salida"
+						description="Limite de generacion por respuesta. La ventana de contexto se ajusta automaticamente segun el modelo."
 						value={ai.maxTokens ?? 16384}
 						type="number"
 						onChange={(v) => save("ai.maxTokens", Number.parseInt(v) || 16384)}
@@ -1349,7 +3034,7 @@ export const SettingsPage: React.FC = () => {
 										<div
 											style={{
 												fontSize: "0.76rem",
-												color: "#737373",
+												color: "#9ca3af",
 												marginBottom: "9px",
 												lineHeight: 1.45,
 											}}
@@ -1373,8 +3058,8 @@ export const SettingsPage: React.FC = () => {
 												minHeight: "150px",
 												padding: "12px 14px",
 												borderRadius: "12px",
-												border: "1px solid #202020",
-												background: "#000",
+												border: "1px solid #343a46",
+												background: "#05070a",
 												color: "#f4f4f5",
 												fontSize: "0.85rem",
 												fontFamily:
@@ -1435,7 +3120,7 @@ export const SettingsPage: React.FC = () => {
 						<span
 							style={{
 								alignSelf: "center",
-								color: "#737373",
+								color: "#9ca3af",
 								fontSize: "0.78rem",
 							}}
 						>

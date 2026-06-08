@@ -122,7 +122,7 @@ describe("Config Defaults", () => {
 
 		it("should enable tool iteration limits by default", () => {
 			expect(DEFAULT_CONFIG.tools.iterationLimit.enabled).toBe(true);
-			expect(DEFAULT_CONFIG.tools.iterationLimit.maxIterations).toBe(18);
+			expect(DEFAULT_CONFIG.tools.iterationLimit.maxIterations).toBe(128);
 		});
 
 		it("should have valid retrieval weight sum close to 1", () => {

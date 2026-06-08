@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import type { DatabaseAdapter } from "../storage/database.js";
+import { decrypt, encrypt } from "../utils/crypto.js";
 
 export interface EnvVar {
 	id: string;
@@ -11,8 +12,26 @@ export interface EnvVar {
 	updated_at: string;
 }
 
+const SENSITIVE_KEY_PATTERN =
+	/(api[_-]?key|token|secret|password|passwd|private[_-]?key|credentials?|credential[_-]?json|cookie|session|brightdata|ws[_-]?url|proxy[_-]?(url|user|username|login|pass|password))/i;
+
+function shouldStoreAsSecret(key: string): boolean {
+	return SENSITIVE_KEY_PATTERN.test(key);
+}
+
 export class EnvVarManager {
-	constructor(private db: DatabaseAdapter) {}
+	private encryptionKey?: string;
+
+	constructor(
+		private db: DatabaseAdapter,
+		opts?: { encryptionKey?: string },
+	) {
+		this.encryptionKey =
+			opts?.encryptionKey ||
+			process.env.OCTOPUS_ENV_ENCRYPTION_KEY ||
+			process.env.OCTOPUS_ENCRYPTION_KEY ||
+			undefined;
+	}
 
 	async set(
 		key: string,
@@ -20,11 +39,10 @@ export class EnvVarManager {
 		opts?: { isSecret?: boolean; description?: string },
 	): Promise<EnvVar> {
 		const now = new Date().toISOString();
-		const isSecret = (opts?.isSecret ?? false) ? 1 : 0;
+		const isSecret =
+			(opts?.isSecret ?? false) || shouldStoreAsSecret(key) ? 1 : 0;
 		const description = opts?.description ?? null;
-		const storedValue = isSecret
-			? `enc:${Buffer.from(value, "utf-8").toString("base64")}`
-			: value;
+		const storedValue = isSecret ? this.encodeSecret(value) : value;
 
 		const existing = await this.db.get<{ id: string }>(
 			"SELECT id FROM env_vars WHERE key = ?",
@@ -115,9 +133,24 @@ export class EnvVarManager {
 	}
 
 	private decodeValue(row: EnvVar): string {
+		if (row.is_secret && row.value.startsWith("enc:v1:")) {
+			if (!this.encryptionKey) {
+				throw new Error(
+					`Cannot decrypt secret ${row.key}: missing encryption key`,
+				);
+			}
+			return decrypt(row.value.slice("enc:v1:".length), this.encryptionKey);
+		}
 		if (row.is_secret && row.value.startsWith("enc:")) {
 			return Buffer.from(row.value.slice(4), "base64").toString("utf-8");
 		}
 		return row.value;
+	}
+
+	private encodeSecret(value: string): string {
+		if (this.encryptionKey) {
+			return `enc:v1:${encrypt(value, this.encryptionKey)}`;
+		}
+		return `enc:${Buffer.from(value, "utf-8").toString("base64")}`;
 	}
 }

@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CodeExecutor } from "../tools/code-executor.js";
 
@@ -247,6 +248,45 @@ describe("CodeExecutor", () => {
 				action: "read",
 				path: "../../etc/passwd",
 			});
+			expect(result.success).toBe(false);
+			expect(result.error).toContain("Access denied");
+		});
+
+		it("manage_workspace handler should reject sibling paths with the same prefix", async () => {
+			const workspaceDir = path.join(
+				process.env.TEMP ?? "/tmp",
+				`octopus-test-ws-prefix-${Date.now()}`,
+			);
+			const siblingDirName = `${path.basename(workspaceDir)}-evil`;
+			const executor = new CodeExecutor({ workspaceDir });
+			const tools = executor.createTools();
+			const wsTool = tools.find((t) => t.name === "manage_workspace");
+			expect(wsTool).toBeDefined();
+
+			const result = await wsTool?.handler({
+				action: "read",
+				path: `../${siblingDirName}/secret.txt`,
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.error).toContain("Access denied");
+		});
+
+		it("manage_workspace handler should reject absolute paths", async () => {
+			const workspaceDir = path.join(
+				process.env.TEMP ?? "/tmp",
+				`octopus-test-ws-absolute-${Date.now()}`,
+			);
+			const executor = new CodeExecutor({ workspaceDir });
+			const tools = executor.createTools();
+			const wsTool = tools.find((t) => t.name === "manage_workspace");
+			expect(wsTool).toBeDefined();
+
+			const result = await wsTool?.handler({
+				action: "read",
+				path: path.join(workspaceDir, "file.txt"),
+			});
+
 			expect(result.success).toBe(false);
 			expect(result.error).toContain("Access denied");
 		});

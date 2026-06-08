@@ -13,10 +13,13 @@ export function resolveMCPSpawnCommand(
 	command: string,
 	platform = process.platform,
 ): MCPSpawnCommand {
-	if (platform === "win32" && (command === "npx" || command === "npm")) {
+	if (
+		platform === "win32" &&
+		["npx", "npm", "pnpm", "yarn", "bun"].includes(command)
+	) {
 		return {
 			command: `${command}.cmd`,
-			shell: false,
+			shell: true,
 		};
 	}
 

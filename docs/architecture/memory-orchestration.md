@@ -10,6 +10,7 @@ La orquestación de memoria es la capa que convierte la memoria persistente de O
 - Preservar memoria crítica de usuario y recordatorios prospectivos dentro del presupuesto de tokens.
 - Registrar evidencia, uso, versiones y relaciones para auditoría posterior.
 - Detectar incertidumbre y gaps antes de que el agente afirme algo sin cobertura suficiente.
+- Integrar knowledge base documental y snapshots conversacionales cuando el contexto requiera fuentes más largas que una memoria puntual.
 
 ## Componentes
 
@@ -21,6 +22,8 @@ La orquestación de memoria es la capa que convierte la memoria persistente de O
 | `ProactiveMemoryScanner` | `packages/core/src/memory/proactive-scanner.ts` | Detecta recordatorios pendientes, próximos o vencidos |
 | `UncertaintyEstimator` | `packages/core/src/memory/uncertainty.ts` | Estima confianza global y gaps conocidos |
 | `FTSSearchEngine` | `packages/core/src/memory/fts-search.ts` | Complementa la búsqueda vectorial con coincidencia lexical exacta |
+| `KnowledgeManager` | `packages/core/src/memory/knowledge-manager.ts` | Administra colecciones, items, chunks y búsqueda documental |
+| `KnowledgeExtractor` | `packages/core/src/memory/knowledge-extractor.ts` | Extrae texto/chunks desde entradas de texto, media o archivos |
 
 ## Flujo de Escritura
 
@@ -127,6 +130,10 @@ La arquitectura escribe tablas auxiliares para poder auditar decisiones:
 | `memory_versions` | Cambios por corrección, borrado o forgetting |
 | `memory_edges` | Relaciones `supersedes`, `contradicts` u otras |
 | `memory_coverage` | Cobertura por tópico, distribución de confianza y gaps |
+| `knowledge_collections` | Agrupaciones documentales por proyecto, tema o fuente |
+| `knowledge_items` | Fuentes indexadas desde texto, media o archivos |
+| `knowledge_chunks` | Fragmentos recuperables para búsqueda documental |
+| `conversation_context_snapshots` | Snapshots de continuidad para conversaciones y workflows largos |
 
 `AgentRuntime.getLastMemoryTrace()` devuelve una traza con:
 
@@ -179,6 +186,24 @@ El dashboard web expone un Centro de Memoria con:
 - Mini mapa, zoom y modo de foco por vecinos.
 - Paneles de salud de memoria, conceptos activos, resumen diario y aprendizajes recientes.
 
+## Knowledge Base y Contexto Largo
+
+La knowledge base evita sobrecargar LTM con documentos completos. Los documentos se guardan como items y chunks asociados a una colección; las memorias siguen representando hechos, preferencias, procedimientos o eventos compactos. Cuando el usuario pide trabajar con una fuente documental, el runtime puede buscar chunks relevantes sin convertir todo el documento en memoria permanente.
+
+Rutas principales:
+
+| Metodo | Ruta | Uso |
+|---|---|---|
+| `GET`/`POST` | `/api/memory/knowledge/collections` | Listar o crear colecciones |
+| `GET`/`DELETE` | `/api/memory/knowledge/collections/{id}` | Consultar o eliminar una colección |
+| `GET` | `/api/memory/knowledge/items` | Listar items por colección |
+| `POST` | `/api/memory/knowledge/items/text` | Indexar texto directo |
+| `POST` | `/api/memory/knowledge/items/media` | Indexar media registrada |
+| `POST` | `/api/memory/knowledge/items/file` | Indexar archivo del workspace |
+| `GET` | `/api/memory/knowledge/search` | Buscar chunks relevantes |
+
+Los snapshots de contexto conversacional complementan esta capa para reconstruir continuidad tras reinicios, runs interrumpidos o workflows recuperados.
+
 ## Validación Recomendada
 
 Para cambios en esta capa ejecutar:
@@ -208,6 +233,8 @@ pnpm build
 - `packages/core/src/memory/proactive-scanner.ts`
 - `packages/core/src/memory/uncertainty.ts`
 - `packages/core/src/memory/fts-search.ts`
+- `packages/core/src/memory/knowledge-manager.ts`
+- `packages/core/src/memory/knowledge-extractor.ts`
 - `packages/core/src/agent/runtime.ts`
 - `packages/cli/src/bootstrap.ts`
 - `packages/web/src/pages/memory.tsx`

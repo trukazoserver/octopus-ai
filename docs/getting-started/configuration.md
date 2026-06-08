@@ -130,6 +130,29 @@ Octopus AI soporta múltiples proveedores de IA. Puedes configurar varios y defi
 
 ### Proveedores disponibles
 
+### Modos de autenticación de proveedores
+
+Además de `apiKey`, algunos proveedores admiten `authMode` para usar bearer tokens, OAuth, sesiones de navegador o Vertex:
+
+| Proveedor | `authMode` soportados | Campos principales |
+|---|---|---|
+| `openai` | `api-key`, `codex`, `oauth`, `browser` | `apiKey`, `accessToken`, `oauthClientId`, `oauthClientSecret`, `oauthAccessToken`, `oauthRefreshToken`, `oauthExpiresAt`, `browserCookies`, `browserUserAgent` |
+| `anthropic` | `api-key`, `bearer`, `oauth` | `apiKey`, `oauthClientId`, `oauthClientSecret`, `oauthAccessToken`, `oauthRefreshToken`, `oauthExpiresAt`, `browserCookies`, `browserUserAgent` |
+| `google` | `api-key`, `vertex`, `oauth`, `browser` | `apiKey`, `accessToken`, `credentialsFile`, `credentialsJson`, `projectId`, `location`, `oauth*`, `browserCookies`, `browserUserAgent` |
+| `deepseek` | `api-key`, `browser` | `apiKey`, `accessToken`, `browserCookies`, `browserUserAgent` |
+| `xai` | `api-key`, `browser` | `apiKey`, `accessToken`, `browserCookies`, `browserUserAgent` |
+
+El dashboard usa `/api/auth/{provider}/start`, `/refresh`, `/browser-start`, `/browser-status`, `/browser-result` y `/api/auth/google/vertex-setup` para guardar estos campos sin editar `config.json` manualmente. Las rutas OAuth generan un callback local en `/api/auth/{provider}/callback`.
+
+Ejemplo de Google Vertex:
+
+```bash
+node packages/cli/dist/index.js config set ai.providers.google.authMode "vertex"
+node packages/cli/dist/index.js config set ai.providers.google.projectId "mi-proyecto"
+node packages/cli/dist/index.js config set ai.providers.google.location "us-central1"
+node packages/cli/dist/index.js config set ai.providers.google.credentialsFile "$HOME/.config/gcloud/service-account.json"
+```
+
 #### Z.ai / ZhipuAI (proveedor por defecto)
 
 ```bash
@@ -596,6 +619,7 @@ node packages/cli/dist/index.js config set server.host "0.0.0.0"
 {
   "security": {
     "encryptionKey": "",
+    "memoryApiKey": "",
     "allowedPaths": ["~/Documents", "~/Desktop"],
     "sandboxCommands": true
   }
@@ -605,10 +629,13 @@ node packages/cli/dist/index.js config set server.host "0.0.0.0"
 | Parámetro | Descripción |
 |---|---|
 | `encryptionKey` | Clave para cifrar datos sensibles (AES-256). Vacío = sin cifrado |
+| `memoryApiKey` | Clave requerida para endpoints sensibles cuando el servidor escucha fuera de loopback o cuando quieres forzar auth local |
 | `allowedPaths` | Directorios a los que la IA puede acceder para leer/escribir archivos |
 | `sandboxCommands` | Ejecutar comandos del sistema en un entorno aislado |
 
 > **Importante:** Si configuras una `encryptionKey`, no la pierdas. Sin ella, los datos cifrados son irrecuperables.
+
+Los endpoints sensibles aceptan la clave en `X-Octopus-Api-Key` o `Authorization: Bearer <clave>`. La clave esperada se resuelve en este orden: `security.memoryApiKey`, `OCTOPUS_MEMORY_API_KEY`, `OCTOPUS_API_KEY`.
 
 ---
 
@@ -660,7 +687,7 @@ node packages/cli/dist/index.js config set server.host "0.0.0.0"
 
 ## 🔐 Variables de Entorno
 
-El cargador de configuración soporta interpolación de variables dentro de `config.json` mediante el formato `${NOMBRE_DE_VARIABLE}`. Además, algunos subsistemas leen variables de proceso directas, como `OCTOPUS_LOG_LEVEL`.
+El cargador de configuración soporta interpolación de variables dentro de `config.json` mediante el formato `${NOMBRE_DE_VARIABLE}`. Además, algunos subsistemas leen variables de proceso directas, como `OCTOPUS_LOG_LEVEL`, `OCTOPUS_API_KEY` y `OCTOPUS_MEMORY_API_KEY`.
 
 Ejemplo de `config.json` con interpolación:
 
@@ -675,6 +702,9 @@ Ejemplo de `config.json` con interpolación:
   },
   "storage": {
     "path": "${OCTOPUS_DB_PATH}"
+  },
+  "security": {
+    "memoryApiKey": "${OCTOPUS_API_KEY}"
   }
 }
 ```
@@ -683,6 +713,7 @@ Ejemplo de `config.json` con interpolación:
 ```bash
 export OPENAI_API_KEY="sk-..."
 export OCTOPUS_DB_PATH="$HOME/.octopus/data/octopus.db"
+export OCTOPUS_API_KEY="clave-local-segura"
 node packages/cli/dist/index.js chat
 ```
 
@@ -690,6 +721,7 @@ node packages/cli/dist/index.js chat
 ```powershell
 $env:OPENAI_API_KEY = "sk-..."
 $env:OCTOPUS_DB_PATH = "$HOME/.octopus/data/octopus.db"
+$env:OCTOPUS_API_KEY = "clave-local-segura"
 node packages/cli/dist/index.js chat
 ```
 
@@ -699,9 +731,12 @@ ZHIPU_API_KEY=tu-key-zhipu
 OPENAI_API_KEY=sk-...
 OCTOPUS_DB_PATH=/data/db/octopus.db
 OCTOPUS_LOG_LEVEL=info
+OCTOPUS_API_KEY=clave-local-segura
 ```
 
 En el `docker-compose.yml` del proyecto también se exponen variables frecuentes para proveedores y canales, como `ZHIPU_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` y `TELEGRAM_BOT_TOKEN`.
+
+Para desarrollo del dashboard, `VITE_API_BASE_URL` puede apuntar al backend estable si no quieres usar la detección automática hacia `http://localhost:18789`.
 
 ---
 

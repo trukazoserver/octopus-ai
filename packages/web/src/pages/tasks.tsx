@@ -34,6 +34,40 @@ interface Agent {
 	[key: string]: unknown;
 }
 
+interface WorkflowRun {
+	id: string;
+	conversation_id: string | null;
+	root_agent_id: string | null;
+	goal: string;
+	status: string;
+	current_phase: string | null;
+	created_at: string;
+	updated_at: string;
+	completed_at: string | null;
+	metadata: string | null;
+}
+
+interface WorkflowTask {
+	id: string;
+	run_id: string;
+	assigned_agent_id: string | null;
+	arm_key: string | null;
+	title: string;
+	status: string;
+	attempt_count: number;
+	stagnant_attempt_count: number;
+	max_stagnant_attempts: number;
+	updated_at: string;
+	metadata: string | null;
+}
+
+interface WorkflowSnapshot {
+	run: WorkflowRun;
+	tasks: WorkflowTask[];
+	events: Array<{ id: string; event_type: string; message: string | null; created_at: string; metadata: string | null }>;
+	artifacts: Array<{ id: string; artifact_type: string; url: string | null; path: string | null; description: string | null }>;
+}
+
 type StatusFilter = "all" | "pending" | "running" | "completed" | "failed";
 
 const STATUS_OPTIONS: StatusFilter[] = [
@@ -67,6 +101,24 @@ const FILTER_LABELS: Record<StatusFilter, string> = {
 };
 
 const EDITABLE_STATUSES = ["pending", "running", "completed", "failed"];
+const SELECTED_WORKFLOW_STORAGE_KEY = "octopus-selected-workflow-run";
+
+function parseMetadata(value: string | null | undefined): Record<string, unknown> {
+	if (!value) return {};
+	try {
+		const parsed = JSON.parse(value);
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string): string | undefined {
+	const value = metadata[key];
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
 
 export const TasksPage: React.FC = () => {
 	const [tasks, setTasks] = useState<Task[]>([]);
@@ -78,6 +130,10 @@ export const TasksPage: React.FC = () => {
 		total: 0,
 	});
 	const [agents, setAgents] = useState<Agent[]>([]);
+	const [workflows, setWorkflows] = useState<WorkflowRun[]>([]);
+	const [selectedWorkflow, setSelectedWorkflow] =
+		useState<WorkflowSnapshot | null>(null);
+	const [workflowActioning, setWorkflowActioning] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 	const [activeFilter, setActiveFilter] = useState<StatusFilter>("all");
@@ -129,18 +185,83 @@ export const TasksPage: React.FC = () => {
 		}
 	}, []);
 
+	const loadWorkflows = useCallback(async () => {
+		try {
+			const result = await apiGet<WorkflowRun[]>("/api/workflows?limit=8");
+			setWorkflows(Array.isArray(result) ? result : []);
+		} catch {
+			setWorkflows([]);
+		}
+	}, []);
+
+	const openWorkflow = useCallback(async (id: string) => {
+		try {
+			setSelectedWorkflow(await apiGet<WorkflowSnapshot>(`/api/workflows/${id}`));
+		} catch (e) {
+			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
+		}
+	}, []);
+
+	const refreshSelectedWorkflow = useCallback(async () => {
+		if (!selectedWorkflow) return;
+		await openWorkflow(selectedWorkflow.run.id);
+	}, [openWorkflow, selectedWorkflow]);
+
+	const recoverWorkflows = async () => {
+		setWorkflowActioning("recover");
+		try {
+			const result = await apiPost("/api/workflows/recover");
+			setMsg({
+				text: `Recovery completado: ${String(result.runs ?? 0)} runs, ${String(result.tasks ?? 0)} subtareas`,
+				ok: true,
+			});
+			await Promise.all([loadWorkflows(), refreshSelectedWorkflow()]);
+		} catch (e) {
+			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
+		} finally {
+			setWorkflowActioning(null);
+		}
+	};
+
+	const runWorkflowAction = async (id: string, action: "retry" | "cancel") => {
+		setWorkflowActioning(`${action}:${id}`);
+		try {
+			await apiPost(`/api/workflows/${id}/${action}`, action === "cancel" ? { reason: "Cancelado desde Tasks" } : undefined);
+			setMsg({ text: action === "retry" ? "Workflow reenviado" : "Workflow cancelado", ok: true });
+			await Promise.all([loadWorkflows(), openWorkflow(id)]);
+		} catch (e) {
+			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
+		} finally {
+			setWorkflowActioning(null);
+		}
+	};
+
 	useEffect(() => {
-		Promise.all([loadStats(), loadTasks(), loadAgents()]).finally(() =>
+		let requestedWorkflowId: string | null = null;
+		try {
+			requestedWorkflowId = localStorage.getItem(SELECTED_WORKFLOW_STORAGE_KEY);
+			if (requestedWorkflowId) {
+				localStorage.removeItem(SELECTED_WORKFLOW_STORAGE_KEY);
+			}
+		} catch {
+			requestedWorkflowId = null;
+		}
+		if (requestedWorkflowId) void openWorkflow(requestedWorkflowId);
+	}, [openWorkflow]);
+
+	useEffect(() => {
+		Promise.all([loadStats(), loadTasks(), loadAgents(), loadWorkflows()]).finally(() =>
 			setLoading(false),
 		);
-	}, [loadStats, loadTasks, loadAgents]);
+	}, [loadStats, loadTasks, loadAgents, loadWorkflows]);
 
 	useEffect(() => {
 		if (!loading) {
 			loadTasks();
 			loadStats();
+			loadWorkflows();
 		}
-	}, [loading, loadTasks, loadStats]);
+	}, [loading, loadTasks, loadStats, loadWorkflows]);
 
 	useEffect(() => {
 		if (msg) {
@@ -401,6 +522,169 @@ export const TasksPage: React.FC = () => {
 					value={stats.failed}
 					color={STATUS_COLORS.failed}
 				/>
+			</div>
+
+			<div
+				style={{
+					background: "#18181b",
+					borderRadius: 14,
+					border: "1px solid #27272a",
+					padding: 20,
+					marginBottom: 24,
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						justifyContent: "space-between",
+						alignItems: "center",
+						gap: 12,
+						marginBottom: 14,
+						flexWrap: "wrap",
+					}}
+				>
+					<div>
+						<h3 style={{ margin: 0, color: "#f4f4f5", fontSize: "1.05rem" }}>
+							Workflows durables de Octopus
+						</h3>
+						<p style={{ margin: "4px 0 0", color: "#71717a", fontSize: "0.82rem" }}>
+							Runs multi-brazo con subtareas, reintentos, eventos y artefactos persistidos.
+						</p>
+					</div>
+					<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+						<button type="button" onClick={loadWorkflows} style={secondaryBtnStyle}>
+							Actualizar workflows
+						</button>
+						<button
+							type="button"
+							onClick={recoverWorkflows}
+							disabled={workflowActioning === "recover"}
+							style={{ ...secondaryBtnStyle, opacity: workflowActioning === "recover" ? 0.6 : 1 }}
+						>
+							{workflowActioning === "recover" ? "Recuperando..." : "Recuperar runs"}
+						</button>
+					</div>
+				</div>
+
+				{workflows.length === 0 ? (
+					<div style={{ color: "#71717a", fontSize: "0.85rem" }}>
+						Aún no hay workflows durables registrados. Se crearán automáticamente cuando Octopus active sus brazos.
+					</div>
+				) : (
+					<div style={{ display: "grid", gap: 10 }}>
+						{workflows.map((workflow) => {
+							const color = workflowStatusColor(workflow.status);
+							return (
+								<button
+									key={workflow.id}
+									type="button"
+									onClick={() => openWorkflow(workflow.id)}
+									style={{
+										textAlign: "left",
+										background: "#09090b",
+										border: "1px solid #27272a",
+										borderRadius: 12,
+										padding: 14,
+										cursor: "pointer",
+										fontFamily: "inherit",
+									}}
+								>
+									<div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+										<strong style={{ color: "#f4f4f5", fontSize: "0.92rem" }}>
+											{workflow.goal}
+										</strong>
+										<span style={{ color, fontSize: "0.75rem", fontWeight: 800, textTransform: "uppercase" }}>
+											{workflow.status}
+										</span>
+									</div>
+									<div style={{ marginTop: 8, display: "flex", gap: 14, color: "#71717a", fontSize: "0.75rem", flexWrap: "wrap" }}>
+										<span>ID: {workflow.id}</span>
+										{workflow.current_phase && <span>Fase: {workflow.current_phase}</span>}
+										<span>Actualizado: {formatDate(workflow.updated_at)}</span>
+									</div>
+								</button>
+							);
+						})}
+					</div>
+				)}
+
+				{selectedWorkflow && (
+					<div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid #27272a" }}>
+						<div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+							<strong style={{ color: "#f4f4f5" }}>Detalle del workflow</strong>
+							<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+								<button
+									type="button"
+									onClick={() => runWorkflowAction(selectedWorkflow.run.id, "retry")}
+									disabled={workflowActioning === `retry:${selectedWorkflow.run.id}`}
+									style={secondaryBtnStyle}
+								>
+									Reintentar
+								</button>
+								<button
+									type="button"
+									onClick={() => runWorkflowAction(selectedWorkflow.run.id, "cancel")}
+									disabled={workflowActioning === `cancel:${selectedWorkflow.run.id}`}
+									style={{ ...secondaryBtnStyle, color: "#f87171" }}
+								>
+									Cancelar
+								</button>
+								<button type="button" onClick={() => setSelectedWorkflow(null)} style={secondaryBtnStyle}>Cerrar</button>
+							</div>
+						</div>
+						<div className="responsive-grid-2" style={{ gap: 12 }}>
+							<div style={workflowPanelStyle}>
+								<div style={workflowPanelTitleStyle}>Subtareas</div>
+								{selectedWorkflow.tasks.length === 0 ? (
+									<div style={mutedSmallStyle}>Sin subtareas registradas.</div>
+								) : selectedWorkflow.tasks.map((task) => {
+									const metadata = parseMetadata(task.metadata);
+									const agentName = metadataString(metadata, "agentName");
+									const avatar = metadataString(metadata, "avatar");
+									const color = metadataString(metadata, "color") ?? workflowStatusColor(task.status);
+									return (
+										<div key={task.id} style={{ ...workflowItemStyle, borderColor: `${color}44` }}>
+											<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+												<span style={{ color: "#e4e4e7", display: "flex", alignItems: "center", gap: 8 }}>
+													{avatar?.startsWith("/") || avatar?.startsWith("http") ? (
+														<img src={avatar} alt="" style={{ width: 24, height: 24, borderRadius: 999, objectFit: "cover" }} />
+													) : avatar ? (
+														<span>{avatar}</span>
+													) : null}
+													<span>{task.title}</span>
+												</span>
+												<span style={{ color: workflowStatusColor(task.status), fontWeight: 800 }}>{task.status}</span>
+											</div>
+											<div style={mutedSmallStyle}>
+												Brazo: {agentName ?? task.arm_key ?? "-"} · Intentos: {task.attempt_count}/{task.max_stagnant_attempts} · Sin avance: {task.stagnant_attempt_count}
+											</div>
+										</div>
+									);
+								})}
+							</div>
+							<div style={workflowPanelStyle}>
+								<div style={workflowPanelTitleStyle}>Eventos recientes</div>
+								{selectedWorkflow.events.slice(-8).map((event) => (
+									<div key={event.id} style={workflowItemStyle}>
+										<div style={{ color: "#e4e4e7", fontSize: "0.8rem" }}>{event.event_type}</div>
+										<div style={mutedSmallStyle}>{event.message ?? "Sin mensaje"}</div>
+									</div>
+								))}
+								{selectedWorkflow.artifacts.length > 0 && (
+									<div style={{ marginTop: 12 }}>
+										<div style={workflowPanelTitleStyle}>Artefactos</div>
+										{selectedWorkflow.artifacts.map((artifact) => (
+											<div key={artifact.id} style={workflowItemStyle}>
+												<div style={{ color: "#e4e4e7", fontSize: "0.8rem" }}>{artifact.artifact_type}</div>
+												<div style={mutedSmallStyle}>{artifact.url ?? artifact.path ?? artifact.description ?? "Artefacto registrado"}</div>
+											</div>
+										))}
+									</div>
+								)}
+							</div>
+						</div>
+					</div>
+				)}
 			</div>
 
 			{showCreateForm && (
@@ -1078,6 +1362,24 @@ function formatDate(iso: string | null): string {
 	}
 }
 
+function workflowStatusColor(status: string): string {
+	return (
+		{
+			ready: "#38bdf8",
+			triage: "#a78bfa",
+			running: "#3b82f6",
+			waiting_dependency: "#f59e0b",
+			blocked: "#fb7185",
+			partial: "#f59e0b",
+			done: "#10b981",
+			failed: "#ef4444",
+			timed_out: "#ef4444",
+			cancelled: "#a1a1aa",
+			archived: "#71717a",
+		}[status] ?? "#a1a1aa"
+	);
+}
+
 const StatCard: React.FC<{
 	icon: React.ReactNode;
 	label: string;
@@ -1146,6 +1448,46 @@ const cancelBtnStyle: React.CSSProperties = {
 	cursor: "pointer",
 	fontWeight: 600,
 	fontSize: "0.9rem",
+};
+
+const secondaryBtnStyle: React.CSSProperties = {
+	padding: "8px 12px",
+	borderRadius: 8,
+	border: "1px solid #27272a",
+	background: "#09090b",
+	color: "#d4d4d8",
+	cursor: "pointer",
+	fontWeight: 700,
+	fontSize: "0.82rem",
+};
+
+const workflowPanelStyle: React.CSSProperties = {
+	background: "#09090b",
+	border: "1px solid #27272a",
+	borderRadius: 12,
+	padding: 12,
+	minWidth: 0,
+};
+
+const workflowPanelTitleStyle: React.CSSProperties = {
+	color: "#f4f4f5",
+	fontSize: "0.8rem",
+	fontWeight: 800,
+	marginBottom: 10,
+	textTransform: "uppercase",
+	letterSpacing: "0.04em",
+};
+
+const workflowItemStyle: React.CSSProperties = {
+	borderTop: "1px solid #18181b",
+	padding: "10px 0",
+};
+
+const mutedSmallStyle: React.CSSProperties = {
+	color: "#71717a",
+	fontSize: "0.75rem",
+	lineHeight: 1.45,
+	marginTop: 4,
 };
 
 const actionBtnStyle: React.CSSProperties = {

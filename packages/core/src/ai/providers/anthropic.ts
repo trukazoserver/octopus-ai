@@ -21,6 +21,23 @@ export class AnthropicProvider extends BaseLLMProvider {
 		this.config.baseUrl ?? "https://api.anthropic.com/v1"
 	).replace(/\/+$/, "");
 
+	private getHeaders(): Record<string, string> {
+		const headers: Record<string, string> = {
+			"Content-Type": "application/json",
+			"anthropic-version": "2023-06-01",
+		};
+		if (this.config.authMode === "bearer" || this.config.authMode === "oauth") {
+			const token =
+				this.config.authMode === "oauth"
+					? this.config.oauthAccessToken
+					: this.config.apiKey;
+			headers.Authorization = `Bearer ${token ?? ""}`;
+		} else {
+			headers["x-api-key"] = this.config.apiKey ?? "";
+		}
+		return headers;
+	}
+
 	private mapModel(model: string): string {
 		return model.replace(/^anthropic\//, "");
 	}
@@ -177,11 +194,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 			body.tools = tools;
 		}
 
-		const headers: Record<string, string> = {
-			"Content-Type": "application/json",
-			"x-api-key": this.config.apiKey ?? "",
-			"anthropic-version": "2023-06-01",
-		};
+		const headers = this.getHeaders();
 
 		const response = await fetch(`${this.baseUrl}/messages`, {
 			method: "POST",
@@ -281,11 +294,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 			body.tools = tools;
 		}
 
-		const headers: Record<string, string> = {
-			"Content-Type": "application/json",
-			"x-api-key": this.config.apiKey ?? "",
-			"anthropic-version": "2023-06-01",
-		};
+		const headers = this.getHeaders();
 
 		const response = await fetch(`${this.baseUrl}/messages`, {
 			method: "POST",

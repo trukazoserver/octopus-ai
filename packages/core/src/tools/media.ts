@@ -22,6 +22,7 @@ interface MediaMetaItem {
 	size: number;
 	createdAt: string;
 	description?: string;
+	metadata?: Record<string, unknown>;
 }
 
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -91,6 +92,34 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function parseMetadata(value: unknown): Record<string, unknown> | undefined {
+	if (!value) return undefined;
+	if (typeof value === "object" && !Array.isArray(value)) {
+		return value as Record<string, unknown>;
+	}
+	if (typeof value === "string" && value.trim()) {
+		try {
+			const parsed = JSON.parse(value) as unknown;
+			return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+				? (parsed as Record<string, unknown>)
+				: undefined;
+		} catch {
+			return { note: value.trim() };
+		}
+	}
+	return undefined;
+}
+
+function compactMetadata(metadata?: Record<string, unknown>): string {
+	if (!metadata || Object.keys(metadata).length === 0) return "";
+	return Object.entries(metadata)
+		.filter(
+			([, value]) => value !== undefined && value !== null && value !== "",
+		)
+		.map(([key, value]) => `${key}=${String(value)}`)
+		.join(" | ");
+}
+
 function expandHome(filePath: string): string {
 	if (filePath === "~") return homedir();
 	if (filePath.startsWith(`~${sep}`) || filePath.startsWith("~/")) {
@@ -119,7 +148,12 @@ function resolveImportPath(filePath: string): string {
 }
 
 export const mediaContext = {
-	save: async (buffer: Buffer, mimeType: string, description?: string) => {
+	save: async (
+		buffer: Buffer,
+		mimeType: string,
+		description?: string,
+		metadata?: Record<string, unknown>,
+	) => {
 		const id = randomUUID();
 		const ext =
 			MIME_EXTENSIONS[mimeType] ||
@@ -139,6 +173,7 @@ export const mediaContext = {
 			size: buffer.length,
 			createdAt: new Date().toISOString(),
 			description,
+			metadata,
 		};
 		items.push(item);
 		saveMediaMeta(items);
@@ -183,7 +218,7 @@ export function createMediaTools(): ToolDefinition[] {
 				"Provide the file data as base64, a filename, and the MIME type. " +
 				"Use this for small in-memory media only. For existing local files or large videos, use import_media_file instead of converting the file to base64. " +
 				"Returns a URL that can be embedded in your response to display the media to the user. " +
-				"Use this whenever you generate or create an image, audio, or video file.",
+				"Use semantic descriptions/metadata for long workflows, e.g. sceneNumber, stage, role, prompt, workflowId, and parentMediaIds, so future steps can identify the correct file.",
 			parameters: {
 				data: {
 					type: "string",
@@ -205,7 +240,13 @@ export function createMediaTools(): ToolDefinition[] {
 				},
 				description: {
 					type: "string",
-					description: "Brief description of the media content",
+					description:
+						"Brief semantic description, e.g. 'Construction timelapse Img 03 - sobre-cimientos final keyframe'",
+				},
+				metadata: {
+					type: "object",
+					description:
+						"Optional structured metadata such as workflowId, sceneNumber, imageNumber, stage, role, prompt, sourceTool, parentMediaIds.",
 				},
 			},
 			handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
@@ -215,6 +256,7 @@ export function createMediaTools(): ToolDefinition[] {
 				const description = params.description
 					? String(params.description)
 					: undefined;
+				const metadata = parseMetadata(params.metadata);
 
 				if (!data || !filename) {
 					return {
@@ -252,6 +294,7 @@ export function createMediaTools(): ToolDefinition[] {
 						size: fileData.length,
 						createdAt: new Date().toISOString(),
 						description,
+						metadata,
 					};
 					items.push(item);
 					saveMediaMeta(items);
@@ -267,6 +310,8 @@ export function createMediaTools(): ToolDefinition[] {
 							filename,
 							mimetype,
 							size: fileData.length,
+							description,
+							metadata,
 						},
 					};
 				} catch (err) {
@@ -283,7 +328,7 @@ export function createMediaTools(): ToolDefinition[] {
 			description:
 				"Import an existing local media file into the Octopus AI media library without base64. " +
 				"Use this for large generated files such as MP4 videos, ffmpeg outputs, audio, PDFs, or images that already exist on disk. " +
-				"Returns a /api/media/file/... URL that can be embedded in the response. Prefer this over save_media for files larger than a few MB.",
+				"Returns a /api/media/file/... URL that can be embedded in the response. Prefer this over save_media for files larger than a few MB. Include semantic metadata for scene/image/video workflows.",
 			parameters: {
 				path: {
 					type: "string",
@@ -303,7 +348,13 @@ export function createMediaTools(): ToolDefinition[] {
 				},
 				description: {
 					type: "string",
-					description: "Brief description of the media content",
+					description:
+						"Brief semantic description, e.g. 'Construction timelapse scene 04 video draft'.",
+				},
+				metadata: {
+					type: "object",
+					description:
+						"Optional structured metadata such as workflowId, sceneNumber, imageNumber, stage, role, prompt, sourceTool, parentMediaIds.",
 				},
 			},
 			handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
@@ -357,6 +408,7 @@ export function createMediaTools(): ToolDefinition[] {
 						description: params.description
 							? String(params.description)
 							: undefined,
+						metadata: parseMetadata(params.metadata),
 					};
 					items.push(item);
 					saveMediaMeta(items);
@@ -396,7 +448,7 @@ export function createMediaTools(): ToolDefinition[] {
 				search: {
 					type: "string",
 					description:
-						"Search term to filter by filename or description (case-insensitive)",
+						"Search term to filter by filename, description, or metadata (case-insensitive)",
 				},
 				limit: {
 					type: "number",
@@ -424,7 +476,10 @@ export function createMediaTools(): ToolDefinition[] {
 						filtered = filtered.filter(
 							(i) =>
 								i.filename?.toLowerCase().includes(search) ||
-								i.description?.toLowerCase().includes(search),
+								i.description?.toLowerCase().includes(search) ||
+								JSON.stringify(i.metadata ?? {})
+									.toLowerCase()
+									.includes(search),
 						);
 					}
 
@@ -442,13 +497,27 @@ export function createMediaTools(): ToolDefinition[] {
 						.map((i) => {
 							const ext = MIME_EXTENSIONS[i.mimetype] || "";
 							const url = `/api/media/file/${i.id}${ext}`;
-							return `- ${i.description || i.filename || i.id}\n  URL: ${url}\n  Type: ${i.mimetype} | Size: ${i.size} bytes | Created: ${i.createdAt}`;
+							const metadata = compactMetadata(i.metadata);
+							return [
+								`- ${i.description || i.filename || i.id}`,
+								`  URL: ${url}`,
+								`  File: ${i.filename} | Type: ${i.mimetype} | Size: ${i.size} bytes | Created: ${i.createdAt}`,
+								metadata ? `  Metadata: ${metadata}` : "",
+							]
+								.filter(Boolean)
+								.join("\n");
 						})
 						.join("\n");
 
 					return {
 						success: true,
 						output: `Found ${result.length} media file(s):\n${listing}\n\nTo use any of these in your response, use markdown: ![description](URL)`,
+						metadata: {
+							items: result.map((i) => {
+								const ext = MIME_EXTENSIONS[i.mimetype] || "";
+								return { ...i, url: `/api/media/file/${i.id}${ext}` };
+							}),
+						},
 					};
 				} catch (err) {
 					return {

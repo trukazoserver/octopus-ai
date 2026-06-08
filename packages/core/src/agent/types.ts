@@ -71,6 +71,59 @@ export interface AgentRecord {
 	created_at: string;
 	updated_at: string;
 	config: string | null;
+	is_builtin_arm?: number;
+	arm_key?: string | null;
+	base_profile?: string | null;
+	user_overrides?: string | null;
+	capabilities?: string | null;
+	tool_permissions?: string | null;
+	knowledge_base_ids?: string | null;
+	fallback_model?: string | null;
+	can_spawn_subagents?: number;
+	max_spawn_depth?: number;
+}
+
+export type AgentStoredMessageType =
+	| "message"
+	| "broadcast"
+	| "progress"
+	| "question"
+	| "result"
+	| "spawn_request";
+
+export interface AgentStoredMessage {
+	id: string;
+	run_id: string | null;
+	from_agent_id: string;
+	to_agent_id: string | null;
+	task_id: string | null;
+	message_type: AgentStoredMessageType;
+	content: string;
+	created_at: string;
+	read_at: string | null;
+	metadata: string | null;
+}
+
+export interface CreateAgentMessageInput {
+	runId?: string;
+	fromAgentId: string;
+	toAgentId?: string | null;
+	taskId?: string;
+	messageType?: AgentStoredMessageType;
+	content: string;
+	metadata?: Record<string, unknown>;
+}
+
+export interface ListAgentMessagesInput {
+	agentId: string;
+	runId?: string;
+	includeBroadcasts?: boolean;
+	unreadOnly?: boolean;
+	limit?: number;
+}
+
+export interface SpawnSubagentInput extends CreateAgentInput {
+	parentAgentId: string;
 }
 
 export interface CreateAgentInput {
@@ -85,6 +138,12 @@ export interface CreateAgentInput {
 	isMain?: boolean;
 	parentId?: string;
 	config?: Record<string, unknown>;
+	fallbackModel?: string;
+	capabilities?: string[];
+	toolPermissions?: Record<string, unknown>;
+	knowledgeBaseIds?: string[];
+	canSpawnSubagents?: boolean;
+	maxSpawnDepth?: number;
 }
 
 export interface DelegationResult {

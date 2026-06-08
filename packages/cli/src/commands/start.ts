@@ -13,7 +13,12 @@ import {
 	TransportServer,
 	mediaContext,
 } from "@octopus-ai/core";
-import type { ChannelMessage, Conversation } from "@octopus-ai/core";
+import type {
+	Channel,
+	ChannelMessage,
+	ChatExecutionEvent,
+	Conversation,
+} from "@octopus-ai/core";
 import chalk from "chalk";
 import { Command } from "commander";
 import { type OctopusSystem, bootstrap } from "../bootstrap.js";
@@ -61,6 +66,8 @@ export function buildTransportSystemContext(
 		chatManager: system.chatManager,
 		chatExecutionManager,
 		agentManager: system.agentManager,
+		workflowManager: system.workflowManager,
+		workflowScheduler: system.workflowScheduler,
 		taskManager: system.taskManager,
 		automationManager: system.automationManager,
 		envVarManager: system.envVarManager,
@@ -686,6 +693,270 @@ async function handleTelegramConversationCommand(opts: {
 	}
 }
 
+type ChannelExecutionSession = {
+	msg: ChannelMessage;
+	channelLabel: string;
+	accumulated: string;
+	lastSentLength: number;
+	lastMessageId?: string;
+	eventQueue: Promise<void>;
+	resolve: () => void;
+	reject: (err: unknown) => void;
+};
+
+function getTelegramBot(
+	channel: Channel | undefined,
+): TelegramBotLike["bot"] | null {
+	return channel?.type === "telegram"
+		? (channel as unknown as TelegramBotLike).bot
+		: null;
+}
+
+async function flushTelegramStream(opts: {
+	tgBot: TelegramBotLike["bot"];
+	chatId: string;
+	accumulated: string;
+	lastSentLength: number;
+	lastMessageId?: string;
+}): Promise<{ lastSentLength: number; lastMessageId?: string }> {
+	const telegramFlushText = getTelegramStreamFlushText(
+		opts.accumulated,
+		opts.lastSentLength,
+	);
+	if (!telegramFlushText) {
+		return {
+			lastSentLength: opts.lastSentLength,
+			lastMessageId: opts.lastMessageId,
+		};
+	}
+
+	let lastMessageId = opts.lastMessageId;
+	try {
+		const safe = markdownToTelegramHtml(telegramFlushText);
+		if (lastMessageId) {
+			await opts.tgBot.api.editMessageText(
+				opts.chatId,
+				Number(lastMessageId),
+				safe,
+				{ parse_mode: "HTML" },
+			);
+		} else {
+			const sent = await opts.tgBot.api.sendMessage(opts.chatId, safe, {
+				parse_mode: "HTML",
+			});
+			lastMessageId = String(sent.message_id);
+		}
+	} catch {
+		try {
+			if (lastMessageId) {
+				await opts.tgBot.api.editMessageText(
+					opts.chatId,
+					Number(lastMessageId),
+					telegramFlushText,
+				);
+			} else {
+				const sent = await opts.tgBot.api.sendMessage(
+					opts.chatId,
+					telegramFlushText,
+				);
+				lastMessageId = String(sent.message_id);
+			}
+		} catch {}
+	}
+
+	return { lastSentLength: telegramFlushText.length, lastMessageId };
+}
+
+async function sendTelegramFinalResponse(opts: {
+	tgBot: TelegramBotLike["bot"];
+	msg: ChannelMessage;
+	content: string;
+	lastMessageId?: string;
+}): Promise<void> {
+	let content = stripToolMarkers(opts.content);
+	const mediaUrls: {
+		url: string;
+		alt: string;
+		buffer?: Buffer;
+		mimeType?: string;
+	}[] = [];
+
+	if (content.includes("/api/media/file/")) {
+		const imgRegex =
+			/!\[([^\]]*)\]\((https?:\/\/[^\s)]+|\/api\/media\/file\/[^\s)]+)\)/g;
+		let match: RegExpExecArray | null = imgRegex.exec(content);
+		while (match !== null) {
+			mediaUrls.push({ alt: match[1], url: match[2] });
+			match = imgRegex.exec(content);
+		}
+		content = content.replace(imgRegex, "").trim();
+
+		for (const media of mediaUrls) {
+			if (!media.url.startsWith("/api/media/file/")) continue;
+			try {
+				const resolved = await mediaContext.resolve(media.url);
+				media.buffer = resolved.buffer;
+				media.mimeType = resolved.mimeType;
+			} catch {
+				console.warn(`Could not resolve media url: ${media.url}`);
+			}
+		}
+	}
+
+	if (content.length > 0) {
+		const parts = splitTelegramMessage(content, 4096);
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i];
+			if (!part) continue;
+			const safe = markdownToTelegramHtml(part);
+			try {
+				if (i === 0 && opts.lastMessageId) {
+					await opts.tgBot.api.editMessageText(
+						opts.msg.senderId,
+						Number(opts.lastMessageId),
+						safe,
+						{ parse_mode: "HTML" },
+					);
+				} else {
+					await opts.tgBot.api.sendMessage(opts.msg.senderId, safe, {
+						parse_mode: "HTML",
+						reply_parameters:
+							i === 0 ? { message_id: Number(opts.msg.id) } : undefined,
+					});
+				}
+			} catch {
+				try {
+					if (i === 0 && opts.lastMessageId) {
+						await opts.tgBot.api.editMessageText(
+							opts.msg.senderId,
+							Number(opts.lastMessageId),
+							part,
+						);
+					} else {
+						await opts.tgBot.api.sendMessage(opts.msg.senderId, part);
+					}
+				} catch {}
+			}
+		}
+	}
+
+	for (const media of mediaUrls) {
+		if (!media.buffer) continue;
+		const inputFile = new InputFile(media.buffer);
+		try {
+			if (media.mimeType?.startsWith("audio/")) {
+				await opts.tgBot.api.sendAudio(opts.msg.senderId, inputFile, {
+					caption: media.alt,
+				});
+			} else if (media.mimeType?.startsWith("video/")) {
+				await opts.tgBot.api.sendVideo(opts.msg.senderId, inputFile, {
+					caption: media.alt,
+				});
+			} else {
+				await opts.tgBot.api.sendPhoto(opts.msg.senderId, inputFile, {
+					caption: media.alt,
+				});
+			}
+		} catch (err) {
+			console.error("Error sending media to telegram", err);
+		}
+	}
+}
+
+async function processChannelExecutionEvent(
+	channelManager: ChannelManager,
+	event: ChatExecutionEvent,
+	session: ChannelExecutionSession,
+): Promise<void> {
+	const channel = channelManager.get(session.msg.channelId);
+	const tgBot = getTelegramBot(channel);
+
+	if (event.type === "event") {
+		if (tgBot) {
+			const toolName = String(event.payload.toolName ?? "");
+			let action = "typing";
+			if (toolName.includes("image")) action = "upload_photo";
+			else if (toolName.includes("voice") || toolName.includes("audio")) {
+				action = "record_voice";
+			}
+			await tgBot.api
+				.sendChatAction(session.msg.senderId, action)
+				.catch(() => {});
+		}
+		return;
+	}
+
+	if (event.type === "stream" || event.type === "response") {
+		const content = String(event.payload.content ?? "");
+		session.accumulated += content;
+		if (tgBot && event.type === "stream") {
+			const flushed = await flushTelegramStream({
+				tgBot,
+				chatId: session.msg.senderId,
+				accumulated: session.accumulated,
+				lastSentLength: session.lastSentLength,
+				lastMessageId: session.lastMessageId,
+			});
+			session.lastSentLength = flushed.lastSentLength;
+			session.lastMessageId = flushed.lastMessageId;
+		}
+		if (event.type === "response") {
+			if (tgBot) {
+				await sendTelegramFinalResponse({
+					tgBot,
+					msg: session.msg,
+					content: session.accumulated,
+					lastMessageId: session.lastMessageId,
+				});
+			} else if (session.accumulated.trim()) {
+				await channelManager.send(
+					session.msg.channelId,
+					session.msg.senderId,
+					session.accumulated,
+					{ replyTo: session.msg.id },
+				);
+			}
+			session.resolve();
+		}
+		return;
+	}
+
+	if (event.type === "stream_end") {
+		if (tgBot) {
+			await sendTelegramFinalResponse({
+				tgBot,
+				msg: session.msg,
+				content: session.accumulated,
+				lastMessageId: session.lastMessageId,
+			});
+		} else if (session.accumulated.trim()) {
+			await channelManager.send(
+				session.msg.channelId,
+				session.msg.senderId,
+				session.accumulated,
+				{ replyTo: session.msg.id },
+			);
+		}
+		session.resolve();
+		return;
+	}
+
+	if (event.type === "error") {
+		const error = String(event.payload.error ?? "Failed to process message");
+		if (tgBot) {
+			await tgBot.api.sendMessage(session.msg.senderId, `Error: ${error}`);
+		} else {
+			await channelManager.send(
+				session.msg.channelId,
+				session.msg.senderId,
+				`Error: ${error}`,
+				{ replyTo: session.msg.id },
+			);
+		}
+		session.resolve();
+	}
+}
+
 export async function runStart(options: StartOptions): Promise<void> {
 	if (await handleExistingServer(options)) return;
 
@@ -749,11 +1020,73 @@ export async function runStart(options: StartOptions): Promise<void> {
 			}
 		}
 
-		// Bridge: channel messages with persistent conversation memory
+		const channelExecutionSessions = new Map<string, ChannelExecutionSession>();
+		const chatExecutionManager = new ChatExecutionManager({
+			chatManager: system.chatManager,
+			conversationHistoryLimit: CONVERSATION_HISTORY_LIMIT,
+			streamCheckpointIntervalMs: STREAM_CHECKPOINT_INTERVAL_MS,
+			getAgentRuntime: (agentId?: string) => {
+				if (!system) throw new Error("System not initialized");
+				void agentId;
+				return system.agentRuntime;
+			},
+			getSelectedAgentContext: async (agentId?: string) => {
+				if (!agentId || !system?.agentManager) return null;
+				const agent = await system.agentManager.getAgent(agentId);
+				if (!agent) return null;
+				return {
+					id: agent.id,
+					name: agent.name,
+					description: agent.description,
+					role: agent.role,
+					personality: agent.personality,
+					systemPrompt: agent.system_prompt,
+					model: agent.model,
+					avatar: agent.avatar,
+					color: agent.color,
+					armKey: agent.arm_key,
+				};
+			},
+			emit: (event) => {
+				if (server) {
+					const type =
+						event.type === "event"
+							? MessageType.event
+							: event.type === "stream"
+								? MessageType.stream
+								: event.type === "stream_end"
+									? MessageType.stream_end
+									: event.type === "error"
+										? MessageType.error
+										: event.type === "response"
+											? MessageType.response
+											: MessageType.event;
+					server.sendToConversation(event.conversationId, {
+						id: event.requestId ?? event.executionId,
+						type,
+						channel: "chat",
+						payload: event.payload,
+						timestamp: Date.now(),
+					});
+				}
+
+				const session = event.requestId
+					? channelExecutionSessions.get(event.requestId)
+					: undefined;
+				if (!session) return;
+				session.eventQueue = session.eventQueue
+					.then(() =>
+						processChannelExecutionEvent(activeChannelManager, event, session),
+					)
+					.catch((err) => session.reject(err));
+			},
+		});
+		await chatExecutionManager.initialize();
+
+		// Bridge: channel messages with the same execution/context pipeline as web chat.
 		const channelProcessingQueues = new Map<string, Promise<void>>();
 		activeChannelManager.onMessage(async (msg: ChannelMessage) => {
 			if (!system) return;
-			const targetAgent = system.agentRuntime;
 			const chatManager = system.chatManager;
 			const channel = activeChannelManager.get(msg.channelId);
 			const channelLabel = channel?.type ?? msg.channelId;
@@ -770,10 +1103,8 @@ export async function runStart(options: StartOptions): Promise<void> {
 			channelProcessingQueues.set(queueKey, queuedProcessing);
 			await previousProcessing.catch(() => {});
 			let typingInterval: ReturnType<typeof setInterval> | undefined;
-			let activeConvId: string | undefined;
-			let accumulated = "";
-			let assistantCheckpointId: string | undefined;
-			let lastCheckpointAt = 0;
+			const requestId = `channel:${msg.channelId}:${msg.id}:${Date.now()}`;
+			let executionStarted = false;
 			try {
 				if (channel?.type === "telegram") {
 					const telegramCommand = parseTelegramConversationCommand(msg.content);
@@ -796,7 +1127,7 @@ export async function runStart(options: StartOptions): Promise<void> {
 						4000,
 					);
 				}
-				// Find or create persistent conversation
+				// Find or create the channel's active persistent conversation.
 				const convKey = queueKey;
 				const allConvs = await chatManager.listConversations({
 					limit: 100,
@@ -811,272 +1142,93 @@ export async function runStart(options: StartOptions): Promise<void> {
 						channel: convKey,
 					});
 				}
-				const convId = conv.id;
-				activeConvId = convId;
-				// Save user message
-				await chatManager.addMessage(convId, "user", msg.content, {
-					metadata: {
+
+				let resolveExecution!: () => void;
+				let rejectExecution!: (err: unknown) => void;
+				const executionDone = new Promise<void>((resolve, reject) => {
+					resolveExecution = resolve;
+					rejectExecution = reject;
+				});
+				const executionSession: ChannelExecutionSession = {
+					msg,
+					channelLabel,
+					accumulated: "",
+					lastSentLength: 0,
+					eventQueue: Promise.resolve(),
+					resolve: resolveExecution,
+					reject: rejectExecution,
+				};
+				channelExecutionSessions.set(requestId, executionSession);
+
+				const execution = await chatExecutionManager.start({
+					requestId,
+					message: msg.content,
+					stream: true,
+					conversationId: conv.id,
+					agentId: conv.agent_id ?? undefined,
+					messageMetadata: {
 						source: channelLabel,
+						channelId: msg.channelId,
+						channelMessageId: msg.id,
 						senderId: msg.senderId,
 						senderName: msg.senderName,
 					},
 				});
-				// Load history into STM for context
-				targetAgent.stm.clear();
-				const history = await chatManager.getConversationMessages(convId, {
-					limit: CONVERSATION_HISTORY_LIMIT,
-					recent: true,
-				});
-				const prevMsgs = history.slice(0, -1);
-				for (const m of prevMsgs) {
-					if (m.role === "user" || m.role === "assistant") {
-						targetAgent.stm.add({
-							role: m.role,
-							content: m.content,
-							timestamp: new Date(m.timestamp),
-							metadata: { conversationId: convId },
-						});
-					}
-				}
-				// Stream response
-				let lastSentLength = 0;
-				let lastMessageId: string | undefined;
-				const saveAssistantCheckpoint = async (
-					status: "streaming" | "completed",
-				) => {
-					if (!accumulated.trim()) return;
-					const metadata = {
-						source: channelLabel,
-						partial: status !== "completed",
-						status,
-						channelMessageId: msg.id,
-					};
-					if (assistantCheckpointId) {
-						await chatManager.updateMessage(
-							assistantCheckpointId,
-							accumulated,
-							{ metadata },
+				executionStarted = true;
+				if (execution.request_id !== requestId) {
+					channelExecutionSessions.delete(requestId);
+					const busyMessage =
+						"Ya hay una respuesta en curso para esta conversacion.";
+					if (channel?.type === "telegram") {
+						await sendTelegramCommandMessage(
+							(channel as unknown as TelegramBotLike).bot,
+							msg.senderId,
+							busyMessage,
+							msg.id,
 						);
 					} else {
-						const saved = await chatManager.addMessage(
-							convId,
-							"assistant",
-							accumulated,
-							{ metadata },
+						await activeChannelManager.send(
+							msg.channelId,
+							msg.senderId,
+							busyMessage,
+							{ replyTo: msg.id },
 						);
-						assistantCheckpointId = saved.id;
 					}
-					lastCheckpointAt = Date.now();
-				};
-				for await (const chunk of targetAgent.processMessageStream(
-					msg.content,
-					convId,
-				)) {
-					const statusMatch = chunk.match(
-						/^\0STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\0$/,
-					);
-					if (statusMatch) {
-						if (channel?.type === "telegram") {
-							const tgBot = (channel as unknown as TelegramBotLike).bot;
-							let action = "typing";
-							if (statusMatch[2]?.includes("image")) action = "upload_photo";
-							else if (
-								statusMatch[2]?.includes("voice") ||
-								statusMatch[2]?.includes("audio")
-							)
-								action = "record_voice";
-
-							tgBot.api.sendChatAction(msg.senderId, action).catch(() => {});
-						}
-						continue;
-					}
-					accumulated += chunk;
-					if (Date.now() - lastCheckpointAt >= STREAM_CHECKPOINT_INTERVAL_MS) {
-						await saveAssistantCheckpoint("streaming");
-					}
-					const telegramFlushText =
-						channel?.type === "telegram"
-							? getTelegramStreamFlushText(accumulated, lastSentLength)
-							: null;
-					if (telegramFlushText) {
-						const tgBot = (channel as unknown as TelegramBotLike).bot;
-						try {
-							const safe = markdownToTelegramHtml(telegramFlushText);
-							if (lastMessageId) {
-								await tgBot.api.editMessageText(
-									msg.senderId,
-									Number(lastMessageId),
-									safe,
-									{ parse_mode: "HTML" },
-								);
-							} else {
-								const sent = await tgBot.api.sendMessage(msg.senderId, safe, {
-									parse_mode: "HTML",
-								});
-								lastMessageId = String(sent.message_id);
-							}
-							lastSentLength = telegramFlushText.length;
-						} catch {
-							try {
-								if (lastMessageId) {
-									await tgBot.api.editMessageText(
-										msg.senderId,
-										Number(lastMessageId),
-										telegramFlushText,
-									);
-								} else {
-									const sent = await tgBot.api.sendMessage(
-										msg.senderId,
-										telegramFlushText,
-									);
-									lastMessageId = String(sent.message_id);
-								}
-								lastSentLength = telegramFlushText.length;
-							} catch {}
-						}
-					}
+					return;
 				}
-				// Save assistant response, upgrading any streaming checkpoint in-place.
-				await saveAssistantCheckpoint("completed");
-				// Final formatted response
-				if (channel?.type === "telegram") {
-					const tgBot = (channel as unknown as TelegramBotLike).bot;
-					accumulated = stripToolMarkers(accumulated);
-
-					const mediaUrls: {
-						url: string;
-						alt: string;
-						buffer?: Buffer;
-						mimeType?: string;
-					}[] = [];
-					if (accumulated.includes("/api/media/file/")) {
-						const imgRegex =
-							/!\[([^\]]*)\]\((https?:\/\/[^\s)]+|\/api\/media\/file\/[^\s)]+)\)/g;
-						let match: RegExpExecArray | null = imgRegex.exec(accumulated);
-						while (match !== null) {
-							mediaUrls.push({ alt: match[1], url: match[2] });
-							match = imgRegex.exec(accumulated);
-						}
-						accumulated = accumulated.replace(imgRegex, "").trim();
-
-						for (const media of mediaUrls) {
-							if (!media.url.startsWith("/api/media/file/")) continue;
-							try {
-								const resolved = await mediaContext.resolve(media.url);
-								media.buffer = resolved.buffer;
-								media.mimeType = resolved.mimeType;
-							} catch (err) {
-								console.warn(`Could not resolve media url: ${media.url}`);
-							}
-						}
-					}
-
-					if (accumulated.length > 0) {
-						const parts = splitTelegramMessage(accumulated, 4096);
-						for (let i = 0; i < parts.length; i++) {
-							const part = parts[i];
-							if (!part) continue;
-							const safe = markdownToTelegramHtml(part);
-							try {
-								if (i === 0 && lastMessageId) {
-									await tgBot.api.editMessageText(
-										msg.senderId,
-										Number(lastMessageId),
-										safe,
-										{ parse_mode: "HTML" },
-									);
-								} else {
-									await tgBot.api.sendMessage(msg.senderId, safe, {
-										parse_mode: "HTML",
-										reply_parameters:
-											i === 0 ? { message_id: Number(msg.id) } : undefined,
-									});
-								}
-							} catch {
-								try {
-									if (i === 0 && lastMessageId) {
-										await tgBot.api.editMessageText(
-											msg.senderId,
-											Number(lastMessageId),
-											part,
-										);
-									} else {
-										await tgBot.api.sendMessage(msg.senderId, part);
-									}
-								} catch {}
-							}
-						}
-					}
-
-					for (const media of mediaUrls) {
-						if (!media.buffer) continue;
-						const inputFile = new InputFile(media.buffer);
-						try {
-							if (media.mimeType?.startsWith("audio/")) {
-								await tgBot.api.sendAudio(msg.senderId, inputFile, {
-									caption: media.alt,
-								});
-							} else if (media.mimeType?.startsWith("video/")) {
-								await tgBot.api.sendVideo(msg.senderId, inputFile, {
-									caption: media.alt,
-								});
-							} else {
-								await tgBot.api.sendPhoto(msg.senderId, inputFile, {
-									caption: media.alt,
-								});
-							}
-						} catch (err) {
-							console.error("Error sending media to telegram", err);
-						}
-					}
-				} else {
-					await activeChannelManager.send(
-						msg.channelId,
-						msg.senderId,
-						accumulated,
-						{ replyTo: msg.id },
-					);
-				}
+				await executionDone;
 			} catch (err) {
-				if (activeConvId && accumulated.trim()) {
+				if (!executionStarted) {
 					try {
-						const metadata = {
-							source: channelLabel,
-							partial: true,
-							status: "interrupted",
-							channelMessageId: msg.id,
-							error: err instanceof Error ? err.message : String(err),
-						};
-						if (assistantCheckpointId) {
-							await chatManager.updateMessage(
-								assistantCheckpointId,
-								accumulated,
-								{ metadata },
+						const errorMessage =
+							err instanceof Error ? err.message : "Failed to process message";
+						if (channel?.type === "telegram") {
+							await sendTelegramCommandMessage(
+								(channel as unknown as TelegramBotLike).bot,
+								msg.senderId,
+								`Error: ${errorMessage}`,
+								msg.id,
 							);
 						} else {
-							await chatManager.addMessage(
-								activeConvId,
-								"assistant",
-								accumulated,
-								{ metadata },
+							await activeChannelManager.send(
+								msg.channelId,
+								msg.senderId,
+								`Error: ${errorMessage}`,
+								{ replyTo: msg.id },
 							);
 						}
-					} catch (checkpointErr) {
-						console.error("Error saving channel checkpoint:", checkpointErr);
+					} catch (sendErr) {
+						console.error("Error sending channel error:", sendErr);
 					}
 				}
 				console.error("Error processing channel message:", err);
 			} finally {
 				if (typingInterval) clearInterval(typingInterval);
+				channelExecutionSessions.delete(requestId);
 				releaseProcessing();
 				if (channelProcessingQueues.get(queueKey) === queuedProcessing) {
 					channelProcessingQueues.delete(queueKey);
 				}
-				try {
-					targetAgent
-						.runConsolidation()
-						.catch((e) => console.error("LTM consolidation error:", e));
-				} catch {}
 			}
 		});
 
@@ -1087,39 +1239,6 @@ export async function runStart(options: StartOptions): Promise<void> {
 			port: runningSystem.config.server.port,
 			host: runningSystem.config.server.host,
 		});
-		const chatExecutionManager = new ChatExecutionManager({
-			chatManager: runningSystem.chatManager,
-			conversationHistoryLimit: CONVERSATION_HISTORY_LIMIT,
-			streamCheckpointIntervalMs: STREAM_CHECKPOINT_INTERVAL_MS,
-			getAgentRuntime: (agentId?: string) =>
-				agentId && runningSystem.agentManager
-					? (runningSystem.agentManager.getRuntime(agentId) ??
-						runningSystem.agentRuntime)
-					: runningSystem.agentRuntime,
-			emit: (event) => {
-				if (!server) return;
-				const type =
-					event.type === "event"
-						? MessageType.event
-						: event.type === "stream"
-							? MessageType.stream
-							: event.type === "stream_end"
-								? MessageType.stream_end
-								: event.type === "error"
-									? MessageType.error
-									: event.type === "response"
-										? MessageType.response
-										: MessageType.event;
-				server.sendToConversation(event.conversationId, {
-					id: event.requestId ?? event.executionId,
-					type,
-					channel: "chat",
-					payload: event.payload,
-					timestamp: Date.now(),
-				});
-			},
-		});
-		await chatExecutionManager.initialize();
 		server.setSystemContext(
 			buildTransportSystemContext(system, chatExecutionManager),
 		);
@@ -1135,6 +1254,39 @@ export async function runStart(options: StartOptions): Promise<void> {
 						};
 						if (payload.action === "subscribe" && payload.conversationId) {
 							server.subscribeConversation(clientId, payload.conversationId);
+							const active =
+								await system.chatManager.getActiveExecutionForConversation(
+									payload.conversationId,
+								);
+							const latest =
+								active ??
+								(await system.chatManager.getLatestExecutionForConversation(
+									payload.conversationId,
+								));
+							if (
+								latest &&
+								["queued", "running", "interrupted"].includes(latest.status)
+							) {
+								const assistantMessage = latest.assistant_message_id
+									? await system.chatManager.getMessage(
+											latest.assistant_message_id,
+										)
+									: null;
+								server.send(clientId, {
+									id: latest.request_id ?? latest.id,
+									type: MessageType.event,
+									channel: "chat",
+									payload: {
+										kind: "execution_snapshot",
+										execution: latest,
+										assistantMessage,
+										conversationId: latest.conversation_id,
+										executionId: latest.id,
+										assistantMessageId: latest.assistant_message_id,
+									},
+									timestamp: Date.now(),
+								});
+							}
 							return;
 						}
 						if (payload.action === "unsubscribe" && payload.conversationId) {

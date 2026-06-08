@@ -7,14 +7,17 @@ let mainWindow: BrowserWindow | null = null;
 
 function createWindow() {
 	mainWindow = new BrowserWindow({
-		width: 1200,
-		height: 800,
+		width: 1440,
+		height: 900,
+		minWidth: 1100,
+		minHeight: 720,
+		backgroundColor: "#050505",
+		frame: false,
 		webPreferences: {
 			preload: path.join(__dirname, "../preload/index.js"),
 			nodeIntegration: false,
 			contextIsolation: true,
 		},
-		frame: false,
 		show: false,
 	});
 

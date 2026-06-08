@@ -3,16 +3,44 @@ import { apiGet } from "./useApi.js";
 
 export interface DashboardStats {
 	agents: number;
+	arms: number;
 	tools: number;
 	mcp: number;
 	tasks: number;
 	runningTasks: number;
+	workflows: number;
+	runningWorkflows: number;
 	conversations: number;
 	memories: number;
 	provider: string;
 	thinking: string;
 	channels: string[];
 	status: "online" | "degraded";
+}
+
+interface AgentSummary {
+	id: string;
+	name?: string;
+	role?: string;
+	color?: string | null;
+	is_builtin_arm?: number;
+	arm_key?: string | null;
+}
+
+export interface WorkflowRunSummary {
+	id: string;
+	status: string;
+	goal?: string;
+	current_phase?: string | null;
+	updated_at?: string;
+}
+
+export interface DashboardArmSummary {
+	id: string;
+	name: string;
+	role: string;
+	armKey: string | null;
+	color: string | null;
 }
 
 export interface ActivityItem {
@@ -26,13 +54,15 @@ export interface ActivityItem {
 export function useDashboard() {
 	const [stats, setStats] = useState<DashboardStats | null>(null);
 	const [activity, setActivity] = useState<ActivityItem[]>([]);
+	const [recentWorkflows, setRecentWorkflows] = useState<WorkflowRunSummary[]>([]);
+	const [arms, setArms] = useState<DashboardArmSummary[]>([]);
 	const [loading, setLoading] = useState(true);
 
 	const loadStats = useCallback(async () => {
 		try {
-			const [agents, mcp, memoryRaw, convs, statusRaw, toolsRaw, taskStatsRaw] =
+			const [agents, mcp, memoryRaw, convs, statusRaw, toolsRaw, taskStatsRaw, workflows] =
 				await Promise.all([
-					apiGet<unknown[]>("/api/agents").catch(() => []),
+					apiGet<AgentSummary[]>("/api/agents").catch(() => []),
 					apiGet<unknown[]>("/api/mcp/servers").catch(() => []),
 					apiGet<Record<string, unknown>>("/api/memory/stats").catch(
 						() => ({}),
@@ -41,6 +71,7 @@ export function useDashboard() {
 					apiGet<Record<string, unknown>>("/api/status").catch(() => ({})),
 					apiGet<unknown[]>("/api/tools").catch(() => []),
 					apiGet<Record<string, number>>("/api/tasks/stats").catch(() => ({})),
+					apiGet<WorkflowRunSummary[]>("/api/workflows?limit=8").catch(() => []),
 				]);
 
 			const memory = memoryRaw as {
@@ -60,6 +91,7 @@ export function useDashboard() {
 
 			setStats({
 				agents: agents.length,
+				arms: agents.filter((agent) => agent.is_builtin_arm === 1).length,
 				tools: Array.isArray(toolsRaw)
 					? toolsRaw.length
 					: Array.isArray((toolsRaw as { items?: unknown[] }).items)
@@ -68,6 +100,10 @@ export function useDashboard() {
 				mcp: mcp.length,
 				tasks: taskStats.total ?? 0,
 				runningTasks: taskStats.running ?? 0,
+				workflows: workflows.length,
+				runningWorkflows: workflows.filter((workflow) =>
+					["ready", "running", "interrupted"].includes(workflow.status),
+				).length,
 				conversations: convs.length,
 				memories: memory.shortTerm ? (memory.shortTerm.count ?? 0) : 0,
 				provider: status.provider ?? "N/A",
@@ -75,6 +111,18 @@ export function useDashboard() {
 				channels: status.channels ?? [],
 				status: status.ok === false ? "degraded" : "online",
 			});
+			setRecentWorkflows(workflows.slice(0, 6));
+			setArms(
+				agents
+					.filter((agent) => agent.is_builtin_arm === 1)
+					.map((agent) => ({
+						id: agent.id,
+						name: agent.name ?? agent.id,
+						role: agent.role ?? "arm",
+						armKey: agent.arm_key ?? null,
+						color: agent.color ?? null,
+					})),
+			);
 
 			const items: ActivityItem[] = [];
 			if (Array.isArray(convs)) {
@@ -125,5 +173,5 @@ export function useDashboard() {
 		return () => clearInterval(interval);
 	}, [loadStats]);
 
-	return { stats, activity, loading, reload: loadStats };
+	return { stats, activity, recentWorkflows, arms, loading, reload: loadStats };
 }

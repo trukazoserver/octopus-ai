@@ -54,6 +54,74 @@ export interface ChatExecution {
 	completed_at: string | null;
 }
 
+export interface ConversationContextSnapshot {
+	conversation_id: string;
+	rolling_summary: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ChatTaskLedgerEntry {
+	id: string;
+	conversation_id: string;
+	objective: string;
+	status: "completed" | "partial" | "failed" | "pending";
+	summary: string | null;
+	outputs: string | null;
+	tool_names: string | null;
+	source_message_id: string | null;
+	created_at: string;
+	updated_at: string;
+	completed_at: string | null;
+}
+
+const SEARCH_STOPWORDS = new Set([
+	"acuerdas",
+	"recuerdas",
+	"recordar",
+	"recuerdo",
+	"como",
+	"dije",
+	"dijiste",
+	"digo",
+	"dijimos",
+	"deben",
+	"debe",
+	"hacer",
+	"hacen",
+	"sobre",
+	"algo",
+	"otra",
+	"otro",
+	"conversacion",
+	"conversación",
+	"hablamos",
+	"hablar",
+	"the",
+	"and",
+	"for",
+	"with",
+	"that",
+	"this",
+]);
+
+function getSearchTerms(query: string): string[] {
+	const terms = query
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/\p{Diacritic}/gu, "")
+		.split(/[^a-z0-9_/-]+/i)
+		.map((term) => term.trim())
+		.filter((term) => term.length >= 3 && !SEARCH_STOPWORDS.has(term));
+	return [...new Set(terms)].slice(0, 8);
+}
+
+function taskSearchTerms(query: string): string[] {
+	return getSearchTerms(query)
+		.filter((term) => term.length >= 4)
+		.slice(0, 10);
+}
+
 export class ChatManager {
 	constructor(private db: DatabaseAdapter) {}
 
@@ -155,6 +223,14 @@ export class ChatManager {
 		await this.db.flush?.();
 	}
 
+	async getMessage(id: string): Promise<ChatMessage | null> {
+		const message = await this.db.get<ChatMessage>(
+			"SELECT * FROM messages WHERE id = ?",
+			[id],
+		);
+		return message ?? null;
+	}
+
 	async getConversation(
 		id: string,
 	): Promise<(Conversation & { messages: ChatMessage[] }) | null> {
@@ -238,10 +314,17 @@ export class ChatManager {
 	}
 
 	async searchConversations(query: string): Promise<Conversation[]> {
-		const likeQuery = `%${query}%`;
+		const likeQuery = `%${query.toLowerCase()}%`;
+		const terms = getSearchTerms(query);
+		const whereParts = ["LOWER(content) LIKE ?"];
+		const params: unknown[] = [likeQuery];
+		for (const term of terms) {
+			whereParts.push("LOWER(content) LIKE ?");
+			params.push(`%${term}%`);
+		}
 		const convIds = await this.db.all<{ conversation_id: string }>(
-			"SELECT DISTINCT conversation_id FROM messages WHERE content LIKE ? LIMIT 20",
-			[likeQuery],
+			`SELECT DISTINCT conversation_id FROM messages WHERE (${whereParts.join(" OR ")}) LIMIT 20`,
+			params,
 		);
 		if (convIds.length === 0) return [];
 		const ids = convIds.map((r) => r.conversation_id);
@@ -256,25 +339,137 @@ export class ChatManager {
 		query: string,
 		opts?: { conversationId?: string; limit?: number; offset?: number },
 	): Promise<ChatMessage[]> {
-		const likeQuery = `%${query}%`;
+		const likeQuery = `%${query.toLowerCase()}%`;
+		const terms = getSearchTerms(query);
+		const whereParts = ["LOWER(content) LIKE ?"];
+		const whereParams: unknown[] = [likeQuery];
+		for (const term of terms) {
+			whereParts.push("LOWER(content) LIKE ?");
+			whereParams.push(`%${term}%`);
+		}
+		const whereClause = `(${whereParts.join(" OR ")})`;
 		const limit = opts?.limit ?? 20;
 		const offset = opts?.offset ?? 0;
 		if (opts?.conversationId) {
 			return this.db.all<ChatMessage>(
 				`SELECT * FROM messages
-				WHERE conversation_id = ? AND content LIKE ?
-				ORDER BY timestamp ASC
+				WHERE conversation_id = ? AND ${whereClause}
+				ORDER BY CASE WHEN LOWER(content) LIKE ? THEN 0 ELSE 1 END, timestamp ASC
 				LIMIT ? OFFSET ?`,
-				[opts.conversationId, likeQuery, limit, offset],
+				[opts.conversationId, ...whereParams, likeQuery, limit, offset],
 			);
 		}
 
 		return this.db.all<ChatMessage>(
 			`SELECT * FROM messages
-			WHERE content LIKE ?
-			ORDER BY timestamp DESC
+			WHERE ${whereClause}
+			ORDER BY CASE WHEN LOWER(content) LIKE ? THEN 0 ELSE 1 END, timestamp DESC
 			LIMIT ? OFFSET ?`,
-			[likeQuery, limit, offset],
+			[...whereParams, likeQuery, limit, offset],
+		);
+	}
+
+	async addTaskLedgerEntry(opts: {
+		conversationId: string;
+		objective: string;
+		status: ChatTaskLedgerEntry["status"];
+		summary?: string;
+		outputs?: string[];
+		toolNames?: string[];
+		sourceMessageId?: string;
+		completedAt?: string;
+	}): Promise<ChatTaskLedgerEntry> {
+		const id = nanoid(16);
+		const now = new Date().toISOString();
+		const outputs = opts.outputs?.length ? JSON.stringify(opts.outputs) : null;
+		const toolNames = opts.toolNames?.length
+			? JSON.stringify(opts.toolNames)
+			: null;
+		await this.db.run(
+			`INSERT INTO chat_task_ledger
+				(id, conversation_id, objective, status, summary, outputs, tool_names, source_message_id, created_at, updated_at, completed_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				id,
+				opts.conversationId,
+				opts.objective,
+				opts.status,
+				opts.summary ?? null,
+				outputs,
+				toolNames,
+				opts.sourceMessageId ?? null,
+				now,
+				now,
+				opts.completedAt ?? null,
+			],
+		);
+		await this.db.flush?.();
+		return {
+			id,
+			conversation_id: opts.conversationId,
+			objective: opts.objective,
+			status: opts.status,
+			summary: opts.summary ?? null,
+			outputs,
+			tool_names: toolNames,
+			source_message_id: opts.sourceMessageId ?? null,
+			created_at: now,
+			updated_at: now,
+			completed_at: opts.completedAt ?? null,
+		};
+	}
+
+	async listTaskLedgerEntries(
+		conversationId: string,
+		opts?: { limit?: number; status?: ChatTaskLedgerEntry["status"] },
+	): Promise<ChatTaskLedgerEntry[]> {
+		const limit = opts?.limit ?? 12;
+		if (opts?.status) {
+			return this.db.all<ChatTaskLedgerEntry>(
+				`SELECT * FROM chat_task_ledger
+				WHERE conversation_id = ? AND status = ?
+				ORDER BY updated_at DESC LIMIT ?`,
+				[conversationId, opts.status, limit],
+			);
+		}
+		return this.db.all<ChatTaskLedgerEntry>(
+			`SELECT * FROM chat_task_ledger
+			WHERE conversation_id = ?
+			ORDER BY updated_at DESC LIMIT ?`,
+			[conversationId, limit],
+		);
+	}
+
+	async searchTaskLedgerEntries(
+		conversationId: string,
+		query: string,
+		opts?: { limit?: number; status?: ChatTaskLedgerEntry["status"] },
+	): Promise<ChatTaskLedgerEntry[]> {
+		const limit = opts?.limit ?? 8;
+		const terms = taskSearchTerms(query);
+		if (terms.length === 0) {
+			return this.listTaskLedgerEntries(conversationId, {
+				limit,
+				status: opts?.status,
+			});
+		}
+		const whereParts = terms.flatMap(() => [
+			"LOWER(objective) LIKE ?",
+			"LOWER(COALESCE(summary, '')) LIKE ?",
+			"LOWER(COALESCE(outputs, '')) LIKE ?",
+		]);
+		const params = terms.flatMap((term) => [
+			`%${term}%`,
+			`%${term}%`,
+			`%${term}%`,
+		]);
+		const statusClause = opts?.status ? "AND status = ?" : "";
+		const statusParams = opts?.status ? [opts.status] : [];
+		return this.db.all<ChatTaskLedgerEntry>(
+			`SELECT * FROM chat_task_ledger
+			WHERE conversation_id = ? ${statusClause} AND (${whereParts.join(" OR ")})
+			ORDER BY updated_at DESC LIMIT ?`,
+			[conversationId, ...statusParams, ...params, limit],
 		);
 	}
 
@@ -413,6 +608,36 @@ export class ChatManager {
 				WHERE status IN ('queued', 'running')`,
 			[now, now],
 		);
+		await this.db.flush?.();
+	}
+
+	async getConversationContextSnapshot(
+		conversationId: string,
+	): Promise<ConversationContextSnapshot | null> {
+		const snapshot = await this.db.get<ConversationContextSnapshot>(
+			"SELECT * FROM conversation_context_snapshots WHERE conversation_id = ?",
+			[conversationId],
+		);
+		return snapshot ?? null;
+	}
+
+	async saveConversationContextSnapshot(
+		conversationId: string,
+		rollingSummary: string,
+	): Promise<void> {
+		const now = new Date().toISOString();
+		const existing = await this.getConversationContextSnapshot(conversationId);
+		if (existing) {
+			await this.db.run(
+				"UPDATE conversation_context_snapshots SET rolling_summary = ?, updated_at = ? WHERE conversation_id = ?",
+				[rollingSummary, now, conversationId],
+			);
+		} else {
+			await this.db.run(
+				"INSERT INTO conversation_context_snapshots (conversation_id, rolling_summary, created_at, updated_at) VALUES (?, ?, ?, ?)",
+				[conversationId, rollingSummary, now, now],
+			);
+		}
 		await this.db.flush?.();
 	}
 }

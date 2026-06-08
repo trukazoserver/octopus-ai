@@ -66,6 +66,75 @@ async function postJson(
 }
 
 describe("memory API endpoints", () => {
+	it("lists and updates environment variables without exposing secret values", async () => {
+		const now = new Date(0).toISOString();
+		const safeSecret = {
+			id: "env-1",
+			key: "OPENAI_API_KEY",
+			value: "••••••••",
+			description: "OpenAI key",
+			is_secret: 1,
+			created_at: now,
+			updated_at: now,
+		};
+		const envVarManager = {
+			list: vi.fn(async () => [safeSecret]),
+			get: vi.fn(async () => "real-secret"),
+			set: vi.fn(async () => ({
+				...safeSecret,
+				value: "enc:v1:ciphertext",
+			})),
+			delete: vi.fn(),
+		};
+		const baseUrl = await startServer({}, { envVarManager });
+
+		const listed = await getJson(`${baseUrl}/api/env`);
+		const blocked = await getJson(`${baseUrl}/api/env?showSecrets=true`);
+		const revealed = await getJson(`${baseUrl}/api/env/OPENAI_API_KEY`);
+		const saved = await postJson(`${baseUrl}/api/env`, {
+			key: "OPENAI_API_KEY",
+			value: "real-secret",
+			description: "OpenAI key",
+			isSecret: true,
+		});
+
+		expect(listed.status).toBe(200);
+		expect(listed.body).toEqual([safeSecret]);
+		expect(blocked.status).toBe(403);
+		expect(revealed.status).toBe(200);
+		expect(revealed.body.value).toBe("real-secret");
+		expect(saved.status).toBe(200);
+		expect(saved.body.value).toBe("••••••••");
+		expect(JSON.stringify(saved.body)).not.toContain("real-secret");
+		expect(JSON.stringify(saved.body)).not.toContain("ciphertext");
+		expect(envVarManager.set).toHaveBeenCalledWith(
+			"OPENAI_API_KEY",
+			"real-secret",
+			{
+				isSecret: true,
+				description: "OpenAI key",
+			},
+		);
+	});
+
+	it("rejects invalid environment variable names before writing", async () => {
+		const envVarManager = {
+			list: vi.fn(async () => []),
+			get: vi.fn(),
+			set: vi.fn(),
+			delete: vi.fn(),
+		};
+		const baseUrl = await startServer({}, { envVarManager });
+
+		const response = await postJson(`${baseUrl}/api/env`, {
+			key: "../BAD",
+			value: "value",
+		});
+
+		expect(response.status).toBe(400);
+		expect(envVarManager.set).not.toHaveBeenCalled();
+	});
+
 	it("keeps health and status public when an API key is configured", async () => {
 		const config = getDefaults();
 		config.security.memoryApiKey = "test-api-key";
@@ -96,6 +165,159 @@ describe("memory API endpoints", () => {
 		expect(wrong.status).toBe(401);
 		expect(allowed.status).toBe(200);
 		expect(allowed.body.version).toBe(1);
+	});
+
+	it("returns active conversation execution for reconnect recovery", async () => {
+		const activeExecution = {
+			id: "exec-1",
+			request_id: "req-1",
+			conversation_id: "conv-1",
+			agent_id: null,
+			status: "running",
+			current_status: "responding",
+			activities: "[]",
+			assistant_message_id: "msg-1",
+			error: null,
+			started_at: new Date(0).toISOString(),
+			updated_at: new Date(0).toISOString(),
+			completed_at: null,
+		};
+		const chatManager = {
+			getActiveExecutionForConversation: vi.fn(async () => activeExecution),
+			getLatestExecutionForConversation: vi.fn(),
+		};
+		const baseUrl = await startServer({}, { chatManager });
+
+		const response = await getJson(
+			`${baseUrl}/api/conversations/conv-1/execution`,
+		);
+
+		expect(response.status).toBe(200);
+		expect(response.body.execution).toMatchObject({
+			id: "exec-1",
+			status: "running",
+			assistant_message_id: "msg-1",
+		});
+		expect(
+			chatManager.getLatestExecutionForConversation,
+		).not.toHaveBeenCalled();
+	});
+
+	it("lists resumable workflows and exposes recovery actions", async () => {
+		const workflowManager = {
+			listRuns: vi.fn(async () => []),
+			listResumableRuns: vi.fn(async () => [
+				{ id: "wf-1", status: "interrupted", goal: "Resume me" },
+			]),
+			markStaleRunsInterrupted: vi.fn(async () => ({ runs: 1, tasks: 2 })),
+			retryRun: vi.fn(async () => {}),
+			cancelRun: vi.fn(async () => {}),
+		};
+		const baseUrl = await startServer({}, { workflowManager });
+
+		const resumable = await getJson(
+			`${baseUrl}/api/workflows?resumable=true&conversationId=conv-1&limit=5`,
+		);
+		const recovered = await postJson(`${baseUrl}/api/workflows/recover`, {});
+		const retried = await postJson(`${baseUrl}/api/workflows/wf-1/retry`, {});
+		const cancelled = await postJson(`${baseUrl}/api/workflows/wf-1/cancel`, {
+			reason: "test",
+		});
+
+		expect(resumable.status).toBe(200);
+		expect(Array.isArray(resumable.body)).toBe(true);
+		expect(workflowManager.listResumableRuns).toHaveBeenCalledWith({
+			conversationId: "conv-1",
+			limit: 5,
+			offset: 0,
+		});
+		expect(recovered.body).toEqual({ ok: true, runs: 1, tasks: 2 });
+		expect(retried.body).toEqual({ ok: true, id: "wf-1", action: "retry" });
+		expect(cancelled.body).toEqual({ ok: true, id: "wf-1", action: "cancel" });
+		expect(workflowManager.retryRun).toHaveBeenCalledWith("wf-1");
+		expect(workflowManager.cancelRun).toHaveBeenCalledWith("wf-1", "test");
+	});
+
+	it("exposes agent message inbox, send, and read actions", async () => {
+		const message = {
+			id: "msg-1",
+			run_id: null,
+			from_agent_id: "agent-main",
+			to_agent_id: "agent-qa",
+			task_id: null,
+			message_type: "question",
+			content: "Can you verify this?",
+			created_at: "2026-01-01T00:00:00.000Z",
+			read_at: null,
+			metadata: null,
+		};
+		const agentManager = {
+			listInbox: vi.fn(async () => [message]),
+			sendMessage: vi.fn(async () => message),
+			markMessagesRead: vi.fn(async () => 1),
+		};
+		const baseUrl = await startServer({}, { agentManager });
+
+		const inbox = await getJson(
+			`${baseUrl}/api/agents/agent-qa/messages?unreadOnly=true&limit=5`,
+		);
+		const sent = await postJson(`${baseUrl}/api/agents/messages`, {
+			fromAgentId: "agent-main",
+			toAgentId: "agent-qa",
+			messageType: "question",
+			content: "Can you verify this?",
+		});
+		const read = await postJson(
+			`${baseUrl}/api/agents/agent-qa/messages/read`,
+			{ messageIds: ["msg-1"] },
+		);
+
+		expect(inbox.status).toBe(200);
+		expect(sent.status).toBe(201);
+		expect(read.body).toEqual({ ok: true, updated: 1 });
+		expect(agentManager.listInbox).toHaveBeenCalledWith({
+			agentId: "agent-qa",
+			runId: undefined,
+			includeBroadcasts: true,
+			unreadOnly: true,
+			limit: 5,
+		});
+		expect(agentManager.sendMessage).toHaveBeenCalledWith({
+			fromAgentId: "agent-main",
+			toAgentId: "agent-qa",
+			runId: undefined,
+			taskId: undefined,
+			messageType: "question",
+			content: "Can you verify this?",
+			metadata: undefined,
+		});
+		expect(agentManager.markMessagesRead).toHaveBeenCalledWith("agent-qa", [
+			"msg-1",
+		]);
+	});
+
+	it("returns workflow snapshot details and 404 for missing workflow", async () => {
+		const workflowManager = {
+			listRuns: vi.fn(async () => []),
+			getRunSnapshot: vi.fn(async (id: string) =>
+				id === "missing"
+					? { run: null, tasks: [], events: [], artifacts: [] }
+					: {
+							run: { id, status: "done", goal: "Complete" },
+							tasks: [],
+							events: [],
+							artifacts: [],
+						},
+			),
+		};
+		const baseUrl = await startServer({}, { workflowManager });
+
+		const found = await getJson(`${baseUrl}/api/workflows/wf-2`);
+		const missing = await getJson(`${baseUrl}/api/workflows/missing`);
+
+		expect(found.status).toBe(200);
+		expect((found.body.run as JsonObject).id).toBe("wf-2");
+		expect(missing.status).toBe(404);
 	});
 
 	it("uses OCTOPUS_API_KEY as a fallback for sensitive endpoint auth", async () => {

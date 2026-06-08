@@ -9,6 +9,9 @@ function resolveApiBase(): string {
 	if (configured) return configured.replace(/\/$/, "");
 
 	const { protocol, hostname, port, origin } = window.location;
+	if (protocol === "file:" || !hostname) {
+		return `http://127.0.0.1:${DEFAULT_API_PORT}`;
+	}
 	if (port === DEFAULT_API_PORT || protocol === "https:") return origin;
 	return `http://${hostname}:${DEFAULT_API_PORT}`;
 }

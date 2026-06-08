@@ -191,6 +191,12 @@ importers:
       '@octopus-ai/core':
         specifier: workspace:*
         version: link:../core
+      dompurify:
+        specifier: ^3.4.0
+        version: 3.4.0
+      marked:
+        specifier: ^18.0.0
+        version: 18.0.0
       react:
         specifier: ^19.2.5
         version: 19.2.5

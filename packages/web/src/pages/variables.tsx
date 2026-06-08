@@ -8,6 +8,7 @@ interface EnvVar {
 	key: string;
 	value: string;
 	description?: string;
+	is_secret?: number;
 	createdAt?: string;
 }
 
@@ -26,6 +27,11 @@ export const VariablesPage: React.FC = () => {
 	const [saving, setSaving] = useState(false);
 	const [showValue, setShowValue] = useState<Set<string>>(new Set());
 	const [revealingKey, setRevealingKey] = useState<string | null>(null);
+	const [editingKey, setEditingKey] = useState<string | null>(null);
+	const [editValue, setEditValue] = useState("");
+	const [editDesc, setEditDesc] = useState("");
+	const [editSecret, setEditSecret] = useState(true);
+	const [savingEditKey, setSavingEditKey] = useState<string | null>(null);
 	const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
 	const load = useCallback(async () => {
@@ -64,8 +70,9 @@ export const VariablesPage: React.FC = () => {
 		try {
 			await apiPost("/api/env", {
 				key: normalizedKey,
-				value: newValue.trim(),
+				value: newValue,
 				description: newDesc.trim() || undefined,
+				isSecret: true,
 			});
 			showToast("success", `Variable ${normalizedKey} guardada`);
 			setNewKey("");
@@ -79,6 +86,28 @@ export const VariablesPage: React.FC = () => {
 			);
 		} finally {
 			setSaving(false);
+		}
+	};
+
+	const revealValue = async (key: string): Promise<EnvVar | null> => {
+		setRevealingKey(key);
+		try {
+			const revealed = await apiGet<EnvVar>(
+				`/api/env/${encodeURIComponent(key)}`,
+			);
+			setVars((current) =>
+				current.map((v) => (v.key === key ? { ...v, ...revealed } : v)),
+			);
+			setShowValue((prev) => new Set(prev).add(key));
+			return revealed;
+		} catch (err) {
+			showToast(
+				"error",
+				err instanceof Error ? err.message : "No se pudo revelar el secreto",
+			);
+			return null;
+		} finally {
+			setRevealingKey(null);
 		}
 	};
 
@@ -106,18 +135,8 @@ export const VariablesPage: React.FC = () => {
 			return;
 		}
 
-		setRevealingKey(key);
-		try {
-			const data = await apiGet<EnvVar[]>("/api/env?showSecrets=true");
-			const revealed = data.find((v) => v.key === key);
-			if (revealed) {
-				setVars((current) =>
-					current.map((v) =>
-						v.key === key ? { ...v, value: revealed.value } : v,
-					),
-				);
-			}
-			setShowValue((prev) => new Set(prev).add(key));
+		const revealed = await revealValue(key);
+		if (revealed) {
 			showToast("info", "El valor se ocultará automáticamente en 10 segundos");
 			setTimeout(() => {
 				setShowValue((current) => {
@@ -126,13 +145,50 @@ export const VariablesPage: React.FC = () => {
 					return updated;
 				});
 			}, 10000);
+		}
+	};
+
+	const startEdit = async (variable: EnvVar) => {
+		const revealed = showValue.has(variable.key)
+			? variable
+			: await revealValue(variable.key);
+		if (!revealed) return;
+		setEditingKey(variable.key);
+		setEditValue(revealed.value);
+		setEditDesc(revealed.description ?? "");
+		setEditSecret(revealed.is_secret !== 0);
+	};
+
+	const cancelEdit = () => {
+		setEditingKey(null);
+		setEditValue("");
+		setEditDesc("");
+		setEditSecret(true);
+	};
+
+	const handleUpdate = async (key: string) => {
+		if (!editValue.length) {
+			showToast("error", "El valor no puede quedar vacío");
+			return;
+		}
+		setSavingEditKey(key);
+		try {
+			await apiPost("/api/env", {
+				key,
+				value: editValue,
+				description: editDesc.trim() || undefined,
+				isSecret: editSecret,
+			});
+			showToast("success", `Variable ${key} actualizada`);
+			cancelEdit();
+			await load();
 		} catch (err) {
 			showToast(
 				"error",
-				err instanceof Error ? err.message : "No se pudo revelar el secreto",
+				err instanceof Error ? err.message : "Error al actualizar",
 			);
 		} finally {
-			setRevealingKey(null);
+			setSavingEditKey(null);
 		}
 	};
 
@@ -357,136 +413,143 @@ export const VariablesPage: React.FC = () => {
 				</div>
 			) : (
 				<div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-					{vars.map((v) => (
-						<div
-							key={v.key}
-							className="animate-fade-in"
-							style={{
-								display: "flex",
-								alignItems: "center",
-								gap: "16px",
-								padding: "16px 20px",
-								borderRadius: "12px",
-								background: "rgba(24,24,27,0.6)",
-								border: "1px solid #27272a",
-								transition: "border-color 0.15s",
-							}}
-							onMouseEnter={(e) => {
-								e.currentTarget.style.borderColor = "#3f3f46";
-							}}
-							onMouseLeave={(e) => {
-								e.currentTarget.style.borderColor = "#27272a";
-							}}
-						>
-							<div style={{ flex: 1, minWidth: 0 }}>
-								<div
-									style={{
-										display: "flex",
-										alignItems: "center",
-										gap: "8px",
-										marginBottom: "4px",
-									}}
-								>
-									<span
-										style={{
-											padding: "2px 8px",
-											borderRadius: "6px",
-											background: "rgba(99,102,241,0.1)",
-											border: "1px solid rgba(99,102,241,0.2)",
-											fontSize: "0.8rem",
-											fontWeight: 600,
-											color: "#818cf8",
-											fontFamily:
-												"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-										}}
-									>
-										{v.key}
-									</span>
-									{v.description && (
-										<span style={{ fontSize: "0.75rem", color: "#71717a" }}>
-											{v.description}
-										</span>
-									)}
+					{vars.map((v) => {
+						const editing = editingKey === v.key;
+						return (
+							<div
+								key={v.key}
+								className="animate-fade-in"
+								style={{
+									padding: "16px 20px",
+									borderRadius: "12px",
+									background: "rgba(24,24,27,0.6)",
+									border: "1px solid #27272a",
+									transition: "border-color 0.15s",
+								}}
+								onMouseEnter={(e) => {
+									e.currentTarget.style.borderColor = "#3f3f46";
+								}}
+								onMouseLeave={(e) => {
+									e.currentTarget.style.borderColor = "#27272a";
+								}}
+							>
+								<div style={variableRowStyle}>
+									<div style={{ flex: 1, minWidth: 0 }}>
+										<div style={variableHeaderStyle}>
+											<span style={variableKeyStyle}>{v.key}</span>
+											{v.description && (
+												<span style={{ fontSize: "0.75rem", color: "#71717a" }}>
+													{v.description}
+												</span>
+											)}
+										</div>
+										<div
+											style={{
+												...variableValueStyle,
+												color: showValue.has(v.key) ? "#a1a1aa" : "#52525b",
+											}}
+										>
+											{showValue.has(v.key) ? v.value : "••••••••••••••••"}
+										</div>
+									</div>
+									<div style={buttonGroupStyle}>
+										<button
+											type="button"
+											onClick={() => void toggleShow(v.key)}
+											disabled={revealingKey === v.key}
+											style={secondaryButtonStyle}
+										>
+											{revealingKey === v.key
+												? "Cargando..."
+												: showValue.has(v.key)
+													? "Ocultar"
+													: "Mostrar"}
+										</button>
+										<button
+											type="button"
+											onClick={() => void startEdit(v)}
+											disabled={revealingKey === v.key}
+											style={secondaryButtonStyle}
+										>
+											Editar
+										</button>
+										<button
+											type="button"
+											onClick={() => {
+												if (deleteConfirm === v.key) void handleDelete(v.key);
+												else setDeleteConfirm(v.key);
+											}}
+											style={dangerButtonStyle}
+										>
+											{deleteConfirm === v.key ? "Confirmar" : "Eliminar"}
+										</button>
+										{deleteConfirm === v.key && (
+											<button
+												type="button"
+												onClick={() => setDeleteConfirm(null)}
+												style={secondaryButtonStyle}
+											>
+												Cancelar
+											</button>
+										)}
+									</div>
 								</div>
-								<div
-									style={{
-										fontSize: "0.8rem",
-										color: showValue.has(v.key) ? "#a1a1aa" : "#52525b",
-										fontFamily:
-											"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-										overflow: "hidden",
-										textOverflow: "ellipsis",
-										whiteSpace: "nowrap",
-									}}
-								>
-									{showValue.has(v.key) ? v.value : "••••••••••••••••"}
-								</div>
+
+								{editing && (
+									<div style={editPanelStyle}>
+										<label>
+											<span style={fieldLabelStyle}>Valor</span>
+											<input
+												type={editSecret ? "password" : "text"}
+												value={editValue}
+												onChange={(e) => setEditValue(e.target.value)}
+												autoComplete="off"
+												style={inputStyle}
+											/>
+										</label>
+										<label>
+											<span style={fieldLabelStyle}>Descripción</span>
+											<input
+												type="text"
+												value={editDesc}
+												onChange={(e) => setEditDesc(e.target.value)}
+												placeholder="Descripción (opcional)"
+												autoComplete="off"
+												style={inputStyle}
+											/>
+										</label>
+										<div style={editActionsStyle}>
+											<label style={checkboxLabelStyle}>
+												<input
+													type="checkbox"
+													checked={editSecret}
+													onChange={(e) => setEditSecret(e.target.checked)}
+												/>
+												Guardar como secreto
+											</label>
+											<div style={buttonGroupStyle}>
+												<button
+													type="button"
+													onClick={() => void handleUpdate(v.key)}
+													disabled={savingEditKey === v.key}
+													style={primaryButtonStyle}
+												>
+													{savingEditKey === v.key ? "Guardando..." : "Guardar"}
+												</button>
+												<button
+													type="button"
+													onClick={cancelEdit}
+													style={secondaryButtonStyle}
+												>
+													Cancelar
+												</button>
+											</div>
+										</div>
+									</div>
+								)}
 							</div>
-							<button
-								type="button"
-								onClick={() => void toggleShow(v.key)}
-								disabled={revealingKey === v.key}
-								style={{
-									padding: "6px 12px",
-									borderRadius: "8px",
-									border: "1px solid #3f3f46",
-									background: "#27272a",
-									color: "#a1a1aa",
-									fontSize: "0.75rem",
-									cursor: revealingKey === v.key ? "wait" : "pointer",
-									fontFamily: "inherit",
-									transition: "all 0.15s",
-									whiteSpace: "nowrap",
-								}}
-							>
-								{revealingKey === v.key
-									? "Cargando..."
-									: showValue.has(v.key)
-										? "Ocultar"
-										: "Mostrar"}
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									if (deleteConfirm === v.key) void handleDelete(v.key);
-									else setDeleteConfirm(v.key);
-								}}
-								style={{
-									padding: "6px 12px",
-									borderRadius: "8px",
-									border: "1px solid rgba(239,68,68,0.3)",
-									background: "rgba(239,68,68,0.1)",
-									color: "#ef4444",
-									fontSize: "0.75rem",
-									cursor: "pointer",
-									fontFamily: "inherit",
-									transition: "all 0.15s",
-									whiteSpace: "nowrap",
-								}}
-							>
-								{deleteConfirm === v.key ? "Confirmar" : "Eliminar"}
-							</button>
-							{deleteConfirm === v.key && (
-								<button
-									type="button"
-									onClick={() => setDeleteConfirm(null)}
-									style={{
-										padding: "6px 12px",
-										borderRadius: "8px",
-										border: "1px solid #3f3f46",
-										background: "#27272a",
-										color: "#a1a1aa",
-										fontSize: "0.75rem",
-										cursor: "pointer",
-										fontFamily: "inherit",
-										whiteSpace: "nowrap",
-									}}
-								>
-									Cancelar
-								</button>
-							)}
-						</div>
-					))}
+						);
+					})}
 				</div>
 			)}
 		</div>
@@ -501,4 +564,118 @@ const fieldLabelStyle: React.CSSProperties = {
 	letterSpacing: "0.04em",
 	textTransform: "uppercase",
 	marginBottom: "6px",
+};
+
+const inputStyle: React.CSSProperties = {
+	width: "100%",
+	padding: "10px 14px",
+	borderRadius: "10px",
+	border: "1px solid #3f3f46",
+	background: "#18181b",
+	color: "#f4f4f5",
+	fontSize: "0.85rem",
+	outline: "none",
+	fontFamily:
+		"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+	boxSizing: "border-box",
+	minWidth: 0,
+};
+
+const primaryButtonStyle: React.CSSProperties = {
+	padding: "6px 12px",
+	borderRadius: "8px",
+	border: "1px solid #6366f1",
+	background: "#6366f1",
+	color: "#fff",
+	fontSize: "0.75rem",
+	cursor: "pointer",
+	fontFamily: "inherit",
+	transition: "all 0.15s",
+	whiteSpace: "nowrap",
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+	padding: "6px 12px",
+	borderRadius: "8px",
+	border: "1px solid #3f3f46",
+	background: "#27272a",
+	color: "#a1a1aa",
+	fontSize: "0.75rem",
+	cursor: "pointer",
+	fontFamily: "inherit",
+	transition: "all 0.15s",
+	whiteSpace: "nowrap",
+};
+
+const dangerButtonStyle: React.CSSProperties = {
+	...secondaryButtonStyle,
+	border: "1px solid rgba(239,68,68,0.3)",
+	background: "rgba(239,68,68,0.1)",
+	color: "#ef4444",
+};
+
+const variableRowStyle: React.CSSProperties = {
+	display: "flex",
+	alignItems: "center",
+	gap: "16px",
+	flexWrap: "wrap",
+};
+
+const variableHeaderStyle: React.CSSProperties = {
+	display: "flex",
+	alignItems: "center",
+	gap: "8px",
+	marginBottom: "4px",
+	flexWrap: "wrap",
+};
+
+const variableKeyStyle: React.CSSProperties = {
+	padding: "2px 8px",
+	borderRadius: "6px",
+	background: "rgba(99,102,241,0.1)",
+	border: "1px solid rgba(99,102,241,0.2)",
+	fontSize: "0.8rem",
+	fontWeight: 600,
+	color: "#818cf8",
+	fontFamily:
+		"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+};
+
+const variableValueStyle: React.CSSProperties = {
+	fontSize: "0.8rem",
+	fontFamily:
+		"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+	overflow: "hidden",
+	textOverflow: "ellipsis",
+	whiteSpace: "nowrap",
+};
+
+const buttonGroupStyle: React.CSSProperties = {
+	display: "flex",
+	gap: "8px",
+	flexWrap: "wrap",
+};
+
+const editPanelStyle: React.CSSProperties = {
+	marginTop: "14px",
+	paddingTop: "14px",
+	borderTop: "1px solid #27272a",
+	display: "grid",
+	gap: "10px",
+};
+
+const editActionsStyle: React.CSSProperties = {
+	display: "flex",
+	gap: "10px",
+	alignItems: "center",
+	justifyContent: "space-between",
+	flexWrap: "wrap",
+};
+
+const checkboxLabelStyle: React.CSSProperties = {
+	display: "inline-flex",
+	gap: "8px",
+	alignItems: "center",
+	color: "#a1a1aa",
+	fontSize: "0.82rem",
 };

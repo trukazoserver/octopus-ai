@@ -29,12 +29,14 @@ export interface ToolContext {
 			buffer: Buffer,
 			mimeType: string,
 			description?: string,
+			metadata?: Record<string, unknown>,
 		) => Promise<{
 			id: string;
 			url: string;
 			filename: string;
 			size: number;
 			mimetype: string;
+			metadata?: Record<string, unknown>;
 		}>;
 		/**
 		 * Resuelve un archivo local o URL nativa de Octopus, y devuelve su Buffer.
@@ -42,6 +44,7 @@ export interface ToolContext {
 		resolve: (url: string) => Promise<{ buffer: Buffer; mimeType: string }>;
 	};
 	agent?: {
+		agentId?: string;
 		model?: string;
 		usesZaiVisionToolForImages?: boolean;
 		workerId?: string;

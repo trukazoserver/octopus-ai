@@ -20,13 +20,25 @@ import {
 	apiPatch,
 	apiPost,
 } from "../hooks/useApi.js";
+import { publicAsset } from "../utils/assets.js";
 
-const WS_URL = `ws://${window.location.hostname}:18789`;
+function resolveWebSocketUrl(): string {
+	const url = new URL(API_BASE);
+	url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+	url.pathname = "/";
+	url.search = "";
+	url.hash = "";
+	return url.toString().replace(/\/$/, "");
+}
+
+const WS_URL = resolveWebSocketUrl();
+const LOGO_SRC = publicAsset("mascotas/Pulpo_octavio.png");
 const ACTIVE_CONVERSATION_STORAGE_KEY = "octopus-active-conversation";
 const INITIAL_VISIBLE_MESSAGES = 20;
 const MESSAGE_PAGE_SIZE = 20;
 const USER_MESSAGE_PREVIEW_WORDS = 180;
 const USER_MESSAGE_PREVIEW_CHARS = 1800;
+const SELECTED_WORKFLOW_STORAGE_KEY = "octopus-selected-workflow-run";
 
 const MediaLibraryPage = lazy(() =>
 	import("./media-library.js").then(({ MediaLibraryPage }) => ({
@@ -116,10 +128,22 @@ interface Message {
 	role: "user" | "assistant";
 	content: string;
 	timestamp: number;
+	local?: boolean;
+}
+
+interface ChatMessageWire {
+	id?: string;
+	role: string;
+	content: string;
+	timestamp?: string;
+	metadata?: string | null;
+	[key: string]: unknown;
 }
 
 interface WsPayload {
+	kind?: string;
 	content?: string;
+	fullContent?: string;
 	response?: string;
 	text?: string;
 	chunk?: string;
@@ -131,7 +155,10 @@ interface WsPayload {
 	uiIconB64?: string;
 	activityDetail?: string | null;
 	executionId?: string;
+	assistantMessageId?: string | null;
 	execution?: ChatExecution;
+	assistantMessage?: ChatMessageWire | null;
+	workflowRunId?: string;
 	done?: boolean;
 	cancelled?: boolean;
 }
@@ -176,6 +203,7 @@ interface MultiAgentStep {
 	id: string;
 	label: string;
 	detail: string;
+	rawDetail?: string | null;
 	timestamp: number;
 	status: AgentActivityStatus;
 	toolName?: string | null;
@@ -190,6 +218,11 @@ interface MultiAgentWorkerState {
 	progress: number;
 	current: string;
 	steps: MultiAgentStep[];
+	agentId?: string;
+	agentName?: string;
+	armKey?: string;
+	agentAvatar?: string;
+	agentColor?: string;
 }
 
 interface MultiAgentPlanState {
@@ -216,13 +249,7 @@ const AGENT_ACTIVITY_STATUSES = new Set<string>([
 interface Conversation {
 	id: string;
 	title?: string | null;
-	messages?: Array<{
-		id?: string;
-		role: string;
-		content: string;
-		timestamp?: string;
-		[key: string]: unknown;
-	}>;
+	messages?: ChatMessageWire[];
 	created_at?: string;
 	updated_at?: string;
 	createdAt?: number;
@@ -255,6 +282,7 @@ interface ChatExecution {
 	current_status?: string | null;
 	activities?: string | null;
 	assistant_message_id?: string | null;
+	workflowRunId?: string | null;
 	error?: string | null;
 	started_at?: string;
 	updated_at?: string;
@@ -266,6 +294,7 @@ interface ConversationExecutionState {
 	status: ChatExecutionStatus;
 	currentStatus: AgentStatus;
 	activities: AgentActivity[];
+	workflowRunId?: string;
 	error?: string | null;
 	notified?: boolean;
 }
@@ -274,6 +303,56 @@ interface Agent {
 	id: string;
 	name: string;
 	description?: string;
+	avatar?: string | null;
+	color?: string | null;
+}
+
+function resolveAgentAvatarImage(avatar?: string | null): string | null {
+	const value = avatar?.trim();
+	if (!value) return LOGO_SRC;
+	if (/^(https?:|data:|blob:)/i.test(value)) return value;
+	if (value.startsWith("/api/")) return value;
+	if (value.startsWith("/") || /\.(png|jpe?g|gif|webp|svg)$/i.test(value)) {
+		return publicAsset(value);
+	}
+	return null;
+}
+
+function getAgentAvatarText(agent?: Agent | null): string {
+	const avatar = agent?.avatar?.trim();
+	if (avatar && !resolveAgentAvatarImage(avatar)) return avatar.slice(0, 3);
+	return agent?.name?.trim().slice(0, 2).toUpperCase() || "AI";
+}
+
+function AgentAvatarContent({
+	agent,
+	alt,
+	imageStyle,
+	textStyle,
+}: {
+	agent?: Agent | null;
+	alt: string;
+	imageStyle?: React.CSSProperties;
+	textStyle?: React.CSSProperties;
+}) {
+	const image = resolveAgentAvatarImage(agent?.avatar);
+	if (image) {
+		return <img src={image} alt={alt} style={imageStyle} />;
+	}
+	return (
+		<span
+			aria-label={alt}
+			style={{
+				fontSize: "1.45rem",
+				fontWeight: 900,
+				lineHeight: 1,
+				color: agent?.color ?? "#f4f4f5",
+				...textStyle,
+			}}
+		>
+			{getAgentAvatarText(agent)}
+		</span>
+	);
 }
 
 interface UserProfileResponse {
@@ -337,6 +416,111 @@ function nanoid(): string {
 	return crypto.randomUUID();
 }
 
+function toMessage(wire: ChatMessageWire): Message {
+	return {
+		id: wire.id || nanoid(),
+		role: wire.role as "user" | "assistant",
+		content: wire.content,
+		timestamp: new Date(wire.timestamp || Date.now()).getTime(),
+	};
+}
+
+function countMediaRefs(content: string): number {
+	return (content.match(/\/api\/media\/file\//g) ?? []).length;
+}
+
+function normalizeMessageContent(content: string): string {
+	return content.replace(/\r\n/g, "\n").trim();
+}
+
+function isSameMessageContent(a: Message, b: Message): boolean {
+	return (
+		normalizeMessageContent(a.content) === normalizeMessageContent(b.content)
+	);
+}
+
+function preferRicherMessage(current: Message, incoming: Message): Message {
+	if (current.role !== "assistant" || incoming.role !== "assistant") {
+		return {
+			...incoming,
+			timestamp: Math.max(current.timestamp, incoming.timestamp),
+		};
+	}
+	const currentMedia = countMediaRefs(current.content);
+	const incomingMedia = countMediaRefs(incoming.content);
+	const incomingIsRollback =
+		current.content.length > incoming.content.length &&
+		currentMedia >= incomingMedia;
+	const incomingLostMedia = currentMedia > incomingMedia;
+	if (incomingIsRollback || incomingLostMedia) {
+		return {
+			...current,
+			timestamp: Math.max(current.timestamp, incoming.timestamp),
+		};
+	}
+	return {
+		...incoming,
+		timestamp: Math.max(current.timestamp, incoming.timestamp),
+	};
+}
+
+function mergeMessagesById(current: Message[], incoming: Message[]): Message[] {
+	const merged = new Map<string, Message>();
+	for (const message of current) merged.set(message.id, message);
+	for (const message of incoming) {
+		let existing = merged.get(message.id);
+		if (!existing) {
+			for (const candidate of merged.values()) {
+				const localUserDuplicate =
+					candidate.local === true &&
+					message.role === "user" &&
+					candidate.role === "user" &&
+					isSameMessageContent(candidate, message);
+				const streamAssistantDuplicate =
+					candidate.id.startsWith("stream-") &&
+					message.role === "assistant" &&
+					candidate.role === "assistant" &&
+					(isSameMessageContent(candidate, message) ||
+						message.content.includes(candidate.content) ||
+						candidate.content.includes(message.content));
+				if (!localUserDuplicate && !streamAssistantDuplicate) continue;
+				existing = candidate;
+				merged.delete(candidate.id);
+				break;
+			}
+		}
+		const next = existing ? preferRicherMessage(existing, message) : message;
+		merged.set(message.id, { ...next, id: message.id, local: false });
+	}
+	return Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function truncateActivityText(value: string): string {
+	const cleaned = cleanAgentWorkText(value);
+	return cleaned.length > 180
+		? `${cleaned.slice(0, 177).trimEnd()}...`
+		: cleaned;
+}
+
+function getActivityDisplayDetail(
+	status: AgentActivityStatus,
+	toolName?: string | null,
+	detail?: string | null,
+): string | undefined {
+	const parsed = parseActivityDetailJson(detail);
+	const candidate =
+		asString(parsed?.message) ??
+		asString(parsed?.description) ??
+		asString(parsed?.reasoning) ??
+		asString(parsed?.error) ??
+		detail?.trim();
+	if (!candidate) return undefined;
+	const sanitized = truncateActivityText(candidate);
+	if (!sanitized) return undefined;
+	const fallback = getActivityCopy(status, toolName).detail;
+	return sanitized.length > fallback.length ? sanitized : sanitized || fallback;
+}
+
 function getSpeechRecognitionConstructor():
 	| SpeechRecognitionConstructorLike
 	| undefined {
@@ -377,27 +561,27 @@ function getActivityCopy(
 			return {
 				label: "Orquestando agentes",
 				detail:
-					"Dividiendo la tarea, creando workers y preparando el contexto compartido.",
+					"Dividiendo la tarea, activando brazos vivos y preparando el contexto compartido.",
 			};
 		case "worker_start":
 			return {
-				label: `Agente ${toolLabel} iniciado`,
-				detail: "Worker creado y comenzando su subtarea.",
+				label: `Brazo ${toolLabel} activado`,
+				detail: "Brazo vivo activado y comenzando su subtarea.",
 			};
 		case "worker_progress":
 			return {
-				label: `Agente ${toolLabel} trabajando`,
-				detail: "Worker ejecutando su siguiente paso.",
+				label: `Brazo ${toolLabel} trabajando`,
+				detail: "Brazo vivo ejecutando su siguiente paso.",
 			};
 		case "worker_done":
 			return {
-				label: `Agente ${toolLabel} terminado`,
-				detail: "Worker terminó su subtarea y devolvió resultado.",
+				label: `Brazo ${toolLabel} terminado`,
+				detail: "Brazo vivo terminó su subtarea y devolvió resultado.",
 			};
 		case "worker_error":
 			return {
-				label: `Agente ${toolLabel} falló`,
-				detail: "Worker reportó un error en su subtarea.",
+				label: `Brazo ${toolLabel} falló`,
+				detail: "Brazo vivo reportó un error en su subtarea.",
 			};
 		case "tool":
 			return {
@@ -465,6 +649,36 @@ function asNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value)
 		? value
 		: undefined;
+}
+
+function extractWorkflowRunIdFromDetail(detail?: string | null): string | undefined {
+	const parsed = parseActivityDetailJson(detail);
+	return asString(parsed?.workflowRunId);
+}
+
+function extractWorkflowRunIdFromActivities(
+	activities: ChatExecutionActivityWire[],
+): string | undefined {
+	for (let i = activities.length - 1; i >= 0; i -= 1) {
+		const workflowRunId = extractWorkflowRunIdFromDetail(
+			activities[i]?.activityDetail,
+		);
+		if (workflowRunId) return workflowRunId;
+	}
+	return undefined;
+}
+
+function extractWorkflowRunIdFromExecution(
+	execution: ChatExecution,
+): string | undefined {
+	if (execution.workflowRunId) return execution.workflowRunId;
+	if (!execution.activities) return undefined;
+	try {
+		const raw = JSON.parse(execution.activities) as ChatExecutionActivityWire[];
+		return Array.isArray(raw) ? extractWorkflowRunIdFromActivities(raw) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function cleanAgentWorkText(value: string): string {
@@ -605,7 +819,12 @@ function toAgentActivity(
 		id: activity.id,
 		status,
 		label: copy.label,
-		detail: activity.activityDetail?.trim() || copy.detail,
+		detail:
+			getActivityDisplayDetail(
+				status,
+				activity.toolName,
+				activity.activityDetail,
+			) || copy.detail,
 		toolName: activity.toolName ?? null,
 		iconSvg: decodeIcon(activity.uiIconB64),
 		timestamp: activity.timestamp,
@@ -654,6 +873,7 @@ function executionStateFromRecord(
 		status: execution.status,
 		currentStatus,
 		activities,
+		workflowRunId: extractWorkflowRunIdFromExecution(execution),
 		error: execution.error,
 	};
 }
@@ -876,10 +1096,16 @@ function AgentActivityPanel({
 	activities,
 	multiAgentPlan,
 	multiAgentWorkers,
+	agent,
+	workflowRunId,
+	onOpenWorkflow,
 }: {
 	activities: AgentActivity[];
 	multiAgentPlan?: MultiAgentPlanState | null;
 	multiAgentWorkers?: MultiAgentWorkerState[];
+	agent?: Agent | null;
+	workflowRunId?: string;
+	onOpenWorkflow?: (workflowRunId: string) => void;
 }) {
 	const latest = activities[activities.length - 1];
 	if (!latest) return null;
@@ -918,16 +1144,22 @@ function AgentActivityPanel({
 			? latest.status === "worker_done" && latestCompleted
 				? `El agente ${latestCompletedIndex + 1} completo ${summarizeAgentWork(latestCompleted).replace(/^completo\s+/i, "")}.`
 				: activeWorkers > 0
-					? `${activeWorkers} de ${workers.length} agentes siguen trabajando en ${goalText}.`
+					? `${activeWorkers} de ${workers.length} brazos vivos siguen trabajando en ${goalText}.`
 					: failedWorkers > 0
-						? `${completedWorkers}/${workers.length} agentes completaron su tarea; ${failedWorkers} tuvieron problemas.`
-						: `Los ${workers.length} agentes completaron sus tareas.`
+						? `${completedWorkers}/${workers.length} brazos completaron su tarea; ${failedWorkers} tuvieron problemas.`
+						: `Los ${workers.length} brazos vivos completaron sus tareas.`
 			: latest.detail;
 
 	return (
 		<div className="agent-activity-row">
-			<div className="agent-activity-avatar">
-				<img src="/logo_Pulpo_octavio.png" alt="Octopus" />
+			<div
+				className="agent-activity-avatar"
+				style={{ boxShadow: `0 10px 28px ${agent?.color ?? "#ff6f3b"}24` }}
+			>
+				<AgentAvatarContent
+					agent={agent}
+					alt={agent ? `${agent.name} avatar` : "Octopus"}
+				/>
 				<span className="agent-thought-cloud" aria-hidden="true">
 					<span />
 					<span />
@@ -942,7 +1174,7 @@ function AgentActivityPanel({
 					<div className="multi-agent-summary">
 						<div className="multi-agent-summary-top">
 							<span className="multi-agent-pill">
-								{multiAgentPlan?.count ?? workers.length} agentes
+								{multiAgentPlan?.count ?? workers.length} agentes vivos
 							</span>
 							{workers.length > 0 && (
 								<span className="multi-agent-pill muted">
@@ -951,6 +1183,16 @@ function AgentActivityPanel({
 							)}
 						</div>
 						<div className="multi-agent-live-text">{mainSummary}</div>
+						{workflowRunId && onOpenWorkflow && (
+							<button
+								type="button"
+								onClick={() => onOpenWorkflow(workflowRunId)}
+								className="multi-agent-pill"
+								style={{ marginTop: 10, cursor: "pointer" }}
+							>
+								Monitor durable: {workflowRunId}
+							</button>
+						)}
 					</div>
 				)}
 				<div className="agent-activity-current">
@@ -966,7 +1208,7 @@ function AgentActivityPanel({
 					<div style={{ minWidth: 0 }}>
 						<div className="agent-activity-title" style={{ color }}>
 							{workers.length > 0
-								? "Octopus coordinando agentes"
+								? "Octopus coordinando agentes vivos"
 								: latest.label}
 						</div>
 						<div className="agent-activity-detail">{mainSummary}</div>
@@ -983,16 +1225,20 @@ function AgentActivityPanel({
 				{showWorkerDetails && (
 					<div className="multi-agent-workers compact-list">
 						{workers.map((worker, index) => {
-							const workerColor =
+							const statusColor =
 								worker.status === "done"
 									? "#34d399"
 									: worker.status === "error"
 										? "#ef4444"
 										: "#38bdf8";
+							const workerColor = worker.agentColor ?? statusColor;
 							const workText = summarizeAgentWork(worker);
 							const active =
 								worker.status === "running" || worker.status === "queued";
 							const toolKind = getWorkerToolKind(worker);
+							const avatar = worker.agentAvatar;
+							const workerTitle =
+								worker.agentName ?? worker.role ?? `Brazo ${index + 1}`;
 							return (
 								<div
 									key={worker.id}
@@ -1004,11 +1250,19 @@ function AgentActivityPanel({
 											className={`multi-agent-worker-avatar ${active ? "active" : ""}`}
 											style={{ borderColor: `${workerColor}66` }}
 										>
-											<span className="agent-glyph">◎</span>
+											{avatar?.startsWith("/") || avatar?.startsWith("http") ? (
+												<img
+													src={avatar}
+													alt=""
+													style={{ width: 30, height: 30, borderRadius: "999px", objectFit: "cover" }}
+												/>
+											) : (
+												<span className="agent-glyph">{avatar ?? "◎"}</span>
+											)}
 											<ToolBadge kind={toolKind} active={active} />
 										</span>
 										<span className="multi-agent-worker-title">
-											Agente {index + 1}
+											{workerTitle}
 										</span>
 										<span
 											className="multi-agent-worker-status"
@@ -1033,7 +1287,7 @@ function AgentActivityPanel({
 				)}
 				{workers.length > 6 && (
 					<div className="multi-agent-collapsed-note">
-						Detalle de {workers.length} agentes colapsado. {mainSummary}
+						Detalle de {workers.length} brazos colapsado. {mainSummary}
 					</div>
 				)}
 				{workers.length === 0 && recent.length > 1 && (
@@ -1059,7 +1313,7 @@ function AgentActivityPanel({
 	);
 }
 
-const MEDIA_BASE = `http://${window.location.hostname}:18789`;
+const MEDIA_BASE = API_BASE;
 
 function isMediaUrl(href: string): boolean {
 	return (
@@ -1352,7 +1606,8 @@ function getPayloadText(payload: WsPayload | string | undefined): string {
 const ChatMessage = memo(function ChatMessage({
 	msg,
 	collapsed,
-}: { msg: Message; collapsed?: boolean }) {
+	agent,
+}: { msg: Message; collapsed?: boolean; agent?: Agent | null }) {
 	const [showFullUserMessage, setShowFullUserMessage] = useState(false);
 	const [showHeavyMessage, setShowHeavyMessage] = useState(false);
 	const [copied, setCopied] = useState(false);
@@ -1767,14 +2022,14 @@ const ChatMessage = memo(function ChatMessage({
 						justifyContent: "center",
 						marginRight: "16px",
 						flexShrink: 0,
-						boxShadow: "0 8px 22px rgba(255,111,59,.12)",
+						boxShadow: `0 8px 22px ${agent?.color ?? "#ff6f3b"}22`,
 						overflow: "hidden",
 					}}
 				>
-					<img
-						src="/logo_Pulpo_octavio.png"
-						alt="Octopus"
-						style={{ width: "54px", height: "54px", objectFit: "contain" }}
+					<AgentAvatarContent
+						agent={agent}
+						alt={agent ? `${agent.name} avatar` : "Octopus"}
+						imageStyle={{ width: "54px", height: "54px", objectFit: "contain" }}
 					/>
 				</div>
 			)}
@@ -2074,9 +2329,14 @@ export const ChatPage: React.FC<{
 									role: asString(task.role),
 									description:
 										asString(task.description) ?? "Subtarea asignada.",
+									agentId: asString(task.agentId),
+									agentName: asString(task.agentName),
+									armKey: asString(task.armKey),
+									agentAvatar: asString(task.agentAvatar),
+									agentColor: asString(task.agentColor),
 									status: "queued" as const,
 									progress: 0,
-									current: "Esperando asignación del worker.",
+									current: "Esperando asignación del brazo vivo.",
 									steps: [],
 								};
 							}),
@@ -2118,10 +2378,16 @@ export const ChatPage: React.FC<{
 				id: nanoid(),
 				label: copy.label,
 				detail: message,
+				rawDetail: detail ?? null,
 				timestamp: Date.now(),
 				status,
 				toolName: asString(parsed?.toolName) ?? null,
 			};
+			const agentId = asString(parsed?.agentId);
+			const agentName = asString(parsed?.agentName);
+			const armKey = asString(parsed?.armKey);
+			const agentAvatar = asString(parsed?.agentAvatar);
+			const agentColor = asString(parsed?.agentColor);
 
 			setMultiAgentWorkers((prev) => {
 				const existingIndex = prev.findIndex(
@@ -2135,6 +2401,11 @@ export const ChatPage: React.FC<{
 							taskId,
 							role: asString(parsed?.role),
 							description: asString(parsed?.description) ?? message,
+							agentId,
+							agentName,
+							armKey,
+							agentAvatar,
+							agentColor,
 							status: nextStatus,
 							progress,
 							current: message,
@@ -2151,6 +2422,11 @@ export const ChatPage: React.FC<{
 						taskId: taskId ?? worker.taskId,
 						role: asString(parsed?.role) ?? worker.role,
 						description: asString(parsed?.description) ?? worker.description,
+						agentId: agentId ?? worker.agentId,
+						agentName: agentName ?? worker.agentName,
+						armKey: armKey ?? worker.armKey,
+						agentAvatar: agentAvatar ?? worker.agentAvatar,
+						agentColor: agentColor ?? worker.agentColor,
 						status: nextStatus,
 						progress: Math.max(worker.progress, progress),
 						current: message,
@@ -2283,6 +2559,11 @@ export const ChatPage: React.FC<{
 			.catch(() => {});
 	}, []);
 
+	const selectedAgent = useMemo(
+		() => agents.find((agent) => agent.id === selectedAgentId) ?? null,
+		[agents, selectedAgentId],
+	);
+
 	const visibleConversations = useMemo(() => {
 		const query = conversationSearch.trim().toLowerCase();
 		if (!query) return conversations;
@@ -2341,28 +2622,25 @@ export const ChatPage: React.FC<{
 		}
 	}, [conversations, activeConversationId, conversationsLoaded]);
 
-	const loadConversationMessages = useCallback(async (convId: string) => {
-		try {
-			const raw = await apiGet<{ conversation: Conversation }>(
-				`/api/conversations/${convId}`,
-			);
-			const conv = raw.conversation ?? (raw as unknown as Conversation);
-			if (conv.messages && conv.messages.length > 0) {
-				setMessages(
-					conv.messages.map((m) => ({
-						id: m.id || nanoid(),
-						role: m.role as "user" | "assistant",
-						content: m.content,
-						timestamp: new Date(m.timestamp || Date.now()).getTime(),
-					})),
+	const loadConversationMessages = useCallback(
+		async (convId: string, options?: { merge?: boolean }) => {
+			try {
+				const raw = await apiGet<{ conversation: Conversation }>(
+					`/api/conversations/${convId}`,
 				);
-			} else {
-				setMessages([]);
+				const conv = raw.conversation ?? (raw as unknown as Conversation);
+				const incoming = conv.messages?.map(toMessage) ?? [];
+				if (options?.merge) {
+					setMessages((prev) => mergeMessagesById(prev, incoming));
+					return;
+				}
+				setMessages(incoming);
+			} catch {
+				if (!options?.merge) setMessages([]);
 			}
-		} catch {
-			setMessages([]);
-		}
-	}, []);
+		},
+		[],
+	);
 
 	const syncConversationExecution = useCallback(
 		async (conversationId: string, options?: { reloadMessages?: boolean }) => {
@@ -2380,7 +2658,7 @@ export const ChatPage: React.FC<{
 						lastActivityKeyRef.current = "";
 						pendingIdRef.current = "";
 						if (options?.reloadMessages)
-							void loadConversationMessages(conversationId);
+							void loadConversationMessages(conversationId, { merge: true });
 					}
 					return;
 				}
@@ -2392,6 +2670,26 @@ export const ChatPage: React.FC<{
 				}));
 				if (
 					conversationId === activeConvRef.current &&
+					options?.reloadMessages
+				) {
+					void loadConversationMessages(conversationId, { merge: true });
+				}
+				if (
+					conversationId === activeConvRef.current &&
+					isExecutionActive(nextState)
+				) {
+					setIsLoading(true);
+					setIsStreaming(Boolean(execution.assistant_message_id));
+					setAgentStatus(
+						nextState.currentStatus === "idle"
+							? "thinking"
+							: nextState.currentStatus,
+					);
+					setAgentActivity(nextState.activities);
+					return;
+				}
+				if (
+					conversationId === activeConvRef.current &&
 					!isExecutionActive(nextState)
 				) {
 					setIsLoading(false);
@@ -2400,8 +2698,6 @@ export const ChatPage: React.FC<{
 					setAgentActivity([]);
 					lastActivityKeyRef.current = "";
 					pendingIdRef.current = "";
-					if (options?.reloadMessages)
-						void loadConversationMessages(conversationId);
 					loadConversations();
 					inputRef.current?.focus();
 				}
@@ -2624,8 +2920,50 @@ export const ChatPage: React.FC<{
 
 				const conversationId = msg.payload?.conversationId;
 				const executionId = msg.payload?.executionId;
+				const payloadWorkflowRunId =
+					msg.payload?.workflowRunId ??
+					extractWorkflowRunIdFromDetail(msg.payload?.activityDetail);
+				const assistantMessageId = msg.payload?.assistantMessageId ?? undefined;
 				const isActiveConversation =
 					!conversationId || conversationId === activeConvRef.current;
+				if (
+					conversationId &&
+					msg.payload?.kind === "execution_snapshot" &&
+					msg.payload.execution
+				) {
+					const execution = msg.payload.execution;
+					const nextState = executionStateFromRecord(execution);
+					setExecutionByConversation((prev) => ({
+						...prev,
+						[conversationId]: nextState,
+					}));
+					if (isActiveConversation) {
+						if (msg.payload.assistantMessage?.content) {
+							const checkpoint = toMessage(msg.payload.assistantMessage);
+							setMessages((prev) => {
+								return mergeMessagesById(prev, [checkpoint]);
+							});
+						}
+						if (isExecutionActive(nextState)) {
+							setIsLoading(true);
+							setIsStreaming(Boolean(execution.assistant_message_id));
+							setAgentStatus(
+								nextState.currentStatus === "idle"
+									? "thinking"
+									: nextState.currentStatus,
+							);
+							setAgentActivity(nextState.activities);
+						} else {
+							setIsLoading(false);
+							setIsStreaming(false);
+							setAgentStatus("idle");
+							setAgentActivity(nextState.activities);
+							pendingIdRef.current = "";
+						}
+						void loadConversationMessages(conversationId, { merge: true });
+					}
+					return;
+				}
 				if (conversationId && msg.payload?.execution) {
 					const execution = msg.payload.execution;
 					setExecutionByConversation((prev) => ({
@@ -2671,33 +3009,37 @@ export const ChatPage: React.FC<{
 						status: "completed",
 						currentStatus: "idle",
 						activities: prev?.activities ?? [],
+						workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
 					}));
 					resetAgentTrace();
 					const assistantContent = getPayloadText(msg.payload);
 
 					if (isActiveConversation) {
 						setMessages((prev) => {
-							const existing = prev.find((m) => m.id === `stream-${msg.id}`);
+							const fallbackStreamId = `stream-${executionId ?? msg.id}`;
+							const responseMessageId = assistantMessageId ?? fallbackStreamId;
+							const incoming: Message = {
+								id: responseMessageId,
+								role: "assistant",
+								content: assistantContent,
+								timestamp: Date.now(),
+							};
+							const existing =
+								prev.find((m) => m.id === responseMessageId) ??
+								(assistantMessageId
+									? prev.find((m) => m.id === fallbackStreamId)
+									: undefined);
 							if (existing) {
 								return prev.map((m) =>
-									m.id === `stream-${msg.id}`
+									m.id === existing.id
 										? {
-												...m,
-												content: assistantContent,
-												role: "assistant" as const,
+												...preferRicherMessage(m, incoming),
+												id: responseMessageId,
 											}
 										: m,
 								);
 							}
-							return [
-								...prev,
-								{
-									id: msg.id,
-									role: "assistant",
-									content: assistantContent,
-									timestamp: Date.now(),
-								},
-							];
+							return [...prev, incoming];
 						});
 					} else if (
 						executionId &&
@@ -2717,33 +3059,42 @@ export const ChatPage: React.FC<{
 					inputRef.current?.focus();
 				} else if (msg.type === "stream") {
 					const chunk = getPayloadText(msg.payload);
-					const streamId = `stream-${msg.id}`;
+					const fallbackStreamId = `stream-${executionId ?? msg.id}`;
+					const streamId = assistantMessageId ?? fallbackStreamId;
+					const fullContent = msg.payload?.fullContent;
 					updateConversationExecution(conversationId, (prev) => ({
 						executionId: executionId ?? prev?.executionId ?? msg.id,
 						status: "running",
 						currentStatus: "responding",
 						activities: prev?.activities ?? [],
+						workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
 					}));
 					if (!isActiveConversation) return;
 					setIsStreaming(true);
 					setAgentStatus("responding");
 					addAgentActivity("responding");
 					setMessages((prev) => {
-						const existing = prev.find((m) => m.id === streamId);
+						const existing =
+							prev.find((m) => m.id === streamId) ??
+							(assistantMessageId
+								? prev.find((m) => m.id === fallbackStreamId)
+								: undefined);
+						const incomingContent =
+							fullContent ?? (existing ? existing.content + chunk : chunk);
+						const incoming: Message = {
+							id: streamId,
+							role: "assistant",
+							content: incomingContent,
+							timestamp: Date.now(),
+						};
 						if (existing) {
 							return prev.map((m) =>
-								m.id === streamId ? { ...m, content: m.content + chunk } : m,
+								m.id === existing.id
+									? { ...preferRicherMessage(m, incoming), id: streamId }
+									: m,
 							);
 						}
-						return [
-							...prev,
-							{
-								id: streamId,
-								role: "assistant",
-								content: chunk,
-								timestamp: Date.now(),
-							},
-						];
+						return [...prev, incoming];
 					});
 					// Auto-scroll on each streaming chunk
 					scrollToBottom(true);
@@ -2753,6 +3104,7 @@ export const ChatPage: React.FC<{
 						status: msg.payload?.cancelled ? "cancelled" : "completed",
 						currentStatus: "idle",
 						activities: prev?.activities ?? [],
+						workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
 						error: msg.payload?.error ?? null,
 					}));
 					if (
@@ -2784,6 +3136,8 @@ export const ChatPage: React.FC<{
 					setIsStreaming(false);
 					resetAgentTrace();
 					pendingIdRef.current = "";
+					if (conversationId)
+						void loadConversationMessages(conversationId, { merge: true });
 					loadConversations();
 					inputRef.current?.focus();
 				} else if (msg.type === "event") {
@@ -2800,16 +3154,11 @@ export const ChatPage: React.FC<{
 								nextIcon = null;
 							}
 						}
-						const parsedDetail = parseActivityDetailJson(
+						const displayDetail = getActivityDisplayDetail(
+							nextStatus,
+							nextToolName,
 							msg.payload?.activityDetail,
 						);
-						const displayDetail =
-							asString(parsedDetail?.message) ??
-							asString(parsedDetail?.description) ??
-							asString(parsedDetail?.reasoning) ??
-							asString(parsedDetail?.result) ??
-							asString(parsedDetail?.error) ??
-							msg.payload?.activityDetail?.trim();
 						const copy = getActivityCopy(nextStatus, nextToolName);
 						const nextActivity: AgentActivity = {
 							id: nanoid(),
@@ -2827,6 +3176,7 @@ export const ChatPage: React.FC<{
 							activities: [...(prev?.activities ?? []), nextActivity].slice(
 								-80,
 							),
+							workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
 						}));
 						if (isActiveConversation) {
 							setAgentStatus(nextStatus);
@@ -2851,6 +3201,7 @@ export const ChatPage: React.FC<{
 						status: "failed",
 						currentStatus: "idle",
 						activities: prev?.activities ?? [],
+						workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
 						error: errMsg,
 					}));
 					if (isActiveConversation) {
@@ -2885,6 +3236,7 @@ export const ChatPage: React.FC<{
 	}, [
 		addAgentActivity,
 		applyMultiAgentEvent,
+		loadConversationMessages,
 		loadConversations,
 		resetAgentTrace,
 		scrollToBottom,
@@ -2924,6 +3276,19 @@ export const ChatPage: React.FC<{
 	const shouldShowAgentActivity =
 		(activeBusy || isStreaming || agentStatus !== "idle") &&
 		latestVisibleAgentActivity?.status !== "responding";
+	const activeWorkflowRunId = activeExecution?.workflowRunId;
+
+	const openWorkflowMonitor = useCallback(
+		(workflowRunId: string) => {
+			try {
+				localStorage.setItem(SELECTED_WORKFLOW_STORAGE_KEY, workflowRunId);
+			} catch {
+				// Navigation still works; Tasks will simply show the workflow list.
+			}
+			onNavigate?.("tasks");
+		},
+		[onNavigate],
+	);
 
 	useEffect(() => {
 		const needsRecovery =
@@ -3093,6 +3458,7 @@ export const ChatPage: React.FC<{
 			role: "user",
 			content: finalContent,
 			timestamp: Date.now(),
+			local: true,
 		};
 		setMessages((prev) => [...prev, userMsg]);
 		setInput("");
@@ -4164,11 +4530,14 @@ export const ChatPage: React.FC<{
 											Plan local · Octopus AI
 										</div>
 										<div className="chat-welcome-title-row">
-											<img
-												src="/logo_Pulpo_octavio.png"
-												alt="Octopus"
-												className="chat-welcome-logo"
-											/>
+											<div className="chat-welcome-logo">
+												<AgentAvatarContent
+													agent={selectedAgent}
+													alt={selectedAgent ? `${selectedAgent.name} avatar` : "Octopus"}
+													imageStyle={{ width: "100%", height: "100%", objectFit: "contain" }}
+													textStyle={{ fontSize: "2.2rem" }}
+												/>
+											</div>
 											<h1 className="chat-welcome-title">
 												Buenos dias, {userDisplayName}
 											</h1>
@@ -4243,9 +4612,14 @@ export const ChatPage: React.FC<{
 													{collapsedCount} restantes)
 												</button>
 											)}
-											{visible.map((msg) => (
-												<ChatMessage key={msg.id} msg={msg} collapsed={false} />
-											))}
+										{visible.map((msg) => (
+											<ChatMessage
+												key={msg.id}
+												msg={msg}
+												collapsed={false}
+												agent={selectedAgent}
+											/>
+										))}
 										</>
 									);
 								})()}
@@ -4254,7 +4628,45 @@ export const ChatPage: React.FC<{
 										activities={visibleAgentActivity}
 										multiAgentPlan={multiAgentPlan}
 										multiAgentWorkers={multiAgentWorkers}
+										agent={selectedAgent}
+										workflowRunId={activeWorkflowRunId}
+										onOpenWorkflow={openWorkflowMonitor}
 									/>
+								)}
+								{!shouldShowAgentActivity && activeWorkflowRunId && (
+									<div className="agent-activity-row">
+										<div
+											className="agent-activity-avatar"
+											style={{
+												boxShadow: `0 10px 28px ${selectedAgent?.color ?? "#ff6f3b"}24`,
+											}}
+										>
+											<AgentAvatarContent
+												agent={selectedAgent}
+												alt={selectedAgent ? `${selectedAgent.name} avatar` : "Octopus"}
+											/>
+										</div>
+										<div className="agent-activity-card compact">
+											<div className="agent-activity-current">
+												<div style={{ minWidth: 0 }}>
+													<div className="agent-activity-title">
+														Workflow durable registrado
+													</div>
+													<div className="agent-activity-detail">
+														El run {activeWorkflowRunId} tiene subtareas, eventos y artefactos persistidos.
+													</div>
+												</div>
+												<button
+													type="button"
+													onClick={() => openWorkflowMonitor(activeWorkflowRunId)}
+													className="multi-agent-pill"
+													style={{ cursor: "pointer" }}
+												>
+													Abrir monitor
+												</button>
+											</div>
+										</div>
+									</div>
 								)}
 
 								<div
@@ -4767,7 +5179,7 @@ export const ChatPage: React.FC<{
 				.chat-welcome { min-height: min(640px, calc(100vh - 230px)); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 16px 22px; text-align: center; }
 				.chat-welcome-plan { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 72px; padding: 9px 16px; border-radius: 13px; background: rgba(24,24,27,.82); color: #a1a1aa; font-size: 0.92rem; font-weight: 700; border: 1px solid rgba(63,63,70,.45); }
 				.chat-welcome-title-row { display: flex; align-items: center; justify-content: center; gap: 30px; margin-bottom: 14px; }
-				.chat-welcome-logo { width: 184px; height: 184px; object-fit: contain; filter: drop-shadow(0 14px 28px rgba(255,111,59,.18)); image-rendering: auto; }
+				.chat-welcome-logo { width: 184px; height: 184px; display: flex; align-items: center; justify-content: center; object-fit: contain; filter: drop-shadow(0 14px 28px rgba(255,111,59,.18)); image-rendering: auto; }
 				.chat-welcome-title { margin: 0; color: #d9d6cd; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(2.35rem, 5vw, 4.45rem); font-weight: 400; letter-spacing: -0.055em; line-height: 1.02; }
 				.chat-welcome-subtitle { margin: 0 0 54px; color: #a6a39c; font-size: clamp(1.1rem, 2.2vw, 1.55rem); font-weight: 500; }
 				.chat-welcome-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; max-width: 900px; }

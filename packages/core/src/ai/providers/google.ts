@@ -10,6 +10,13 @@ import type {
 } from "../types.js";
 import { BaseLLMProvider } from "./base.js";
 
+interface GoogleServiceAccountCredentials {
+	client_email?: string;
+	private_key?: string;
+	token_uri?: string;
+	project_id?: string;
+}
+
 const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, "none">, number> = {
 	low: 128,
 	medium: 1024,
@@ -46,8 +53,10 @@ export class GoogleProvider extends BaseLLMProvider {
 	}
 
 	private vertexProjectId(): string {
+		const credentials = this.loadVertexCredentials(false);
 		return (
 			this.config.projectId ??
+			credentials?.project_id ??
 			process.env.GOOGLE_CLOUD_PROJECT ??
 			process.env.GCLOUD_PROJECT ??
 			""
@@ -64,6 +73,18 @@ export class GoogleProvider extends BaseLLMProvider {
 	}
 
 	private async getHeaders(): Promise<Record<string, string>> {
+		if (this.config.authMode === "oauth") {
+			const token = this.config.oauthAccessToken;
+			if (!token) {
+				throw new Error(
+					"Google OAuth mode requires an access token. Please login again.",
+				);
+			}
+			return {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			};
+		}
 		if (this.authMode === "vertex") {
 			return {
 				"Content-Type": "application/json",
@@ -78,23 +99,19 @@ export class GoogleProvider extends BaseLLMProvider {
 
 	private async vertexAccessToken(): Promise<string> {
 		const configured =
-			this.config.accessToken ?? process.env.GOOGLE_VERTEX_ACCESS_TOKEN;
+			this.config.accessToken ??
+			this.config.oauthAccessToken ??
+			process.env.GOOGLE_VERTEX_ACCESS_TOKEN;
 		if (configured?.trim()) return configured.trim();
 		if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 60_000) {
 			return this.tokenCache.token;
 		}
-		const credentialsFile =
-			this.config.credentialsFile ?? process.env.GOOGLE_APPLICATION_CREDENTIALS;
-		if (!credentialsFile || !existsSync(credentialsFile)) {
+		const credentials = this.loadVertexCredentials(true);
+		if (!credentials) {
 			throw new Error(
-				"Google Vertex auth requires GOOGLE_VERTEX_ACCESS_TOKEN or GOOGLE_APPLICATION_CREDENTIALS",
+				"Google Vertex auth requires GOOGLE_VERTEX_ACCESS_TOKEN, credentialsJson, credentialsFile, or GOOGLE_APPLICATION_CREDENTIALS",
 			);
 		}
-		const credentials = JSON.parse(readFileSync(credentialsFile, "utf8")) as {
-			client_email?: string;
-			private_key?: string;
-			token_uri?: string;
-		};
 		if (!credentials.client_email || !credentials.private_key) {
 			throw new Error("Google service account credentials are incomplete");
 		}
@@ -137,6 +154,29 @@ export class GoogleProvider extends BaseLLMProvider {
 			expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000,
 		};
 		return token.access_token;
+	}
+
+	private loadVertexCredentials(
+		throwOnInvalid: boolean,
+	): GoogleServiceAccountCredentials | null {
+		const rawJson = this.config.credentialsJson;
+		if (rawJson?.trim()) {
+			try {
+				return JSON.parse(rawJson) as GoogleServiceAccountCredentials;
+			} catch {
+				if (throwOnInvalid) {
+					throw new Error("Google credentialsJson is not valid JSON");
+				}
+				return null;
+			}
+		}
+
+		const credentialsFile =
+			this.config.credentialsFile ?? process.env.GOOGLE_APPLICATION_CREDENTIALS;
+		if (!credentialsFile || !existsSync(credentialsFile)) return null;
+		return JSON.parse(
+			readFileSync(credentialsFile, "utf8"),
+		) as GoogleServiceAccountCredentials;
 	}
 
 	private buildThinkingConfig(request: LLMRequest): Record<string, unknown> {
@@ -411,7 +451,9 @@ export class GoogleProvider extends BaseLLMProvider {
 			return Boolean(
 				this.vertexProjectId() &&
 					(this.config.accessToken ||
+						this.config.oauthAccessToken ||
 						process.env.GOOGLE_VERTEX_ACCESS_TOKEN ||
+						this.config.credentialsJson ||
 						this.config.credentialsFile ||
 						process.env.GOOGLE_APPLICATION_CREDENTIALS),
 			);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { GoogleProvider } from "../ai/providers/google.js";
 import { resolveProviderConfig } from "../ai/router.js";
 
 const envKeys = [
@@ -115,5 +116,18 @@ describe("resolveProviderConfig", () => {
 
 		expect(config.authMode).toBe("vertex");
 		expect(config.baseUrl).toBe("https://vertex.example/v1");
+	});
+
+	it("accepts inline Google Vertex service account JSON", async () => {
+		const provider = new GoogleProvider({
+			authMode: "vertex",
+			credentialsJson: JSON.stringify({
+				project_id: "vertex-project",
+				client_email: "svc@example.iam.gserviceaccount.com",
+				private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+			}),
+		});
+
+		expect(await provider.isAvailable()).toBe(true);
 	});
 });

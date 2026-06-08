@@ -1,10 +1,71 @@
 .app-shell {
+	position: relative;
 	display: flex;
 	height: 100vh;
+	box-sizing: border-box;
 	background: #000;
 	color: #fafafa;
 	font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
 		sans-serif;
+}
+
+.app-shell.is-electron {
+	height: 100vh;
+	padding-top: 34px;
+	border: 1px solid #242424;
+}
+
+.app-electron-titlebar {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 34px;
+	z-index: 1000;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	background: #050505;
+	border-bottom: 1px solid #151515;
+}
+
+.app-electron-titlebar-drag {
+	position: absolute;
+	inset: 0 138px 0 0;
+	-webkit-app-region: drag;
+}
+
+.app-electron-controls {
+	position: relative;
+	z-index: 1;
+	display: flex;
+	height: 100%;
+	-webkit-app-region: no-drag;
+}
+
+.app-electron-control {
+	width: 46px;
+	height: 100%;
+	border: 0;
+	background: transparent;
+	color: #d4d4d8;
+	cursor: pointer;
+	font: inherit;
+	font-size: 1rem;
+	line-height: 1;
+}
+
+.app-electron-control:hover,
+.app-electron-control:focus-visible {
+	background: #18181b;
+	color: #fff;
+	outline: none;
+}
+
+.app-electron-control.is-close:hover,
+.app-electron-control.is-close:focus-visible {
+	background: #dc2626;
+	color: #fff;
 }
 
 .app-mobile-header {

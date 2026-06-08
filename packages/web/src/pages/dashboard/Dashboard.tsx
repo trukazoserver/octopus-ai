@@ -2,14 +2,18 @@ import type React from "react";
 import { ActivityFeed } from "../../components/dashboard/ActivityFeed.js";
 import { DashboardStatsGrid } from "../../components/dashboard/DashboardStats.js";
 import { QuickActions } from "../../components/dashboard/QuickActions.js";
+import type { DashboardArmSummary, WorkflowRunSummary } from "../../hooks/useDashboard.js";
 import { useDashboard } from "../../hooks/useDashboard.js";
+import { publicAsset } from "../../utils/assets.js";
+
+const LOGO_SRC = publicAsset("mascotas/Pulpo_octavio.png");
 
 interface DashboardPageProps {
 	onNavigate?: (tab: string) => void;
 }
 
 export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
-	const { stats, activity, loading, reload } = useDashboard();
+	const { stats, activity, recentWorkflows, arms, loading, reload } = useDashboard();
 
 	return (
 		<div className="page-shell" style={{ maxWidth: "1220px" }}>
@@ -37,7 +41,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 						}}
 					>
 						<img
-							src="/logo_Pulpo_octavio.png"
+							src={LOGO_SRC}
 							alt="Octopus AI"
 							style={{ width: "46px", height: "46px", objectFit: "contain" }}
 						/>
@@ -133,6 +137,21 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 				<DashboardStatsGrid stats={stats} loading={loading} />
 			</div>
 
+			<div
+				style={{
+					display: "grid",
+					gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+					gap: "18px",
+					marginBottom: "32px",
+				}}
+			>
+				<RecentWorkflowsCard
+					workflows={recentWorkflows}
+					onOpenTasks={() => onNavigate?.("tasks")}
+				/>
+				<ArmStatusCard arms={arms} />
+			</div>
+
 			{/* Activity Feed */}
 			<div>
 				<h2
@@ -160,4 +179,172 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 			</div>
 		</div>
 	);
+};
+
+const RecentWorkflowsCard: React.FC<{
+	workflows: WorkflowRunSummary[];
+	onOpenTasks: () => void;
+}> = ({ workflows, onOpenTasks }) => (
+	<section style={panelStyle}>
+		<div style={panelHeaderStyle}>
+			<div>
+				<h2 style={panelTitleStyle}>Workflows recientes</h2>
+				<p style={panelSubtitleStyle}>Ejecuciones durables y recuperables</p>
+			</div>
+			<button type="button" onClick={onOpenTasks} style={panelButtonStyle}>
+				Ver tareas
+			</button>
+		</div>
+		{workflows.length === 0 ? (
+			<div style={emptyStyle}>Aún no hay workflows registrados.</div>
+		) : (
+			<div style={{ display: "grid", gap: "10px" }}>
+				{workflows.map((workflow) => (
+					<div key={workflow.id} style={workflowItemStyle}>
+						<div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+							<strong style={{ color: "#f4f4f5", fontSize: "0.88rem" }}>
+								{workflow.goal || workflow.id}
+							</strong>
+							<span style={{ ...statusBadgeStyle, color: workflowColor(workflow.status) }}>
+								{workflow.status}
+							</span>
+						</div>
+						<div style={{ color: "#71717a", fontSize: "0.75rem", marginTop: 6 }}>
+							{workflow.current_phase ? `Fase: ${workflow.current_phase} · ` : ""}
+							{formatDate(workflow.updated_at)}
+						</div>
+					</div>
+				))}
+			</div>
+		)}
+	</section>
+);
+
+const ArmStatusCard: React.FC<{ arms: DashboardArmSummary[] }> = ({ arms }) => (
+	<section style={panelStyle}>
+		<div style={panelHeaderStyle}>
+			<div>
+				<h2 style={panelTitleStyle}>Brazos Octopus</h2>
+				<p style={panelSubtitleStyle}>Identidades builtin listas para delegación</p>
+			</div>
+			<span style={{ color: "#a78bfa", fontWeight: 800 }}>{arms.length}/8</span>
+		</div>
+		{arms.length === 0 ? (
+			<div style={emptyStyle}>Los brazos aparecerán después del bootstrap.</div>
+		) : (
+			<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+				{arms.map((arm) => (
+					<div key={arm.id} style={armItemStyle}>
+						<span style={{ width: 8, height: 8, borderRadius: 999, background: arm.color ?? "#818cf8" }} />
+						<div style={{ minWidth: 0 }}>
+							<div style={{ color: "#f4f4f5", fontSize: "0.84rem", fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+								{arm.name}
+							</div>
+							<div style={{ color: "#71717a", fontSize: "0.72rem" }}>
+								{arm.armKey ?? arm.role}
+							</div>
+						</div>
+					</div>
+				))}
+			</div>
+		)}
+	</section>
+);
+
+function workflowColor(status: string): string {
+	switch (status) {
+		case "done":
+			return "#22c55e";
+		case "running":
+		case "ready":
+			return "#38bdf8";
+		case "interrupted":
+		case "partial":
+			return "#f59e0b";
+		case "failed":
+		case "blocked":
+		case "cancelled":
+			return "#ef4444";
+		default:
+			return "#a1a1aa";
+	}
+}
+
+function formatDate(value?: string): string {
+	if (!value) return "sin fecha";
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return value;
+	return date.toLocaleString(undefined, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+const panelStyle: React.CSSProperties = {
+	background: "rgba(24, 24, 27, 0.45)",
+	border: "1px solid #27272a",
+	borderRadius: "16px",
+	padding: "18px",
+};
+
+const panelHeaderStyle: React.CSSProperties = {
+	display: "flex",
+	justifyContent: "space-between",
+	alignItems: "flex-start",
+	gap: "14px",
+	marginBottom: "14px",
+};
+
+const panelTitleStyle: React.CSSProperties = {
+	fontSize: "1rem",
+	fontWeight: 800,
+	color: "#f4f4f5",
+	margin: 0,
+};
+
+const panelSubtitleStyle: React.CSSProperties = {
+	fontSize: "0.78rem",
+	color: "#71717a",
+	margin: "4px 0 0",
+};
+
+const panelButtonStyle: React.CSSProperties = {
+	border: "1px solid rgba(167, 139, 250, 0.35)",
+	background: "rgba(167, 139, 250, 0.1)",
+	color: "#c4b5fd",
+	borderRadius: "9px",
+	padding: "7px 10px",
+	fontSize: "0.78rem",
+	fontWeight: 700,
+	cursor: "pointer",
+};
+
+const emptyStyle: React.CSSProperties = {
+	padding: "22px",
+	borderRadius: "12px",
+	background: "rgba(9, 9, 11, 0.35)",
+	color: "#71717a",
+	fontSize: "0.84rem",
+	textAlign: "center",
+};
+
+const workflowItemStyle: React.CSSProperties = {
+	padding: "12px",
+	borderRadius: "12px",
+	background: "rgba(9, 9, 11, 0.45)",
+	border: "1px solid rgba(255,255,255,0.04)",
+};
+
+const statusBadgeStyle: React.CSSProperties = {
+	fontSize: "0.72rem",
+	fontWeight: 800,
+	textTransform: "uppercase",
+	letterSpacing: "0.04em",
+};
+
+const armItemStyle: React.CSSProperties = {
+	display: "flex",
+	alignItems: "center",
+	gap: "8px",
+	padding: "10px",
+	borderRadius: "10px",
+	background: "rgba(9, 9, 11, 0.45)",
+	border: "1px solid rgba(255,255,255,0.04)",
 };

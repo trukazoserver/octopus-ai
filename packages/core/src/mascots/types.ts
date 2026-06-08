@@ -1,8 +1,11 @@
 export const MASCOT_IDS = [
+	"abeja-bibi",
 	"anemona-anita",
+	"arana-ari",
 	"calamar-cali",
 	"cangrejo-crabby",
 	"estrella-estelita",
+	"langosta-langi",
 	"medusa-medi",
 	"pulpo-octavio",
 ] as const;
@@ -15,7 +18,8 @@ export type MascotTone =
 	| "ingenioso"
 	| "protector"
 	| "creativo"
-	| "estrategico";
+	| "estrategico"
+	| "analitico";
 
 export type MascotSpecialty =
 	| "bienvenida-y-orientacion"
@@ -23,7 +27,10 @@ export type MascotSpecialty =
 	| "debugging-y-diagnostico"
 	| "planificacion-creativa"
 	| "automatizacion-fluida"
-	| "arquitectura-y-coordinacion";
+	| "arquitectura-y-coordinacion"
+	| "control-de-calidad"
+	| "multimedia-cinematica"
+	| "sintesis-y-comunicacion";
 
 export interface MascotProfile {
 	id: MascotId;

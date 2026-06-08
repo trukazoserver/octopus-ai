@@ -38,18 +38,37 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 	}
 
 	private getHeaders(): Record<string, string> {
+		const credential = stripBearerPrefix(
+			this.config.authMode === "oauth"
+				? this.config.oauthAccessToken
+				: this.config.authMode === "browser"
+					? this.config.accessToken
+					: this.config.apiKey ||
+						(this.config.authMode === "codex"
+							? this.config.accessToken
+							: undefined),
+		);
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
 			...this.extraHeaders,
 		};
-		if (this.config.apiKey) {
+		if (credential) {
 			if (this.authHeader === "Authorization") {
-				headers.Authorization = `Bearer ${this.config.apiKey}`;
+				headers.Authorization = `Bearer ${credential}`;
 			} else {
-				headers[this.authHeader] = this.config.apiKey;
+				headers[this.authHeader] = credential;
 			}
 		}
 		return headers;
+	}
+
+	private hasAuthCredential(): boolean {
+		return Boolean(
+			this.config.apiKey ||
+				this.config.oauthAccessToken ||
+				this.config.accessToken ||
+				(this.config.authMode === "codex" && this.config.accessToken),
+		);
 	}
 
 	private buildMessages(request: LLMRequest): Array<{
@@ -347,7 +366,13 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 	}
 
 	async isAvailable(): Promise<boolean> {
-		if (!this.config.apiKey && this.prefix !== "local") return false;
+		if (!this.hasAuthCredential() && this.prefix !== "local") return false;
+		if (
+			this.prefix === "openai" &&
+			(this.config.authMode === "codex" || this.config.authMode === "browser")
+		) {
+			return true;
+		}
 		try {
 			const response = await fetch(`${this.baseUrl}/models`, {
 				headers: this.getHeaders(),
@@ -358,4 +383,8 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 			return this.prefix === "local";
 		}
 	}
+}
+
+function stripBearerPrefix(value: string | undefined): string | undefined {
+	return value?.replace(/^Bearer\s+/i, "").trim();
 }

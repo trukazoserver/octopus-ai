@@ -14,7 +14,8 @@ octopus-ai/
 │   ├── core/
 │   │   └── src/
 │   │       ├── ai/              # Router LLM, proveedores, tokenizer
-│   │       ├── agent/           # Runtime, reflection, heartbeat, daemon
+│   │       ├── agent/           # Runtime, coordinación, workflows, recovery, heartbeat
+│   │       ├── auth/            # OAuth, browser auth, Vertex y tokens de proveedores
 │   │       ├── channels/        # Integraciones de mensajería
 │   │       ├── config/          # Loader, schema, defaults, env manager, SOUL parser
 │   │       ├── memory/          # STM, LTM, orquestación, integridad, daily memory, perfil
@@ -41,11 +42,12 @@ octopus-ai/
 | Módulo | Archivos principales | Descripción |
 |---|---|---|
 | `ai` | `router.ts`, `providers/*.ts` | Router con múltiples proveedores, razonamiento y cambio dinámico de provider/modelo |
-| `agent` | `runtime.ts`, `reflection.ts`, `heartbeat.ts`, `daemon.ts` | Ejecución conversacional, autoevaluación, trabajo proactivo y operación continua |
+| `agent` | `runtime.ts`, `orchestrator.ts`, `manager.ts`, `workflow-manager.ts`, `workflow-scheduler.ts`, `agent-coordination-bus.ts` | Ejecución conversacional, coordinación multi-agente, workflows persistentes, recovery, autoevaluación y operación continua |
+| `auth` | `oauth.ts`, `browser-auth.ts`, `jwt.ts`, `google-vertex.ts` | Autenticación de proveedores con API key, bearer, OAuth, sesiones de navegador y Google Vertex |
 | `memory` | `stm.ts`, `ltm.ts`, `orchestrator.ts`, `integrity.ts`, `context-assembler.ts`, `daily.ts`, `user-profile.ts` | Contexto activo, memoria persistente, validación, evidencia, scopes, recuperación híbrida, resumen diario y perfil del usuario |
 | `learning` | `engine.ts`, `types.ts` | Registra experiencias, extrae aprendizajes reutilizables y los reinyecta como guia operacional |
 | `skills` | `loader.ts`, `forge.ts`, `improver.ts`, `evaluator.ts` | Carga progresiva, creación y mejora continua de skills |
-| `tools` | `registry.ts`, `executor.ts`, `browser.ts`, `sandbox-tool.ts`, `media.ts` | Catálogo de tools del agente, ejecución, browser automation, sandbox y media |
+| `tools` | `registry.ts`, `executor.ts`, `browser.ts`, `sandbox-tool.ts`, `media.ts`, `agent-comms.ts`, `agent-spawn.ts`, `rate-limiter.ts` | Catálogo de tools del agente, ejecución, browser automation, sandbox, media, comunicación/spawn de agentes y rate limiting |
 | `tasks` | `manager.ts`, `automation-manager.ts`, `cron-runner.ts`, `webhooks.ts` | Tareas del workspace, automatizaciones y disparadores programados |
 | `team` | `delegation.ts`, `permissions.ts` | Delegación a workers especializados y control de permisos |
 | `transport` | `server.ts`, `client.ts`, `protocol.ts` | API HTTP/WebSocket, streaming, gestión de media y endpoints del dashboard |
@@ -61,23 +63,28 @@ Entrada del usuario o trigger del sistema
         Canal / WebSocket / API HTTP
                 ↓
             AgentRuntime
-                ├── User Profile + Daily Memory
+                 ├── User Profile + Daily Memory
         ├── Context Assembler + Memory Orchestrator
         │      ├── STM + LTM scoped retrieval
         │      ├── integridad, evidencia y confianza
         │      ├── recordatorios prospectivos
         │      └── incertidumbre y known gaps
+        ├── Workflow Manager + Subtask Tracker
+        │      ├── subtasks, attempts y artifacts persistidos
+        │      ├── retry policy y recovery/resume
+        │      └── cross-review + reconciliation
+        ├── Agent Coordination Bus
         ├── Skill Loader
                 ├── LLM Router
                 └── Tool Executor
                        ├── filesystem / shell / code
                        ├── browser / media
-                       ├── sandbox / delegation
+                       ├── sandbox / agent spawn / agent comms
                        └── automations
                 ↓
          Respuesta y eventos de estado
                 ↓
-   Consolidación + perfil + resumen diario + aprendizaje + feedback de memoria
+   Consolidación + perfil + resumen diario + aprendizaje + workflow events + feedback de memoria
                 ↓
             Persistencia en SQLite
 ```
@@ -101,6 +108,14 @@ Los aprendizajes de alta confianza se guardan también como memoria procedural y
 | `AutomationRunner` | Registra jobs cron persistidos y lanza prompts del agente sin intervención humana |
 | `ReflectionEngine` | Revisa tareas complejas y detecta patrones reutilizables para skills |
 | `LearningEngine` | Convierte trabajos exitosos o fallidos en procedimientos, antipatrones y métricas de skills |
+| `AgentCoordinationBus` | Registra mensajes directos, broadcasts e inbox entre agentes y workers |
+| `WorkflowManager` | Persiste runs, subtareas, attempts, artifacts y eventos para trabajos largos |
+| `WorkflowScheduler` | Reanuda workflows recuperables, ejecuta ticks y aplica retry/cancel |
+| `SubtaskTracker` | Mantiene estado granular de subtareas, dependencias y progreso |
+| `ArtifactVerifier` | Verifica entregables antes de cerrar subtareas o workflows |
+| `CrossReviewEngine` | Solicita revisión cruzada entre workers especializados |
+| `ReconciliationService` | Fusiona resultados parciales y resuelve discrepancias entre agentes |
+| `RetryPolicy` | Evita loops sin progreso mediante step keys, firmas de progreso y límites de estancamiento |
 | `OctopusDaemon` | Coordina heartbeat, automatizaciones, canales y health checks como proceso de larga vida |
 
 ## Capa HTTP/WebSocket
@@ -108,9 +123,9 @@ Los aprendizajes de alta confianza se guardan también como memoria procedural y
 El servidor de transporte expone la API usada por el dashboard y por integraciones locales:
 
 - salud y estado del sistema
-- configuración, memoria y aprendizaje continuo
+- auth de proveedores, configuración, memoria y aprendizaje continuo
 - skills, tools dinámicas y ejecución de código
-- conversaciones, agentes, tareas y automatizaciones
+- conversaciones, agentes, mensajes entre agentes, tareas, workflows y automatizaciones
 - variables de entorno, MCP, canales y biblioteca multimedia
 
 Referencia completa: [API HTTP y WebSocket](../api/http.md)
@@ -123,6 +138,8 @@ El runtime usa dos rutas complementarias de memoria:
 - La ruta avanzada `ContextAssembler` usa `MemoryOrchestrator` para recuperar memorias filtradas por tenant, usuario, proyecto, rol, rango temporal y nivel mínimo de confianza.
 
 La memoria avanzada persiste evidencia, usage, coverage, versiones y relaciones semánticas. Las memorias inactivas (`expired`, `superseded`, `user_deleted`) se ocultan de búsqueda vectorial, FTS, listados recientes y UI. El runtime expone trazas de memoria para explicar qué recuerdos influyeron en una respuesta.
+
+La capa de conocimiento (`KnowledgeManager` y `KnowledgeExtractor`) añade colecciones, items y chunks buscables para texto, media y archivos. Se expone por `/api/memory/knowledge/*` y comparte los controles de seguridad de memoria.
 
 Detalle completo: [Orquestación de Memoria](./memory-orchestration.md)
 

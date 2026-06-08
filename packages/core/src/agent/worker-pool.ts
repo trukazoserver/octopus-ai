@@ -15,10 +15,45 @@ import type { ToolDefinition, ToolRegistry } from "../tools/registry.js";
 import type { AgentEvent, EventStream } from "./event-stream.js";
 import type { AgentConfig } from "./types.js";
 
+const STATUS_RE =
+	/^\x00STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\x00$/;
+
+export interface LiveAgentRuntime {
+	processMessageStream?(
+		message: string,
+		channelId?: string,
+		options?: {
+			signal?: AbortSignal;
+			disableOrchestrator?: boolean;
+			disableDelegation?: boolean;
+		},
+	): AsyncIterable<string>;
+	processMessage?(
+		message: string,
+		channelId?: string,
+		options?: {
+			signal?: AbortSignal;
+			disableOrchestrator?: boolean;
+			disableDelegation?: boolean;
+		},
+	): Promise<string>;
+}
+
+export interface WorkerPoolOptions {
+	getAgentRuntime?: (agentId: string) => LiveAgentRuntime | undefined;
+}
+
 export interface SubTask {
 	id: string;
 	description: string;
 	role: string;
+	agentId?: string;
+	agentName?: string;
+	armKey?: string;
+	avatar?: string;
+	color?: string;
+	model?: string;
+	acceptanceCriteria?: string[];
 	toolScope: string[];
 	fileScope?: string[];
 	priority: number;
@@ -69,6 +104,12 @@ function summarizeVisibleWorkerText(content: string, maxChars = 420): string {
 		: cleaned;
 }
 
+function isTerminalFailureResult(result: string): boolean {
+	return /^\s*(?:\[Timeout\]|\[Cancelado\]|Error\b|Error en tarea\b)/i.test(
+		result,
+	);
+}
+
 export class WorkerPool {
 	private workers: Map<string, WorkerState> = new Map();
 	private maxConcurrent: number;
@@ -81,6 +122,7 @@ export class WorkerPool {
 		private eventStream: EventStream,
 		private baseConfig: AgentConfig,
 		maxConcurrent = 5,
+		private options: WorkerPoolOptions = {},
 	) {
 		this.maxConcurrent = maxConcurrent;
 	}
@@ -92,14 +134,158 @@ export class WorkerPool {
 		return `worker_${++this.workerIdCounter}_${Date.now()}`;
 	}
 
+	private taskMetadata(
+		task: SubTask,
+		activity: string,
+		extra: Record<string, unknown> = {},
+	): Record<string, unknown> {
+		return {
+			activity,
+			agentId: task.agentId,
+			agentName: task.agentName,
+			armKey: task.armKey,
+			avatar: task.avatar,
+			color: task.color,
+			...extra,
+		};
+	}
+
+	private decodeStatusField(value: string | undefined): string | null {
+		if (!value) return null;
+		try {
+			return Buffer.from(value, "base64").toString("utf8");
+		} catch {
+			return null;
+		}
+	}
+
+	private buildLiveAgentPrompt(task: SubTask): string {
+		return [
+			"Subtarea asignada por Octavio, orquestador raiz.",
+			`Brazo/agente vivo: ${task.agentName ?? task.agentId ?? task.role}.`,
+			`Rol asignado: ${task.role}.`,
+			task.armKey ? `Arm key: ${task.armKey}.` : "",
+			`Objetivo especifico: ${task.description}`,
+			task.acceptanceCriteria?.length
+				? `Criterios de aceptacion:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`
+				: "",
+			task.toolScope.length > 0
+				? `Herramientas sugeridas por Octavio: ${task.toolScope.join(", ")}. Son sugerencias, no restricciones.`
+				: "",
+			"No delegues esta subtarea a otros agentes. Si necesitas apoyo, reporta el bloqueo y tu avance verificable a Octavio.",
+			"Responde como agente vivo completo: analiza, usa memoria/habilidades/herramientas si hacen falta, verifica y entrega resultado concreto.",
+		]
+			.filter(Boolean)
+			.join("\n\n");
+	}
+
+	private async runLiveAgentRuntime(
+		state: WorkerState,
+		config: WorkerConfig,
+		runtime: LiveAgentRuntime,
+	): Promise<string> {
+		const task = state.task;
+		const prompt = this.buildLiveAgentPrompt(task);
+		const runtimeOptions = {
+			signal: state.abortController.signal,
+			disableOrchestrator: true,
+			disableDelegation: true,
+		};
+		this.eventStream.append({
+			runId: config.runId,
+			workerId: state.id,
+			taskId: task.id,
+			type: "thinking",
+			data: {
+				message: `${task.agentName ?? state.id} analizando como agente vivo.`,
+				progress: 5,
+				metadata: this.taskMetadata(task, "live_agent_runtime", {
+					liveAgentRuntime: true,
+				}),
+			},
+		});
+
+		if (runtime.processMessageStream) {
+			let result = "";
+			for await (const chunk of runtime.processMessageStream(
+				prompt,
+				config.channelId,
+				runtimeOptions,
+			)) {
+				if (state.abortController.signal.aborted || config.signal?.aborted) {
+					return "[Cancelado] La tarea fue cancelada por el orquestador.";
+				}
+				const statusMatch = chunk.match(STATUS_RE);
+				if (statusMatch) {
+					const status = statusMatch[1] ?? "status";
+					const toolName = statusMatch[2] || undefined;
+					const detail = this.decodeStatusField(statusMatch[4]);
+					const message = detail || toolName || `${task.agentName ?? state.id} activo.`;
+					if (status === "tool" || status === "code") {
+						this.eventStream.append({
+							runId: config.runId,
+							workerId: state.id,
+							taskId: task.id,
+							type: "tool_used",
+							data: {
+								toolName,
+								message,
+								progress: 50,
+								metadata: this.taskMetadata(task, status, {
+									liveAgentRuntime: true,
+								}),
+							},
+						});
+					} else if (status === "tool_done") {
+						this.eventStream.append({
+							runId: config.runId,
+							workerId: state.id,
+							taskId: task.id,
+							type: "tool_result",
+							data: {
+								toolName,
+								toolResult: message.slice(0, 500),
+								progress: 75,
+								metadata: this.taskMetadata(task, "tool_result", {
+									liveAgentRuntime: true,
+								}),
+							},
+						});
+					} else if (status === "thinking" || status === "responding") {
+						this.eventStream.append({
+							runId: config.runId,
+							workerId: state.id,
+							taskId: task.id,
+							type: "thinking",
+							data: {
+								message,
+								progress: status === "responding" ? 90 : 25,
+								metadata: this.taskMetadata(task, status, {
+									liveAgentRuntime: true,
+								}),
+							},
+						});
+					}
+					continue;
+				}
+				result += chunk;
+			}
+			return result.trim() || "[Sin respuesta del agente vivo]";
+		}
+
+		if (runtime.processMessage) {
+			return runtime.processMessage(prompt, config.channelId, runtimeOptions);
+		}
+		return "[Sin runtime ejecutable para el agente vivo]";
+	}
+
 	/**
 	 * Construir el system prompt especializado para un worker.
 	 */
 	private buildWorkerSystemPrompt(task: SubTask, config: WorkerConfig): string {
 		if (config.systemPromptOverride) return config.systemPromptOverride;
 
-		const availableTools = this.toolRegistry
-			.list()
+		const availableTools = this.getScopedTools(task.toolScope)
 			.map((tool) => `- ${tool.name}: ${tool.description}`)
 			.join("\n");
 		const recommendedTools =
@@ -112,8 +298,14 @@ export class WorkerPool {
 			: "";
 
 		return [
-			`Eres un worker especializado con el rol de "${task.role}".`,
+			`Eres ${task.agentName ?? "un worker especializado"} con el rol de "${task.role}".`,
+			task.armKey
+				? `Identidad de brazo Octopus: ${task.armKey}.`
+				: "",
 			`Tu tarea específica es: ${task.description}`,
+			task.acceptanceCriteria?.length
+				? `Criterios de aceptacion verificables:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`
+				: "",
 			"",
 			"Tienes acceso completo a todas las herramientas registradas del sistema, incluyendo herramientas locales, MCPs, media, navegador y ejecución de código.",
 			"La memoria, el perfil del usuario, aprendizajes operativos y skills relevantes se inyectan como contexto compartido cuando están disponibles. Si existe una herramienta explícita para consultar memoria o skills, puedes usarla; si no existe, usa el contexto proporcionado.",
@@ -123,6 +315,7 @@ export class WorkerPool {
 			"",
 			"Reglas:",
 			"- Enfócate SOLO en tu tarea asignada.",
+			"- No delegues esta subtarea a otros agentes/workers. Si necesitas ayuda adicional, reporta el bloqueo o el resultado parcial al orquestador.",
 			"- Sé eficiente: usa el mínimo de herramientas necesarias.",
 			"- Si generas imágenes, audio o video con execute_code, guarda el archivo en el directorio actual del script con una extensión normal (.png, .jpg, .mp4, etc.). execute_code lo guardará automáticamente en la librería de media y devolverá una URL /api/media/file/...; usa esa URL directamente en tu resultado.",
 			"- No instales dependencias pesadas para imágenes simples; prefiere SVG, Python estándar, PIL si ya está disponible, o código ligero.",
@@ -138,7 +331,7 @@ export class WorkerPool {
 	 */
 	private getScopedTools(_toolScope: string[]): ToolDefinition[] {
 		const allTools = this.toolRegistry.list();
-		return allTools;
+		return allTools.filter((tool) => tool.name !== "delegate_task");
 	}
 
 	/**
@@ -180,23 +373,34 @@ export class WorkerPool {
 			type: "task_claimed",
 			data: {
 				message: `Worker ${workerId} iniciando tarea: ${task.description.slice(0, 200)}`,
+				metadata: this.taskMetadata(task, "claimed"),
 			},
 		});
 
-		const systemPrompt = this.buildWorkerSystemPrompt(task, fullConfig);
-		const scopedTools = this.getScopedTools(task.toolScope);
+		const liveRuntime = task.agentId
+			? this.options.getAgentRuntime?.(task.agentId)
+			: undefined;
+		const systemPrompt = liveRuntime
+			? ""
+			: this.buildWorkerSystemPrompt(task, fullConfig);
+		const scopedTools = liveRuntime ? [] : this.getScopedTools(task.toolScope);
 
-		state.messages = [
-			{ role: "system", content: systemPrompt },
-			...(fullConfig.sharedContext ?? []),
-			{ role: "user", content: task.description },
-		];
+		state.messages = liveRuntime
+			? []
+			: [
+					{ role: "system", content: systemPrompt },
+					...(fullConfig.sharedContext ?? []),
+					{ role: "user", content: task.description },
+				];
 
 		try {
-			const result = await this.runWorkerLoop(state, scopedTools, fullConfig);
+			const result = liveRuntime
+				? await this.runLiveAgentRuntime(state, fullConfig, liveRuntime)
+				: await this.runWorkerLoop(state, scopedTools, fullConfig);
 			if (abortController.signal.aborted || result.startsWith("[Cancelado]")) {
 				state.status = "cancelled";
 				task.status = "cancelled";
+				task.result = result;
 				this.eventStream.append({
 					runId: fullConfig.runId,
 					workerId,
@@ -206,8 +410,30 @@ export class WorkerPool {
 						message: "Worker cancelado.",
 						durationMs: Date.now() - state.startedAt,
 						toolIterations: state.toolIterations,
+						metadata: this.taskMetadata(task, "cancelled"),
 					},
 				});
+				return result;
+			}
+			if (isTerminalFailureResult(result)) {
+				state.status = "failed";
+				task.status = "failed";
+				task.result = result;
+
+				this.eventStream.append({
+					runId: fullConfig.runId,
+					workerId,
+					taskId: task.id,
+					type: "error",
+					data: {
+						error: result,
+						message: result,
+						durationMs: Date.now() - state.startedAt,
+						toolIterations: state.toolIterations,
+						metadata: this.taskMetadata(task, "error"),
+					},
+				});
+
 				return result;
 			}
 			state.status = "done";
@@ -223,6 +449,7 @@ export class WorkerPool {
 					message: result.slice(0, 2000),
 					durationMs: Date.now() - state.startedAt,
 					toolIterations: state.toolIterations,
+					metadata: this.taskMetadata(task, "result"),
 				},
 			});
 
@@ -241,6 +468,7 @@ export class WorkerPool {
 					error: errorMsg,
 					durationMs: Date.now() - state.startedAt,
 					toolIterations: state.toolIterations,
+					metadata: this.taskMetadata(task, "error"),
 				},
 			});
 
@@ -301,11 +529,13 @@ export class WorkerPool {
 						90,
 						Math.round((state.toolIterations / config.maxToolIterations) * 100),
 					),
+					metadata: this.taskMetadata(state.task, "thinking"),
 				},
 			});
 
 			const request: LLMRequest = {
-				model: config.model || this.baseConfig.model || "default",
+				model:
+					state.task.model || config.model || this.baseConfig.model || "default",
 				messages: state.messages,
 				tools: llmTools.length > 0 ? llmTools : undefined,
 				maxTokens: this.baseConfig.maxTokens,
@@ -333,6 +563,7 @@ export class WorkerPool {
 								(state.toolIterations / config.maxToolIterations) * 100,
 							),
 						),
+						metadata: this.taskMetadata(state.task, "thinking"),
 					},
 				});
 			}
@@ -361,6 +592,7 @@ export class WorkerPool {
 								(state.toolIterations / config.maxToolIterations) * 100,
 							),
 						),
+						metadata: this.taskMetadata(state.task, "tool_used"),
 					},
 				});
 
@@ -371,7 +603,8 @@ export class WorkerPool {
 						toolCall.function.name,
 						params,
 						{
-							model: config.model || this.baseConfig.model,
+							agentId: state.task.agentId ?? this.baseConfig.id,
+							model: state.task.model || config.model || this.baseConfig.model,
 							usesZaiVisionToolForImages: config.usesZaiVisionToolForImages,
 							workerId: state.id,
 							taskId: state.task.id,
@@ -408,6 +641,7 @@ export class WorkerPool {
 								(state.toolIterations / config.maxToolIterations) * 100,
 							),
 						),
+						metadata: this.taskMetadata(state.task, "tool_result"),
 					},
 				});
 			}
@@ -471,7 +705,9 @@ export class WorkerPool {
 		await executeReadyBatch(ready);
 
 		// Ejecutar tareas con dependencias en orden
-		const completedTaskIds = new Set(results.keys());
+		const completedTaskIds = new Set(
+			ready.filter((task) => task.status === "done").map((task) => task.id),
+		);
 		let maxPasses = pending.length + 1; // Evitar loops infinitos
 
 		while (pending.length > 0 && maxPasses-- > 0) {
@@ -509,7 +745,11 @@ export class WorkerPool {
 						workerId: task.assignedWorkerId ?? "unassigned",
 						taskId: task.id,
 						type: "blocked",
-						data: { message, error: message },
+						data: {
+							message,
+							error: message,
+							metadata: this.taskMetadata(task, "blocked"),
+						},
 					});
 				}
 				break;
@@ -517,7 +757,9 @@ export class WorkerPool {
 
 			await executeReadyBatch(nowReady);
 			for (const task of nowReady) {
-				completedTaskIds.add(task.id);
+				if (task.status === "done") {
+					completedTaskIds.add(task.id);
+				}
 			}
 			pending.length = 0;
 			pending.push(...stillPending);

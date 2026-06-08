@@ -14,7 +14,29 @@ La orden `start` levanta un servidor HTTP/WebSocket usado por el dashboard web, 
 - Docker Compose: `http://localhost:18789`
 - Desarrollo frontend Vite: `http://localhost:3000` solo sirve la UI y se conecta al backend en `18789`
 
-> La API no incorpora autenticacion por defecto. Si la expones fuera de tu maquina o red de confianza, protege el acceso con reverse proxy, VPN o reglas de red.
+> Los endpoints sensibles son libres en loopback si no configuras una clave. Si el servidor escucha en un host no-loopback, deben autenticarse con `security.memoryApiKey`, `OCTOPUS_MEMORY_API_KEY` u `OCTOPUS_API_KEY`.
+
+---
+
+## Seguridad de API
+
+Las rutas de configuración, memoria, aprendizaje, skills, tasks, workflows, automatizaciones, canales, MCP y variables de entorno se consideran sensibles. Cuando hay clave configurada, envíala en cualquiera de estos headers:
+
+```bash
+curl http://localhost:18789/api/memory/stats \
+  -H "X-Octopus-Api-Key: $OCTOPUS_API_KEY"
+
+curl http://localhost:18789/api/workflows \
+  -H "Authorization: Bearer $OCTOPUS_API_KEY"
+```
+
+Precedencia de clave esperada:
+
+1. `security.memoryApiKey` en `~/.octopus/config.json`.
+2. `OCTOPUS_MEMORY_API_KEY`.
+3. `OCTOPUS_API_KEY`.
+
+Si expones el dashboard o API fuera de tu red de confianza, usa además reverse proxy, TLS, VPN o reglas de firewall.
 
 ---
 
@@ -50,6 +72,24 @@ curl http://localhost:18789/api/config/server.port
 
 ---
 
+## Autenticacion de Proveedores
+
+Estas rutas ayudan al dashboard a configurar credenciales de proveedores sin editar JSON manualmente.
+
+| Metodo | Ruta | Uso |
+|---|---|---|
+| `POST` | `/api/auth/{provider}/start` | Inicia OAuth para `google`, `openai`, `anthropic`, `deepseek` o `xai` |
+| `GET` | `/api/auth/{provider}/callback` | Callback OAuth usado por el navegador |
+| `POST` | `/api/auth/{provider}/refresh` | Refresca tokens OAuth guardados |
+| `POST` | `/api/auth/{provider}/browser-start` | Inicia captura asistida de sesión de navegador |
+| `GET` | `/api/auth/{provider}/browser-status` | Consulta el estado de la captura browser auth |
+| `POST` | `/api/auth/{provider}/browser-result` | Guarda cookies/token de browser auth |
+| `POST` | `/api/auth/google/vertex-setup` | Configura Google Vertex con service account, proyecto y región |
+
+`{provider}` acepta `google`, `openai`, `anthropic`, `deepseek` y `xai` según la ruta.
+
+---
+
 ## Memoria
 
 | Metodo | Ruta | Uso |
@@ -57,6 +97,20 @@ curl http://localhost:18789/api/config/server.port
 | `GET` | `/api/memory/stats` | Estadisticas generales |
 | `GET` | `/api/memory/config` | Configuracion de memoria |
 | `GET` | `/api/memory/search?q=texto` | Busca recuerdos |
+| `POST` | `/api/memory/context/retrieve` | Recupera contexto avanzado con scopes, presupuesto e incertidumbre |
+| `POST` | `/api/memory/create` | Crea una memoria avanzada con evidencia |
+| `POST` | `/api/memory/feedback` | Registra feedback sobre una memoria usada |
+| `POST` | `/api/memory/forget` | Solicita forgetting o borrado logico de memorias |
+| `POST` | `/api/memory/backfill` | Ejecuta backfill de memoria avanzada |
+| `POST` | `/api/memory/retention/run` | Aplica retención, expiración y limpieza activa |
+| `GET` | `/api/memory/sources` | Lista fuentes/evidencia disponibles |
+| `GET` | `/api/memory/graph` | Devuelve grafo de memoria para la UI |
+| `POST` | `/api/memory/graph/traverse` | Recorre conexiones del grafo desde uno o varios nodos |
+| `GET` | `/api/memory/audit` | Auditoría de uso, evidencia, versiones y relaciones |
+| `GET` | `/api/memory/audit/integrity` | Auditoría de redacciones/bloqueos de integridad |
+| `GET` | `/api/memory/actions` | Acciones recomendadas o pendientes sobre memoria |
+| `GET` | `/api/memory/verify?id=...` | Verifica una memoria concreta |
+| `POST` | `/api/memory/verify` | Verifica varias memorias o artifacts de memoria |
 | `POST` | `/api/memory/consolidate` | Fuerza consolidacion STM -> LTM |
 | `GET` | `/api/memory/stm` | Inspeccion de memoria a corto plazo |
 | `GET` | `/api/memory/daily` | Resumen diario global y actividad no resumida |
@@ -69,6 +123,22 @@ Ejemplo:
 ```bash
 curl "http://localhost:18789/api/memory/search?q=proyecto"
 ```
+
+### Knowledge Base
+
+La base de conocimiento se integra bajo `/api/memory/knowledge` para indexar colecciones, textos, media y archivos.
+
+| Metodo | Ruta | Uso |
+|---|---|---|
+| `GET` | `/api/memory/knowledge/collections` | Lista colecciones de conocimiento |
+| `POST` | `/api/memory/knowledge/collections` | Crea una coleccion |
+| `GET` | `/api/memory/knowledge/collections/{id}` | Devuelve colección e items asociados |
+| `DELETE` | `/api/memory/knowledge/collections/{id}` | Elimina una colección |
+| `GET` | `/api/memory/knowledge/items` | Lista items, opcionalmente por `collectionId` |
+| `POST` | `/api/memory/knowledge/items/text` | Crea un item desde texto directo |
+| `POST` | `/api/memory/knowledge/items/media` | Crea un item desde media ya registrada |
+| `POST` | `/api/memory/knowledge/items/file` | Crea un item desde un archivo del workspace |
+| `GET` | `/api/memory/knowledge/search?q=...` | Busca en chunks de conocimiento indexados |
 
 ---
 
@@ -142,6 +212,9 @@ curl -X DELETE http://localhost:18789/api/learning/insights/learn_123
 | `GET` | `/api/agents/{id}` | Consulta un agente |
 | `PUT` | `/api/agents/{id}` | Actualiza un agente |
 | `DELETE` | `/api/agents/{id}` | Elimina un agente |
+| `POST` | `/api/agents/messages` | Envía mensaje directo, broadcast o coordinación entre agentes |
+| `GET` | `/api/agents/{id}/messages` | Lista inbox/mensajes de un agente |
+| `POST` | `/api/agents/{id}/messages/read` | Marca mensajes como leídos |
 
 ---
 
@@ -155,6 +228,11 @@ curl -X DELETE http://localhost:18789/api/learning/insights/learn_123
 | `GET` | `/api/tasks/{id}` | Consulta tarea |
 | `PUT` | `/api/tasks/{id}` | Actualiza tarea |
 | `DELETE` | `/api/tasks/{id}` | Elimina tarea |
+| `GET` | `/api/workflows` | Lista workflows persistentes, subtareas, progreso y estado |
+| `GET` | `/api/workflows/{id}` | Consulta detalle de un workflow, attempts, artifacts y eventos |
+| `POST` | `/api/workflows/recover` | Reanuda workflows interrumpidos o recuperables |
+| `POST` | `/api/workflows/{id}/retry` | Reintenta un workflow fallido o bloqueado |
+| `POST` | `/api/workflows/{id}/cancel` | Cancela un workflow activo o pendiente |
 | `GET` | `/api/automations` | Lista automatizaciones |
 | `POST` | `/api/automations` | Crea automatizacion |
 | `GET` | `/api/automations/{id}` | Consulta automatizacion |

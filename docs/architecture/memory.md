@@ -4,7 +4,7 @@
   <img src="../../logo aplicacion.png" alt="Octopus AI" width="80" />
 </p>
 
-Octopus AI implementa un sistema de memoria inspirado en la memoria humana, con memoria a corto plazo (STM), memoria a largo plazo (LTM), resumen diario global, perfil persistente del usuario y una capa avanzada de orquestación con integridad, evidencia, scopes, feedback, recordatorios prospectivos e incertidumbre explícita.
+Octopus AI implementa un sistema de memoria inspirado en la memoria humana, con memoria a corto plazo (STM), memoria a largo plazo (LTM), knowledge base, resumen diario global, perfil persistente del usuario y una capa avanzada de orquestación con integridad, evidencia, scopes, feedback, recordatorios prospectivos e incertidumbre explícita.
 
 ---
 
@@ -21,7 +21,9 @@ Mensaje del usuario
         ↓ (consolidación automática)
    Memory Orchestrator ← integridad, evidencia, scopes, feedback
         ↓
-   Memoria a Largo Plazo (LTM) ← hechos, eventos, procedimientos, usuario, org, agente, prospectiva
+    Memoria a Largo Plazo (LTM) ← hechos, eventos, procedimientos, usuario, org, agente, prospectiva
+        ├── KnowledgeManager ← colecciones, items, chunks y búsqueda documental
+        ├── Conversation Context Snapshots ← continuidad y ledger de tareas/chat
         ↓ (recuperación híbrida + presupuesto)
    ContextAssembler → Contexto enriquecido para la IA → Respuesta personalizada
 ```
@@ -98,6 +100,8 @@ La LTM es el almacenamiento permanente donde se guardan los recuerdos importante
 | **Resumen diario global** | Comprime los mensajes recientes del día en una narrativa breve reutilizable por el runtime | `daily.ts` |
 | **Perfil de usuario** | Aprende estilo de comunicación, idioma preferido, expertise, decisiones y patrones de trabajo | `user-profile.ts` |
 | **Aprendizaje operacional** | Guarda procedimientos, antipatrones y estrategias de tools extraídas de trabajos reales | `learning/engine.ts` |
+| **Knowledge base** | Indexa colecciones, texto, media y archivos en chunks buscables | `knowledge-manager.ts`, `knowledge-extractor.ts` |
+| **Snapshots de contexto** | Persisten snapshots conversacionales y ledger de tareas/chat para continuidad y recuperación | `storage/migrations/010_*`, `011_*` |
 
 ### Parámetros
 
@@ -231,6 +235,31 @@ Octopus AI construye un grafo de asociaciones entre recuerdos:
 
 ---
 
+## Knowledge Base Documental
+
+`KnowledgeManager` y `KnowledgeExtractor` complementan la memoria autobiográfica con conocimiento documental. La capa permite crear colecciones, agregar items desde texto, media o archivos, extraer chunks y buscarlos desde API o UI.
+
+| Recurso | Descripción |
+|---|---|
+| Colecciones | Agrupan documentos o fuentes por proyecto, tema o workflow |
+| Items | Representan una fuente concreta: texto directo, media registrada o archivo del workspace |
+| Chunks | Fragmentos indexables usados por búsqueda y recuperación contextual |
+| Metadata | Guarda origen, etiquetas, relación con media y trazabilidad |
+
+Endpoints principales:
+
+| Metodo | Ruta |
+|---|---|
+| `GET`/`POST` | `/api/memory/knowledge/collections` |
+| `GET`/`DELETE` | `/api/memory/knowledge/collections/{id}` |
+| `GET` | `/api/memory/knowledge/items` |
+| `POST` | `/api/memory/knowledge/items/text` |
+| `POST` | `/api/memory/knowledge/items/media` |
+| `POST` | `/api/memory/knowledge/items/file` |
+| `GET` | `/api/memory/knowledge/search` |
+
+---
+
 ## Recuperación de Memoria (Retrieval)
 
 Cuando la IA necesita recordar algo, usa un sistema de puntuación ponderada:
@@ -253,6 +282,8 @@ En el runtime actual, la recuperación de memorias se combina además con:
 - **Perfil del usuario** para ajustar idioma, tono, preferencias y expertise conocidos
 - **Learned Operating Guidance** para recordar procedimientos y antipatrones aprendidos de ejecuciones anteriores
 - **Contexto STM filtrado por conversación/canal** para no mezclar historiales activos distintos
+- **Snapshots de contexto conversacional** para reconstruir continuidad después de runs largos, reinicios o workflows recuperados
+- **Knowledge base documental** para incorporar colecciones, media y archivos al contexto bajo demanda
 - **Búsqueda híbrida** vectorial + FTS con filtros de estado, scope, rango temporal y confianza
 - **Recordatorios prospectivos** para compromisos pendientes o próximos
 - **Known gaps** cuando la cobertura es insuficiente

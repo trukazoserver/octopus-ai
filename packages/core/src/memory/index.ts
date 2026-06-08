@@ -26,6 +26,27 @@ export { VectorStore } from "./store.js";
 export { createVectorStore } from "./factory.js";
 export type { VectorStoreFactoryOptions } from "./factory.js";
 export { KnowledgeGraph } from "./knowledge-graph.js";
+export { KnowledgeManager } from "./knowledge-manager.js";
+export type {
+	ExtractedKnowledgeChunk,
+	KnowledgeFileExtractionInput,
+	KnowledgeFileExtractor,
+	KnowledgeChunkModality,
+	KnowledgeChunkRecord,
+	KnowledgeCollectionRecord,
+	KnowledgeItemRecord,
+	KnowledgeItemSourceType,
+	KnowledgeItemStatus,
+} from "./knowledge-manager.js";
+export {
+	createConfiguredKnowledgeExtractor,
+	createGoogleKnowledgeExtractor,
+	createOpenAIKnowledgeExtractor,
+} from "./knowledge-extractor.js";
+export type {
+	GoogleKnowledgeExtractorOptions,
+	OpenAIKnowledgeExtractorOptions,
+} from "./knowledge-extractor.js";
 export { MemoryDecayEngine } from "./decay.js";
 export { FTSSearchEngine } from "./fts-search.js";
 export type { FTSSearchConfig, FTSResult } from "./fts-search.js";

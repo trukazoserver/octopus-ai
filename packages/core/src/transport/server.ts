@@ -24,6 +24,19 @@ import { EventEmitter } from "eventemitter3";
 import WebSocket, { WebSocketServer, type WebSocket as WSWebSocket } from "ws";
 import { type LLMRouter, getProviderRegistry } from "../ai/router.js";
 import type { UsageStats } from "../ai/types.js";
+import {
+	closeBrowserAuth,
+	getAuthResult,
+	getAuthStatus,
+	startBrowserAuth,
+} from "../auth/browser-session.js";
+import { prepareVertexProject } from "../auth/google-cloud.js";
+import {
+	createAuthorizationUrl,
+	exchangeCodeForToken,
+	refreshAccessToken,
+	renderOAuthCallbackPage,
+} from "../auth/oauth.js";
 import { ConfigLoader } from "../config/loader.js";
 import type { OctopusConfig } from "../config/schema.js";
 import { ConfigValidator } from "../config/validator.js";
@@ -39,6 +52,7 @@ import type {
 import type { MCPManagedServer } from "../plugins/mcp/manager.js";
 import { getZaiMCPConfigs } from "../plugins/mcp/zai-servers.js";
 import type { Skill } from "../skills/types.js";
+import { resolveRelativePathInside } from "../utils/path-safety.js";
 import { MCP_CATALOG } from "./mcp-catalog.js";
 import {
 	MessageType,
@@ -115,12 +129,44 @@ const SENSITIVE_API_PREFIXES = [
 	"/api/memory",
 	"/api/skills",
 	"/api/tasks",
+	"/api/workflows",
 ];
 
 const CHANNEL_SECRET_CONFIG_KEYS = new Set([
 	"botToken",
 	"signingSecret",
 	"appToken",
+]);
+
+const ENV_VAR_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const BROWSER_TOOL_ENV_KEYS = new Set([
+	"BRIGHTDATA_WS_URL",
+	"TWOCAPTCHA_API_KEY",
+	"TWO_CAPTCHA_API_KEY",
+	"TWOCAPTCHA_PROXY_ADDRESS",
+	"TWOCAPTCHA_PROXY_PORT",
+	"TWOCAPTCHA_PROXY_LOGIN",
+	"TWOCAPTCHA_PROXY_PASSWORD",
+	"DECODO_PROXY_URL",
+	"DECODO_PROXY_SERVER",
+	"DECODO_PROXY_PROTOCOL",
+	"DECODO_PROXY_USERNAME",
+	"DECODO_PROXY_USER",
+	"DECODO_PROXY_PASSWORD",
+	"DECODO_PROXY_PASS",
+	"DECODO_PROXY_COUNTRY",
+	"DECODO_PROXY_CITY",
+	"DECODO_PROXY_STATE",
+	"DECODO_PROXY_ZIP",
+	"DECODO_PROXY_SESSION",
+	"DECODO_PROXY_SESSION_DURATION",
+	"DECODO_SCRAPER_TOKEN",
+	"DECODO_API_TOKEN",
+	"DECODO_SCRAPER_USERNAME",
+	"DECODO_API_USERNAME",
+	"DECODO_SCRAPER_PASSWORD",
+	"DECODO_API_PASSWORD",
 ]);
 
 function getSecretPreview(value: string): string {
@@ -345,6 +391,10 @@ function setNestedValue(
 
 function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 	const masked = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+	const sensitiveKeyPattern =
+		/(apiKey|accessToken|refreshToken|idToken|token|secret|password|privateKey|credentialsJson|cookie|session)/i;
+	const isSensitiveKey = (key: string): boolean =>
+		!/(env|envVar)$/i.test(key) && sensitiveKeyPattern.test(key);
 	const maskUrlCredentials = (value: unknown): unknown => {
 		if (typeof value !== "string" || value.length === 0) return value;
 		try {
@@ -358,40 +408,23 @@ function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 			return value;
 		}
 	};
-	const ai = masked.ai as Record<string, unknown>;
-	const providers = ai.providers as Record<string, Record<string, unknown>>;
-	for (const provider of Object.values(providers)) {
-		if (
-			provider.apiKey &&
-			typeof provider.apiKey === "string" &&
-			(provider.apiKey as string).length > 0
-		) {
-			const key = provider.apiKey as string;
-			provider.apiKey = `${key.slice(0, 4)}...${key.slice(-4)}`;
+	const redact = (value: unknown, key = ""): unknown => {
+		if (typeof value === "string") {
+			const urlMasked = maskUrlCredentials(value);
+			if (isSensitiveKey(key) && value.length > 0) return "****";
+			return urlMasked;
 		}
-	}
-	if (masked.security && typeof masked.security === "object") {
-		const sec = masked.security as Record<string, unknown>;
-		if (
-			sec.encryptionKey &&
-			typeof sec.encryptionKey === "string" &&
-			(sec.encryptionKey as string).length > 0
-		) {
-			sec.encryptionKey = "****";
+		if (!value || typeof value !== "object") return value;
+		if (Array.isArray(value)) return value.map((item) => redact(item, key));
+
+		const record = value as Record<string, unknown>;
+		for (const [childKey, childValue] of Object.entries(record)) {
+			record[childKey] = redact(childValue, childKey);
 		}
-		if (
-			sec.memoryApiKey &&
-			typeof sec.memoryApiKey === "string" &&
-			(sec.memoryApiKey as string).length > 0
-		) {
-			sec.memoryApiKey = "****";
-		}
-	}
-	if (masked.browser && typeof masked.browser === "object") {
-		const browser = masked.browser as Record<string, unknown>;
-		browser.brightDataWsUrl = maskUrlCredentials(browser.brightDataWsUrl);
-		browser.decodoProxyUrl = maskUrlCredentials(browser.decodoProxyUrl);
-	}
+		return record;
+	};
+
+	redact(masked);
 	return masked;
 }
 
@@ -587,6 +620,69 @@ export class TransportServer {
 					return;
 				}
 
+				if (
+					req.method === "POST" &&
+					/^\/api\/auth\/(google|openai|anthropic|deepseek|xai)\/start$/.test(
+						pathname,
+					)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleOAuthStart(req, res, provider);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					/^\/api\/auth\/(google|openai|anthropic|deepseek|xai)\/refresh$/.test(
+						pathname,
+					)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleOAuthRefresh(req, res, provider);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					pathname === "/api/auth/google/vertex-setup"
+				) {
+					void this.handleGoogleVertexSetup(req, res);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					/^\/api\/auth\/(openai|anthropic|google|deepseek|xai)\/browser-start$/.test(
+						pathname,
+					)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleBrowserAuthStart(req, res, provider);
+					return;
+				}
+
+				if (
+					req.method === "GET" &&
+					/^\/api\/auth\/(openai|anthropic|google|deepseek|xai)\/browser-status$/.test(
+						pathname,
+					)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleBrowserAuthStatus(req, res, provider);
+					return;
+				}
+
+				if (
+					req.method === "POST" &&
+					/^\/api\/auth\/(openai|anthropic|google|deepseek|xai)\/browser-result$/.test(
+						pathname,
+					)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleBrowserAuthResult(req, res, provider);
+					return;
+				}
+
 				if (req.method === "PUT" && pathname.startsWith("/api/config/")) {
 					const keyPath = pathname.slice("/api/config/".length);
 					void this.handlePutConfigKey(req, res, keyPath);
@@ -600,6 +696,11 @@ export class TransportServer {
 
 				if (req.method === "GET" && pathname === "/api/memory/config") {
 					this.handleMemoryConfigGet(res);
+					return;
+				}
+
+				if (pathname.startsWith("/api/memory/knowledge")) {
+					void this.handleKnowledgeApi(req, res, url, pathname);
 					return;
 				}
 
@@ -933,6 +1034,26 @@ export class TransportServer {
 					void this.handleCreateAgent(res, req);
 					return;
 				}
+				if (req.method === "POST" && pathname === "/api/agents/messages") {
+					void this.handleSendAgentMessage(res, req);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					/^\/api\/agents\/[^/]+\/messages$/.test(pathname)
+				) {
+					const agentId = pathname.split("/")[3] ?? "";
+					void this.handleListAgentMessages(res, url, agentId);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					/^\/api\/agents\/[^/]+\/messages\/read$/.test(pathname)
+				) {
+					const agentId = pathname.split("/")[3] ?? "";
+					void this.handleMarkAgentMessagesRead(res, req, agentId);
+					return;
+				}
 				if (
 					req.method === "GET" &&
 					/^\/api\/agents\/[^/]+$/.test(pathname) &&
@@ -958,6 +1079,32 @@ export class TransportServer {
 
 				if (req.method === "GET" && pathname === "/api/tasks") {
 					void this.handleListTasks(res, url);
+					return;
+				}
+				if (req.method === "GET" && pathname === "/api/workflows") {
+					void this.handleListWorkflows(res, url);
+					return;
+				}
+				if (req.method === "POST" && pathname === "/api/workflows/recover") {
+					void this.handleRecoverWorkflows(res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					/^\/api\/workflows\/[^/]+\/(retry|cancel)$/.test(pathname)
+				) {
+					const parts = pathname.split("/");
+					const workflowId = parts[3] ?? "";
+					const action = parts[4] ?? "";
+					void this.handleWorkflowAction(res, req, workflowId, action);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					/^\/api\/workflows\/[^/]+$/.test(pathname)
+				) {
+					const workflowId = pathname.split("/").pop() ?? "";
+					void this.handleGetWorkflow(res, workflowId);
 					return;
 				}
 				if (req.method === "POST" && pathname === "/api/tasks") {
@@ -1028,6 +1175,11 @@ export class TransportServer {
 
 				if (req.method === "GET" && pathname === "/api/env") {
 					void this.handleListEnvVars(res, url);
+					return;
+				}
+				if (req.method === "GET" && /^\/api\/env\/[^/]+$/.test(pathname)) {
+					const key = decodeURIComponent(pathname.split("/").pop() ?? "");
+					void this.handleGetEnvVar(res, key);
 					return;
 				}
 				if (req.method === "POST" && pathname === "/api/env") {
@@ -1175,6 +1327,17 @@ export class TransportServer {
 					return;
 				}
 
+				if (
+					req.method === "GET" &&
+					/^\/api\/auth\/(google|openai|anthropic|deepseek|xai)\/callback$/.test(
+						pathname,
+					)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleOAuthCallback(req, res, provider);
+					return;
+				}
+
 				const webDistCandidates = [
 					resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist"),
 					resolve(dirname(fileURLToPath(import.meta.url)), "../../../web/dist"),
@@ -1196,10 +1359,44 @@ export class TransportServer {
 					css: "text/css",
 					json: "application/json",
 					png: "image/png",
+					jpg: "image/jpeg",
+					jpeg: "image/jpeg",
+					webp: "image/webp",
 					svg: "image/svg+xml",
 					ico: "image/x-icon",
 					wasm: "application/wasm",
 				};
+				if (pathname.startsWith("/mascotas/")) {
+					const mascotFilename = basename(decodeURIComponent(pathname));
+					const mascotCandidates = [
+						resolve(
+							dirname(fileURLToPath(import.meta.url)),
+							"../../../../assets/mascotas",
+							mascotFilename,
+						),
+						resolve(
+							dirname(fileURLToPath(import.meta.url)),
+							"../../../assets/mascotas",
+							mascotFilename,
+						),
+					];
+					const mascotPath = mascotCandidates.find((candidate) => {
+						try {
+							return existsSync(candidate) && statSync(candidate).isFile();
+						} catch {
+							return false;
+						}
+					});
+					if (mascotPath) {
+						const ext = mascotFilename.split(".").pop()?.toLowerCase() ?? "";
+						res.writeHead(200, {
+							"Content-Type": mimeTypes[ext] ?? "application/octet-stream",
+							"Cache-Control": "public, max-age=86400",
+						});
+						createReadStream(mascotPath).pipe(res);
+						return;
+					}
+				}
 				let staticPath = pathname;
 				if (staticPath === "/" || !staticPath.includes("."))
 					staticPath = "/index.html";
@@ -1357,6 +1554,330 @@ export class TransportServer {
 		}
 	}
 
+	private async handleOAuthStart(
+		req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): Promise<void> {
+		try {
+			const body = await readBody(req);
+			let parsed: { clientId?: string; clientSecret?: string };
+			try {
+				parsed = JSON.parse(body);
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+
+			if (!parsed.clientId) {
+				jsonRes(res, 400, { error: "clientId is required" });
+				return;
+			}
+
+			const host =
+				req.headers.host ??
+				`127.0.0.1:${this.system?.config?.server?.port ?? 18789}`;
+			const protocol =
+				host.startsWith("127.0.0.1") || host.startsWith("localhost")
+					? "http"
+					: "https";
+			const redirectUri = `${protocol}://${host}/api/auth/${provider}/callback`;
+
+			const { url } = createAuthorizationUrl(
+				provider,
+				redirectUri,
+				parsed.clientId,
+				parsed.clientSecret,
+			);
+
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const configObj = config as unknown as Record<string, unknown>;
+			const providerConfig = (configObj.ai as Record<string, unknown>)
+				.providers as Record<string, unknown>;
+			const prov = (providerConfig[provider] as Record<string, unknown>) ?? {};
+			prov.oauthClientId = parsed.clientId;
+			if (parsed.clientSecret) prov.oauthClientSecret = parsed.clientSecret;
+			providerConfig[provider] = prov;
+			loader.save(config);
+
+			jsonRes(res, 200, { authorizationUrl: url });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : "OAuth start failed",
+			});
+		}
+	}
+
+	private async handleOAuthRefresh(
+		req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): Promise<void> {
+		try {
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const configObj = config as unknown as Record<string, unknown>;
+			const providerConfig = (configObj.ai as Record<string, unknown>)
+				.providers as Record<string, unknown>;
+			const prov = (providerConfig[provider] as Record<string, unknown>) ?? {};
+
+			const refreshToken = prov.oauthRefreshToken as string | undefined;
+			const clientId = prov.oauthClientId as string | undefined;
+			const clientSecret = prov.oauthClientSecret as string | undefined;
+
+			if (!refreshToken || !clientId) {
+				jsonRes(res, 400, { error: "No stored refresh token or client ID" });
+				return;
+			}
+
+			const tokens = await refreshAccessToken(
+				provider,
+				refreshToken,
+				clientId,
+				clientSecret,
+			);
+
+			prov.oauthAccessToken = tokens.access_token;
+			if (tokens.refresh_token) prov.oauthRefreshToken = tokens.refresh_token;
+			prov.oauthExpiresAt = Date.now() + tokens.expires_in * 1000;
+			providerConfig[provider] = prov;
+			loader.save(config);
+
+			jsonRes(res, 200, {
+				accessToken: tokens.access_token,
+				expiresIn: tokens.expires_in,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : "Token refresh failed",
+			});
+		}
+	}
+
+	private async handleOAuthCallback(
+		req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): Promise<void> {
+		try {
+			const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+			const code = url.searchParams.get("code");
+			const stateParam = url.searchParams.get("state");
+			const error = url.searchParams.get("error");
+
+			if (error) {
+				renderOAuthCallbackPage(
+					res,
+					false,
+					url.searchParams.get("error_description") ?? error,
+				);
+				return;
+			}
+
+			if (!code || !stateParam) {
+				renderOAuthCallbackPage(res, false, "Missing code or state");
+				return;
+			}
+
+			const tokens = await exchangeCodeForToken(provider, code, stateParam);
+
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const configObj = config as unknown as Record<string, unknown>;
+			const providerConfig = (configObj.ai as Record<string, unknown>)
+				.providers as Record<string, unknown>;
+			const prov = (providerConfig[provider] as Record<string, unknown>) ?? {};
+
+			prov.oauthAccessToken = tokens.access_token;
+			if (tokens.refresh_token) prov.oauthRefreshToken = tokens.refresh_token;
+			prov.oauthExpiresAt = Date.now() + tokens.expires_in * 1000;
+			prov.authMode = "oauth";
+
+			providerConfig[provider] = prov;
+			loader.save(config);
+
+			if (this.system?.router) {
+				await this.system.router.reconfigure(config.ai);
+			}
+
+			renderOAuthCallbackPage(res, true);
+		} catch (err) {
+			renderOAuthCallbackPage(
+				res,
+				false,
+				err instanceof Error ? err.message : "Unknown error",
+			);
+		}
+	}
+
+	private async handleGoogleVertexSetup(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const body = await readBody(req);
+			let parsed: {
+				projectId?: string;
+				projectName?: string;
+				billingAccountName?: string;
+				location?: string;
+			};
+			try {
+				parsed = body.trim() ? JSON.parse(body) : {};
+			} catch {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return;
+			}
+
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const configObj = config as unknown as Record<string, unknown>;
+			const providerConfig = (configObj.ai as Record<string, unknown>)
+				.providers as Record<string, unknown>;
+			const prov = (providerConfig.google as Record<string, unknown>) ?? {};
+
+			let accessToken =
+				typeof prov.oauthAccessToken === "string"
+					? prov.oauthAccessToken.trim()
+					: "";
+			const refreshToken = prov.oauthRefreshToken as string | undefined;
+			const clientId = prov.oauthClientId as string | undefined;
+			const clientSecret = prov.oauthClientSecret as string | undefined;
+			const expiresAt = prov.oauthExpiresAt as number | undefined;
+
+			if (accessToken && expiresAt && Date.now() > expiresAt - 60_000) {
+				if (!refreshToken || !clientId) {
+					jsonRes(res, 400, {
+						error:
+							"El token OAuth de Google expiro. Vuelve a iniciar sesion en OAuth antes de preparar Vertex.",
+					});
+					return;
+				}
+				const tokens = await refreshAccessToken(
+					"google",
+					refreshToken,
+					clientId,
+					clientSecret,
+				);
+				accessToken = tokens.access_token;
+				prov.oauthAccessToken = tokens.access_token;
+				if (tokens.refresh_token) prov.oauthRefreshToken = tokens.refresh_token;
+				prov.oauthExpiresAt = Date.now() + tokens.expires_in * 1000;
+			}
+
+			if (!accessToken) {
+				jsonRes(res, 400, {
+					error:
+						"Primero inicia sesion con Google OAuth para conceder cloud-platform y facturacion.",
+				});
+				return;
+			}
+
+			const result = await prepareVertexProject({
+				accessToken,
+				projectId: parsed.projectId,
+				projectName: parsed.projectName,
+				billingAccountName: parsed.billingAccountName,
+			});
+
+			prov.authMode = "vertex";
+			prov.projectId = result.projectId;
+			prov.location = parsed.location?.trim() || prov.location || "us-central1";
+			prov.oauthAccessToken = accessToken;
+			providerConfig.google = prov;
+			loader.save(config);
+
+			if (this.system?.router) {
+				await this.system.router.reconfigure(config.ai);
+			}
+
+			jsonRes(res, 200, result);
+		} catch (err) {
+			jsonRes(res, 500, {
+				error:
+					err instanceof Error ? err.message : "Google Vertex setup failed",
+			});
+		}
+	}
+
+	private async handleBrowserAuthStart(
+		req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): Promise<void> {
+		try {
+			const result = await startBrowserAuth(provider);
+			jsonRes(res, result.ok ? 200 : 400, result);
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : "Browser auth failed",
+			});
+		}
+	}
+
+	private handleBrowserAuthStatus(
+		_req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): void {
+		const status = getAuthStatus(provider);
+		jsonRes(res, 200, status);
+	}
+
+	private async handleBrowserAuthResult(
+		req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): Promise<void> {
+		try {
+			const result = getAuthResult(provider);
+			if (!result || !result.success) {
+				jsonRes(res, 400, {
+					error: result?.error ?? "No auth result available",
+				});
+				return;
+			}
+
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const configObj = config as unknown as Record<string, unknown>;
+			const providerConfig = (configObj.ai as Record<string, unknown>)
+				.providers as Record<string, unknown>;
+			const prov = (providerConfig[provider] as Record<string, unknown>) ?? {};
+
+			if (result.interceptedToken) {
+				prov.accessToken = result.interceptedToken.replace(/^Bearer\s+/i, "");
+			}
+			if (result.cookies.length > 0) {
+				prov.browserCookies = JSON.stringify(result.cookies);
+			}
+			if (result.userAgent) {
+				prov.browserUserAgent = result.userAgent;
+			}
+			prov.authMode =
+				provider === "openai" && result.interceptedToken ? "codex" : "browser";
+			providerConfig[provider] = prov;
+			loader.save(config);
+
+			if (this.system?.router) {
+				await this.system.router.reconfigure(config.ai);
+			}
+
+			jsonRes(res, 200, {
+				success: true,
+				cookieCount: result.cookies.length,
+				hasToken: Boolean(result.interceptedToken),
+				hasCookies: result.cookies.length > 0,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error:
+					err instanceof Error ? err.message : "Failed to save browser auth",
+			});
+		}
+	}
+
 	private async handlePutConfigKey(
 		req: IncomingMessage,
 		res: ServerResponse,
@@ -1421,6 +1942,14 @@ export class TransportServer {
 
 			if (this.system) {
 				this.system.config = nextConfig;
+				if (keyPath === "ai" || keyPath.startsWith("ai.")) {
+					await this.system.router?.reconfigure({
+						default: nextConfig.ai.default,
+						fallback: nextConfig.ai.fallback,
+						providers: nextConfig.ai.providers,
+						thinking: nextConfig.ai.thinking,
+					});
+				}
 				if (keyPath === "browser" || keyPath.startsWith("browser.")) {
 					await this.system.refreshBrowserTools?.(this.system.config);
 				}
@@ -1429,9 +1958,14 @@ export class TransportServer {
 						this.system.config.tools.iterationLimit,
 					);
 				}
-				if (keyPath === "tools" || keyPath.startsWith("tools.timeouts")) {
+				if (
+					keyPath === "tools" ||
+					keyPath.startsWith("tools.timeouts") ||
+					keyPath.startsWith("tools.rateLimits")
+				) {
 					this.system.toolExecutor?.updateConfig?.({
 						timeouts: this.system.config.tools.timeouts,
+						rateLimits: this.system.config.tools.rateLimits,
 					});
 				}
 				if (keyPath === "learning" || keyPath.startsWith("learning.")) {
@@ -1988,6 +2522,216 @@ export class TransportServer {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
 			});
+		}
+	}
+
+	private async handleKnowledgeApi(
+		req: IncomingMessage,
+		res: ServerResponse,
+		url: URL,
+		pathname: string,
+	): Promise<void> {
+		try {
+			const manager = this.system?.knowledgeManager;
+			if (!manager) {
+				jsonRes(res, 503, { error: "Knowledge manager is not available" });
+				return;
+			}
+
+			if (
+				req.method === "GET" &&
+				pathname === "/api/memory/knowledge/collections"
+			) {
+				jsonRes(res, 200, await manager.listCollections());
+				return;
+			}
+
+			if (
+				req.method === "POST" &&
+				pathname === "/api/memory/knowledge/collections"
+			) {
+				const body = await this.readJsonBody(req, res);
+				if (!body) return;
+				jsonRes(
+					res,
+					201,
+					await manager.createCollection({
+						name: String(body.name ?? ""),
+						description:
+							typeof body.description === "string"
+								? body.description
+								: undefined,
+						metadata: isRecord(body.metadata) ? body.metadata : undefined,
+					}),
+				);
+				return;
+			}
+
+			if (
+				req.method === "GET" &&
+				/^\/api\/memory\/knowledge\/collections\/[^/]+$/.test(pathname)
+			) {
+				const id = pathname.split("/").pop() ?? "";
+				const collection = await manager.getCollection(id);
+				if (!collection) {
+					jsonRes(res, 404, { error: "Knowledge collection not found" });
+					return;
+				}
+				jsonRes(res, 200, {
+					collection,
+					items: await manager.listItems({ collectionId: id }),
+				});
+				return;
+			}
+
+			if (
+				req.method === "DELETE" &&
+				/^\/api\/memory\/knowledge\/collections\/[^/]+$/.test(pathname)
+			) {
+				await manager.deleteCollection(pathname.split("/").pop() ?? "");
+				jsonRes(res, 200, { ok: true });
+				return;
+			}
+
+			if (req.method === "GET" && pathname === "/api/memory/knowledge/items") {
+				jsonRes(
+					res,
+					200,
+					await manager.listItems({
+						collectionId: url.searchParams.get("collectionId") ?? undefined,
+					}),
+				);
+				return;
+			}
+
+			if (
+				req.method === "POST" &&
+				pathname === "/api/memory/knowledge/items/text"
+			) {
+				const body = await this.readJsonBody(req, res);
+				if (!body) return;
+				jsonRes(
+					res,
+					201,
+					await manager.createTextItem({
+						collectionId: String(body.collectionId ?? ""),
+						title: typeof body.title === "string" ? body.title : undefined,
+						content: String(body.content ?? ""),
+						sourceUri:
+							typeof body.sourceUri === "string" ? body.sourceUri : undefined,
+						metadata: isRecord(body.metadata) ? body.metadata : undefined,
+					}),
+				);
+				return;
+			}
+
+			if (
+				req.method === "POST" &&
+				pathname === "/api/memory/knowledge/items/media"
+			) {
+				const body = await this.readJsonBody(req, res);
+				if (!body) return;
+				jsonRes(
+					res,
+					201,
+					await manager.createMediaItem({
+						collectionId: String(body.collectionId ?? ""),
+						mediaId:
+							typeof body.mediaId === "string" ? body.mediaId : undefined,
+						sourceUri: String(body.sourceUri ?? ""),
+						title: typeof body.title === "string" ? body.title : undefined,
+						modality:
+							typeof body.modality === "string" ? body.modality : undefined,
+						description:
+							typeof body.description === "string"
+								? body.description
+								: undefined,
+						metadata: isRecord(body.metadata) ? body.metadata : undefined,
+					}),
+				);
+				return;
+			}
+
+			if (
+				req.method === "POST" &&
+				pathname === "/api/memory/knowledge/items/file"
+			) {
+				const body = await this.readJsonBody(req, res);
+				if (!body) return;
+				jsonRes(
+					res,
+					201,
+					await manager.createFileItem({
+						collectionId: String(body.collectionId ?? ""),
+						filePath: String(body.filePath ?? ""),
+						title: typeof body.title === "string" ? body.title : undefined,
+						sourceUri:
+							typeof body.sourceUri === "string" ? body.sourceUri : undefined,
+						metadata: isRecord(body.metadata) ? body.metadata : undefined,
+					}),
+				);
+				return;
+			}
+
+			if (req.method === "GET" && pathname === "/api/memory/knowledge/search") {
+				jsonRes(
+					res,
+					200,
+					await manager.searchChunks({
+						query: url.searchParams.get("q") ?? "",
+						collectionId: url.searchParams.get("collectionId") ?? undefined,
+						limit: Number.parseInt(url.searchParams.get("limit") ?? "20"),
+					}),
+				);
+				return;
+			}
+
+			if (
+				req.method === "GET" &&
+				/^\/api\/memory\/knowledge\/items\/[^/]+$/.test(pathname)
+			) {
+				const id = pathname.split("/").pop() ?? "";
+				const item = await manager.getItem(id);
+				if (!item) {
+					jsonRes(res, 404, { error: "Knowledge item not found" });
+					return;
+				}
+				jsonRes(res, 200, { item, chunks: await manager.listChunks(id) });
+				return;
+			}
+
+			if (
+				req.method === "DELETE" &&
+				/^\/api\/memory\/knowledge\/items\/[^/]+$/.test(pathname)
+			) {
+				await manager.deleteItem(pathname.split("/").pop() ?? "");
+				jsonRes(res, 200, { ok: true });
+				return;
+			}
+
+			jsonRes(res, 404, { error: "Knowledge endpoint not found" });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async readJsonBody(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<Record<string, unknown> | null> {
+		try {
+			const raw = await readBody(req);
+			const parsed = raw ? (JSON.parse(raw) as unknown) : {};
+			if (!isRecord(parsed)) {
+				jsonRes(res, 400, { error: "Invalid JSON body" });
+				return null;
+			}
+			return parsed;
+		} catch {
+			jsonRes(res, 400, { error: "Invalid JSON body" });
+			return null;
 		}
 	}
 
@@ -3715,9 +4459,9 @@ export class TransportServer {
 	private handleWorkspaceGet(res: ServerResponse, relPath: string): void {
 		try {
 			const workspaceRoot = join(homedir(), ".octopus", "workspace");
-			const fullPath = resolve(workspaceRoot, relPath);
+			const fullPath = resolveRelativePathInside(workspaceRoot, relPath);
 
-			if (!fullPath.startsWith(workspaceRoot)) {
+			if (!fullPath) {
 				jsonRes(res, 403, { error: "Access denied" });
 				return;
 			}
@@ -3750,9 +4494,9 @@ export class TransportServer {
 	): Promise<void> {
 		try {
 			const workspaceRoot = join(homedir(), ".octopus", "workspace");
-			const fullPath = resolve(workspaceRoot, relPath);
+			const fullPath = resolveRelativePathInside(workspaceRoot, relPath);
 
-			if (!fullPath.startsWith(workspaceRoot)) {
+			if (!fullPath) {
 				jsonRes(res, 403, { error: "Access denied" });
 				return;
 			}
@@ -4008,6 +4752,106 @@ export class TransportServer {
 		}
 	}
 
+	private async handleListAgentMessages(
+		res: ServerResponse,
+		url: URL,
+		agentId: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.agentManager) {
+				jsonRes(res, 503, { error: "Agent manager not available" });
+				return;
+			}
+			const messages = await this.system.agentManager.listInbox({
+				agentId,
+				runId: url.searchParams.get("runId") ?? undefined,
+				includeBroadcasts:
+					url.searchParams.get("includeBroadcasts") !== "false",
+				unreadOnly: url.searchParams.get("unreadOnly") === "true",
+				limit: Number.parseInt(url.searchParams.get("limit") ?? "50"),
+			});
+			jsonRes(res, 200, messages);
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleSendAgentMessage(
+		res: ServerResponse,
+		req: IncomingMessage,
+	): Promise<void> {
+		try {
+			if (!this.system?.agentManager) {
+				jsonRes(res, 503, { error: "Agent manager not available" });
+				return;
+			}
+			const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			const fromAgentId =
+				typeof body.fromAgentId === "string" ? body.fromAgentId.trim() : "";
+			const content = typeof body.content === "string" ? body.content : "";
+			if (!fromAgentId || !content.trim()) {
+				jsonRes(res, 400, { error: "fromAgentId and content are required" });
+				return;
+			}
+			const message = await this.system.agentManager.sendMessage({
+				fromAgentId,
+				toAgentId:
+					typeof body.toAgentId === "string" && body.toAgentId.trim()
+						? body.toAgentId.trim()
+						: null,
+				runId:
+					typeof body.runId === "string" && body.runId.trim()
+						? body.runId.trim()
+						: undefined,
+				taskId:
+					typeof body.taskId === "string" && body.taskId.trim()
+						? body.taskId.trim()
+						: undefined,
+				messageType:
+					typeof body.messageType === "string"
+						? (body.messageType as never)
+						: undefined,
+				content,
+				metadata:
+					body.metadata &&
+					typeof body.metadata === "object" &&
+					!Array.isArray(body.metadata)
+						? (body.metadata as Record<string, unknown>)
+						: undefined,
+			});
+			jsonRes(res, 201, message);
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleMarkAgentMessagesRead(
+		res: ServerResponse,
+		req: IncomingMessage,
+		agentId: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.agentManager) {
+				jsonRes(res, 503, { error: "Agent manager not available" });
+				return;
+			}
+			const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			const messageIds = Array.isArray(body.messageIds)
+				? body.messageIds.filter(
+						(id): id is string =>
+							typeof id === "string" && id.trim().length > 0,
+					)
+				: [];
+			const updated = await this.system.agentManager.markMessagesRead(
+				agentId,
+				messageIds,
+			);
+			jsonRes(res, 200, { ok: true, updated });
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
 	private async handleUpdateAgent(
 		res: ServerResponse,
 		req: IncomingMessage,
@@ -4062,6 +4906,117 @@ export class TransportServer {
 					offset,
 				}),
 			);
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleListWorkflows(
+		res: ServerResponse,
+		url: URL,
+	): Promise<void> {
+		try {
+			if (!this.system?.workflowManager) {
+				jsonRes(res, 200, []);
+				return;
+			}
+			const status = url.searchParams.get("status") ?? undefined;
+			const conversationId =
+				url.searchParams.get("conversationId") ?? undefined;
+			const limit = Number.parseInt(url.searchParams.get("limit") ?? "50");
+			const offset = Number.parseInt(url.searchParams.get("offset") ?? "0");
+			const resumable = url.searchParams.get("resumable") === "true";
+			jsonRes(
+				res,
+				200,
+				resumable
+					? await this.system.workflowManager.listResumableRuns({
+							conversationId,
+							limit,
+							offset,
+						})
+					: await this.system.workflowManager.listRuns({
+							status,
+							conversationId,
+							limit,
+							offset,
+						}),
+			);
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleRecoverWorkflows(res: ServerResponse): Promise<void> {
+		try {
+			if (!this.system?.workflowManager) {
+				jsonRes(res, 503, { error: "Workflow manager not available" });
+				return;
+			}
+			const result =
+				await this.system.workflowManager.markStaleRunsInterrupted();
+			const scheduler = this.system.workflowScheduler
+				? await this.system.workflowScheduler.tick()
+				: undefined;
+			jsonRes(res, 200, { ok: true, ...result, scheduler });
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleWorkflowAction(
+		res: ServerResponse,
+		req: IncomingMessage,
+		id: string,
+		action: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.workflowManager) {
+				jsonRes(res, 503, { error: "Workflow manager not available" });
+				return;
+			}
+			if (action === "retry") {
+				await this.system.workflowManager.retryRun(id);
+				const scheduler = this.system.workflowScheduler
+					? await this.system.workflowScheduler.tick()
+					: undefined;
+				jsonRes(res, 200, { ok: true, id, action, scheduler });
+				return;
+			}
+			if (action === "cancel") {
+				let reason: string | undefined;
+				try {
+					const raw = await readBody(req);
+					const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+					reason = typeof body.reason === "string" ? body.reason : undefined;
+				} catch {
+					reason = undefined;
+				}
+				await this.system.workflowManager.cancelRun(id, reason);
+				jsonRes(res, 200, { ok: true, id, action });
+				return;
+			}
+			jsonRes(res, 400, { error: `Unsupported workflow action: ${action}` });
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleGetWorkflow(
+		res: ServerResponse,
+		id: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.workflowManager) {
+				jsonRes(res, 503, { error: "Workflow manager not available" });
+				return;
+			}
+			const snapshot = await this.system.workflowManager.getRunSnapshot(id);
+			if (!snapshot.run) {
+				jsonRes(res, 404, { error: "Workflow not found" });
+				return;
+			}
+			jsonRes(res, 200, snapshot);
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
@@ -4263,8 +5218,45 @@ export class TransportServer {
 				jsonRes(res, 200, []);
 				return;
 			}
-			const showSecrets = url.searchParams.get("showSecrets") === "true";
-			jsonRes(res, 200, await this.system.envVarManager.list(showSecrets));
+			if (url.searchParams.get("showSecrets") === "true") {
+				jsonRes(res, 403, { error: "Secret values cannot be listed" });
+				return;
+			}
+			jsonRes(res, 200, await this.system.envVarManager.list(false));
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleGetEnvVar(
+		res: ServerResponse,
+		key: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.envVarManager) {
+				jsonRes(res, 503, { error: "Not available" });
+				return;
+			}
+			if (!ENV_VAR_KEY_PATTERN.test(key)) {
+				jsonRes(res, 400, { error: "Invalid environment variable name" });
+				return;
+			}
+
+			const value = await this.system.envVarManager.get(key);
+			if (value === null) {
+				jsonRes(res, 404, { error: "Environment variable not found" });
+				return;
+			}
+
+			const envVars = await this.system.envVarManager.list(false);
+			const metadata = envVars.find(
+				(item: { key: string }) => item.key === key,
+			);
+			jsonRes(res, 200, {
+				...(metadata ?? {}),
+				key,
+				value,
+			});
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
@@ -4280,46 +5272,43 @@ export class TransportServer {
 				return;
 			}
 			const body = JSON.parse(await readBody(req));
-			const result = await this.system.envVarManager.set(body.key, body.value, {
+			const key = typeof body?.key === "string" ? body.key.trim() : "";
+			if (!ENV_VAR_KEY_PATTERN.test(key)) {
+				jsonRes(res, 400, {
+					error:
+						"Invalid environment variable name. Use letters, numbers, and underscores, starting with a letter or underscore.",
+				});
+				return;
+			}
+
+			const hasValue =
+				Object.hasOwn(body as Record<string, unknown>, "value") &&
+				body.value !== undefined;
+			const value = hasValue
+				? String(body.value)
+				: await this.system.envVarManager.get(key);
+			if (value === null) {
+				jsonRes(res, 400, { error: "Missing environment variable value" });
+				return;
+			}
+
+			await this.system.envVarManager.set(key, value, {
 				isSecret: body.isSecret,
 				description: body.description,
 			});
-			if (body?.key && body?.value !== undefined) {
-				process.env[String(body.key)] = String(body.value);
-				if (
-					[
-						"BRIGHTDATA_WS_URL",
-						"TWOCAPTCHA_API_KEY",
-						"TWO_CAPTCHA_API_KEY",
-						"TWOCAPTCHA_PROXY_ADDRESS",
-						"TWOCAPTCHA_PROXY_PORT",
-						"TWOCAPTCHA_PROXY_LOGIN",
-						"TWOCAPTCHA_PROXY_PASSWORD",
-						"DECODO_PROXY_URL",
-						"DECODO_PROXY_SERVER",
-						"DECODO_PROXY_PROTOCOL",
-						"DECODO_PROXY_USERNAME",
-						"DECODO_PROXY_USER",
-						"DECODO_PROXY_PASSWORD",
-						"DECODO_PROXY_PASS",
-						"DECODO_PROXY_COUNTRY",
-						"DECODO_PROXY_CITY",
-						"DECODO_PROXY_STATE",
-						"DECODO_PROXY_ZIP",
-						"DECODO_PROXY_SESSION",
-						"DECODO_PROXY_SESSION_DURATION",
-						"DECODO_SCRAPER_TOKEN",
-						"DECODO_API_TOKEN",
-						"DECODO_SCRAPER_USERNAME",
-						"DECODO_API_USERNAME",
-						"DECODO_SCRAPER_PASSWORD",
-						"DECODO_API_PASSWORD",
-					].includes(String(body.key))
-				) {
-					await this.system.refreshBrowserTools?.(this.system.config);
-				}
+			process.env[key] = value;
+			if (BROWSER_TOOL_ENV_KEYS.has(key)) {
+				await this.system.refreshBrowserTools?.(this.system.config);
 			}
-			jsonRes(res, 200, result);
+
+			const envVars = await this.system.envVarManager.list(false);
+			jsonRes(
+				res,
+				200,
+				envVars.find((item: { key: string }) => item.key === key) ?? {
+					ok: true,
+				},
+			);
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
@@ -4334,39 +5323,14 @@ export class TransportServer {
 				jsonRes(res, 503, { error: "Not available" });
 				return;
 			}
+			if (!ENV_VAR_KEY_PATTERN.test(key)) {
+				jsonRes(res, 400, { error: "Invalid environment variable name" });
+				return;
+			}
 			const ok = await this.system.envVarManager.delete(key);
 			if (ok) {
 				delete process.env[key];
-				if (
-					[
-						"BRIGHTDATA_WS_URL",
-						"TWOCAPTCHA_API_KEY",
-						"TWO_CAPTCHA_API_KEY",
-						"TWOCAPTCHA_PROXY_ADDRESS",
-						"TWOCAPTCHA_PROXY_PORT",
-						"TWOCAPTCHA_PROXY_LOGIN",
-						"TWOCAPTCHA_PROXY_PASSWORD",
-						"DECODO_PROXY_URL",
-						"DECODO_PROXY_SERVER",
-						"DECODO_PROXY_PROTOCOL",
-						"DECODO_PROXY_USERNAME",
-						"DECODO_PROXY_USER",
-						"DECODO_PROXY_PASSWORD",
-						"DECODO_PROXY_PASS",
-						"DECODO_PROXY_COUNTRY",
-						"DECODO_PROXY_CITY",
-						"DECODO_PROXY_STATE",
-						"DECODO_PROXY_ZIP",
-						"DECODO_PROXY_SESSION",
-						"DECODO_PROXY_SESSION_DURATION",
-						"DECODO_SCRAPER_TOKEN",
-						"DECODO_API_TOKEN",
-						"DECODO_SCRAPER_USERNAME",
-						"DECODO_API_USERNAME",
-						"DECODO_SCRAPER_PASSWORD",
-						"DECODO_API_PASSWORD",
-					].includes(key)
-				) {
+				if (BROWSER_TOOL_ENV_KEYS.has(key)) {
 					await this.system.refreshBrowserTools?.(this.system.config);
 				}
 			}

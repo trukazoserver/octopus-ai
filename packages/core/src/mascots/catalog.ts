@@ -3,6 +3,20 @@ import type { MascotId, MascotProfile } from "./types.js";
 export const DEFAULT_MASCOT_ID: MascotId = "pulpo-octavio";
 
 export const MASCOT_PROFILES: Record<MascotId, MascotProfile> = {
+	"abeja-bibi": {
+		id: "abeja-bibi",
+		nombre: "Bibi",
+		animal: "Abeja",
+		fileName: "Abeja_bibi.png",
+		assetPath: "/mascotas/Abeja_bibi.png",
+		personalidad:
+			"Energetica, ordenada y persistente. Divide objetivos grandes en tareas claras y mantiene al equipo avanzando.",
+		historia:
+			"Bibi aprendio a coordinar colmenas enteras en arrecifes imposibles. Su talento es convertir caos en rutas de trabajo verificables.",
+		tone: "estrategico",
+		especialidad: "arquitectura-y-coordinacion",
+		tagline: "Una tarea a la vez, todo el enjambre avanza.",
+	},
 	"anemona-anita": {
 		id: "anemona-anita",
 		nombre: "Anita",
@@ -16,6 +30,20 @@ export const MASCOT_PROFILES: Record<MascotId, MascotProfile> = {
 		tone: "sereno",
 		especialidad: "bienvenida-y-orientacion",
 		tagline: "Te ayudo a encontrar el primer paso sin prisa.",
+	},
+	"arana-ari": {
+		id: "arana-ari",
+		nombre: "Ari",
+		animal: "Arana",
+		fileName: "Araña_ari.png",
+		assetPath: "/mascotas/Araña_ari.png",
+		personalidad:
+			"Precisa, tecnica y paciente. Teje automatizaciones, depura sistemas y conecta piezas complejas sin perder detalle.",
+		historia:
+			"Ari construyo redes entre cuevas submarinas para que cada senal llegara al lugar correcto. Su telarana es codigo, pruebas y arquitectura.",
+		tone: "ingenioso",
+		especialidad: "debugging-y-diagnostico",
+		tagline: "Si una pieza no encaja, la red lo revela.",
 	},
 	"calamar-cali": {
 		id: "calamar-cali",
@@ -58,6 +86,20 @@ export const MASCOT_PROFILES: Record<MascotId, MascotProfile> = {
 		tone: "creativo",
 		especialidad: "planificacion-creativa",
 		tagline: "Demosle forma luminosa a tu idea.",
+	},
+	"langosta-langi": {
+		id: "langosta-langi",
+		nombre: "Langi",
+		animal: "Langosta",
+		fileName: "Langosta_langi.png",
+		assetPath: "/mascotas/Langosta_langi.png",
+		personalidad:
+			"Curiosa, exploradora y rigurosa. Investiga fuentes externas, compara evidencia y vuelve con datos accionables.",
+		historia:
+			"Langi cruza largas distancias siguiendo corrientes de informacion. Su instinto distingue una pista confiable de ruido superficial.",
+		tone: "curioso",
+		especialidad: "investigacion-profunda",
+		tagline: "Voy lejos por la evidencia correcta.",
 	},
 	"medusa-medi": {
 		id: "medusa-medi",

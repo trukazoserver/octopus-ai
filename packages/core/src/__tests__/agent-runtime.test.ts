@@ -288,6 +288,49 @@ describe("AgentRuntime", () => {
 			);
 		});
 
+		it("should include recent raw STM turns even when retrieved STM is sparse", async () => {
+			const sparseTurn: ConversationTurn = {
+				role: "user",
+				content: "sparse retrieved turn",
+				timestamp: new Date("2026-01-01T00:00:00.000Z"),
+				metadata: { conversationId: "conv-raw" },
+			};
+			mockMemoryRetrieval = createMockMemoryRetrieval({
+				fromSTM: [sparseTurn],
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+
+			const baseTime = new Date("2026-01-02T00:00:00.000Z");
+			for (let i = 0; i < 80; i++) {
+				mockSTM.add({
+					role: i % 2 === 0 ? "user" : "assistant",
+					content: `full-stm-${i}`,
+					timestamp: new Date(baseTime.getTime() + i * 1000),
+					metadata: { conversationId: "conv-raw" },
+				});
+			}
+
+			await runtime.processMessage("continue", "conv-raw");
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+			const contents = request.messages
+				.map((message: { content: unknown }) => message.content)
+				.filter(
+					(content: unknown): content is string => typeof content === "string",
+				);
+
+			expect(contents).toContain("full-stm-79");
+			expect(contents).toContain("full-stm-40");
+			expect(contents).not.toContain("full-stm-0");
+			expect(contents).toContain("continue");
+		});
+
 		it("should clear stale memory trace when advanced context assembly fails", async () => {
 			const assembled: ContextAssemblyResult = {
 				memoryPack: {
@@ -794,6 +837,98 @@ describe("AgentRuntime", () => {
 			);
 		});
 
+		it("should finish streamed delegate_task batches and persist a workflow", async () => {
+			mockLLMRouter.chatStream = vi.fn().mockImplementationOnce(async function* () {
+				yield {
+					toolCalls: {
+						id: "delegate-1",
+						type: "function" as const,
+						function: {
+							name: "delegate_task",
+							arguments: JSON.stringify({ role: "qa", task: "Review risks" }),
+						},
+					},
+				};
+				yield {
+					toolCalls: {
+						id: "delegate-2",
+						type: "function" as const,
+						function: {
+							name: "delegate_task",
+							arguments: JSON.stringify({ role: "writer", task: "Draft plan" }),
+						},
+					},
+				};
+			});
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content: "Final combined answer",
+				model: "test-model",
+				usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+				finishReason: "stop",
+			});
+			const mockRegistry = createMockToolRegistry([
+				{ name: "delegate_task", description: "Delegates work" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			mockExecutor.execute.mockImplementation(async (_name, params) => ({
+				success: true,
+				output: `Worker result for ${(params as { role?: string }).role}`,
+			}));
+			const mockWorkflowManager = {
+				createRun: vi.fn().mockResolvedValue({ id: "wf-1" }),
+				updateRunStatus: vi.fn(),
+				createTask: vi
+					.fn()
+					.mockResolvedValueOnce({ id: "wf-task-1" })
+					.mockResolvedValueOnce({ id: "wf-task-2" }),
+				recordEvent: vi.fn(),
+				updateTaskStatus: vi.fn(),
+			};
+
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+			runtime.setWorkflowManager(mockWorkflowManager as never);
+
+			const chunks: string[] = [];
+			for await (const chunk of runtime.processMessageStream(
+				"Use multiple agents",
+				"conv-1",
+			)) {
+				chunks.push(chunk);
+			}
+
+			expect(chunks.join("")).toContain("Final combined answer");
+			expect(mockExecutor.execute).toHaveBeenCalledTimes(2);
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
+			expect(mockLLMRouter.chatStream).toHaveBeenCalledTimes(1);
+			expect(mockWorkflowManager.createRun).toHaveBeenCalledWith(
+				expect.objectContaining({
+					conversationId: "conv-1",
+					rootAgentId: "test-agent",
+					metadata: expect.objectContaining({ source: "delegate_task" }),
+				}),
+			);
+			expect(mockWorkflowManager.updateRunStatus).toHaveBeenCalledWith(
+				"wf-1",
+				"done",
+				expect.objectContaining({ currentPhase: "synthesis" }),
+			);
+			const telemetryChunk = chunks.find((chunk) =>
+				chunk.includes("orchestrating:telemetry"),
+			);
+			expect(telemetryChunk).toBeDefined();
+			const encodedTelemetry = telemetryChunk
+				?.replace(/\x00/g, "")
+				.split(":")[4];
+			const telemetry = JSON.parse(
+				Buffer.from(encodedTelemetry ?? "", "base64").toString("utf8"),
+			) as { workflowRunId?: string };
+			expect(telemetry.workflowRunId).toBe("wf-1");
+			expect(chunks.some((chunk) => chunk.includes("worker_done"))).toBe(true);
+		});
+
 		it("should inject relevant learning guidance and record the experience", async () => {
 			const learningEngine = createMockLearningEngine();
 			runtime.setLearningEngine(learningEngine as never);
@@ -817,6 +952,440 @@ describe("AgentRuntime", () => {
 					finalResponse: "Hello from assistant",
 				}),
 			);
+		});
+
+		it("should allow expensive tools even when a matching task is already completed", async () => {
+			mockLLMRouter = createMockLLMRouter({
+				content: "",
+				toolCalls: [
+					{
+						id: "call-video",
+						type: "function" as const,
+						function: {
+							name: "veo-video-generator",
+							arguments: '{"prompt":"extend predator video"}',
+						},
+					},
+				],
+			});
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-video",
+							type: "function" as const,
+							function: {
+								name: "veo-video-generator",
+								arguments: '{"prompt":"extend predator video"}',
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "Extendí el video con una nueva versión.",
+					model: "test-model",
+					usage: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
+					finishReason: "stop",
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "veo-video-generator", description: "Generates videos" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([
+					{
+						id: "ledger-1",
+						conversation_id: "conv-video",
+						objective: "Extender video del Depredador",
+						status: "completed",
+						summary: "Video final entregado.",
+						outputs: JSON.stringify(["/api/media/file/final.mp4"]),
+						tool_names: JSON.stringify(["veo-video-generator"]),
+						source_message_id: null,
+						created_at: "2026-05-22T00:00:00.000Z",
+						updated_at: "2026-05-22T00:00:00.000Z",
+						completed_at: "2026-05-22T00:00:00.000Z",
+					},
+				]),
+				addTaskLedgerEntry: vi.fn(),
+			};
+
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+			runtime.setChatManager(mockChatManager as never);
+
+			const result = await runtime.processMessage(
+				"extiende el video del depredador",
+				"conv-video",
+			);
+
+			expect(result).toBe("Extendí el video con una nueva versión.");
+			expect(mockExecutor.execute).toHaveBeenCalledWith(
+				"veo-video-generator",
+				expect.objectContaining({ prompt: "extend predator video" }),
+				expect.any(Object),
+			);
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(2);
+		});
+
+		it("should not stop media generation tools after two calls", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-image-1",
+							type: "function" as const,
+							function: {
+								name: "nano-banana-generate",
+								arguments: '{"prompt":"construction image 1"}',
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-image-2",
+							type: "function" as const,
+							function: {
+								name: "nano-banana-generate",
+								arguments: '{"prompt":"construction image 2"}',
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-image-3",
+							type: "function" as const,
+							function: {
+								name: "nano-banana-generate",
+								arguments: '{"prompt":"construction image 3"}',
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "Generé las tres imágenes solicitadas.",
+					model: "test-model",
+					usage: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
+					finishReason: "stop",
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "nano-banana-generate", description: "Generates images" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const result = await runtime.processMessage(
+				"genera 3 imágenes",
+				"conv-img",
+			);
+
+			expect(result).toBe("Generé las tres imágenes solicitadas.");
+			expect(mockExecutor.execute).toHaveBeenCalledTimes(3);
+			expect(mockExecutor.execute).toHaveBeenNthCalledWith(
+				3,
+				"nano-banana-generate",
+				expect.objectContaining({ prompt: "construction image 3" }),
+				expect.any(Object),
+			);
+		});
+
+		it("should allow expensive tools when feedback asks for a more creative revision", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-image",
+							type: "function" as const,
+							function: {
+								name: "nano-banana-generate",
+								arguments: '{"prompt":"make it more creative"}',
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "Generé una nueva portada más creativa.",
+					model: "test-model",
+					usage: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
+					finishReason: "stop",
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "nano-banana-generate", description: "Generates images" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([
+					{
+						id: "ledger-1",
+						conversation_id: "conv-image",
+						objective: "Portada anterior completada",
+						status: "completed",
+						summary: "Portada final entregada.",
+						outputs: JSON.stringify(["/api/media/file/final.png"]),
+						tool_names: JSON.stringify(["nano-banana-generate"]),
+						source_message_id: null,
+						created_at: "2026-05-22T00:00:00.000Z",
+						updated_at: "2026-05-22T00:00:00.000Z",
+						completed_at: "2026-05-22T00:00:00.000Z",
+					},
+				]),
+				addTaskLedgerEntry: vi.fn(),
+			};
+
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+			runtime.setChatManager(mockChatManager as never);
+
+			const result = await runtime.processMessage(
+				"Tienes que ser más creativo, recuerda que es una portada para un video de redes sociales",
+				"conv-image",
+			);
+
+			expect(result).toBe("Generé una nueva portada más creativa.");
+			expect(mockExecutor.execute).toHaveBeenCalledWith(
+				"nano-banana-generate",
+				expect.objectContaining({ prompt: "make it more creative" }),
+				expect.any(Object),
+			);
+		});
+
+		it("should record continuation-limited responses as partial tasks", async () => {
+			mockLLMRouter = createMockLLMRouter({
+				content:
+					"He alcanzado el límite máximo de herramientas en una sola respuesta. Puedo continuar si me lo pides.",
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				addTaskLedgerEntry: vi.fn(),
+			};
+			runtime.setChatManager(mockChatManager as never);
+
+			await runtime.processMessage(
+				"genera una colección de imágenes",
+				"conv-1",
+			);
+
+			expect(mockChatManager.addTaskLedgerEntry).toHaveBeenCalledWith(
+				expect.objectContaining({
+					status: "partial",
+					completedAt: undefined,
+				}),
+			);
+		});
+
+		it("should record responses with generated outputs and missing work as partial", async () => {
+			mockLLMRouter = createMockLLMRouter({
+				content:
+					"Ya tenemos Img 0 e Img 1: /api/media/file/img-1.png. Faltan Img 2 a Img 15.",
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				addTaskLedgerEntry: vi.fn(),
+			};
+			runtime.setChatManager(mockChatManager as never);
+
+			await runtime.processMessage("genera 16 imágenes", "conv-outputs");
+
+			expect(mockChatManager.addTaskLedgerEntry).toHaveBeenCalledWith(
+				expect.objectContaining({
+					status: "partial",
+					outputs: ["/api/media/file/img-1.png"],
+					completedAt: undefined,
+				}),
+			);
+		});
+
+		it("should prioritize incomplete ledger entries for continuation prompts", async () => {
+			const incompleteEntry = {
+				id: "ledger-partial",
+				conversation_id: "conv-resume",
+				objective: "Generar varias imágenes de bosque",
+				status: "partial",
+				summary: "Se generaron dos imágenes; faltan tres.",
+				outputs: JSON.stringify(["/api/media/file/forest-1.png"]),
+				tool_names: JSON.stringify(["nano-banana-generate"]),
+				source_message_id: null,
+				created_at: "2026-05-22T00:00:00.000Z",
+				updated_at: "2026-05-22T00:00:00.000Z",
+				completed_at: null,
+			};
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([incompleteEntry]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				addTaskLedgerEntry: vi.fn(),
+			};
+			runtime.setChatManager(mockChatManager as never);
+
+			await runtime.processMessage("continua", "conv-resume");
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+
+			expect(request.messages[0]?.content).toContain(
+				"Active/Pending Tasks To Continue",
+			);
+			expect(request.messages[0]?.content).toContain(
+				"Generar varias imágenes de bosque",
+			);
+			expect(request.messages[0]?.content).toContain(
+				"resume the first active/pending task",
+			);
+		});
+
+		it("should resume from latest incomplete assistant turn even if execution was completed", async () => {
+			mockSTM.add({
+				role: "assistant",
+				content:
+					"Ya tenemos Img 0 a Img 2 generadas. Faltan Img 3 a Img 15. Generando Img 3...",
+				timestamp: new Date("2026-05-22T00:00:00.000Z"),
+				metadata: { conversationId: "conv-resume-raw" },
+			});
+
+			await runtime.processMessage("continua", "conv-resume-raw");
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+			const contents = request.messages
+				.map((message: { content: unknown }) => message.content)
+				.filter(
+					(content: unknown): content is string => typeof content === "string",
+				)
+				.join("\n");
+
+			expect(contents).toContain("latest assistant turn says work remains");
+			expect(contents).toContain("Faltan Img 3 a Img 15");
+		});
+
+		it("should block manual Veo API calls through execute_code", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-code",
+							type: "function" as const,
+							function: {
+								name: "execute_code",
+								arguments: JSON.stringify({
+									language: "python",
+									code: "requests.post('https://us-central1-aiplatform.googleapis.com/v1/projects/x/locations/us-central1/publishers/google/models/veo-3.0-fast-generate-001:predictLongRunning')",
+								}),
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content:
+						"Usaré la herramienta veo-video-generator en lugar de execute_code.",
+					model: "test-model",
+					usage: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
+					finishReason: "stop",
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "execute_code", description: "Executes code" },
+				{ name: "veo-video-generator", description: "Generates videos" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const result = await runtime.processMessage(
+				"intenta hacerlo con el modelo fast de Veo 3.0",
+				"conv-video",
+			);
+
+			expect(result).toBe(
+				"Usaré la herramienta veo-video-generator en lugar de execute_code.",
+			);
+			expect(mockExecutor.execute).not.toHaveBeenCalled();
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(2);
 		});
 	});
 

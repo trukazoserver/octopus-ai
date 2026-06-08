@@ -96,7 +96,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			},
 		},
 		thinking: "medium",
-		maxTokens: 16384,
+		maxTokens: 32768,
 	},
 	channels: {
 		whatsapp: { enabled: false },
@@ -261,7 +261,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		disabled: [],
 		iterationLimit: {
 			enabled: true,
-			maxIterations: 18,
+			maxIterations: 128,
 		},
 		timeouts: {
 			defaultMs: 45000,
@@ -270,12 +270,41 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			scrapingMs: 165000,
 			byTool: {
 				delegate_task: 300000,
+				execute_code: 120000,
+				"nano-banana-generate": 600000,
+				"veo-video-generator": 600000,
 			},
 		},
+		rateLimits: {
+			enabled: true,
+			mediaDefault: {
+				minIntervalMs: 3000,
+				maxConcurrent: 1,
+				queueTimeoutMs: 600000,
+			},
+			byTool: {},
+		},
+	},
+	orchestration: {
+		enabled: true,
+		mode: "durable",
+		maxArms: 8,
+		workerTimeoutMs: 600000,
+		maxToolIterationsPerArm: 32,
+		decompositionTimeoutMs: 30000,
+		synthesisTimeoutMs: 10000,
+		synthesisMaxTokens: 1200,
+		maxStagnantAttempts: 5,
+		maxSpawnDepth: 2,
 	},
 	mcp: {
 		servers: {},
 		autoDisabled: [],
+	},
+	continuityGuard: {
+		enabled: true,
+		maxAutoContinuations: 10,
+		truncationDetection: true,
 	},
 };
 

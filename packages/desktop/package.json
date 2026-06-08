@@ -14,6 +14,8 @@
 	},
 	"dependencies": {
 		"@octopus-ai/core": "workspace:*",
+		"dompurify": "^3.4.0",
+		"marked": "^18.0.0",
 		"react": "^19.2.5",
 		"react-dom": "^19.1.0"
 	},

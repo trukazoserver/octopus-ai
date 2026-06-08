@@ -95,6 +95,7 @@ const STAT_SKELETON_KEYS = [
 	"conversations",
 	"tools",
 	"tasks",
+	"workflows",
 	"memory",
 	"model",
 ];
@@ -155,6 +156,14 @@ export const DashboardStatsGrid: React.FC<DashboardStatsProps> = ({
 			sublabel: `${stats.runningTasks} en ejecución`,
 			color: "#38bdf8",
 			bg: "rgba(56, 189, 248, 0.1)",
+		},
+		{
+			icon: "activity",
+			label: "Workflows durables",
+			value: stats.workflows,
+			sublabel: `${stats.runningWorkflows} activos · ${stats.arms} brazos`,
+			color: "#a78bfa",
+			bg: "rgba(167, 139, 250, 0.1)",
 		},
 		{
 			icon: "brain",

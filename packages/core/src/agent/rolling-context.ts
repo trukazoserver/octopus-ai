@@ -1,5 +1,5 @@
+import { getModelContextWindow } from "../ai/model-context.js";
 import type { LLMRouter } from "../ai/router.js";
-import { getModelContextWindow } from "../ai/router.js";
 import { TokenCounter } from "../ai/tokenizer.js";
 import type { LLMMessage } from "../ai/types.js";
 import { createLogger } from "../utils/logger.js";
@@ -18,7 +18,10 @@ Rules:
 7. Use clear section headers: [User Request], [Actions Taken], [Results], [Key Data], [Retrieval Hints].
 8. The [Retrieval Hints] section is mandatory. Include exact search strings the agent can use if a specific detail is missing from the summary: unique filenames, paths, URLs, media IDs, tool names, error fragments, commands, user phrases, and message refs like segment-message #012.
 9. Retrieval hints must explain where/how to recover details: use the raw conversation search tool with those exact keywords; start with exact quoted strings, then broaden to related terms.
-10. Output ONLY the summary text. No meta-commentary.`;
+10. Preserve task state explicitly: label tasks as COMPLETED, PARTIAL, FAILED, or PENDING. If the assistant already generated/imported/delivered an output, mark it COMPLETED and include the final output/media URL/path when visible.
+11. Preserve user corrections as procedural rules. If the user explains why a tool call failed or how a workflow should work, record it under [Key Data] or [Procedure Rules] with exact constraints.
+12. Never convert completed work into a pending request. If a later agent reads this summary, it must know what was already done so it does not repeat expensive generation/tool calls unless the user explicitly asks.
+13. Output ONLY the summary text. No meta-commentary.`;
 
 const RAW_TURNS_TO_KEEP = 20;
 const CONTEXT_THRESHOLD = 0.8;
@@ -28,7 +31,10 @@ export class RollingContextManager {
 	private currentSummary = "";
 	private summarizing = false;
 
-	constructor(private llmRouter: LLMRouter) {}
+	constructor(
+		private llmRouter: LLMRouter,
+		private onSummaryUpdated?: (summary: string) => Promise<void> | void,
+	) {}
 
 	reset(): void {
 		this.currentSummary = "";
@@ -38,28 +44,71 @@ export class RollingContextManager {
 		return this.currentSummary;
 	}
 
+	setSummary(summary: string): void {
+		this.currentSummary = summary.trim();
+	}
+
 	async maybeSummarize(
 		messages: LLMMessage[],
 		model: string,
 	): Promise<LLMMessage[]> {
+		let workingMessages = messages;
+		if (this.currentSummary && !this.hasRollingSummary(messages)) {
+			workingMessages = this.injectSummaryMessage(messages);
+		}
+
 		const contextWindow = getModelContextWindow(model);
 		const threshold = Math.floor(contextWindow * CONTEXT_THRESHOLD);
 		const outputReserve = 16384;
 		const inputBudget = contextWindow - outputReserve;
-		const currentTokens = this.tokenCounter.countMessagesTokens(messages);
+		const currentTokens =
+			this.tokenCounter.countMessagesTokens(workingMessages);
 
 		if (currentTokens < threshold) {
 			logger.debug(
 				`Context at ${currentTokens}/${inputBudget} tokens (${((currentTokens / inputBudget) * 100).toFixed(1)}%) — below 80% threshold, no summarization needed.`,
 			);
-			return messages;
+			return workingMessages;
 		}
 
 		logger.info(
 			`Context reached ${currentTokens}/${inputBudget} tokens (${((currentTokens / inputBudget) * 100).toFixed(1)}%) — triggering rolling summarization.`,
 		);
 
-		return this.summarizeAndCompress(messages, model, inputBudget);
+		return this.summarizeAndCompress(workingMessages, model, inputBudget);
+	}
+
+	private hasRollingSummary(messages: LLMMessage[]): boolean {
+		return messages.some(
+			(message) =>
+				message.role === "system" &&
+				typeof message.content === "string" &&
+				message.content.includes("## Conversation Summary (rolling context)"),
+		);
+	}
+
+	private buildSummaryMessage(): LLMMessage {
+		return {
+			role: "system",
+			content: `## Conversation Summary (rolling context)\nThis is a persisted summary of earlier conversation context. Use it to preserve continuity after reconnects, restarts, or context compression.\n\nIf you need an exact detail that is not present in the summary, do not guess. Use the [Retrieval Hints] section as a search map: call the raw conversation search tool (recall_conversation, if available) with exact filenames, paths, URLs, media IDs, command fragments, error text, or user phrases listed there. Prefer the current conversation first, then broaden only if needed.\n\n${this.currentSummary}`,
+		};
+	}
+
+	private injectSummaryMessage(messages: LLMMessage[]): LLMMessage[] {
+		let insertAt = 0;
+		for (let i = 0; i < messages.length; i++) {
+			if (messages[i].role === "system") insertAt = i + 1;
+		}
+		return [
+			...messages.slice(0, insertAt),
+			this.buildSummaryMessage(),
+			...messages.slice(insertAt),
+		];
+	}
+
+	private async notifySummaryUpdated(): Promise<void> {
+		if (!this.onSummaryUpdated || !this.currentSummary.trim()) return;
+		await this.onSummaryUpdated(this.currentSummary);
 	}
 
 	private async summarizeAndCompress(
@@ -97,11 +146,9 @@ export class RollingContextManager {
 				model,
 			);
 		}
+		await this.notifySummaryUpdated();
 
-		const summaryMessage: LLMMessage = {
-			role: "system",
-			content: `## Conversation Summary (rolling context)\nThis is a summary of the earlier part of the conversation. Use it as context for understanding what happened before the recent messages shown below.\n\nIf you need an exact detail that is not present in the summary, do not guess. Use the [Retrieval Hints] section as a search map: call the raw conversation search tool (recall_conversation, if available) with exact filenames, paths, URLs, media IDs, command fragments, error text, or user phrases listed there. Prefer the current conversation first, then broaden only if needed.\n\n${this.currentSummary}`,
-		};
+		const summaryMessage = this.buildSummaryMessage();
 
 		const compressed: LLMMessage[] = [
 			...systemMessages,

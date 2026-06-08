@@ -144,6 +144,73 @@ export class LearningEngine {
 		return experience;
 	}
 
+	async recordUserCorrection(input: {
+		content: string;
+		conversationId?: string;
+		channelId?: string;
+		agentId?: string;
+	}): Promise<void> {
+		if (!this.config.enabled) return;
+		await this.ensureTables();
+		const content = input.content.trim();
+		if (!content) return;
+
+		const experience: ExperienceRecord = {
+			id: nanoid(),
+			conversationId: input.conversationId,
+			agentId: input.agentId,
+			channelId: input.channelId,
+			userRequest: content,
+			finalResponse: `Explicit user procedural correction: ${content}`,
+			status: "succeeded",
+			confidence: 0.98,
+			toolsUsed: [],
+			skillsUsed: [],
+			metadata: { source: "explicit_user_correction" },
+			createdAt: new Date(),
+		};
+
+		await this.db.run(
+			`INSERT INTO experiences (id, conversation_id, task_id, agent_id, channel_id, user_request, final_response, status, confidence, tools_used, skills_used, duration_ms, metadata, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				experience.id,
+				experience.conversationId ?? null,
+				null,
+				experience.agentId ?? null,
+				experience.channelId ?? null,
+				experience.userRequest,
+				experience.finalResponse,
+				experience.status,
+				experience.confidence,
+				JSON.stringify([]),
+				JSON.stringify([]),
+				null,
+				JSON.stringify(experience.metadata),
+				experience.createdAt.toISOString(),
+			],
+		);
+
+		const keywords = this.extractKeywords(content);
+		const insight: LearningInsight = {
+			id: nanoid(),
+			experienceId: experience.id,
+			type: "procedure",
+			domain: this.detectDomain(keywords, content),
+			keywords,
+			content: `User explicit operational correction: ${content}`,
+			evidence: content.slice(0, 500),
+			confidence: 0.98,
+			importance: 0.98,
+			embedding: await this.embedFn(
+				`explicit correction ${keywords.join(" ")} ${content}`,
+			),
+			useCount: 0,
+			createdAt: new Date(),
+		};
+		await this.storeInsight(insight);
+	}
+
 	async retrieveRelevant(query: string): Promise<LearningInsight[]> {
 		if (!this.config.enabled) return [];
 		await this.ensureTables();
@@ -347,7 +414,7 @@ export class LearningEngine {
 		const successfulTools = experience.toolsUsed.filter((tool) => tool.success);
 		const failedTools = experience.toolsUsed.filter((tool) => !tool.success);
 
-		if (experience.status === "succeeded" || experience.status === "partial") {
+		if (experience.status === "succeeded") {
 			const toolText =
 				successfulTools.length > 0
 					? ` Tools that produced progress: ${[...new Set(successfulTools.map((t) => t.name))].join(", ")}.`
@@ -365,7 +432,7 @@ export class LearningEngine {
 			});
 		}
 
-		if (successfulTools.length > 0) {
+		if (experience.status === "succeeded" && successfulTools.length > 0) {
 			insights.push({
 				experienceId: experience.id,
 				type: "tool_strategy",

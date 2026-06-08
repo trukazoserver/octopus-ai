@@ -2,7 +2,10 @@ import type React from "react";
 import { Suspense, lazy, useEffect, useState } from "react";
 import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
 import { ToastContainer } from "../components/ui/Toast.js";
+import { publicAsset } from "../utils/assets.js";
 import "./app.css";
+
+const LOGO_SRC = publicAsset("mascotas/Pulpo_octavio.png");
 
 const AgentsPage = lazy(() =>
 	import("../pages/agents.js").then(({ AgentsPage }) => ({
@@ -74,6 +77,12 @@ interface NavGroup {
 
 type ChatWorkspaceView = "chat" | "media";
 
+interface DesktopWindowApi {
+	minimize?: () => void;
+	maximize?: () => void;
+	close?: () => void;
+}
+
 interface ChatWorkspaceRequest {
 	id: number;
 	view: ChatWorkspaceView;
@@ -130,6 +139,10 @@ const PageLoading: React.FC = () => (
 	</div>
 );
 
+function getDesktopWindowApi(): DesktopWindowApi | undefined {
+	return (window as unknown as { octopus?: DesktopWindowApi }).octopus;
+}
+
 function isTabId(tab: string): tab is TabId {
 	return NAV_GROUPS.some((group) =>
 		group.items.some((item) => item.id === tab),
@@ -137,6 +150,8 @@ function isTabId(tab: string): tab is TabId {
 }
 
 export const App: React.FC = () => {
+	const desktopWindow = getDesktopWindowApi();
+	const isDesktop = Boolean(desktopWindow);
 	const [activeTab, setActiveTab] = useState<TabId>(() => {
 		try {
 			const stored = localStorage.getItem("octopus-active-tab");
@@ -263,7 +278,38 @@ export const App: React.FC = () => {
 	};
 
 	return (
-		<div className="app-shell">
+		<div className={`app-shell${isDesktop ? " is-electron" : ""}`}>
+			{isDesktop && (
+				<div className="app-electron-titlebar">
+					<div className="app-electron-titlebar-drag" />
+					<div className="app-electron-controls">
+						<button
+							type="button"
+							className="app-electron-control"
+							aria-label="Minimizar ventana"
+							onClick={() => desktopWindow?.minimize?.()}
+						>
+							<span aria-hidden="true">-</span>
+						</button>
+						<button
+							type="button"
+							className="app-electron-control"
+							aria-label="Maximizar ventana"
+							onClick={() => desktopWindow?.maximize?.()}
+						>
+							<span aria-hidden="true">□</span>
+						</button>
+						<button
+							type="button"
+							className="app-electron-control is-close"
+							aria-label="Cerrar ventana"
+							onClick={() => desktopWindow?.close?.()}
+						>
+							<span aria-hidden="true">×</span>
+						</button>
+					</div>
+				</div>
+			)}
 			<header className="app-mobile-header">
 				<button
 					type="button"
@@ -275,7 +321,7 @@ export const App: React.FC = () => {
 				</button>
 				<div className="app-mobile-brand">
 					<div className="app-logo">
-						<img src="/logo_Pulpo_octavio.png" alt="Octopus AI" />
+						<img src={LOGO_SRC} alt="Octopus AI" />
 					</div>
 					<div>
 						<div className="app-brand-title">Octopus AI</div>
@@ -297,7 +343,7 @@ export const App: React.FC = () => {
 				<aside className={`app-sidebar${menuOpen ? " is-open" : ""}`}>
 					<div className="app-sidebar-header">
 						<div className="app-logo">
-							<img src="/logo_Pulpo_octavio.png" alt="Octopus AI" />
+							<img src={LOGO_SRC} alt="Octopus AI" />
 						</div>
 						<div>
 							<div className="app-brand-title">Octopus AI</div>

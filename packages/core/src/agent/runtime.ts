@@ -10,6 +10,7 @@ import type {
 	LLMTool,
 	LLMToolCall,
 } from "../ai/types.js";
+import type { ChatManager, ChatTaskLedgerEntry } from "../chat/manager.js";
 import type { LearningEngine, LearningInsight } from "../learning/index.js";
 import type {
 	ExperienceSkillTrace,
@@ -42,11 +43,16 @@ import {
 } from "./orchestrator.js";
 import { RollingContextManager } from "./rolling-context.js";
 import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
+import type { WorkflowManager } from "./workflow-manager.js";
 
-const DEFAULT_MAX_TOOL_ITERATIONS = 18;
+const DEFAULT_MAX_TOOL_ITERATIONS = 64;
 const MAX_REPEATED_TOOL_SIGNATURES = 2;
 const MAX_TOOL_RESULT_CONTEXT_CHARS = 12000;
 const MAX_TOOL_RESULT_STORED_CHARS = 2000;
+const DELEGATE_SYNTHESIS_TIMEOUT_MS = 10_000;
+const DELEGATE_SYNTHESIS_MAX_TOKENS = 1200;
+const DELEGATE_SYNTHESIS_RESULT_CHARS = 1500;
+const REQUIRED_RECENT_RAW_TURNS = 20;
 const STM_MIN_TURNS = 30;
 const STM_MAX_TURNS = 60;
 const TOOL_IMAGE_RE = /\[IMG:(data:image\/[a-zA-Z0-9-]+;base64,[^\]]+)\]/;
@@ -78,6 +84,25 @@ interface EvidenceLedger {
 	}>;
 }
 
+interface DelegateWorkflowTask {
+	id: string;
+	role: string;
+	task: string;
+}
+
+interface DelegateWorkflowState {
+	runId: string;
+	taskIds: Map<string, string>;
+}
+
+interface DelegateTaskResult {
+	workerId: string;
+	role: string;
+	task: string;
+	result: string;
+	error?: string;
+}
+
 type ToolDecision =
 	| { action: "execute" }
 	| { action: "skip"; reason: string }
@@ -97,12 +122,40 @@ export interface RuntimeMemoryTrace {
 
 export interface AgentProcessOptions {
 	signal?: AbortSignal;
+	selectedAgentContext?: RuntimeSelectedAgentContext | null;
+	disableOrchestrator?: boolean;
+	disableDelegation?: boolean;
+}
+
+export interface RuntimeSelectedAgentContext {
+	id: string;
+	name: string;
+	description?: string | null;
+	role?: string | null;
+	personality?: string | null;
+	systemPrompt?: string | null;
+	model?: string | null;
+	avatar?: string | null;
+	color?: string | null;
+	armKey?: string | null;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) {
 		throw new Error("Execution cancelled");
 	}
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+	return Promise.race([
+		promise,
+		new Promise<T>((_, reject) => {
+			setTimeout(
+				() => reject(new Error(`Operation timed out after ${timeoutMs}ms`)),
+				timeoutMs,
+			);
+		}),
+	]);
 }
 
 export function requiresZaiVisionToolForModel(model?: string): boolean {
@@ -132,10 +185,15 @@ export class AgentRuntime {
 	private memoryOrchestrator?: MemoryOrchestrator;
 	private contextAssembler?: ContextAssembler;
 	private learningEngine?: LearningEngine;
+	private chatManager?: ChatManager;
+	private workflowManager?: WorkflowManager;
 	private orchestrator?: OctopusOrchestrator;
+	private subtaskTracker?: import("./subtask-tracker.js").SubtaskTracker;
+	private continuityGuard?: import("./continuity-guard.js").ContinuityGuard;
 	private workingMemory: WorkingMemory = new WorkingMemory();
 	private rollingContext: RollingContextManager;
 	private rollingContexts = new Map<string, RollingContextManager>();
+	private rollingContextHydrated = new Set<string>();
 	private lastMemoryTrace?: RuntimeMemoryTrace;
 
 	constructor(
@@ -156,12 +214,33 @@ export class AgentRuntime {
 		this.rollingContexts.set("__default__", this.rollingContext);
 	}
 
-	private getRollingContext(channelId?: string): RollingContextManager {
+	private createRollingContext(key: string): RollingContextManager {
+		return new RollingContextManager(this.llmRouter, async (summary) => {
+			if (!this.chatManager || key === "__default__") return;
+			await this.chatManager.saveConversationContextSnapshot?.(key, summary);
+		});
+	}
+
+	private async getRollingContext(
+		channelId?: string,
+	): Promise<RollingContextManager> {
 		const key = channelId || "__default__";
 		let manager = this.rollingContexts.get(key);
 		if (!manager) {
-			manager = new RollingContextManager(this.llmRouter);
+			manager = this.createRollingContext(key);
 			this.rollingContexts.set(key, manager);
+		}
+		if (
+			key !== "__default__" &&
+			!this.rollingContextHydrated.has(key) &&
+			!manager.getSummary()
+		) {
+			this.rollingContextHydrated.add(key);
+			const snapshot =
+				await this.chatManager?.getConversationContextSnapshot?.(key);
+			if (snapshot?.rolling_summary) {
+				manager.setSummary(snapshot.rolling_summary);
+			}
 		}
 		return manager;
 	}
@@ -208,6 +287,22 @@ export class AgentRuntime {
 		this.learningEngine = engine;
 	}
 
+	setChatManager(manager: ChatManager): void {
+		this.chatManager = manager;
+	}
+
+	setWorkflowManager(manager: WorkflowManager): void {
+		this.workflowManager = manager;
+	}
+
+	setSubtaskTracker(tracker: import("./subtask-tracker.js").SubtaskTracker): void {
+		this.subtaskTracker = tracker;
+	}
+
+	setContinuityGuard(guard: import("./continuity-guard.js").ContinuityGuard): void {
+		this.continuityGuard = guard;
+	}
+
 	/**
 	 * Configura el orquestador multi-agente para ejecución paralela.
 	 * Si se configura, las tareas complejas se descomponen automáticamente.
@@ -225,6 +320,7 @@ export class AgentRuntime {
 			this.toolExecutor,
 			this.config,
 			config,
+			this.workflowManager,
 		);
 	}
 
@@ -356,11 +452,33 @@ export class AgentRuntime {
 			/\b(recuerdame|recu[eé]rdame|no olvides|pendiente|deadline|fecha l[ií]mite|remind me|follow up)\b/i.test(
 				content,
 			);
-		if (!isPreference && !isProspective) return;
+		const isProceduralCorrection =
+			this.looksLikeUserFeedbackOrCorrection(content) &&
+			/\b(modelo|modelos|tool|herramienta|veo|ffmpeg|procedimiento|flujo|pipeline|generaci[oó]n|video|imagen|referencia|frame|par[aá]metro|acepta|usar|utilizar)\b/i.test(
+				content,
+			);
+		if (!isPreference && !isProspective && !isProceduralCorrection) return;
+
+		if (isProceduralCorrection) {
+			this.learningEngine
+				?.recordUserCorrection?.({
+					content,
+					conversationId: channelId,
+					channelId,
+					agentId: this.config.id,
+				})
+				.catch((err) =>
+					console.error("Failed to record user correction learning:", err),
+				);
+		}
 
 		this.memoryOrchestrator
 			.write({
-				type: isProspective ? "prospective" : "user",
+				type: isProspective
+					? "prospective"
+					: isProceduralCorrection
+						? "procedural"
+						: "user",
 				content,
 				sourceTrust: "user_explicit",
 				scope: {
@@ -460,9 +578,134 @@ export class AgentRuntime {
 
 	private getToolExecutionContext(): ToolExecutionContext {
 		return {
+			agentId: this.config.id,
 			model: this.config.model,
 			usesZaiVisionToolForImages: this.shouldUseZaiVisionToolsForImages(),
 		};
+	}
+
+	private async startDelegateWorkflow(
+		message: string,
+		channelId: string | undefined,
+		tasks: DelegateWorkflowTask[],
+	): Promise<DelegateWorkflowState | null> {
+		if (!this.workflowManager) return null;
+		try {
+			const run = await this.workflowManager.createRun({
+				conversationId: channelId,
+				rootAgentId: this.config.id,
+				goal: message,
+				metadata: {
+					source: "delegate_task",
+					executionPlan: "parallel",
+					taskCount: tasks.length,
+				},
+			});
+			await this.workflowManager.updateRunStatus(run.id, "running", {
+				currentPhase: "delegation",
+			});
+			const taskIds = new Map<string, string>();
+			for (const task of tasks) {
+				const workflowTask = await this.workflowManager.createTask({
+					runId: run.id,
+					assignedAgentId: this.config.id,
+					title: `${task.role}: ${task.task.slice(0, 80)}`,
+					description: task.task,
+					priority: 3,
+					metadata: {
+						source: "delegate_task",
+						sourceTaskId: task.id,
+						role: task.role,
+					},
+				});
+				taskIds.set(task.id, workflowTask.id);
+			}
+			await this.workflowManager.recordEvent({
+				runId: run.id,
+				agentId: this.config.id,
+				eventType: "decomposition",
+				message: `Delegated ${tasks.length} tasks via delegate_task.`,
+				metadata: {
+					source: "delegate_task",
+					subtasks: tasks.map((task) => ({
+						id: task.id,
+						workflowTaskId: taskIds.get(task.id),
+						role: task.role,
+					})),
+				},
+			});
+			return { runId: run.id, taskIds };
+		} catch (err) {
+			console.error(
+				"Failed to persist delegate_task workflow:",
+				err instanceof Error ? err.message : err,
+			);
+			return null;
+		}
+	}
+
+	private async updateDelegateWorkflowTask(
+		workflow: DelegateWorkflowState | null,
+		workerId: string,
+		status: "running" | "done" | "failed",
+		message: string,
+	): Promise<void> {
+		if (!workflow || !this.workflowManager) return;
+		const taskId = workflow.taskIds.get(workerId);
+		if (!taskId) return;
+		try {
+			await this.workflowManager.updateTaskStatus(taskId, status, {
+				stepKey: status === "running" ? "delegate_task" : "result",
+				progressSignature: `${status}:${message.slice(0, 200)}`,
+			});
+			await this.workflowManager.recordEvent({
+				runId: workflow.runId,
+				taskId,
+				agentId: this.config.id,
+				eventType: status === "failed" ? "error" : status,
+				message: message.slice(0, 4000),
+				toolName: "delegate_task",
+				metadata: { source: "delegate_task", workerId },
+			});
+		} catch (err) {
+			console.error(
+				"Failed to update delegate_task workflow:",
+				err instanceof Error ? err.message : err,
+			);
+		}
+	}
+
+	private async finishDelegateWorkflow(
+		workflow: DelegateWorkflowState | null,
+		results: DelegateTaskResult[],
+		finalResponse: string,
+	): Promise<void> {
+		if (!workflow || !this.workflowManager) return;
+		const failed = results.filter((result) => result.error).length;
+		const succeeded = results.length - failed;
+		const status = failed > 0 ? (succeeded > 0 ? "partial" : "failed") : "done";
+		try {
+			await this.workflowManager.updateRunStatus(workflow.runId, status, {
+				currentPhase: "synthesis",
+				metadata: {
+					source: "delegate_task",
+					succeeded,
+					failed,
+				},
+			});
+			await this.workflowManager.recordEvent({
+				runId: workflow.runId,
+				agentId: this.config.id,
+				eventType: "synthesis",
+				message: finalResponse.slice(0, 4000),
+				metadata: { source: "delegate_task", succeeded, failed },
+			});
+		} catch (err) {
+			console.error(
+				"Failed to finish delegate_task workflow:",
+				err instanceof Error ? err.message : err,
+			);
+		}
 	}
 
 	private getToolIterationLimit(): { enabled: boolean; maxIterations: number } {
@@ -549,7 +792,7 @@ export class AgentRuntime {
 	private appendZaiVisionHint(content: string, localPaths: string[]): string {
 		if (localPaths.length === 0) return content;
 		const quotedPaths = localPaths.map((p) => JSON.stringify(p)).join(", ");
-		return `${content}\n\n[ZAI VISION REQUIRED] This image must be inspected with a Z.AI Vision MCP tool because the active model is Z.ai GLM. Use the available vision tool schema with one of these local screenshot paths (${quotedPaths}) before deciding the next browser action.`;
+		return `${content}\n\n[ZAI VISION REQUIRED] This image must be inspected with an available Z.AI Vision MCP tool because the active model is Z.ai GLM. Use the exact vision tool name exposed in Available Tools (for example analyze_image, extract_text_from_screenshot, or a namespaced alias containing that name) and pass one of these local media paths (${quotedPaths}) using the parameter required by that tool schema before answering.`;
 	}
 
 	private stripInlineImageData(content: string): string {
@@ -632,10 +875,34 @@ export class AgentRuntime {
 		}
 	}
 
+	private formatSelectedAgentContext(
+		selectedAgent?: RuntimeSelectedAgentContext | null,
+	): string | null {
+		if (!selectedAgent) return null;
+		return [
+			"# Selected Agent Context",
+			`The user selected ${selectedAgent.name} (${selectedAgent.id}) for this conversation. Octavio remains the root orchestrator, but should honor this agent's identity, specialty, and intent when coordinating the arms.`,
+			selectedAgent.role ? `- Role: ${selectedAgent.role}` : "",
+			selectedAgent.armKey ? `- Arm key: ${selectedAgent.armKey}` : "",
+			selectedAgent.description
+				? `- Description: ${selectedAgent.description}`
+				: "",
+			selectedAgent.personality
+				? `- Personality: ${selectedAgent.personality}`
+				: "",
+			selectedAgent.systemPrompt
+				? `- Protected/agent instructions to preserve: ${selectedAgent.systemPrompt}`
+				: "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+
 	private async buildSharedWorkerContext(
 		userMessage: string,
 		channelId?: string,
 		signal?: AbortSignal,
+		selectedAgent?: RuntimeSelectedAgentContext | null,
 	): Promise<LLMMessage[]> {
 		const memories = await this.memoryRetrieval.retrieveForContext(userMessage);
 		throwIfAborted(signal);
@@ -657,6 +924,7 @@ export class AgentRuntime {
 			userMessage,
 			channelId,
 			learningInsights,
+			selectedAgent,
 		);
 
 		try {
@@ -788,6 +1056,8 @@ export class AgentRuntime {
 	}
 
 	private getToolBudget(toolName: string): number {
+		if (toolName === "create_tool") return 2;
+		if (toolName === "execute_code" || toolName === "run_shell") return 3;
 		if (toolName === "browser_screenshot") return 2;
 		if (toolName === "browser_snapshot") return 4;
 		if (toolName === "browser_read_page") return 4;
@@ -795,8 +1065,9 @@ export class AgentRuntime {
 		if (toolName === "browser_eval") return 3;
 		if (toolName === "browser_extract_images") return 3;
 		if (toolName.startsWith("browser_")) return 4;
-		if (toolName === "image-url-to-base64" || toolName === "save_media")
-			return 6;
+		if (toolName === "save_media") return 6;
+		if (/\b(video|image|audio|generate|edit|veo|nano)\b/i.test(toolName))
+			return this.getToolIterationLimit().maxIterations;
 		return 8;
 	}
 
@@ -828,7 +1099,26 @@ export class AgentRuntime {
 		return { success: false, resultContent: `Tool policy: ${message}` };
 	}
 
-	private createEvidenceLedger(message: string): EvidenceLedger {
+private extractArtifactsFromToolResult(
+		toolName: string,
+		resultContent: string,
+	): Array<{ artifactType: string; url?: string; path?: string; description?: string }> {
+		const artifacts: Array<{ artifactType: string; url?: string; path?: string; description?: string }> = [];
+		const MEDIA_URL_RE = new RegExp("/api/media/file/[a-f0-9-]+\.[a-z0-9]+", "gi");
+		let match: RegExpExecArray | null;
+		while ((match = MEDIA_URL_RE.exec(resultContent)) !== null) {
+			const url = match[0];
+			const ext = url.split(".").pop()?.toLowerCase() ?? "";
+			const artifactType = ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext) ? "image"
+				: ["mp4", "webm"].includes(ext) ? "video"
+				: ["mp3", "wav", "ogg", "m4a"].includes(ext) ? "audio"
+				: "media";
+			artifacts.push({ artifactType, url, description: `${artifactType} from ${toolName}` });
+		}
+		return artifacts;
+	}
+
+		private createEvidenceLedger(message: string): EvidenceLedger {
 		const lower = message.toLowerCase();
 		const objectiveKind: ObjectiveKind =
 			/(imagen|imágenes|image|images|foto|fotos|producto|product|media|screenshot|captura)/i.test(
@@ -868,6 +1158,53 @@ export class AgentRuntime {
 		};
 	}
 
+	private shouldStopOnToolBudgetExceeded(toolName: string): boolean {
+		return (
+			toolName === "create_tool" ||
+			toolName === "execute_code" ||
+			toolName === "run_shell"
+		);
+	}
+
+	private isManualVeoApiAttempt(
+		toolName: string,
+		params: Record<string, unknown>,
+	): boolean {
+		if (toolName !== "execute_code" && toolName !== "run_shell") return false;
+		const text = [params.code, params.command, params.script]
+			.filter((value): value is string => typeof value === "string")
+			.join("\n");
+		return /\b(veo-3\.|aiplatform\.googleapis\.com|predictLongRunning|fetchPredictOperation|generateVideos|GOOGLE_APPLICATION_CREDENTIALS|gcloud\s+auth\s+print-access-token)\b/i.test(
+			text,
+		);
+	}
+
+	private formatTaskLedgerEntry(entry: ChatTaskLedgerEntry): string {
+		const outputs = this.parseJsonArray(entry.outputs).slice(0, 5);
+		const tools = this.parseJsonArray(entry.tool_names).slice(0, 8);
+		return [
+			`- status=${entry.status}; objective=${entry.objective}`,
+			entry.summary ? `  summary=${entry.summary}` : "",
+			outputs.length > 0 ? `  outputs=${outputs.join(", ")}` : "",
+			tools.length > 0 ? `  tools=${tools.join(", ")}` : "",
+			entry.completed_at ? `  completedAt=${entry.completed_at}` : "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+
+	private parseJsonArray(value: string | null): string[] {
+		if (!value) return [];
+		try {
+			const parsed = JSON.parse(value);
+			return Array.isArray(parsed)
+				? parsed.filter((item): item is string => typeof item === "string")
+				: [];
+		} catch {
+			return [];
+		}
+	}
+
 	private addUnique(target: string[], values: string[]): boolean {
 		let changed = false;
 		for (const value of values) {
@@ -895,7 +1232,7 @@ export class AgentRuntime {
 	private extractMediaUrls(text: string): string[] {
 		const urls = new Set<string>();
 		for (const match of text.matchAll(/\/api\/media\/file\/[^\s)\]]+/g)) {
-			urls.add(match[0]);
+			urls.add(match[0].replace(/[,.]+$/, ""));
 		}
 		return Array.from(urls);
 	}
@@ -1047,6 +1384,17 @@ export class AgentRuntime {
 		ledger: EvidenceLedger,
 		remainingIterations: number | null,
 	): ToolDecision {
+		if (
+			this.isManualVeoApiAttempt(toolName, params) &&
+			this.toolRegistry?.has("veo-video-generator")
+		) {
+			return {
+				action: "stop",
+				reason:
+					"Se bloqueó un intento manual de llamar la API de Veo desde execute_code/run_shell. Usa la herramienta dedicada `veo-video-generator` con `model_preference`, `image_url`/`first_frame_url` y `generate_audio`; no construyas endpoints de Vertex AI manualmente ni expongas credenciales.",
+			};
+		}
+
 		if (ledger.usefulResults > 0 && ledger.consecutiveErrors >= 3) {
 			return {
 				action: "stop",
@@ -1218,8 +1566,23 @@ export class AgentRuntime {
 				lines.push(`${index + 1}. ${url}`);
 			}
 		}
+		if (ledger.mediaUrls.length > 0) {
+			lines.push("", "Media generado o encontrado:");
+			for (const [index, url] of ledger.mediaUrls.slice(0, 10).entries()) {
+				lines.push(`${index + 1}. ${url}`);
+			}
+		}
 		if (ledger.blockers.length > 0) {
 			lines.push("", `Bloqueos detectados: ${ledger.blockers.join(" | ")}`);
+		}
+		const recentFailures = ledger.toolHistory
+			.filter((entry) => !entry.success)
+			.slice(-3);
+		if (recentFailures.length > 0) {
+			lines.push("", "Ultimos errores de herramientas:");
+			for (const failure of recentFailures) {
+				lines.push(`- ${failure.name}: ${failure.summary}`);
+			}
 		}
 		return lines.join("\n");
 	}
@@ -1243,8 +1606,17 @@ export class AgentRuntime {
 				yielded = true;
 				yield chunk.content;
 			}
-		} catch {
-			/* fallback below */
+		} catch (err) {
+			if (yielded) {
+				yield `\n\nLa respuesta se interrumpió mientras cerraba la tarea. Estado actual: ${reason}.`;
+				const fallback = this.buildFallbackFinalResponse(ledger, reason);
+				if (fallback.trim()) yield `\n\n${fallback}`;
+				console.error(
+					"Final response stream failed after partial output:",
+					err,
+				);
+				return;
+			}
 		}
 		if (!yielded) yield this.buildFallbackFinalResponse(ledger, reason);
 	}
@@ -1266,6 +1638,75 @@ export class AgentRuntime {
 			/* fallback below */
 		}
 		return this.buildFallbackFinalResponse(ledger, reason);
+	}
+
+	private buildDelegateSynthesisFallback(results: DelegateTaskResult[]): string {
+		const lines = [
+			"# Resultados combinados",
+			"",
+			"La sintesis automatica no termino correctamente. Estos son los resultados verificados de los workers.",
+		];
+		for (const result of results) {
+			lines.push(
+				"",
+				`## ${result.role} (${result.workerId})`,
+				`Tarea: ${result.task}`,
+				result.error ? `Estado: failed - ${result.error}` : "Estado: done",
+				"",
+				result.result.slice(0, DELEGATE_SYNTHESIS_RESULT_CHARS),
+			);
+		}
+		return lines.join("\n");
+	}
+
+	private async generateDelegateSynthesis(
+		messages: LLMMessage[],
+		results: DelegateTaskResult[],
+	): Promise<string> {
+		const summary = results
+			.map((result) =>
+				[
+					`## ${result.role} (${result.workerId})`,
+					`Tarea: ${result.task}`,
+					result.error ? `Estado: failed - ${result.error}` : "Estado: done",
+					"",
+					result.result.slice(0, DELEGATE_SYNTHESIS_RESULT_CHARS),
+				].join("\n"),
+			)
+			.join("\n\n---\n\n");
+		try {
+			const response = await withTimeout(
+				this.llmRouter.chat({
+					model: this.config.model ?? "default",
+					messages: [
+						...messages,
+						{
+							role: "system",
+							content: [
+								"Sintetiza ahora los resultados de delegate_task en una respuesta final.",
+								"No llames herramientas. No inventes artefactos, archivos, URLs ni pruebas que no aparezcan en los resultados.",
+								"Si algun worker fallo, reporta el resultado como parcial y cita el error exacto.",
+								"Evita repetir contenido redundante y prioriza conclusiones accionables.",
+							].join("\n"),
+						},
+						{
+							role: "user",
+							content: `Resultados de workers:\n\n${summary}`,
+						},
+					],
+					maxTokens: Math.min(
+						this.config.maxTokens ?? DELEGATE_SYNTHESIS_MAX_TOKENS,
+						DELEGATE_SYNTHESIS_MAX_TOKENS,
+					),
+					temperature: this.config.temperature ?? 0.3,
+				}),
+				DELEGATE_SYNTHESIS_TIMEOUT_MS,
+			);
+			if (response.content?.trim()) return response.content;
+		} catch {
+			/* fallback below */
+		}
+		return this.buildDelegateSynthesisFallback(results);
 	}
 
 	async initialize(): Promise<void> {
@@ -1299,7 +1740,7 @@ export class AgentRuntime {
 		this.workingMemory.updateFromUserMessage(message);
 
 		// === Auto-escalado a multi-agente ===
-		if (this.orchestrator) {
+		if (this.orchestrator && !options.disableOrchestrator) {
 			try {
 				throwIfAborted(options.signal);
 				const shouldDecompose =
@@ -1311,6 +1752,7 @@ export class AgentRuntime {
 							message,
 							channelId,
 							options.signal,
+							options.selectedAgentContext,
 						);
 						let synthesisResult = "";
 						for await (const event of this.orchestrator.executeParallel(
@@ -1374,8 +1816,9 @@ export class AgentRuntime {
 			message,
 			channelId,
 			learningInsights,
+			options.selectedAgentContext,
 		);
-		const tools = this.getAvailableTools();
+		const tools = this.getAvailableTools(options);
 
 		throwIfAborted(options.signal);
 		const response = await this.executeWithTools(
@@ -1395,6 +1838,16 @@ export class AgentRuntime {
 		this.stm.add(assistantTurn);
 
 		this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
+		await this.recordTaskLedgerEntry({
+			userRequest: message,
+			assistantTurn,
+			channelId,
+			toolsUsed: response.toolCallsExecuted.map((tool) => ({
+				name: tool.name,
+				success: !tool.result.startsWith("Error:"),
+				summary: tool.result.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+			})),
+		});
 
 		this.updateActiveTask(response.content);
 
@@ -1434,7 +1887,7 @@ export class AgentRuntime {
 		this.workingMemory.updateFromUserMessage(message);
 
 		// === Auto-escalado a multi-agente ===
-		if (this.orchestrator) {
+		if (this.orchestrator && !options.disableOrchestrator) {
 			try {
 				throwIfAborted(options.signal);
 				const shouldDecompose =
@@ -1447,6 +1900,7 @@ export class AgentRuntime {
 							message,
 							channelId,
 							options.signal,
+							options.selectedAgentContext,
 						);
 						yield `\x00STATUS:orchestrating:${decomposition.subtasks.length}\x00`;
 						for await (const event of this.orchestrator.executeParallel(
@@ -1467,13 +1921,18 @@ export class AgentRuntime {
 											count: event.data.subtasks.length,
 											executionPlan: event.data.executionPlan,
 											reasoning: event.data.reasoning,
-											subtasks: event.data.subtasks.map((task) => ({
-												id: task.id,
-												role: task.role,
-												description: task.description,
-												toolScope: task.toolScope,
-											})),
-										}),
+									subtasks: event.data.subtasks.map((task) => ({
+										id: task.id,
+										role: task.role,
+										description: task.description,
+										toolScope: task.toolScope,
+										agentId: task.agentId,
+										agentName: task.agentName,
+										armKey: task.armKey,
+										agentAvatar: task.avatar,
+										agentColor: task.color,
+									})),
+								}),
 									)}\x00`;
 									break;
 								case "worker_started":
@@ -1481,9 +1940,16 @@ export class AgentRuntime {
 										JSON.stringify({
 											workerId: event.workerId,
 											taskId: event.taskId,
-											role: event.role,
-											description: event.description,
-										}),
+										role: event.role,
+										description: event.description,
+										agentId: event.agentId,
+										agentName: event.agentName,
+										armKey: event.armKey,
+										agentAvatar: event.avatar,
+										agentColor: event.color,
+										activity: event.activity,
+										liveAgentRuntime: event.liveAgentRuntime,
+									}),
 									)}\x00`;
 									break;
 								case "worker_progress":
@@ -1491,28 +1957,50 @@ export class AgentRuntime {
 										JSON.stringify({
 											workerId: event.workerId,
 											taskId: event.taskId,
-											message: event.message,
-											progress: event.progress,
-											toolName: event.toolName,
-										}),
+										message: event.message,
+										progress: event.progress,
+										toolName: event.toolName,
+										agentId: event.agentId,
+										agentName: event.agentName,
+										armKey: event.armKey,
+										agentAvatar: event.avatar,
+										agentColor: event.color,
+										activity: event.activity,
+										liveAgentRuntime: event.liveAgentRuntime,
+									}),
 									)}\x00`;
 									break;
 								case "worker_done":
 									yield `\x00STATUS:worker_done:${event.workerId}::${this.encodeStatusField(
 										JSON.stringify({
 											workerId: event.workerId,
-											taskId: event.taskId,
-											result: event.result,
-										}),
+										taskId: event.taskId,
+										result: event.result,
+										progress: 100,
+										agentId: event.agentId,
+										agentName: event.agentName,
+										armKey: event.armKey,
+										agentAvatar: event.avatar,
+										agentColor: event.color,
+										activity: event.activity,
+										liveAgentRuntime: event.liveAgentRuntime,
+									}),
 									)}\x00`;
 									break;
 								case "worker_error":
 									yield `\x00STATUS:worker_error:${event.workerId}::${this.encodeStatusField(
 										JSON.stringify({
 											workerId: event.workerId,
-											taskId: event.taskId,
-											error: event.error,
-										}),
+										taskId: event.taskId,
+										error: event.error,
+										agentId: event.agentId,
+										agentName: event.agentName,
+										armKey: event.armKey,
+										agentAvatar: event.avatar,
+										agentColor: event.color,
+										activity: event.activity,
+										liveAgentRuntime: event.liveAgentRuntime,
+									}),
 									)}\x00`;
 									break;
 								case "telemetry":
@@ -1563,6 +2051,19 @@ export class AgentRuntime {
 		}
 
 		// === Single-agent (flujo normal) ===
+			const continuityGuard = this.continuityGuard;
+			if (continuityGuard) continuityGuard.reset(message);
+
+		let inlineRunId: string | undefined;
+		if (this.subtaskTracker && channelId) {
+			try {
+				inlineRunId = await this.subtaskTracker.beginInlineRun({
+					conversationId: channelId,
+					agentId: this.config.id,
+					goal: message,
+				});
+			} catch { /* non-critical, continue without tracking */ }
+		}
 		const memories = await this.memoryRetrieval.retrieveForContext(message);
 		throwIfAborted(options.signal);
 
@@ -1581,8 +2082,9 @@ export class AgentRuntime {
 			message,
 			channelId,
 			learningInsights,
+			options.selectedAgentContext,
 		);
-		const tools = this.getAvailableTools();
+		const tools = this.getAvailableTools(options);
 
 		const messages = [...context];
 		let iterations = 0;
@@ -1597,8 +2099,8 @@ export class AgentRuntime {
 			throwIfAborted(options.signal);
 			iterations++;
 
-			const compressedMessages = await this.getRollingContext(
-				channelId,
+			const compressedMessages = await (
+				await this.getRollingContext(channelId)
 			).maybeSummarize(messages, this.config.model ?? "default");
 			if (compressedMessages !== messages) {
 				messages.length = 0;
@@ -1623,6 +2125,7 @@ export class AgentRuntime {
 			let hasContent = false;
 			let isThinking = false;
 			let hasYieldedResponding = false;
+				let streamFinishReason: string | undefined;
 
 			try {
 				yield "\x00STATUS:thinking\x00";
@@ -1666,6 +2169,9 @@ export class AgentRuntime {
 							});
 						}
 					}
+					if (chunk.finishReason) {
+						streamFinishReason = chunk.finishReason;
+					}
 				}
 			} catch (err) {
 				const errMsg = err instanceof Error ? err.message : String(err);
@@ -1682,8 +2188,19 @@ export class AgentRuntime {
 				}
 				fullResponse += `\n\n⚠️ Error: ${errMsg}`;
 				yield errMsg;
+				// Interrupt inline run tracking
+				if (inlineRunId && this.subtaskTracker) {
+					try {
+						await this.subtaskTracker.interruptInlineRun(inlineRunId, errMsg);
+					} catch { /* non-critical */ }
+				}
 				break;
 			}
+
+				// Record finish reason in continuity guard
+				if (continuityGuard) {
+					continuityGuard.recordFinishReason(streamFinishReason);
+				}
 
 			const validToolCalls = toolCalls.filter(
 				(tc) => tc.function.name.length > 0,
@@ -1701,12 +2218,39 @@ export class AgentRuntime {
 				validToolCalls.length === 0 ||
 				!this.toolExecutor ||
 				!this.toolRegistry
-			) {
+				) {
+				// Auto-continuation: check if response was truncated
+				if (continuityGuard && streamFinishReason === "length" && inlineRunId) {
+					continuityGuard.incrementContinuation();
+					const shouldContinue = continuityGuard.shouldAutoContinue({
+						finishReason: streamFinishReason,
+						hasToolCalls: validToolCalls.length > 0,
+						hasContent: !!chunkContent,
+						iterationCount: iterations,
+						maxIterations: this.getToolIterationLimit().maxIterations,
+						inlineRunId,
+					});
+					if (shouldContinue) {
+						let reconciliationReport = null;
+						if (this.subtaskTracker) {
+							try {
+								reconciliationReport = await this.subtaskTracker.reconcileInterruptedRun(inlineRunId);
+							} catch { /* non-critical */ }
+						}
+						const continuePrompt = continuityGuard.buildContinuePrompt(reconciliationReport);
+						messages.push({ role: "assistant", content: chunkContent || "" });
+						messages.push({ role: "system", content: continuePrompt });
+						if (chunkContent) fullResponse += chunkContent;
+						fullResponse += "\n\n[Auto-continuing...]\n\n";
+						yield "\n\n[Auto-continuing...]\n\n";
+						continue; // Continue the while loop for another LLM call
+					}
+				}
 				if (chunkContent) {
 					fullResponse += chunkContent;
 				}
 				break;
-			}
+				}
 
 			messages.push({
 				role: "assistant",
@@ -1755,6 +2299,11 @@ export class AgentRuntime {
 						task,
 					};
 				});
+				const delegateWorkflow = await this.startDelegateWorkflow(
+					message,
+					channelId,
+					delegatedTasks,
+				);
 
 				yield `\x00STATUS:orchestrating:multiagent::${this.encodeStatusField(
 					JSON.stringify({
@@ -1769,8 +2318,29 @@ export class AgentRuntime {
 						})),
 					}),
 				)}\x00`;
+				if (delegateWorkflow) {
+					yield `\x00STATUS:orchestrating:telemetry::${this.encodeStatusField(
+						JSON.stringify({
+							runId: `delegate_${Date.now()}`,
+							workflowRunId: delegateWorkflow.runId,
+							totalMs: 0,
+							executionMs: 0,
+							synthesisMs: 0,
+							workerCount: delegatedTasks.length,
+							succeeded: 0,
+							failed: 0,
+							cancelled: 0,
+						}),
+					)}\x00`;
+				}
 
 				for (const task of delegatedTasks) {
+					await this.updateDelegateWorkflowTask(
+						delegateWorkflow,
+						task.id,
+						"running",
+						"Worker delegado ejecutandose mediante delegate_task.",
+					);
 					yield `\x00STATUS:worker_start:${task.id}::${this.encodeStatusField(
 						JSON.stringify({
 							workerId: task.id,
@@ -1845,6 +2415,12 @@ export class AgentRuntime {
 					pending.delete(settled.promise);
 					delegateResults[settled.index] = settled;
 					if (settled.error) {
+						await this.updateDelegateWorkflowTask(
+							delegateWorkflow,
+							settled.workerId,
+							"failed",
+							settled.error,
+						);
 						yield `\x00STATUS:worker_error:${settled.workerId}::${this.encodeStatusField(
 							JSON.stringify({
 								workerId: settled.workerId,
@@ -1853,6 +2429,12 @@ export class AgentRuntime {
 							}),
 						)}\x00`;
 					} else {
+						await this.updateDelegateWorkflowTask(
+							delegateWorkflow,
+							settled.workerId,
+							"done",
+							settled.result,
+						);
 						yield `\x00STATUS:worker_done:${settled.workerId}::${this.encodeStatusField(
 							JSON.stringify({
 								workerId: settled.workerId,
@@ -1877,6 +2459,35 @@ export class AgentRuntime {
 						content: this.compactToolResultForContext(resultContent),
 						toolCallId: result?.toolCallId ?? "delegate_task",
 					});
+				}
+
+				if (otherCalls.length === 0) {
+					const delegateTaskResults = delegateResults.map((result, index) => {
+						const task = delegatedTasks[index];
+						return {
+							workerId: result?.workerId ?? task?.id ?? `delegate_${index + 1}`,
+							role: task?.role ?? "Delegated Worker",
+							task: task?.task ?? "Delegated task",
+							result:
+								result?.result ??
+								"Error: delegated worker did not return a result.",
+							error: result?.error,
+						};
+					});
+					yield "\x00STATUS:responding\x00";
+					const finalText = await this.generateDelegateSynthesis(
+						messages,
+						delegateTaskResults,
+					);
+					fullResponse += finalText;
+					yield finalText;
+					await this.finishDelegateWorkflow(
+						delegateWorkflow,
+						delegateTaskResults,
+						finalText,
+					);
+					stoppedByDecision = true;
+					break;
 				}
 			}
 
@@ -1920,6 +2531,18 @@ export class AgentRuntime {
 					}
 				}
 
+
+				let currentSubtaskId: string | undefined;
+				if (inlineRunId && this.subtaskTracker) {
+					try {
+						currentSubtaskId = await this.subtaskTracker.declareSubtask({
+							runId: inlineRunId,
+							title: toolCall.function.name,
+							toolName: toolCall.function.name,
+						});
+						await this.subtaskTracker.startSubtask(currentSubtaskId);
+					} catch { /* non-critical */ }
+				}
 				const activityDetail = this.describeToolActivity(
 					toolCall.function.name,
 					params,
@@ -1950,6 +2573,24 @@ export class AgentRuntime {
 					toolSignatureCounts.set(signature, signatureCount);
 
 					if (toolNameCount > toolBudget) {
+						if (this.shouldStopOnToolBudgetExceeded(toolCall.function.name)) {
+							const reason = `${toolCall.function.name} exceeded its strict per-response budget (${toolBudget}). Stop now, report the exact current state/error, and do not emit fake tool_call markup or attempt manual API workarounds.`;
+							const detail = this.encodeStatusField(reason);
+							yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${detail}\x00`;
+							yield "\x00STATUS:responding\x00";
+							let finalText = "";
+							for await (const finalChunk of this.streamFinalResponse(
+								messages,
+								ledger,
+								reason,
+							)) {
+								finalText += finalChunk;
+								yield finalChunk;
+							}
+							fullResponse += finalText;
+							stoppedByDecision = true;
+							break;
+						}
 						skipped = true;
 						const policyResult = this.createToolPolicyResult(
 							`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
@@ -2030,6 +2671,23 @@ export class AgentRuntime {
 					error: toolResult.success ? undefined : toolResult.error,
 				});
 
+
+				// Subtask tracking: complete or fail based on tool result
+				if (currentSubtaskId && this.subtaskTracker) {
+					if (toolResult.success && !skipped) {
+						const producedArtifacts = this.extractArtifactsFromToolResult(
+							toolCall.function.name,
+							resultContentStr,
+						);
+						try {
+							await this.subtaskTracker.completeSubtask(currentSubtaskId, producedArtifacts);
+						} catch { /* non-critical */ }
+					} else if (!toolResult.success) {
+						try {
+							await this.subtaskTracker.failSubtask(currentSubtaskId, toolResult.error ?? "Unknown error");
+						} catch { /* non-critical */ }
+					}
+				}
 				// Emit tool-done status (intercepted by frontend, not shown as text)
 				if (skipped) {
 					const skippedDetail = this.encodeStatusField(
@@ -2092,6 +2750,19 @@ export class AgentRuntime {
 		};
 		this.stm.add(assistantTurn);
 		this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
+		await this.recordTaskLedgerEntry({
+			userRequest: message,
+			assistantTurn,
+			channelId,
+			toolsUsed: toolTrace,
+		});
+
+		// Complete inline run tracking
+		if (inlineRunId && this.subtaskTracker) {
+			try {
+				await this.subtaskTracker.completeInlineRun(inlineRunId);
+			} catch { /* non-critical */ }
+		}
 
 		this.updateActiveTask(fullResponse);
 		this.recordLearningExperience({
@@ -2131,8 +2802,8 @@ export class AgentRuntime {
 			throwIfAborted(options.signal);
 			iterations++;
 
-			const compressedMessages = await this.getRollingContext(
-				channelId,
+			const compressedMessages = await (
+				await this.getRollingContext(channelId)
 			).maybeSummarize(messages, this.config.model ?? "default");
 			if (compressedMessages !== messages) {
 				messages.length = 0;
@@ -2210,6 +2881,14 @@ export class AgentRuntime {
 						const toolBudget = this.getToolBudget(toolCall.function.name);
 
 						if (toolNameCount > toolBudget) {
+							if (this.shouldStopOnToolBudgetExceeded(toolCall.function.name)) {
+								const finalContent = await this.generateFinalResponse(
+									messages,
+									ledger,
+									`${toolCall.function.name} exceeded its strict per-response budget (${toolBudget}). Stop now, report the exact current state/error, and do not emit fake tool_call markup or attempt manual API workarounds.`,
+								);
+								return { content: finalContent, toolCallsExecuted };
+							}
 							toolResult = {
 								success: false,
 								output: "",
@@ -2318,9 +2997,146 @@ export class AgentRuntime {
 		};
 	}
 
-	private getAvailableTools(): LLMTool[] {
+	private getAvailableTools(options: AgentProcessOptions = {}): LLMTool[] {
 		if (!this.toolRegistry) return [];
-		return this.toolRegistry.toLLMTools();
+		const tools = this.toolRegistry.toLLMTools();
+		return options.disableDelegation
+			? tools.filter((tool) => tool.function.name !== "delegate_task")
+			: tools;
+	}
+
+	private looksLikeUserFeedbackOrCorrection(content: string): boolean {
+		return /\b(te voy a explicar|correcci[oó]n|corrige|fall[oó]|fallo|no fue|no era|en realidad|para futuro|ten en cuenta|cuando se requiera|se debe|debe usar|no acepta|solo acepta|obligatoriamente|gracias por la correcci[oó]n)\b/i.test(
+			content,
+		);
+	}
+
+	private isContinuationRequest(content: string): boolean {
+		return /^\s*(contin[uú]a|continuar|sigue|seguimos|prosigue|reanuda|retoma|resume|continue|go on|keep going)\b/i.test(
+			content,
+		);
+	}
+
+	private indicatesIncompleteOrContinuation(content: string): boolean {
+		return /\b(puedo continuar|puedo seguir|contin[uú]o si|si me lo pides|se alcanz[oó] el l[ií]mite|l[ií]mite m[aá]ximo|faltan?|quedan?|missing|remaining|pendiente|incomplet[oa]|parcial|partial|blocked|bloquead[oa]|no pude|no se pudo|could not|couldn['’]?t|unable to|failed to)\b/i.test(
+			content,
+		);
+	}
+
+	private looksLikeCompletedAssistantState(content: string): boolean {
+		return /\b(¡?listo|hecho|completad[oa]|terminad[oa]|finalizado|ya lo|aqu[ií] tienes|video final|resultado final|import[éeoó]|generad[oa]|concatenad[oa]|guardad[oa]|subid[oa]|cread[oa])\b/i.test(
+			content,
+		);
+	}
+
+	private getTurnIdentity(turn: ConversationTurn): string {
+		return [
+			turn.role,
+			turn.timestamp.getTime(),
+			turn.metadata?.conversationId ?? "",
+			turn.content,
+		].join("\u0000");
+	}
+
+	private mergeConversationTurns(
+		...groups: ConversationTurn[][]
+	): ConversationTurn[] {
+		const byIdentity = new Map<string, ConversationTurn>();
+		for (const group of groups) {
+			for (const turn of group) {
+				const identity = this.getTurnIdentity(turn);
+				if (byIdentity.has(identity)) byIdentity.delete(identity);
+				byIdentity.set(identity, turn);
+			}
+		}
+		return Array.from(byIdentity.values()).sort(
+			(a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
+		);
+	}
+
+	private filterTurnsForConversation(
+		turns: ConversationTurn[],
+		channelId?: string,
+	): ConversationTurn[] {
+		if (!channelId) return turns;
+		return turns.filter(
+			(turn) =>
+				turn.role === "system" ||
+				!turn.metadata?.conversationId ||
+				turn.metadata.conversationId === channelId,
+		);
+	}
+
+	private buildRecentStateGuidance(
+		conversationTurns: ConversationTurn[],
+		userMessage: string,
+	): string | null {
+		const recentRawTurns = conversationTurns
+			.filter((turn) => turn.role === "user" || turn.role === "assistant")
+			.slice(-REQUIRED_RECENT_RAW_TURNS);
+		const recentAssistantCompletions = [...recentRawTurns]
+			.reverse()
+			.filter(
+				(turn) =>
+					turn.role === "assistant" &&
+					this.looksLikeCompletedAssistantState(turn.content),
+			)
+			.slice(0, 3);
+		const latestAssistant = [...recentRawTurns]
+			.reverse()
+			.find((turn) => turn.role === "assistant");
+		const userLooksLikeFeedback =
+			this.looksLikeUserFeedbackOrCorrection(userMessage);
+		const userLooksLikeContinuation = this.isContinuationRequest(userMessage);
+		const latestAssistantLooksIncomplete = Boolean(
+			latestAssistant &&
+				this.indicatesIncompleteOrContinuation(latestAssistant.content),
+		);
+		const assistantLooksCompleted = recentAssistantCompletions.length > 0;
+
+		if (
+			!userLooksLikeFeedback &&
+			!assistantLooksCompleted &&
+			!(userLooksLikeContinuation && latestAssistantLooksIncomplete)
+		)
+			return null;
+
+		const lines = [
+			"## Recent Conversation State",
+			`The last ${Math.min(REQUIRED_RECENT_RAW_TURNS, recentRawTurns.length)} raw conversation turns are present below in full. Use them as authoritative state to avoid treating completed work as pending.`,
+		];
+		if (assistantLooksCompleted) {
+			for (const completion of recentAssistantCompletions) {
+				const excerpt = completion.content.replace(/\s+/g, " ").slice(0, 500);
+				const mediaUrls = this.extractMediaUrls(completion.content).slice(0, 5);
+				const mediaSuffix =
+					mediaUrls.length > 0
+						? ` Media/output URLs: ${mediaUrls.join(", ")}`
+						: "";
+				lines.push(
+					`- Recent completed/delivered task evidence: ${excerpt}${mediaSuffix}`,
+				);
+			}
+			lines.push(
+				"- Do not ask whether to perform that same task again unless the latest user explicitly requests a redo, modification, or additional extension.",
+			);
+		}
+		if (userLooksLikeContinuation && latestAssistantLooksIncomplete) {
+			lines.push(
+				`- The latest user is asking to continue and the latest assistant turn says work remains. Resume from this latest incomplete state instead of treating the previous execution metadata as final: ${latestAssistant?.content.replace(/\s+/g, " ").slice(0, 700)}`,
+			);
+		}
+		if (latestAssistant && !assistantLooksCompleted) {
+			lines.push(
+				`- Latest assistant turn, for continuity: ${latestAssistant.content.replace(/\s+/g, " ").slice(0, 300)}`,
+			);
+		}
+		if (userLooksLikeFeedback) {
+			lines.push(
+				"- The latest user message appears to be feedback/correction/explanation. Treat it as procedural guidance to acknowledge and apply going forward, not as an implicit request to re-run the previous task.",
+			);
+		}
+		return lines.join("\n");
 	}
 
 	private async buildContext(
@@ -2329,6 +3145,7 @@ export class AgentRuntime {
 		userMessage: string,
 		channelId?: string,
 		learningInsights: LearningInsight[] = [],
+		selectedAgent?: RuntimeSelectedAgentContext | null,
 	): Promise<LLMMessage[]> {
 		const messages: LLMMessage[] = [];
 		const contextParts: string[] = [];
@@ -2422,6 +3239,11 @@ export class AgentRuntime {
 			systemContent += `\n\n# Learned Operating Guidance\nUse these prior operational learnings when they are relevant. Prefer higher-confidence procedures and avoid listed anti-patterns.\n${guidance}`;
 		}
 
+		const selectedAgentContext = this.formatSelectedAgentContext(selectedAgent);
+		if (selectedAgentContext) {
+			systemContent += `\n\n${selectedAgentContext}`;
+		}
+
 		if (advancedMemoryPack) {
 			const knownGaps = advancedMemoryPack.knownGaps.slice(0, 5);
 			const proactive = proactiveMemoryNotices.slice(0, 5);
@@ -2456,6 +3278,52 @@ export class AgentRuntime {
 			contextParts.push(advancedMemoryContext);
 		}
 
+		if (this.chatManager && channelId) {
+			try {
+				const [recentTasks, matchingCompleted] = await Promise.all([
+					this.chatManager.listTaskLedgerEntries(channelId, { limit: 8 }),
+					this.chatManager.searchTaskLedgerEntries(channelId, userMessage, {
+						limit: 5,
+						status: "completed",
+					}),
+				]);
+				const taskLines = recentTasks.map((entry) =>
+					this.formatTaskLedgerEntry(entry),
+				);
+				const matchLines = matchingCompleted.map((entry) =>
+					this.formatTaskLedgerEntry(entry),
+				);
+				const incompleteLines = this.isContinuationRequest(userMessage)
+					? recentTasks
+							.filter((entry) => entry.status !== "completed")
+							.slice(0, 5)
+							.map((entry) => this.formatTaskLedgerEntry(entry))
+					: [];
+				if (taskLines.length > 0 || matchLines.length > 0) {
+					contextParts.push(
+						[
+							"# Conversation Task Ledger",
+							"This ledger is persistent per conversation. Use it as context for prior outputs, but never as a reason to skip a tool that the latest user request needs or explicitly asks for.",
+							incompleteLines.length > 0
+								? `## Active/Pending Tasks To Continue\n${incompleteLines.join("\n")}\nIf the latest user message is a short continuation prompt, resume the first active/pending task above from its last checkpoint. Treat a completed chat execution as transport state only, not proof that the broader user task is finished.`
+								: "",
+							matchLines.length > 0
+								? `## Completed Tasks Matching Current Request\n${matchLines.join("\n")}`
+								: "",
+							taskLines.length > 0
+								? `## Recent Task States\n${taskLines.join("\n")}`
+								: "",
+							"If the user asks to revise, improve, analyze, regenerate, continue, or use a tool, execute the needed tool call even when a similar prior task exists.",
+						]
+							.filter(Boolean)
+							.join("\n\n"),
+					);
+				}
+			} catch (err) {
+				console.error("Failed to load conversation task ledger:", err);
+			}
+		}
+
 		if (this.toolRegistry && this.toolRegistry.list().length > 0) {
 			const toolNames = this.toolRegistry
 				.list()
@@ -2465,9 +3333,16 @@ export class AgentRuntime {
 			systemContent +=
 				"\n\nCRITICAL RULE: Do NOT use tools or hallucinate past tasks for simple greetings (e.g. 'hola') or casual conversation. Only use tools if the *latest* user request explicitly requires it.";
 			systemContent +=
+				"\n\nRAW CONVERSATION RECALL RULE: If the latest user asks whether you remember something, refers to what they told you before, asks about another/prior conversation, or needs an exact past detail that is not already in the visible context, call `recall_conversation` before answering. If the first search has no matches, search all saved conversations with short concrete keywords before saying you cannot find it.";
+			systemContent += `\n\nRECENT STATE RULE: The last ${REQUIRED_RECENT_RAW_TURNS} raw conversation turns are mandatory continuity context and are more authoritative than summaries or older memories for the current task state. Use recent outputs as context, but do not let prior completion block the latest user request. If the user asks to revise, improve, analyze, regenerate, continue, or use a tool, call the needed tool instead of only describing what you would do.`;
+			systemContent +=
+				"\n\nTOOL DEBUGGING RULE: If a tool fails, do not repeatedly rewrite or recreate that tool. First read the exact current tool code and exact error. Make at most one focused fix, then run a cheap isolated validation or a single real retry. If the same failure persists, stop and report the tool as still broken with the exact error and workaround; do not claim the tool was fixed unless a validation actually passed.";
+			systemContent +=
+				"\n\nSTRUCTURED TOOL CALL RULE: Never print `<tool_call>`, `<tool_call_block>`, XML-like pseudo-tool calls, JSON call scaffolding, or code intended as a tool call in the final answer. If you cannot execute a real structured tool call, say that execution was blocked or failed and give the exact reason. For provider APIs with a dedicated tool, use the dedicated tool instead of execute_code/run_shell.";
+			systemContent +=
 				"\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
 			systemContent +=
-				"\n\nMANDATORY MEDIA OUTPUT RULE (PERSISTENT, NON-NEGOTIABLE): Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description)`), the `save_media` tool ONLY for small base64 payloads, or `import_media_file` for any existing local file and any large output such as ffmpeg videos. If a file already exists on disk, NEVER convert it to base64; ALWAYS call `import_media_file` with the local path. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
+				"\n\nMANDATORY MEDIA OUTPUT RULE (PERSISTENT, NON-NEGOTIABLE): Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description, metadata)`), the `save_media` tool ONLY for small base64 payloads that already come from an external API, or `import_media_file` for any existing local file and any large output such as ffmpeg videos. If a file already exists on disk, NEVER convert it to base64; ALWAYS call `import_media_file` with the local path. For user-attached images or Octopus media URLs, pass the existing `/api/media/file/...` URL directly to tools that accept image URLs. For `nano-banana-generate`, use attached/reference images directly in `reference_images` as `/api/media/file/...`, http(s)://, or gs:// URLs; NEVER call or invent an image-to-base64 conversion step and NEVER pass `data:image/...;base64` as a tool argument. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. For multi-step media workflows, every saved item MUST have a semantic description and metadata such as `workflowId`, `imageNumber`/`sceneNumber`, `stage`, `role`, `prompt`, and `parentMediaIds` so later steps can identify the correct file. Example description: `Construction timelapse Img 03 - sobre-cimientos final keyframe`; example metadata: `{ workflowId: 'construction-house-timelapse', imageNumber: 3, stage: 'sobre-cimientos', role: 'video-keyframe' }`. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
 		}
 
 		systemContent += `\n\nCRITICAL SYSTEM INSTRUCTION:
@@ -2590,27 +3465,45 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			});
 		}
 
-		const stmTurns =
-			memories.fromSTM.length > 0 ? memories.fromSTM : this.stm.getContext();
+		const fullStmContext = this.stm.getContext();
+		const stmTurns = this.mergeConversationTurns(
+			memories.fromSTM,
+			fullStmContext,
+		);
 		for (const turn of stmTurns) {
 			if (turn.role === "system") {
 				messages.push({ role: "system", content: turn.content });
 			}
 		}
-		let conversationTurns = stmTurns;
-		if (channelId) {
-			conversationTurns = stmTurns.filter(
-				(t) =>
-					t.role === "system" ||
-					!t.metadata?.conversationId ||
-					t.metadata.conversationId === channelId,
-			);
+		const conversationTurns = this.filterTurnsForConversation(
+			stmTurns,
+			channelId,
+		);
+		const guaranteedRecentRawTurns = this.filterTurnsForConversation(
+			fullStmContext,
+			channelId,
+		)
+			.filter((turn) => turn.role === "user" || turn.role === "assistant")
+			.slice(-REQUIRED_RECENT_RAW_TURNS);
+		const recentStateGuidance = this.buildRecentStateGuidance(
+			conversationTurns,
+			userMessage,
+		);
+		if (recentStateGuidance) {
+			messages.push({ role: "system", content: recentStateGuidance });
 		}
 		const maxTurns = Math.min(
 			STM_MAX_TURNS,
-			Math.max(STM_MIN_TURNS, conversationTurns.length),
+			Math.max(
+				STM_MIN_TURNS,
+				REQUIRED_RECENT_RAW_TURNS,
+				conversationTurns.length,
+			),
 		);
-		const recentTurns = conversationTurns.slice(-maxTurns);
+		const recentTurns = this.mergeConversationTurns(
+			conversationTurns.slice(-maxTurns),
+			guaranteedRecentRawTurns,
+		);
 		for (const turn of recentTurns) {
 			if (turn.role === "user" || turn.role === "assistant") {
 				const toolResults = (turn.metadata as Record<string, unknown>)
@@ -2724,6 +3617,71 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			activeTask.result = responseText;
 			activeTask.completedAt = new Date();
 			this.stm.setActiveTask(activeTask);
+		}
+	}
+
+	private inferTaskLedgerStatus(
+		responseText: string,
+		toolsUsed: Array<{ name: string; success?: boolean }> = [],
+	): ChatTaskLedgerEntry["status"] | null {
+		const lower = responseText.toLowerCase();
+		const hasOutputs = this.extractMediaUrls(responseText).length > 0;
+		const hasSuccessfulTools = toolsUsed.some((tool) => tool.success !== false);
+		const hasFailure =
+			/\b(error|failed|fall[oó]|bloque|captcha|limit|l[ií]mite)\b/i.test(lower);
+		if (this.indicatesIncompleteOrContinuation(responseText)) return "partial";
+		if (hasFailure && !hasSuccessfulTools && !hasOutputs) return "failed";
+		if (
+			hasOutputs ||
+			this.looksLikeCompletedAssistantState(responseText) ||
+			/(task completed|completed successfully|finished successfully|final answer|resultado final|video final|archivo final)/i.test(
+				lower,
+			)
+		) {
+			return "completed";
+		}
+		if (hasFailure) {
+			return hasSuccessfulTools ? "partial" : "failed";
+		}
+		if (hasSuccessfulTools) return "partial";
+		return null;
+	}
+
+	private async recordTaskLedgerEntry(input: {
+		userRequest: string;
+		assistantTurn: ConversationTurn;
+		channelId?: string;
+		toolsUsed: Array<{ name: string; success?: boolean; summary?: string }>;
+	}): Promise<void> {
+		if (!this.chatManager || !input.channelId) return;
+		const status = this.inferTaskLedgerStatus(
+			input.assistantTurn.content,
+			input.toolsUsed,
+		);
+		if (!status) return;
+		const outputs = this.extractMediaUrls(input.assistantTurn.content).slice(
+			0,
+			12,
+		);
+		const toolNames = [
+			...new Set(input.toolsUsed.map((tool) => tool.name).filter(Boolean)),
+		].slice(0, 20);
+		const summary = input.assistantTurn.content
+			.replace(/\s+/g, " ")
+			.slice(0, 1200);
+		try {
+			await this.chatManager.addTaskLedgerEntry({
+				conversationId: input.channelId,
+				objective: input.userRequest.slice(0, 800),
+				status,
+				summary,
+				outputs,
+				toolNames,
+				completedAt:
+					status === "completed" ? new Date().toISOString() : undefined,
+			});
+		} catch (err) {
+			console.error("Failed to record task ledger entry:", err);
 		}
 	}
 

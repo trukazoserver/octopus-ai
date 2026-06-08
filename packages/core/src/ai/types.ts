@@ -93,12 +93,20 @@ export interface ProviderConfig {
 	accessToken?: string;
 	accessTokenEnv?: string;
 	credentialsFile?: string;
+	credentialsJson?: string;
 	projectId?: string;
 	location?: string;
 	mode?: string;
 	codingApiKey?: string;
 	codingBaseUrl?: string;
 	models?: string[];
+	oauthClientId?: string;
+	oauthClientSecret?: string;
+	oauthAccessToken?: string;
+	oauthRefreshToken?: string;
+	oauthExpiresAt?: number;
+	browserCookies?: string;
+	browserUserAgent?: string;
 }
 
 export interface UsageStats {
