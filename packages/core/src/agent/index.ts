@@ -74,8 +74,18 @@ export { ContextManager } from "./context-manager.js";
 export type { ContextManagerConfig } from "./context-manager.js";
 export { WorkflowManager } from "./workflow-manager.js";
 export type {
+	WorkflowArtifactRecord,
+	WorkflowBlockerRecord,
+	WorkflowTaskCommentRecord,
+	WorkflowTaskContext,
+	WorkflowDependencyEdge,
+	KanbanRunMetrics,
+	WorkflowRequirementStatus,
+	WorkflowRequirementType,
 	WorkflowRunRecord,
 	WorkflowStatus,
+	WorkflowTaskLeaseRecord,
+	WorkflowTaskRequirementRecord,
 	WorkflowTaskRecord,
 } from "./workflow-manager.js";
 export { WorkflowScheduler } from "./workflow-scheduler.js";
@@ -83,7 +93,32 @@ export type {
 	WorkflowRunResumer,
 	WorkflowSchedulerOptions,
 } from "./workflow-scheduler.js";
-export { createProgressSignature, decideRetryAfterFailure } from "./retry-policy.js";
+export {
+	RequirementResolver,
+	deriveInitialTaskStatus,
+} from "./requirement-resolver.js";
+export type { RequirementResolverResult } from "./requirement-resolver.js";
+export { KanbanPlanner } from "./kanban-planner.js";
+export type {
+	KanbanArtifactSpec,
+	KanbanPlanSpec,
+	KanbanPlanTaskSpec,
+	KanbanPlannerOptions,
+	KanbanRequirementSpec,
+	PersistedKanbanPlan,
+} from "./kanban-planner.js";
+export { KanbanDispatcher } from "./kanban-dispatcher.js";
+export type {
+	KanbanDispatcherOptions,
+	KanbanDispatcherStatus,
+	KanbanDispatcherTickResult,
+	KanbanTaskExecutionContext,
+	KanbanTaskExecutor,
+} from "./kanban-dispatcher.js";
+export {
+	createProgressSignature,
+	decideRetryAfterFailure,
+} from "./retry-policy.js";
 export type { RetryDecision, RetryProgressState } from "./retry-policy.js";
 export { ArtifactVerifier } from "./artifact-verifier.js";
 export type { ArtifactVerificationResult } from "./artifact-verifier.js";
@@ -96,4 +131,7 @@ export type {
 } from "./subtask-tracker.js";
 export { ReconciliationService } from "./reconciliation-service.js";
 export { ContinuityGuard } from "./continuity-guard.js";
-export type { ContinuityGuardConfig, ContinuityState } from "./continuity-guard.js";
+export type {
+	ContinuityGuardConfig,
+	ContinuityState,
+} from "./continuity-guard.js";

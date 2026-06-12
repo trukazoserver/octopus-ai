@@ -68,6 +68,7 @@ interface WorkflowSnapshot {
 	artifacts: Array<{ id: string; artifact_type: string; url: string | null; path: string | null; description: string | null }>;
 }
 
+type PageTab = "kanban" | "tasks" | "scheduled";
 type StatusFilter = "all" | "pending" | "running" | "completed" | "failed";
 
 const STATUS_OPTIONS: StatusFilter[] = [
@@ -155,6 +156,7 @@ export const TasksPage: React.FC = () => {
 
 	const [deletingId, setDeletingId] = useState<string | null>(null);
 	const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+	const [pageTab, setPageTab] = useState<PageTab>("kanban");
 
 	const loadStats = useCallback(async () => {
 		try {
@@ -436,7 +438,7 @@ export const TasksPage: React.FC = () => {
 							letterSpacing: "-0.02em",
 						}}
 					>
-						Tareas
+						Tablero de Tareas
 					</h2>
 					<p
 						style={{
@@ -447,7 +449,7 @@ export const TasksPage: React.FC = () => {
 							lineHeight: 1.6,
 						}}
 					>
-						Gestiona y da seguimiento al trabajo entre agentes.
+						{pageTab === "kanban" ? "Tablero visual Kanban Swarm — flujos multi-agente con dependencias y artefactos." : pageTab === "tasks" ? "Tareas individuales asignadas a agentes específicos." : "Tareas programadas que se ejecutan automáticamente según un horario o evento."}
 					</p>
 				</div>
 				<button
@@ -472,6 +474,38 @@ export const TasksPage: React.FC = () => {
 				</button>
 			</div>
 
+			{/* Tabs de navegación */}
+			<div style={{ display: "flex", gap: 6, marginBottom: 24, borderBottom: "1px solid #27272a", paddingBottom: 0 }}>
+				{([
+					{ id: "kanban" as PageTab, label: "Tablero Kanban", icon: "📋" },
+					{ id: "tasks" as PageTab, label: "Tareas Individuales", icon: "📝" },
+					{ id: "scheduled" as PageTab, label: "Tareas Programadas", icon: "⏰" },
+				] as Array<{ id: PageTab; label: string; icon: string }>).map((tab) => {
+					const isActive = pageTab === tab.id;
+					return (
+						<button
+							key={tab.id}
+							type="button"
+							onClick={() => setPageTab(tab.id)}
+							style={{
+								padding: "10px 18px",
+								border: "none",
+								borderBottom: isActive ? "3px solid #3b82f6" : "3px solid transparent",
+								background: "transparent",
+								color: isActive ? "#f4f4f5" : "#71717a",
+								cursor: "pointer",
+								fontWeight: isActive ? 700 : 500,
+								fontSize: "0.9rem",
+								transition: "all 0.15s ease",
+							}}
+						>
+							<span style={{ marginRight: 8 }}>{tab.icon}</span>
+							{tab.label}
+						</button>
+					);
+				})}
+			</div>
+
 			{msg && (
 				<div
 					style={{
@@ -491,6 +525,7 @@ export const TasksPage: React.FC = () => {
 				</div>
 			)}
 
+			{pageTab === "tasks" && (
 			<div className="stats-grid" style={{ marginBottom: 24 }}>
 				<StatCard
 					icon={<AppIcon name="folder" />}
@@ -524,6 +559,9 @@ export const TasksPage: React.FC = () => {
 				/>
 			</div>
 
+			)}
+
+			{pageTab === "kanban" && (
 			<div
 				style={{
 					background: "#18181b",
@@ -686,6 +724,11 @@ export const TasksPage: React.FC = () => {
 					</div>
 				)}
 			</div>
+
+			)}
+
+			{pageTab === "tasks" && (
+			<>
 
 			{showCreateForm && (
 				<div
@@ -1349,6 +1392,36 @@ export const TasksPage: React.FC = () => {
 					})}
 				</div>
 			)}
+					</>
+				)}
+
+				{pageTab === "scheduled" && (
+					<div style={{ textAlign: "center", padding: "48px 24px", color: "#a1a1aa", background: "#18181b", borderRadius: 14, border: "1px solid #27272a", maxWidth: 640, margin: "0 auto" }}>
+						<div style={{ fontSize: "2.5rem", marginBottom: 16 }}>⏰</div>
+						<div style={{ fontSize: "1.15rem", fontWeight: 700, color: "#f4f4f5", marginBottom: 8 }}>Tareas Programadas</div>
+						<div style={{ fontSize: "0.92rem", lineHeight: 1.6, marginBottom: 20, maxWidth: 480, margin: "0 auto 20px" }}>
+							Las tareas programadas te permiten definir acciones que se ejecutan
+							automáticamente según un horario (cron), un evento o un webhook.
+							Cada tarea puede ser asignada a un agente específico.
+						</div>
+						<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, maxWidth: 560, margin: "0 auto 24px" }}>
+							{[
+								{ icon: "📅", title: "Cron", desc: "Ejecución periódica programada" },
+								{ icon: "🔗", title: "Evento", desc: "Se activa al ocurrir un evento" },
+								{ icon: "🌐", title: "Webhook", desc: "Responde a llamadas externas" },
+							].map((item) => (
+								<div key={item.title} style={{ background: "#09090b", border: "1px solid #27272a", borderRadius: 10, padding: "14px 12px", textAlign: "center" }}>
+									<div style={{ fontSize: "1.5rem", marginBottom: 6 }}>{item.icon}</div>
+									<div style={{ color: "#f4f4f5", fontWeight: 700, fontSize: "0.85rem" }}>{item.title}</div>
+									<div style={{ color: "#71717a", fontSize: "0.75rem", marginTop: 4 }}>{item.desc}</div>
+								</div>
+							))}
+						</div>
+						<a href="#automations" onClick={(e) => { e.preventDefault(); try { localStorage.setItem("octopus-active-tab", "automations"); } catch {} window.location.reload(); }} style={{ display: "inline-block", padding: "12px 24px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: "0.95rem", cursor: "pointer", textDecoration: "none" }}>
+							Ir a Automatizaciones
+						</a>
+					</div>
+				)}
 		</div>
 	);
 };

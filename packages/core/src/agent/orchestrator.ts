@@ -17,6 +17,8 @@ import { AgentCoordinationBus } from "./agent-coordination-bus.js";
 import { EventStream } from "./event-stream.js";
 import { getOctopusArmProfile } from "./arm-profiles.js";
 import { routeTaskToArm } from "./arm-router.js";
+import type { KanbanPlanner } from "./kanban-planner.js";
+import type { RequirementResolver } from "./requirement-resolver.js";
 import {
 	CrossReviewEngine,
 	type CrossReviewConfig,
@@ -26,6 +28,7 @@ import { createProgressSignature } from "./retry-policy.js";
 import type { AgentConfig } from "./types.js";
 import type {
 	WorkflowManager,
+	WorkflowRunRecord,
 	WorkflowTaskRecord,
 } from "./workflow-manager.js";
 import { type SubTask, type WorkerConfig, WorkerPool } from "./worker-pool.js";
@@ -36,6 +39,7 @@ export interface TaskDecomposition {
 	subtasks: SubTask[];
 	executionPlan: "parallel" | "sequential" | "mixed";
 	reasoning: string;
+	kanbanPlanRunId?: string;
 }
 
 export interface WorkerAgentMetadata {
@@ -252,6 +256,8 @@ export class OctopusOrchestrator {
 	private config: OrchestratorConfig;
 	private coordinationBus: AgentCoordinationBus;
 	private crossReviewEngine: CrossReviewEngine;
+	private kanbanPlanner?: KanbanPlanner;
+	private requirementResolver?: RequirementResolver;
 
 	constructor(
 		private llmRouter: LLMRouter,
@@ -278,6 +284,80 @@ export class OctopusOrchestrator {
 			this.coordinationBus,
 			this.config.crossReview,
 		);
+	}
+
+	/**
+	 * Set the KanbanPlanner and RequirementResolver for Kanban-based decomposition.
+	 */
+	setKanbanPlanner(
+		planner: KanbanPlanner | undefined,
+		resolver: RequirementResolver | undefined,
+	): void {
+		this.kanbanPlanner = planner;
+		this.requirementResolver = resolver;
+	}
+
+	/**
+	 * Descomponer un objetivo usando KanbanPlanner en vez de decompose crudo.
+	 * Convierte KanbanPlanTaskSpec[] -> SubTask[] usando routeTaskToArm.
+	 */
+	async decomposeViaKanban(
+		goal: string,
+		options: { conversationId?: string; rootAgentId?: string } = {},
+	): Promise<TaskDecomposition & { kanbanPlanRunId?: string }> {
+		if (!this.kanbanPlanner) {
+			return this.decompose(goal);
+		}
+		const plan = await this.kanbanPlanner.planFromGoal({
+			goal,
+			conversationId: options.conversationId,
+			rootAgentId: options.rootAgentId,
+		});
+
+		await this.requirementResolver?.evaluatePendingRequirements({
+			runId: plan.run.id,
+		});
+
+		const subtasks: SubTask[] = plan.tasks.map((taskRecord) => {
+			const taskMeta = parseJsonRecord(taskRecord.metadata);
+			const planTaskKey =
+				typeof taskMeta.key === "string" ? taskMeta.key : undefined;
+			const armKey =
+				typeof taskRecord.arm_key === "string"
+					? taskRecord.arm_key
+					: undefined;
+			const arm = armKey
+				? getOctopusArmProfile(armKey)
+				: routeTaskToArm({ description: taskRecord.title });
+				if (!arm) return null as any;
+			return {
+				id: planTaskKey ?? taskRecord.id,
+				description: taskRecord.description ?? taskRecord.title,
+				role: arm.role,
+				toolScope: [],
+				priority: taskRecord.priority,
+				model: taskRecord.model ?? undefined,
+				agentId: arm.agentId,
+				agentName: arm.name,
+				armKey: arm.key,
+				avatar: arm.avatar,
+				color: arm.color,
+				acceptanceCriteria: taskRecord.acceptance_criteria
+					? parseJsonStringArray(taskRecord.acceptance_criteria)
+					: ["La subtarea debe reportar evidencia concreta de avance o bloqueo."],
+				status: "pending" as const,
+			};
+		});
+
+		return {
+			originalGoal: goal,
+			subtasks,
+			executionPlan: subtasks.length > 1 ? "parallel" : "sequential",
+			reasoning:
+				plan.plan.reasoning ??
+				"Kanban Swarm decomposition via KanbanPlanner.",
+			kanbanPlanRunId: plan.run.id,
+		};
 	}
 
 	/**
@@ -919,18 +999,27 @@ export class OctopusOrchestrator {
 	): AsyncIterable<OrchestratorEvent> {
 		const runId = workerConfig.runId ?? createRunId();
 		const startedAt = Date.now();
-		const workflowRun = this.workflowManager
-			? await this.workflowManager.createRun({
-					conversationId: workerConfig.channelId,
-					rootAgentId: this.baseConfig.id,
-					goal: decomposition.originalGoal,
-					metadata: {
-						runId,
-						executionPlan: decomposition.executionPlan,
-						reasoning: decomposition.reasoning,
-					},
-				})
-			: null;
+		let workflowRun: WorkflowRunRecord | null = null;
+		let usingExistingKanbanRun = false;
+		if (this.workflowManager) {
+			if (decomposition.kanbanPlanRunId) {
+				workflowRun = await this.workflowManager.getRun(
+					decomposition.kanbanPlanRunId,
+				);
+				usingExistingKanbanRun = Boolean(workflowRun);
+			}
+			workflowRun ??= await this.workflowManager.createRun({
+				conversationId: workerConfig.channelId,
+				rootAgentId: this.baseConfig.id,
+				goal: decomposition.originalGoal,
+				metadata: {
+					runId,
+					executionPlan: decomposition.executionPlan,
+					reasoning: decomposition.reasoning,
+					kanbanPlanRunId: decomposition.kanbanPlanRunId,
+				},
+			});
+		}
 		if (workflowRun) {
 			await this.workflowManager?.updateRunStatus(workflowRun.id, "running", {
 				currentPhase: "decomposition",
@@ -938,28 +1027,41 @@ export class OctopusOrchestrator {
 		}
 		const workflowTaskBySubtask = new Map<string, string>();
 		if (workflowRun && this.workflowManager) {
-			for (const task of decomposition.subtasks) {
-				const workflowTask = await this.workflowManager.createTask({
-					runId: workflowRun.id,
-					assignedAgentId: task.agentId,
-					armKey: task.armKey,
-					title: `${task.agentName ?? task.role}: ${task.description.slice(0, 80)}`,
-					description: task.description,
-					priority: task.priority,
-					dependsOn: task.dependsOn,
-					acceptanceCriteria: task.acceptanceCriteria,
-					metadata: {
-						sourceTaskId: task.id,
-						role: task.role,
-						agentId: task.agentId,
-						agentName: task.agentName,
+			if (usingExistingKanbanRun) {
+				const existingTasks = await this.workflowManager.listRunTasks(
+					workflowRun.id,
+				);
+				for (const task of existingTasks) {
+					const metadata = parseJsonRecord(task.metadata);
+					const key = typeof metadata.key === "string" ? metadata.key : undefined;
+					workflowTaskBySubtask.set(task.id, task.id);
+					if (key) workflowTaskBySubtask.set(key, task.id);
+				}
+			} else {
+				for (const task of decomposition.subtasks) {
+					const workflowTask = await this.workflowManager.createTask({
+						runId: workflowRun.id,
+						assignedAgentId: task.agentId,
 						armKey: task.armKey,
-						avatar: task.avatar,
-						color: task.color,
-						toolScope: task.toolScope,
-					},
-				});
-				workflowTaskBySubtask.set(task.id, workflowTask.id);
+						title: `${task.agentName ?? task.role}: ${task.description.slice(0, 80)}`,
+						description: task.description,
+						priority: task.priority,
+						dependsOn: task.dependsOn,
+						acceptanceCriteria: task.acceptanceCriteria,
+						model: task.model,
+						metadata: {
+							sourceTaskId: task.id,
+							role: task.role,
+							agentId: task.agentId,
+							agentName: task.agentName,
+							armKey: task.armKey,
+							avatar: task.avatar,
+							color: task.color,
+							toolScope: task.toolScope,
+						},
+					});
+					workflowTaskBySubtask.set(task.id, workflowTask.id);
+				}
 			}
 			await this.workflowManager.recordEvent({
 				runId: workflowRun.id,
@@ -968,7 +1070,9 @@ export class OctopusOrchestrator {
 				message: decomposition.reasoning,
 				metadata: {
 					orchestratorRunId: runId,
-						subtasks: decomposition.subtasks.map((task) => ({
+					kanbanPlanRunId: decomposition.kanbanPlanRunId,
+					reusedKanbanRun: usingExistingKanbanRun,
+					subtasks: decomposition.subtasks.map((task) => ({
 							id: task.id,
 							workflowTaskId: workflowTaskBySubtask.get(task.id),
 							armKey: task.armKey,

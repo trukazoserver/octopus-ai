@@ -12,12 +12,14 @@ export type {
 	CodeExecutorHooks,
 } from "./code-executor.js";
 export { createMediaTools, mediaContext } from "./media.js";
+export { createWorkflowTools } from "./workflow.js";
 export { createAutomationTools } from "./automation.js";
 export { createTeamTools } from "./team.js";
 export { createSandboxTools } from "./sandbox-tool.js";
 export { createTeamCommTools } from "./team-comm.js";
 export { createAgentCommsTools } from "./agent-comms.js";
 export { createAgentSpawnTools } from "./agent-spawn.js";
+export { createKanbanCardTools } from "./kanban-cards.js";
 
 // Stealth browsing
 export { ProxyManager } from "./proxy-manager.js";

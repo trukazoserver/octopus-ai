@@ -518,7 +518,7 @@ const ContinuityGuardSchema = Type.Object({
 
 const ToolIterationLimitSchema = Type.Object({
 	enabled: Type.Boolean({ default: true }),
-	maxIterations: Type.Integer({ default: 64, minimum: 1 }),
+	maxIterations: Type.Integer({ default: 256, minimum: 1 }),
 });
 
 const ToolTimeoutsSchema = Type.Object({
@@ -585,6 +585,16 @@ const MascotsConfigSchema = Type.Object({
 	defaultId: MascotIdSchema,
 });
 
+const TenacidadSchema = Type.Object({
+	level: Type.Union(
+		[Type.Literal("normal"), Type.Literal("tenaz")],
+		{ default: "default" },
+	),
+	maxGenuineApiErrors: Type.Integer({ default: 3, minimum: 1 }),
+	streamErrorRetries: Type.Integer({ default: 3, minimum: 0, maximum: 10 }),
+	emptyResponseRetries: Type.Integer({ default: 3, minimum: 0, maximum: 10 }),
+});
+
 export const ConfigSchema = Type.Object({
 	version: Type.Number({ default: 1 }),
 	server: ServerSchema,
@@ -602,6 +612,7 @@ export const ConfigSchema = Type.Object({
 	tools: ToolsConfigSchema,
 	orchestration: Type.Optional(OrchestrationConfigSchema),
 	continuityGuard: Type.Optional(ContinuityGuardSchema),
+	tenacidad: Type.Optional(TenacidadSchema),
 	mcp: Type.Optional(MCPchema),
 });
 

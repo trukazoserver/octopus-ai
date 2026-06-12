@@ -104,7 +104,7 @@ const NAV_GROUPS: NavGroup[] = [
 		label: "Producción",
 		items: [
 			{ id: "agents", icon: "agent", label: "Agentes" },
-			{ id: "tasks", icon: "check", label: "Tareas" },
+			{ id: "tasks", icon: "check", label: "Tablero de Tareas" },
 			{ id: "automations", icon: "automation", label: "Automatizaciones" },
 			{ id: "tools", icon: "tools", label: "Herramientas" },
 		],
@@ -225,12 +225,22 @@ export const App: React.FC = () => {
 			const tooltipElement = target?.closest<HTMLElement>("[data-tooltip]");
 			if (!tooltipElement) return;
 
+			const rect = tooltipElement.getBoundingClientRect();
 			const viewportPadding = 12;
-			const x = Math.max(
-				viewportPadding,
-				Math.min(window.innerWidth - viewportPadding, event.clientX),
+			const estimatedTooltipHalfWidth = Math.min(
+				130,
+				Math.max(80, window.innerWidth * 0.4),
 			);
-			const y = Math.max(viewportPadding, event.clientY);
+			const minX = viewportPadding + estimatedTooltipHalfWidth;
+			const maxX = window.innerWidth - viewportPadding - estimatedTooltipHalfWidth;
+			const x = Math.max(
+				minX,
+				Math.min(maxX, rect.left + rect.width / 2),
+			);
+			const placeBelow = rect.top < 48;
+			const y = placeBelow ? rect.bottom : rect.top;
+
+			tooltipElement.dataset.tooltipPlacement = placeBelow ? "bottom" : "top";
 			tooltipElement.style.setProperty("--tooltip-x", `${x}px`);
 			tooltipElement.style.setProperty("--tooltip-y", `${y}px`);
 		};

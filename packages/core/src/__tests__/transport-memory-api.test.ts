@@ -1,7 +1,11 @@
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { KanbanPlanner } from "../agent/kanban-planner.js";
+import { RequirementResolver } from "../agent/requirement-resolver.js";
+import { WorkflowManager } from "../agent/workflow-manager.js";
 import { getDefaults } from "../config/defaults.js";
+import { createDatabaseAdapter } from "../storage/database.js";
 import { TransportServer } from "../transport/server.js";
 
 type JsonObject = Record<string, unknown>;
@@ -236,6 +240,297 @@ describe("memory API endpoints", () => {
 		expect(cancelled.body).toEqual({ ok: true, id: "wf-1", action: "cancel" });
 		expect(workflowManager.retryRun).toHaveBeenCalledWith("wf-1");
 		expect(workflowManager.cancelRun).toHaveBeenCalledWith("wf-1", "test");
+	});
+
+	it("exposes Kanban dispatcher status, tick, pause, and resume actions", async () => {
+		const status = {
+			enabled: true,
+			ticking: false,
+			activeTaskIds: [],
+			activeCount: 0,
+			availableSlots: 3,
+			config: {
+				limit: 3,
+				leaseTtlMs: 60000,
+				maxConcurrentTasks: 3,
+				maxConcurrentPerArm: 1,
+				defaultAgentId: "octavio",
+			},
+			lastTickAt: null,
+			lastTickResult: null,
+		};
+		const tick = {
+			expiredLeases: 1,
+			requirementsEvaluated: 2,
+			requirementsSatisfied: 1,
+			unlockedTasks: 1,
+			claimed: 1,
+			skipped: 0,
+		};
+		const kanbanDispatcher = {
+			getStatus: vi.fn(() => status),
+			tick: vi.fn(async () => tick),
+			setEnabled: vi.fn((enabled: boolean) => ({ ...status, enabled })),
+		};
+		const baseUrl = await startServer({}, { kanbanDispatcher });
+
+		const listed = await getJson(`${baseUrl}/api/kanban/dispatcher/status`);
+		const ticked = await postJson(`${baseUrl}/api/kanban/dispatcher/tick`, {});
+		const paused = await postJson(`${baseUrl}/api/kanban/dispatcher/pause`, {});
+		const resumed = await postJson(
+			`${baseUrl}/api/kanban/dispatcher/resume`,
+			{},
+		);
+
+		expect(listed.status).toBe(200);
+		expect(listed.body.enabled).toBe(true);
+		expect(ticked.body.claimed).toBe(1);
+		expect(paused.body.enabled).toBe(false);
+		expect(resumed.body.enabled).toBe(true);
+		expect(kanbanDispatcher.setEnabled).toHaveBeenCalledWith(false);
+		expect(kanbanDispatcher.setEnabled).toHaveBeenCalledWith(true);
+	});
+
+	it("exposes all known models for active providers", async () => {
+		const baseUrl = await startServer(
+			{},
+			{
+				router: {
+					getAvailableProviders: () => ["zhipu"],
+				},
+				config: {
+					ai: {
+						providers: {
+							zhipu: {
+								models: ["glm-5.1"],
+							},
+						},
+					},
+				},
+			},
+		);
+
+		const response = await getJson(`${baseUrl}/api/models`);
+
+		expect(response.status).toBe(200);
+		expect(response.body.providers[0].provider).toBe("zhipu");
+		expect(response.body.providers[0].models).toEqual(
+			expect.arrayContaining(["glm-5.1", "glm-4.7", "glm-4.6"]),
+		);
+	});
+
+	it("creates Kanban plans through the planner API", async () => {
+		const run = { id: "run-1", goal: "generic plan", status: "running" };
+		const snapshot = {
+			run,
+			tasks: [{ id: "task-1", title: "Research", status: "ready" }],
+			requirements: [],
+			dependencyEdges: [],
+		};
+		const kanbanPlanner = {
+			planFromGoal: vi.fn(async () => ({
+				run,
+				tasks: snapshot.tasks,
+				plan: {},
+			})),
+			persistPlan: vi.fn(),
+		};
+		const workflowManager = {
+			getRunSnapshot: vi.fn(async () => snapshot),
+		};
+		const requirementResolver = {
+			evaluatePendingRequirements: vi.fn(async () => ({
+				evaluated: 0,
+				satisfied: 0,
+				unlockedTasks: 0,
+			})),
+		};
+		const baseUrl = await startServer(
+			{},
+			{ workflowManager, kanbanPlanner, requirementResolver },
+		);
+
+		const response = await postJson(`${baseUrl}/api/kanban/plan`, {
+			goal: "crea 2 reportes con investigacion especifica",
+			conversationId: "conv-1",
+			rootAgentId: "octavio",
+		});
+
+		expect(response.status).toBe(201);
+		expect(response.body.run).toEqual(run);
+		expect(kanbanPlanner.planFromGoal).toHaveBeenCalledWith({
+			goal: "crea 2 reportes con investigacion especifica",
+			conversationId: "conv-1",
+			rootAgentId: "octavio",
+		});
+		expect(
+			requirementResolver.evaluatePendingRequirements,
+		).toHaveBeenCalledWith({
+			runId: "run-1",
+		});
+	});
+
+	it("rejects invalid Kanban plan payloads with 400", async () => {
+		const workflowManager = { getRunSnapshot: vi.fn() };
+		const kanbanPlanner = { planFromGoal: vi.fn(), persistPlan: vi.fn() };
+		const baseUrl = await startServer({}, { workflowManager, kanbanPlanner });
+
+		const missingGoal = await postJson(`${baseUrl}/api/kanban/plan`, {});
+		const badTasks = await postJson(`${baseUrl}/api/kanban/plan`, {
+			goal: "valid goal",
+			tasks: "not-an-array",
+		});
+		const longGoal = await postJson(`${baseUrl}/api/kanban/plan`, {
+			goal: "x".repeat(4001),
+		});
+
+		expect(missingGoal.status).toBe(400);
+		expect(missingGoal.body.error).toBe("goal is required");
+		expect(badTasks.status).toBe(400);
+		expect(badTasks.body.error).toBe("tasks must be an array when provided");
+		expect(longGoal.status).toBe(400);
+		expect(String(longGoal.body.error)).toContain("goal must be");
+		expect(kanbanPlanner.planFromGoal).not.toHaveBeenCalled();
+		expect(kanbanPlanner.persistPlan).not.toHaveBeenCalled();
+	});
+
+	it("creates a real generic Kanban Swarm plan over HTTP", async () => {
+		const db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		try {
+			const workflowManager = new WorkflowManager(db);
+			const kanbanPlanner = new KanbanPlanner(workflowManager);
+			const requirementResolver = new RequirementResolver(workflowManager);
+			const baseUrl = await startServer(
+				{},
+				{ workflowManager, kanbanPlanner, requirementResolver },
+			);
+
+			const response = await postJson(`${baseUrl}/api/kanban/plan`, {
+				goal: "crea 2 informes, cada uno con su investigacion especifica",
+				rootAgentId: "octavio",
+			});
+
+			expect(response.status).toBe(201);
+			expect(response.body.tasks as unknown[]).toHaveLength(4);
+			expect(response.body.requirements as unknown[]).toHaveLength(2);
+			expect(response.body.dependencyEdges as unknown[]).toHaveLength(2);
+			expect(
+				(response.body.requirements as Array<{ artifact_key: string }>).map(
+					(requirement) => requirement.artifact_key,
+				),
+			).toEqual(
+				expect.arrayContaining([
+					"investigacion_informes_1",
+					"investigacion_informes_2",
+				]),
+			);
+		} finally {
+			await db.close();
+		}
+	});
+
+	it("exposes Kanban task context and manual requirement actions", async () => {
+		const requirement = {
+			id: "req-1",
+			run_id: "run-1",
+			task_id: "task-1",
+			requirement_key: "manual:approval",
+		};
+		const context = {
+			task: {
+				id: "task-1",
+				run_id: "run-1",
+				title: "Review",
+				status: "waiting_dependency",
+			},
+			missingRequirements: [requirement],
+			requirements: [requirement],
+			artifacts: [],
+			matchingArtifacts: [],
+			blockers: [],
+			comments: [],
+			leases: [],
+		};
+		const snapshot = { run: { id: "run-1" }, tasks: [context.task] };
+		const workflowManager = {
+			getTaskContext: vi.fn(async () => context),
+			getRequirement: vi.fn(async () => requirement),
+			markRequirementSatisfied: vi.fn(async () => {}),
+			markRequirementPending: vi.fn(async () => {}),
+			recordEvent: vi.fn(async () => {}),
+			completeRunIfAllTasksTerminal: vi.fn(async () => false),
+			invalidateTaskForPendingRequirement: vi.fn(async () => true),
+			getRunSnapshot: vi.fn(async () => snapshot),
+		};
+		const requirementResolver = {
+			unlockSatisfiedTasks: vi.fn(async () => 1),
+		};
+		const kanbanDispatcher = { tick: vi.fn(async () => ({ claimed: 0 })) };
+		const baseUrl = await startServer(
+			{},
+			{ workflowManager, requirementResolver, kanbanDispatcher },
+		);
+
+		const loaded = await getJson(`${baseUrl}/api/kanban/tasks/task-1/context`);
+		const satisfied = await postJson(
+			`${baseUrl}/api/kanban/requirements/req-1/satisfy`,
+			{},
+		);
+		const reset = await postJson(
+			`${baseUrl}/api/kanban/requirements/req-1/reset`,
+			{ reason: "needs revision" },
+		);
+
+		expect(loaded.status).toBe(200);
+		expect(loaded.body.task).toEqual(context.task);
+		expect(satisfied.status).toBe(200);
+		expect(reset.status).toBe(200);
+		expect(workflowManager.markRequirementSatisfied).toHaveBeenCalledWith(
+			"req-1",
+			{},
+		);
+		expect(workflowManager.markRequirementPending).toHaveBeenCalledWith(
+			"req-1",
+			"needs revision",
+		);
+		expect(
+			workflowManager.invalidateTaskForPendingRequirement,
+		).toHaveBeenCalledWith({
+			taskId: "task-1",
+			requirementId: "req-1",
+			reason: "needs revision",
+		});
+		expect(kanbanDispatcher.tick).toHaveBeenCalledTimes(2);
+	});
+
+	it("rejects oversized Kanban comments and reasons", async () => {
+		const task = { id: "task-1", run_id: "run-1", title: "Review" };
+		const workflowManager = {
+			getTask: vi.fn(async () => task),
+			recordTaskComment: vi.fn(),
+			recordBlocker: vi.fn(),
+			updateTaskStatus: vi.fn(),
+			getRunSnapshot: vi.fn(),
+		};
+		const baseUrl = await startServer({}, { workflowManager });
+
+		const comment = await postJson(
+			`${baseUrl}/api/kanban/tasks/task-1/comment`,
+			{
+				body: "x".repeat(4001),
+			},
+		);
+		const block = await postJson(`${baseUrl}/api/kanban/tasks/task-1/block`, {
+			reason: "x".repeat(4001),
+		});
+
+		expect(comment.status).toBe(400);
+		expect(String(comment.body.error)).toContain("body must be");
+		expect(block.status).toBe(400);
+		expect(String(block.body.error)).toContain("reason must be");
+		expect(workflowManager.recordTaskComment).not.toHaveBeenCalled();
+		expect(workflowManager.recordBlocker).not.toHaveBeenCalled();
 	});
 
 	it("exposes agent message inbox, send, and read actions", async () => {

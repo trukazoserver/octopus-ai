@@ -374,6 +374,55 @@ node packages/cli/dist/index.js plugins uninstall mi-plugin
 
 ---
 
+### `kanban`
+
+Gestiona workflows Kanban Swarm desde la terminal. Este comando crea planes desde objetivos naturales, ejecuta ticks del dispatcher y permite inspeccionar runs persistidos sin abrir el dashboard.
+
+```bash
+node packages/cli/dist/index.js kanban <subcomando>
+```
+
+| Subcomando | Descripción | Ejemplo |
+|---|---|---|
+| `swarm <objetivo>` | Crea un run Kanban Swarm desde un objetivo natural y ejecuta ticks hasta finalizar o agotar el limite | `kanban swarm "Investiga y prototipa una landing"` |
+| `status` | Muestra estado del dispatcher, slots disponibles y ultimo tick | `kanban status` |
+| `list` | Lista runs Kanban recientes, opcionalmente filtrados por estado | `kanban list --status running` |
+| `inspect <runId>` | Muestra snapshot del run, metricas, board y cards por estado | `kanban inspect wf_123` |
+
+**Opciones principales:**
+
+| Opción | Disponible en | Descripción |
+|---|---|---|
+| `--workers <lista>` | `swarm` | Limita el plan a brazos concretos separados por coma, por ejemplo `bibi,ari,medi` |
+| `--model <modelo>` | `swarm` | Sobrescribe el modelo usado para planificar |
+| `--dry-run` | `swarm` | Genera el plan sin crear ni ejecutar cards |
+| `--status <estado>` | `list` | Filtra runs por estado |
+| `--limit <n>` | `list` | Limita cuantos runs mostrar |
+| `--json` | `swarm`, `status`, `list`, `inspect` | Imprime la salida completa en JSON |
+
+**Ejemplos:**
+
+```bash
+# Crear y ejecutar un swarm desde un objetivo complejo
+node packages/cli/dist/index.js kanban swarm "Investiga competidores, redacta copy y valida una landing page"
+
+# Ver el plan sin ejecutarlo
+node packages/cli/dist/index.js kanban swarm "Preparar campaña de lanzamiento" --dry-run
+
+# Usar solo algunos brazos especializados
+node packages/cli/dist/index.js kanban swarm "Audita y corrige la documentacion" --workers bibi,ari,medi
+
+# Consultar estado operativo del dispatcher
+node packages/cli/dist/index.js kanban status
+
+# Inspeccionar un run persistido
+node packages/cli/dist/index.js kanban inspect wf_123 --json
+```
+
+Los mismos runs se pueden operar desde el dashboard o la [API HTTP Kanban](./http.md), incluyendo aprobaciones, rechazos, blockers, comentarios, requirements manuales, blackboard y snapshots de tablero.
+
+---
+
 ## Opciones Globales
 
 | Opción | Descripción |

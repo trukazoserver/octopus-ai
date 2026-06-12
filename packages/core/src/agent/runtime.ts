@@ -36,17 +36,22 @@ import type { LoadedSkill } from "../skills/types.js";
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
+import { getOctopusArmProfile } from "./arm-profiles.js";
+import { ContinuityGuard } from "./continuity-guard.js";
 import {
 	OctopusOrchestrator,
 	type OrchestratorConfig,
 	type OrchestratorEvent,
 } from "./orchestrator.js";
 import { RollingContextManager } from "./rolling-context.js";
+import { routeTaskToArm } from "./arm-router.js";
 import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
 import type { WorkflowManager } from "./workflow-manager.js";
+import type { KanbanPlanner } from "./kanban-planner.js";
+import type { RequirementResolver } from "./requirement-resolver.js";
 
-const DEFAULT_MAX_TOOL_ITERATIONS = 64;
-const MAX_REPEATED_TOOL_SIGNATURES = 2;
+const DEFAULT_MAX_TOOL_ITERATIONS = 128;
+const MAX_REPEATED_TOOL_SIGNATURES = 3;
 const MAX_TOOL_RESULT_CONTEXT_CHARS = 12000;
 const MAX_TOOL_RESULT_STORED_CHARS = 2000;
 const DELEGATE_SYNTHESIS_TIMEOUT_MS = 10_000;
@@ -88,6 +93,9 @@ interface DelegateWorkflowTask {
 	id: string;
 	role: string;
 	task: string;
+	armKey?: string;
+	produces?: Array<Record<string, unknown>>;
+	model?: string;
 }
 
 interface DelegateWorkflowState {
@@ -101,6 +109,20 @@ interface DelegateTaskResult {
 	task: string;
 	result: string;
 	error?: string;
+}
+
+function parseDelegateProduces(value: unknown): Array<Record<string, unknown>> | undefined {
+	if (Array.isArray(value)) {
+		const artifacts = value.filter(
+			(item): item is Record<string, unknown> =>
+				Boolean(item) && typeof item === "object" && !Array.isArray(item),
+		);
+		return artifacts.length > 0 ? artifacts : undefined;
+	}
+	if (typeof value === "string" && value.trim()) {
+		return [{ artifactKey: value.trim(), artifactType: "result" }];
+	}
+	return undefined;
 }
 
 type ToolDecision =
@@ -188,8 +210,10 @@ export class AgentRuntime {
 	private chatManager?: ChatManager;
 	private workflowManager?: WorkflowManager;
 	private orchestrator?: OctopusOrchestrator;
+	private kanbanPlanner?: KanbanPlanner;
+	private requirementResolver?: RequirementResolver;
 	private subtaskTracker?: import("./subtask-tracker.js").SubtaskTracker;
-	private continuityGuard?: import("./continuity-guard.js").ContinuityGuard;
+	private continuityGuard: ContinuityGuard;
 	private workingMemory: WorkingMemory = new WorkingMemory();
 	private rollingContext: RollingContextManager;
 	private rollingContexts = new Map<string, RollingContextManager>();
@@ -210,6 +234,16 @@ export class AgentRuntime {
 		this.memoryRetrieval = memoryRetrieval;
 		this.memoryConsolidator = memoryConsolidator;
 		this.skillLoader = skillLoader;
+		// In relentless mode, use much higher auto-continuation limit
+		if (config.tenacidad?.level === "tenaz") {
+			const guardConfig = config.continuityGuard ?? {};
+			this.continuityGuard = new ContinuityGuard({
+				...guardConfig,
+				maxAutoContinuations: guardConfig.maxAutoContinuations ?? 50,
+			});
+		} else {
+			this.continuityGuard = new ContinuityGuard(config.continuityGuard);
+		}
 		this.rollingContext = new RollingContextManager(llmRouter);
 		this.rollingContexts.set("__default__", this.rollingContext);
 	}
@@ -294,13 +328,90 @@ export class AgentRuntime {
 	setWorkflowManager(manager: WorkflowManager): void {
 		this.workflowManager = manager;
 	}
+	setKanbanPlanner(planner: KanbanPlanner): void {
+		this.kanbanPlanner = planner;
+	}
 
-	setSubtaskTracker(tracker: import("./subtask-tracker.js").SubtaskTracker): void {
+	setRequirementResolver(resolver: RequirementResolver): void {
+		this.requirementResolver = resolver;
+	}
+
+	setSubtaskTracker(
+		tracker: import("./subtask-tracker.js").SubtaskTracker,
+	): void {
 		this.subtaskTracker = tracker;
 	}
 
-	setContinuityGuard(guard: import("./continuity-guard.js").ContinuityGuard): void {
+	setContinuityGuard(
+		guard: import("./continuity-guard.js").ContinuityGuard,
+	): void {
 		this.continuityGuard = guard;
+	}
+
+	private isMediaWorkflowTool(toolName: string): boolean {
+		return /(?:nano-banana|veo-video|image|video|audio|media|tts|save_media|import_media)/i.test(
+			toolName,
+		);
+	}
+
+	private shouldAutoContinueAfterToolLimit(
+		ledger: EvidenceLedger,
+		toolsUsed: Array<{ name: string }>,
+	): boolean {
+		const persistence = this.getTenacidad();
+
+		// In relentless mode: always continue unless genuine API failure
+		if (persistence.enabled) {
+			return ledger.consecutiveErrors < persistence.maxGenuineApiErrors;
+		}
+
+		if (ledger.consecutiveErrors >= 3) return false;
+		return (
+			ledger.objectiveKind === "media_collection" ||
+			Boolean(ledger.requestedItemCount) ||
+			toolsUsed.some((tool) => this.isMediaWorkflowTool(tool.name))
+		);
+	}
+
+	private async buildToolLimitAutoContinuePrompt(input: {
+		guard: ContinuityGuard;
+		ledger: EvidenceLedger;
+		toolsUsed: Array<{ name: string }>;
+		iterations: number;
+		inlineRunId?: string;
+	}): Promise<string | null> {
+		if (!this.shouldAutoContinueAfterToolLimit(input.ledger, input.toolsUsed)) {
+			return null;
+		}
+		const maxIterations = this.getToolIterationLimit().maxIterations;
+		input.guard.recordFinishReason("tool_iteration_limit");
+		const shouldContinue = input.guard.shouldAutoContinue({
+			finishReason: "tool_iteration_limit",
+			hasToolCalls: input.toolsUsed.length > 0,
+			hasContent: true,
+			iterationCount: input.iterations,
+			maxIterations,
+			inlineRunId: input.inlineRunId,
+		});
+		if (!shouldContinue) return null;
+
+		input.guard.incrementContinuation();
+		let reconciliationReport = null;
+		if (this.subtaskTracker && input.inlineRunId) {
+			try {
+				reconciliationReport =
+					await this.subtaskTracker.reconcileInterruptedRun(input.inlineRunId);
+			} catch {
+				/* non-critical */
+			}
+		}
+
+		return [
+			input.guard.buildContinuePrompt(reconciliationReport),
+			"The previous segment exhausted the per-response tool iteration budget, but the original user goal remains active.",
+			"Continue automatically from the first missing deliverable using the existing evidence ledger and generated media URLs.",
+			"Do not ask the user to type 'continua' or wait for confirmation unless a missing credential, missing required reference, safety issue, or external manual action blocks progress.",
+		].join("\n");
 	}
 
 	/**
@@ -596,7 +707,8 @@ export class AgentRuntime {
 				rootAgentId: this.config.id,
 				goal: message,
 				metadata: {
-					source: "delegate_task",
+					source: "kanban_swarm_delegate",
+					workflowKind: "kanban_swarm",
 					executionPlan: "parallel",
 					taskCount: tasks.length,
 				},
@@ -606,31 +718,47 @@ export class AgentRuntime {
 			});
 			const taskIds = new Map<string, string>();
 			for (const task of tasks) {
+				const routedArm = task.armKey
+					? getOctopusArmProfile(task.armKey)
+					: routeTaskToArm({ role: task.role, description: task.task });
 				const workflowTask = await this.workflowManager.createTask({
 					runId: run.id,
-					assignedAgentId: this.config.id,
+					assignedAgentId: routedArm?.agentId ?? this.config.id,
+					armKey: routedArm?.key,
 					title: `${task.role}: ${task.task.slice(0, 80)}`,
 					description: task.task,
 					priority: 3,
+					produces: task.produces,
+					model: task.model,
 					metadata: {
-						source: "delegate_task",
+						source: "kanban_swarm_delegate",
+						workflowKind: "kanban_swarm",
 						sourceTaskId: task.id,
 						role: task.role,
+						armKey: routedArm?.key,
+						agentId: routedArm?.agentId,
+						agentName: routedArm?.name,
 					},
 				});
 				taskIds.set(task.id, workflowTask.id);
 			}
+			await this.requirementResolver?.evaluatePendingRequirements({
+				runId: run.id,
+			});
 			await this.workflowManager.recordEvent({
 				runId: run.id,
 				agentId: this.config.id,
 				eventType: "decomposition",
 				message: `Delegated ${tasks.length} tasks via delegate_task.`,
 				metadata: {
-					source: "delegate_task",
+					source: "kanban_swarm_delegate",
+					workflowKind: "kanban_swarm",
 					subtasks: tasks.map((task) => ({
 						id: task.id,
 						workflowTaskId: taskIds.get(task.id),
 						role: task.role,
+						armKey: task.armKey,
+						model: task.model,
 					})),
 				},
 			});
@@ -665,7 +793,7 @@ export class AgentRuntime {
 				eventType: status === "failed" ? "error" : status,
 				message: message.slice(0, 4000),
 				toolName: "delegate_task",
-				metadata: { source: "delegate_task", workerId },
+				metadata: { source: "kanban_swarm_delegate", workflowKind: "kanban_swarm", workerId },
 			});
 		} catch (err) {
 			console.error(
@@ -688,7 +816,8 @@ export class AgentRuntime {
 			await this.workflowManager.updateRunStatus(workflow.runId, status, {
 				currentPhase: "synthesis",
 				metadata: {
-					source: "delegate_task",
+					source: "kanban_swarm_delegate",
+					workflowKind: "kanban_swarm",
 					succeeded,
 					failed,
 				},
@@ -698,7 +827,7 @@ export class AgentRuntime {
 				agentId: this.config.id,
 				eventType: "synthesis",
 				message: finalResponse.slice(0, 4000),
-				metadata: { source: "delegate_task", succeeded, failed },
+				metadata: { source: "kanban_swarm_delegate", workflowKind: "kanban_swarm", succeeded, failed },
 			});
 		} catch (err) {
 			console.error(
@@ -708,12 +837,40 @@ export class AgentRuntime {
 		}
 	}
 
+	private getTenacidad(): {
+		enabled: boolean;
+		maxGenuineApiErrors: number;
+		streamErrorRetries: number;
+		emptyResponseRetries: number;
+	} {
+		const tp = this.config.tenacidad;
+		const enabled = tp?.level === "tenaz";
+		return {
+			enabled,
+			maxGenuineApiErrors: tp?.maxGenuineApiErrors ?? 3,
+			streamErrorRetries: tp?.streamErrorRetries ?? (enabled ? 3 : 0),
+			emptyResponseRetries: tp?.emptyResponseRetries ?? (enabled ? 3 : 0),
+		};
+	}
+
+	private isGenuineApiError(message: string): boolean {
+		return /auth|unauthorized|forbidden|invalid.?api.?key|quota.?exceed|billing|payment|required/i.test(
+			message,
+		);
+	}
+
+	private getMaxRepeatedToolSignatures(): number {
+		return this.getTenacidad().enabled ? 5 : MAX_REPEATED_TOOL_SIGNATURES;
+	}
+
 	private getToolIterationLimit(): { enabled: boolean; maxIterations: number } {
 		const configuredMax = this.config.toolIterationLimit?.maxIterations;
+		const persistence = this.getTenacidad();
+		const defaultMax = persistence.enabled ? 512 : DEFAULT_MAX_TOOL_ITERATIONS;
 		const maxIterations =
 			typeof configuredMax === "number" && Number.isFinite(configuredMax)
 				? Math.max(1, Math.trunc(configuredMax))
-				: DEFAULT_MAX_TOOL_ITERATIONS;
+				: defaultMax;
 
 		return {
 			enabled: this.config.toolIterationLimit?.enabled ?? true,
@@ -1056,6 +1213,21 @@ export class AgentRuntime {
 	}
 
 	private getToolBudget(toolName: string): number {
+		const persistence = this.getTenacidad();
+		const maxIter = this.getToolIterationLimit().maxIterations;
+
+		// In relentless mode, all budgets are much more generous
+		if (persistence.enabled) {
+			if (/(video|image|audio|generate|edit|veo|nano)/i.test(toolName))
+				return maxIter;
+			if (toolName === "save_media") return maxIter;
+			if (toolName.startsWith("browser_")) return 20;
+			if (toolName === "create_tool") return 8;
+			if (toolName === "execute_code" || toolName === "run_shell") return 12;
+			return 16;
+		}
+
+		// Original budgets (existing behavior)
 		if (toolName === "create_tool") return 2;
 		if (toolName === "execute_code" || toolName === "run_shell") return 3;
 		if (toolName === "browser_screenshot") return 2;
@@ -1066,8 +1238,8 @@ export class AgentRuntime {
 		if (toolName === "browser_extract_images") return 3;
 		if (toolName.startsWith("browser_")) return 4;
 		if (toolName === "save_media") return 6;
-		if (/\b(video|image|audio|generate|edit|veo|nano)\b/i.test(toolName))
-			return this.getToolIterationLimit().maxIterations;
+		if (/(video|image|audio|generate|edit|veo|nano)/i.test(toolName))
+			return maxIter;
 		return 8;
 	}
 
@@ -1099,26 +1271,51 @@ export class AgentRuntime {
 		return { success: false, resultContent: `Tool policy: ${message}` };
 	}
 
-private extractArtifactsFromToolResult(
+	private extractArtifactsFromToolResult(
 		toolName: string,
 		resultContent: string,
-	): Array<{ artifactType: string; url?: string; path?: string; description?: string }> {
-		const artifacts: Array<{ artifactType: string; url?: string; path?: string; description?: string }> = [];
-		const MEDIA_URL_RE = new RegExp("/api/media/file/[a-f0-9-]+\.[a-z0-9]+", "gi");
-		let match: RegExpExecArray | null;
-		while ((match = MEDIA_URL_RE.exec(resultContent)) !== null) {
+	): Array<{
+		artifactType: string;
+		url?: string;
+		path?: string;
+		description?: string;
+	}> {
+		const artifacts: Array<{
+			artifactType: string;
+			url?: string;
+			path?: string;
+			description?: string;
+		}> = [];
+		const MEDIA_URL_RE = /\/api\/media\/file\/[a-f0-9-]+.[a-z0-9]+/gi;
+		let match = MEDIA_URL_RE.exec(resultContent);
+		while (match !== null) {
 			const url = match[0];
 			const ext = url.split(".").pop()?.toLowerCase() ?? "";
-			const artifactType = ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext) ? "image"
-				: ["mp4", "webm"].includes(ext) ? "video"
-				: ["mp3", "wav", "ogg", "m4a"].includes(ext) ? "audio"
-				: "media";
-			artifacts.push({ artifactType, url, description: `${artifactType} from ${toolName}` });
+			const artifactType = [
+				"png",
+				"jpg",
+				"jpeg",
+				"gif",
+				"webp",
+				"svg",
+			].includes(ext)
+				? "image"
+				: ["mp4", "webm"].includes(ext)
+					? "video"
+					: ["mp3", "wav", "ogg", "m4a"].includes(ext)
+						? "audio"
+						: "media";
+			artifacts.push({
+				artifactType,
+				url,
+				description: `${artifactType} from ${toolName}`,
+			});
+			match = MEDIA_URL_RE.exec(resultContent);
 		}
 		return artifacts;
 	}
 
-		private createEvidenceLedger(message: string): EvidenceLedger {
+	private createEvidenceLedger(message: string): EvidenceLedger {
 		const lower = message.toLowerCase();
 		const objectiveKind: ObjectiveKind =
 			/(imagen|imágenes|image|images|foto|fotos|producto|product|media|screenshot|captura)/i.test(
@@ -1159,6 +1356,9 @@ private extractArtifactsFromToolResult(
 	}
 
 	private shouldStopOnToolBudgetExceeded(toolName: string): boolean {
+		// In relentless mode, never hard-stop on budget alone
+		if (this.getTenacidad().enabled) return false;
+
 		return (
 			toolName === "create_tool" ||
 			toolName === "execute_code" ||
@@ -1395,26 +1595,38 @@ private extractArtifactsFromToolResult(
 			};
 		}
 
-		if (ledger.usefulResults > 0 && ledger.consecutiveErrors >= 3) {
-			return {
-				action: "stop",
-				reason:
-					"Ya hay evidencia útil y los intentos de recuperación están fallando.",
-			};
-		}
+		const persistence = this.getTenacidad();
 
-		if (
-			ledger.usefulResults > 0 &&
-			remainingIterations !== null &&
-			remainingIterations <= 1
-		) {
-			return {
-				action: "stop",
-				reason:
-					"Queda poco presupuesto de herramientas y ya existe evidencia útil.",
-			};
-		}
+		// In relentless mode: only stop for genuine repeated API failures
+		if (persistence.enabled) {
+			if (ledger.consecutiveErrors >= persistence.maxGenuineApiErrors) {
+				return {
+					action: "stop",
+					reason: `Deteniendo: ${persistence.maxGenuineApiErrors}+ errores consecutivos sugieren un problema real (API caída, error de autenticación, etc.).`,
+				};
+			}
+			// Don't stop on "remaining iterations <= 1" or "already have useful results"
+		} else {
+			if (ledger.usefulResults > 0 && ledger.consecutiveErrors >= 3) {
+				return {
+					action: "stop",
+					reason:
+						"Ya hay evidencia útil y los intentos de recuperación están fallando.",
+				};
+			}
 
+			if (
+				ledger.usefulResults > 0 &&
+				remainingIterations !== null &&
+				remainingIterations <= 1
+			) {
+				return {
+					action: "stop",
+					reason:
+						"Queda poco presupuesto de herramientas y ya existe evidencia útil.",
+				};
+			}
+		}
 		const recent = ledger.toolHistory.slice(-3);
 		if (
 			toolName === "browser_screenshot" &&
@@ -1640,7 +1852,9 @@ private extractArtifactsFromToolResult(
 		return this.buildFallbackFinalResponse(ledger, reason);
 	}
 
-	private buildDelegateSynthesisFallback(results: DelegateTaskResult[]): string {
+	private buildDelegateSynthesisFallback(
+		results: DelegateTaskResult[],
+	): string {
 		const lines = [
 			"# Resultados combinados",
 			"",
@@ -1746,7 +1960,9 @@ private extractArtifactsFromToolResult(
 				const shouldDecompose =
 					await this.orchestrator.shouldDecompose(message);
 				if (shouldDecompose) {
-					const decomposition = await this.orchestrator.decompose(message);
+					const decomposition = this.kanbanPlanner
+					? await this.orchestrator.decomposeViaKanban(message, { conversationId: channelId, rootAgentId: this.config.id })
+					: await this.orchestrator.decompose(message);
 					if (decomposition.subtasks.length > 1) {
 						const sharedContext = await this.buildSharedWorkerContext(
 							message,
@@ -1893,7 +2109,9 @@ private extractArtifactsFromToolResult(
 				const shouldDecompose =
 					await this.orchestrator.shouldDecompose(message);
 				if (shouldDecompose) {
-					const decomposition = await this.orchestrator.decompose(message);
+					const decomposition = this.kanbanPlanner
+					? await this.orchestrator.decomposeViaKanban(message, { conversationId: channelId, rootAgentId: this.config.id })
+					: await this.orchestrator.decompose(message);
 					if (decomposition.subtasks.length > 1) {
 						yield `\x00STATUS:orchestrating:planning::${this.encodeStatusField("Analizando la solicitud para decidir cuántos agentes crear y cómo dividir el trabajo.")}\x00`;
 						const sharedContext = await this.buildSharedWorkerContext(
@@ -1921,18 +2139,18 @@ private extractArtifactsFromToolResult(
 											count: event.data.subtasks.length,
 											executionPlan: event.data.executionPlan,
 											reasoning: event.data.reasoning,
-									subtasks: event.data.subtasks.map((task) => ({
-										id: task.id,
-										role: task.role,
-										description: task.description,
-										toolScope: task.toolScope,
-										agentId: task.agentId,
-										agentName: task.agentName,
-										armKey: task.armKey,
-										agentAvatar: task.avatar,
-										agentColor: task.color,
-									})),
-								}),
+											subtasks: event.data.subtasks.map((task) => ({
+												id: task.id,
+												role: task.role,
+												description: task.description,
+												toolScope: task.toolScope,
+												agentId: task.agentId,
+												agentName: task.agentName,
+												armKey: task.armKey,
+												agentAvatar: task.avatar,
+												agentColor: task.color,
+											})),
+										}),
 									)}\x00`;
 									break;
 								case "worker_started":
@@ -1940,16 +2158,16 @@ private extractArtifactsFromToolResult(
 										JSON.stringify({
 											workerId: event.workerId,
 											taskId: event.taskId,
-										role: event.role,
-										description: event.description,
-										agentId: event.agentId,
-										agentName: event.agentName,
-										armKey: event.armKey,
-										agentAvatar: event.avatar,
-										agentColor: event.color,
-										activity: event.activity,
-										liveAgentRuntime: event.liveAgentRuntime,
-									}),
+											role: event.role,
+											description: event.description,
+											agentId: event.agentId,
+											agentName: event.agentName,
+											armKey: event.armKey,
+											agentAvatar: event.avatar,
+											agentColor: event.color,
+											activity: event.activity,
+											liveAgentRuntime: event.liveAgentRuntime,
+										}),
 									)}\x00`;
 									break;
 								case "worker_progress":
@@ -1957,50 +2175,50 @@ private extractArtifactsFromToolResult(
 										JSON.stringify({
 											workerId: event.workerId,
 											taskId: event.taskId,
-										message: event.message,
-										progress: event.progress,
-										toolName: event.toolName,
-										agentId: event.agentId,
-										agentName: event.agentName,
-										armKey: event.armKey,
-										agentAvatar: event.avatar,
-										agentColor: event.color,
-										activity: event.activity,
-										liveAgentRuntime: event.liveAgentRuntime,
-									}),
+											message: event.message,
+											progress: event.progress,
+											toolName: event.toolName,
+											agentId: event.agentId,
+											agentName: event.agentName,
+											armKey: event.armKey,
+											agentAvatar: event.avatar,
+											agentColor: event.color,
+											activity: event.activity,
+											liveAgentRuntime: event.liveAgentRuntime,
+										}),
 									)}\x00`;
 									break;
 								case "worker_done":
 									yield `\x00STATUS:worker_done:${event.workerId}::${this.encodeStatusField(
 										JSON.stringify({
 											workerId: event.workerId,
-										taskId: event.taskId,
-										result: event.result,
-										progress: 100,
-										agentId: event.agentId,
-										agentName: event.agentName,
-										armKey: event.armKey,
-										agentAvatar: event.avatar,
-										agentColor: event.color,
-										activity: event.activity,
-										liveAgentRuntime: event.liveAgentRuntime,
-									}),
+											taskId: event.taskId,
+											result: event.result,
+											progress: 100,
+											agentId: event.agentId,
+											agentName: event.agentName,
+											armKey: event.armKey,
+											agentAvatar: event.avatar,
+											agentColor: event.color,
+											activity: event.activity,
+											liveAgentRuntime: event.liveAgentRuntime,
+										}),
 									)}\x00`;
 									break;
 								case "worker_error":
 									yield `\x00STATUS:worker_error:${event.workerId}::${this.encodeStatusField(
 										JSON.stringify({
 											workerId: event.workerId,
-										taskId: event.taskId,
-										error: event.error,
-										agentId: event.agentId,
-										agentName: event.agentName,
-										armKey: event.armKey,
-										agentAvatar: event.avatar,
-										agentColor: event.color,
-										activity: event.activity,
-										liveAgentRuntime: event.liveAgentRuntime,
-									}),
+											taskId: event.taskId,
+											error: event.error,
+											agentId: event.agentId,
+											agentName: event.agentName,
+											armKey: event.armKey,
+											agentAvatar: event.avatar,
+											agentColor: event.color,
+											activity: event.activity,
+											liveAgentRuntime: event.liveAgentRuntime,
+										}),
 									)}\x00`;
 									break;
 								case "telemetry":
@@ -2051,8 +2269,8 @@ private extractArtifactsFromToolResult(
 		}
 
 		// === Single-agent (flujo normal) ===
-			const continuityGuard = this.continuityGuard;
-			if (continuityGuard) continuityGuard.reset(message);
+		const continuityGuard = this.continuityGuard;
+		if (continuityGuard) continuityGuard.reset(message);
 
 		let inlineRunId: string | undefined;
 		if (this.subtaskTracker && channelId) {
@@ -2062,7 +2280,9 @@ private extractArtifactsFromToolResult(
 					agentId: this.config.id,
 					goal: message,
 				});
-			} catch { /* non-critical, continue without tracking */ }
+			} catch {
+				/* non-critical, continue without tracking */
+			}
 		}
 		const memories = await this.memoryRetrieval.retrieveForContext(message);
 		throwIfAborted(options.signal);
@@ -2094,495 +2314,507 @@ private extractArtifactsFromToolResult(
 		const ledger = this.createEvidenceLedger(message);
 		const toolTrace: ExperienceToolTrace[] = [];
 		let stoppedByDecision = false;
+		let continueAfterToolLimit = true;
+			let streamErrorRetryCount = 0;
+			let emptyResponseRetryCount = 0;
 
-		while (this.hasToolIterationsRemaining(iterations) && !stoppedByDecision) {
-			throwIfAborted(options.signal);
-			iterations++;
+		while (continueAfterToolLimit && !stoppedByDecision) {
+			continueAfterToolLimit = false;
+			while (
+				this.hasToolIterationsRemaining(iterations) &&
+				!stoppedByDecision
+			) {
+				throwIfAborted(options.signal);
+				iterations++;
 
-			const compressedMessages = await (
-				await this.getRollingContext(channelId)
-			).maybeSummarize(messages, this.config.model ?? "default");
-			if (compressedMessages !== messages) {
-				messages.length = 0;
-				messages.push(...compressedMessages);
-			}
+				const compressedMessages = await (
+					await this.getRollingContext(channelId)
+				).maybeSummarize(messages, this.config.model ?? "default");
+				if (compressedMessages !== messages) {
+					messages.length = 0;
+					messages.push(...compressedMessages);
+				}
 
-			const request: LLMRequest = {
-				model: this.config.model ?? "default",
-				messages,
-				maxTokens: this.config.maxTokens,
-				temperature: this.config.temperature,
-				stream: true,
-				tools: tools.length > 0 ? tools : undefined,
-			};
+				const request: LLMRequest = {
+					model: this.config.model ?? "default",
+					messages,
+					maxTokens: this.config.maxTokens,
+					temperature: this.config.temperature,
+					stream: true,
+					tools: tools.length > 0 ? tools : undefined,
+				};
 
-			let chunkContent = "";
-			const toolCalls: Array<{
-				id: string;
-				type: "function";
-				function: { name: string; arguments: string };
-			}> = [];
-			let hasContent = false;
-			let isThinking = false;
-			let hasYieldedResponding = false;
+				let chunkContent = "";
+				const toolCalls: Array<{
+					id: string;
+					type: "function";
+					function: { name: string; arguments: string };
+				}> = [];
+				let hasContent = false;
+				let isThinking = false;
+				let hasYieldedResponding = false;
 				let streamFinishReason: string | undefined;
 
-			try {
-				yield "\x00STATUS:thinking\x00";
-				for await (const chunk of this.llmRouter.chatStream(request)) {
-					throwIfAborted(options.signal);
-					if (chunk.thinking) {
-						if (!isThinking) {
-							isThinking = true;
+				try {
+					yield "\x00STATUS:thinking\x00";
+					for await (const chunk of this.llmRouter.chatStream(request)) {
+						throwIfAborted(options.signal);
+						if (chunk.thinking) {
+							if (!isThinking) {
+								isThinking = true;
+							}
 						}
+
+						if (chunk.content) {
+							if (isThinking) {
+								isThinking = false;
+							}
+							chunkContent += chunk.content;
+							hasContent = true;
+							if (!hasYieldedResponding) {
+								yield "\x00STATUS:responding\x00";
+								hasYieldedResponding = true;
+							}
+							yield chunk.content;
+						}
+						if (chunk.toolCalls) {
+							const tc = chunk.toolCalls;
+							const tcFn = tc.function ?? { name: "", arguments: "" };
+							const existing = toolCalls.find(
+								(t) => t.id === tc.id && tc.id !== "",
+							);
+							if (existing) {
+								existing.function.arguments += tcFn.arguments ?? "";
+								if (tcFn.name) existing.function.name = tcFn.name;
+							} else {
+								toolCalls.push({
+									id: tc.id || `tc_${iterations}_${toolCalls.length}`,
+									type: "function",
+									function: {
+										name: tcFn.name ?? "",
+										arguments: tcFn.arguments ?? "",
+									},
+								});
+							}
+						}
+						if (chunk.finishReason) {
+							streamFinishReason = chunk.finishReason;
+						}
+					}
+								} catch (err) {
+					const errMsg = err instanceof Error ? err.message : String(err);
+					if (chunkContent) {
+						fullResponse += chunkContent;
+					}
+					if (ledger.usefulResults > 0) {
+						fullResponse += this.buildContinuationCheckpoint(
+							ledger,
+							"runtime_error",
+							errMsg,
+							false,
+						);
 					}
 
-					if (chunk.content) {
-						if (isThinking) {
-							isThinking = false;
-						}
-						chunkContent += chunk.content;
-						hasContent = true;
-						if (!hasYieldedResponding) {
-							yield "\x00STATUS:responding\x00";
-							hasYieldedResponding = true;
-						}
-						yield chunk.content;
+					// In relentless mode, retry transient stream errors
+					const persistence = this.getTenacidad();
+					const isGenuine = this.isGenuineApiError(errMsg);
+
+					if (persistence.enabled && !isGenuine && streamErrorRetryCount < persistence.streamErrorRetries) {
+						streamErrorRetryCount++;
+						const retryNotice = "\n\n[Stream error (attempt " + streamErrorRetryCount + "/" + persistence.streamErrorRetries + "), retrying...]\n\n";
+						fullResponse += retryNotice;
+						yield retryNotice;
+						yield ` STATUS:persistence_retry:stream_error::${this.encodeStatusField(`Stream error attempt ${streamErrorRetryCount}/${persistence.streamErrorRetries}: ${errMsg.slice(0, 200)}`)} `;
+						// Brief backoff
+						await new Promise(r => setTimeout(r, Math.min(1000 * streamErrorRetryCount, 5000)));
+						continue;
 					}
-					if (chunk.toolCalls) {
-						const tc = chunk.toolCalls;
-						const tcFn = tc.function ?? { name: "", arguments: "" };
-						const existing = toolCalls.find(
-							(t) => t.id === tc.id && tc.id !== "",
-						);
-						if (existing) {
-							existing.function.arguments += tcFn.arguments ?? "";
-							if (tcFn.name) existing.function.name = tcFn.name;
-						} else {
-							toolCalls.push({
-								id: tc.id || `tc_${iterations}_${toolCalls.length}`,
-								type: "function",
-								function: {
-									name: tcFn.name ?? "",
-									arguments: tcFn.arguments ?? "",
-								},
-							});
+
+					fullResponse += "\n\n⚠️ Error: " + errMsg;
+						yield errMsg;
+						// Interrupt inline run tracking
+						if (inlineRunId && this.subtaskTracker) {
+							try {
+								await this.subtaskTracker.interruptInlineRun(inlineRunId, errMsg);
+							} catch {
+								/* non-critical */
+							}
 						}
-					}
-					if (chunk.finishReason) {
-						streamFinishReason = chunk.finishReason;
-					}
+						break;
 				}
-			} catch (err) {
-				const errMsg = err instanceof Error ? err.message : String(err);
-				if (chunkContent) {
-					fullResponse += chunkContent;
-				}
-				if (ledger.usefulResults > 0) {
-					fullResponse += this.buildContinuationCheckpoint(
-						ledger,
-						"runtime_error",
-						errMsg,
-						false,
-					);
-				}
-				fullResponse += `\n\n⚠️ Error: ${errMsg}`;
-				yield errMsg;
-				// Interrupt inline run tracking
-				if (inlineRunId && this.subtaskTracker) {
-					try {
-						await this.subtaskTracker.interruptInlineRun(inlineRunId, errMsg);
-					} catch { /* non-critical */ }
-				}
-				break;
-			}
 
 				// Record finish reason in continuity guard
 				if (continuityGuard) {
 					continuityGuard.recordFinishReason(streamFinishReason);
 				}
 
-			const validToolCalls = toolCalls.filter(
-				(tc) => tc.function.name.length > 0,
-			);
-
-			if (!hasContent && validToolCalls.length === 0) {
-				const warnMsg =
-					"\n\n⚠️ The AI model returned an empty response. This may be due to a content filter, context length limit, or an API error.";
-				fullResponse += warnMsg;
-				yield warnMsg;
-				break;
-			}
-
-			if (
-				validToolCalls.length === 0 ||
-				!this.toolExecutor ||
-				!this.toolRegistry
-				) {
-				// Auto-continuation: check if response was truncated
-				if (continuityGuard && streamFinishReason === "length" && inlineRunId) {
-					continuityGuard.incrementContinuation();
-					const shouldContinue = continuityGuard.shouldAutoContinue({
-						finishReason: streamFinishReason,
-						hasToolCalls: validToolCalls.length > 0,
-						hasContent: !!chunkContent,
-						iterationCount: iterations,
-						maxIterations: this.getToolIterationLimit().maxIterations,
-						inlineRunId,
-					});
-					if (shouldContinue) {
-						let reconciliationReport = null;
-						if (this.subtaskTracker) {
-							try {
-								reconciliationReport = await this.subtaskTracker.reconcileInterruptedRun(inlineRunId);
-							} catch { /* non-critical */ }
-						}
-						const continuePrompt = continuityGuard.buildContinuePrompt(reconciliationReport);
-						messages.push({ role: "assistant", content: chunkContent || "" });
-						messages.push({ role: "system", content: continuePrompt });
-						if (chunkContent) fullResponse += chunkContent;
-						fullResponse += "\n\n[Auto-continuing...]\n\n";
-						yield "\n\n[Auto-continuing...]\n\n";
-						continue; // Continue the while loop for another LLM call
-					}
-				}
-				if (chunkContent) {
-					fullResponse += chunkContent;
-				}
-				break;
-				}
-
-			messages.push({
-				role: "assistant",
-				content: chunkContent || "",
-				toolCalls: validToolCalls,
-			});
-			const toolExecutor = this.toolExecutor;
-
-			const delegateCalls = validToolCalls.filter(
-				(tc) => tc.function.name === "delegate_task",
-			);
-			const otherCalls = validToolCalls.filter(
-				(tc) => tc.function.name !== "delegate_task",
-			);
-
-			if (delegateCalls.length === 1) {
-				const singleDelegate = delegateCalls[0];
-				if (!singleDelegate) continue;
-				messages.push({
-					role: "tool",
-					content: [
-						"Delegación omitida: solo se solicitó una subtarea.",
-						"Resuelve esta tarea directamente como Octopus usando las herramientas disponibles.",
-						"Solo uses delegate_task cuando haya 2 o más subtareas independientes que puedan correr en paralelo.",
-					].join("\n"),
-					toolCallId: singleDelegate.id,
-				});
-			}
-
-			if (delegateCalls.length > 1) {
-				const delegatedTasks = delegateCalls.map((tc, index) => {
-					const parsedParams = this.parseToolParams(tc);
-					const role =
-						!parsedParams.error && typeof parsedParams.params.role === "string"
-							? parsedParams.params.role
-							: `Delegated Worker ${index + 1}`;
-					const task =
-						!parsedParams.error && typeof parsedParams.params.task === "string"
-							? parsedParams.params.task
-							: (parsedParams.error ?? "Delegated task");
-					return {
-						id: `delegate_${iterations}_${index + 1}`,
-						toolCall: tc,
-						parsedParams,
-						role,
-						task,
-					};
-				});
-				const delegateWorkflow = await this.startDelegateWorkflow(
-					message,
-					channelId,
-					delegatedTasks,
+				const validToolCalls = toolCalls.filter(
+					(tc) => tc.function.name.length > 0,
 				);
 
-				yield `\x00STATUS:orchestrating:multiagent::${this.encodeStatusField(
-					JSON.stringify({
-						count: delegatedTasks.length,
-						executionPlan: "parallel",
-						reasoning: `El modelo delegó ${delegatedTasks.length} subtarea${delegatedTasks.length === 1 ? "" : "s"} a workers especializados mediante delegate_task.`,
-						subtasks: delegatedTasks.map((task) => ({
-							id: task.id,
-							role: task.role,
-							description: task.task,
-							toolScope: ["delegate_task"],
-						})),
-					}),
-				)}\x00`;
-				if (delegateWorkflow) {
-					yield `\x00STATUS:orchestrating:telemetry::${this.encodeStatusField(
-						JSON.stringify({
-							runId: `delegate_${Date.now()}`,
-							workflowRunId: delegateWorkflow.runId,
-							totalMs: 0,
-							executionMs: 0,
-							synthesisMs: 0,
-							workerCount: delegatedTasks.length,
-							succeeded: 0,
-							failed: 0,
-							cancelled: 0,
-						}),
-					)}\x00`;
+								if (!hasContent && validToolCalls.length === 0) {
+					const persistence = this.getTenacidad();
+
+					// In relentless mode, retry on empty responses
+					if (persistence.enabled && emptyResponseRetryCount < persistence.emptyResponseRetries) {
+						emptyResponseRetryCount++;
+						const retryMsg = "\n\n[Empty response (attempt " + emptyResponseRetryCount + "/" + persistence.emptyResponseRetries + "), retrying...]\n\n";
+						fullResponse += retryMsg;
+						yield retryMsg;
+						yield ` STATUS:persistence_retry:empty_response::${this.encodeStatusField(`Empty model response retry ${emptyResponseRetryCount}/${persistence.emptyResponseRetries}`)} `;
+						messages.push({
+							role: "system",
+							content: "The previous model response was empty. Please continue working on the task.",
+						});
+						continue;
+					}
+
+					const warnMsg =
+						"\n\n⚠️ The AI model returned an empty response. This may be due to a content filter, context length limit, or an API error.";
+					fullResponse += warnMsg;
+					yield warnMsg;
+					break;
 				}
 
-				for (const task of delegatedTasks) {
-					await this.updateDelegateWorkflowTask(
-						delegateWorkflow,
-						task.id,
-						"running",
-						"Worker delegado ejecutandose mediante delegate_task.",
+				if (
+					validToolCalls.length === 0 ||
+					!this.toolExecutor ||
+					!this.toolRegistry
+				) {
+					// Auto-continuation: check if response was truncated
+					if (
+						continuityGuard &&
+						streamFinishReason === "length" &&
+						inlineRunId
+					) {
+						continuityGuard.incrementContinuation();
+						const shouldContinue = continuityGuard.shouldAutoContinue({
+							finishReason: streamFinishReason,
+							hasToolCalls: validToolCalls.length > 0,
+							hasContent: !!chunkContent,
+							iterationCount: iterations,
+							maxIterations: this.getToolIterationLimit().maxIterations,
+							inlineRunId,
+						});
+						if (shouldContinue) {
+							let reconciliationReport = null;
+							if (this.subtaskTracker) {
+								try {
+									reconciliationReport =
+										await this.subtaskTracker.reconcileInterruptedRun(
+											inlineRunId,
+										);
+								} catch {
+									/* non-critical */
+								}
+							}
+							const continuePrompt =
+								continuityGuard.buildContinuePrompt(reconciliationReport);
+							messages.push({ role: "assistant", content: chunkContent || "" });
+							messages.push({ role: "system", content: continuePrompt });
+							if (chunkContent) fullResponse += chunkContent;
+							fullResponse += "\n\n[Auto-continuing...]\n\n";
+							yield "\n\n[Auto-continuing...]\n\n";
+							continue; // Continue the while loop for another LLM call
+						}
+					}
+					if (chunkContent) {
+						fullResponse += chunkContent;
+					}
+					break;
+				}
+
+				messages.push({
+					role: "assistant",
+					content: chunkContent || "",
+					toolCalls: validToolCalls,
+				});
+				const toolExecutor = this.toolExecutor;
+
+				const delegateCalls = validToolCalls.filter(
+					(tc) => tc.function.name === "delegate_task",
+				);
+				const otherCalls = validToolCalls.filter(
+					(tc) => tc.function.name !== "delegate_task",
+				);
+
+				if (delegateCalls.length === 1) {
+					const singleDelegate = delegateCalls[0];
+					if (!singleDelegate) continue;
+					messages.push({
+						role: "tool",
+						content: [
+							"Delegación omitida: solo se solicitó una subtarea.",
+							"Resuelve esta tarea directamente como Octopus usando las herramientas disponibles.",
+							"Solo uses delegate_task cuando haya 2 o más subtareas independientes que puedan correr en paralelo.",
+						].join("\n"),
+						toolCallId: singleDelegate.id,
+					});
+				}
+
+				if (delegateCalls.length > 1) {
+					const delegatedTasks = delegateCalls.map((tc, index) => {
+						const parsedParams = this.parseToolParams(tc);
+						const role =
+							!parsedParams.error &&
+							typeof parsedParams.params.role === "string"
+								? parsedParams.params.role
+								: `Delegated Worker ${index + 1}`;
+						const task =
+							!parsedParams.error &&
+							typeof parsedParams.params.task === "string"
+								? parsedParams.params.task
+								: (parsedParams.error ?? "Delegated task");
+						const armKey =
+							!parsedParams.error &&
+							typeof parsedParams.params.arm_key === "string"
+								? parsedParams.params.arm_key
+								: undefined;
+						const model =
+							!parsedParams.error &&
+							typeof parsedParams.params.model === "string"
+								? parsedParams.params.model
+								: undefined;
+						return {
+							id: `delegate_${iterations}_${index + 1}`,
+							toolCall: tc,
+							parsedParams,
+							role,
+							task,
+							armKey,
+							produces: !parsedParams.error
+								? parseDelegateProduces(parsedParams.params.produces)
+								: undefined,
+							model,
+						};
+					});
+					const delegateWorkflow = await this.startDelegateWorkflow(
+						message,
+						channelId,
+						delegatedTasks,
 					);
-					yield `\x00STATUS:worker_start:${task.id}::${this.encodeStatusField(
-						JSON.stringify({
-							workerId: task.id,
-							taskId: task.id,
-							role: task.role,
-							description: task.task,
-						}),
-					)}\x00`;
-					yield `\x00STATUS:worker_progress:${task.id}::${this.encodeStatusField(
-						JSON.stringify({
-							workerId: task.id,
-							taskId: task.id,
-							message: "Worker delegado ejecutándose mediante delegate_task.",
-							progress: 10,
-							toolName: "delegate_task",
-						}),
-					)}\x00`;
-				}
 
-				type DelegateJobResult = {
-					promise: Promise<DelegateJobResult>;
-					index: number;
-					workerId: string;
-					toolCallId: string;
-					result: string;
-					error?: string;
-				};
-				const pending = new Set<Promise<DelegateJobResult>>();
-				for (const [index, task] of delegatedTasks.entries()) {
-					const job = {
-						promise: undefined as unknown as Promise<DelegateJobResult>,
+					yield `\x00STATUS:orchestrating:multiagent::${this.encodeStatusField(
+						JSON.stringify({
+							count: delegatedTasks.length,
+							executionPlan: "parallel",
+							reasoning: `El modelo delegó ${delegatedTasks.length} subtarea${delegatedTasks.length === 1 ? "" : "s"} a workers especializados mediante delegate_task.`,
+							subtasks: delegatedTasks.map((task) => ({
+								id: task.id,
+								role: task.role,
+								description: task.task,
+								armKey: task.armKey,
+								model: task.model,
+								toolScope: ["delegate_task"],
+							})),
+						}),
+					)}\x00`;
+					if (delegateWorkflow) {
+						yield `\x00STATUS:orchestrating:telemetry::${this.encodeStatusField(
+							JSON.stringify({
+								runId: `delegate_${Date.now()}`,
+								workflowRunId: delegateWorkflow.runId,
+								totalMs: 0,
+								executionMs: 0,
+								synthesisMs: 0,
+								workerCount: delegatedTasks.length,
+								succeeded: 0,
+								failed: 0,
+								cancelled: 0,
+							}),
+						)}\x00`;
+					}
+
+					for (const task of delegatedTasks) {
+						await this.updateDelegateWorkflowTask(
+							delegateWorkflow,
+							task.id,
+							"running",
+							"Worker delegado ejecutandose mediante delegate_task.",
+						);
+						yield `\x00STATUS:worker_start:${task.id}::${this.encodeStatusField(
+							JSON.stringify({
+								workerId: task.id,
+								taskId: task.id,
+								role: task.role,
+								description: task.task,
+								armKey: task.armKey,
+								model: task.model,
+							}),
+						)}\x00`;
+						yield `\x00STATUS:worker_progress:${task.id}::${this.encodeStatusField(
+							JSON.stringify({
+								workerId: task.id,
+								taskId: task.id,
+								message: "Worker delegado ejecutándose mediante delegate_task.",
+								progress: 10,
+								toolName: "delegate_task",
+							}),
+						)}\x00`;
+					}
+
+					type DelegateJobResult = {
+						promise: Promise<DelegateJobResult>;
+						index: number;
+						workerId: string;
+						toolCallId: string;
+						result: string;
+						error?: string;
 					};
-					job.promise = (async () => {
-						if (task.parsedParams.error) {
+					const pending = new Set<Promise<DelegateJobResult>>();
+					for (const [index, task] of delegatedTasks.entries()) {
+						const job = {
+							promise: undefined as unknown as Promise<DelegateJobResult>,
+						};
+						job.promise = (async () => {
+							if (task.parsedParams.error) {
+								return {
+									promise: job.promise,
+									index,
+									workerId: task.id,
+									toolCallId: task.toolCall.id,
+									result: `Error: ${task.parsedParams.error}`,
+									error: task.parsedParams.error,
+								};
+							}
+							const result = await toolExecutor.execute(
+								"delegate_task",
+								task.parsedParams.params,
+								{
+									...this.getToolExecutionContext(),
+									abortSignal: options.signal,
+								},
+							);
 							return {
 								promise: job.promise,
 								index,
 								workerId: task.id,
 								toolCallId: task.toolCall.id,
-								result: `Error: ${task.parsedParams.error}`,
-								error: task.parsedParams.error,
+								result: result.output || result.error || "",
+								error: result.success
+									? undefined
+									: result.error || "Worker delegado falló.",
 							};
-						}
-						const result = await toolExecutor.execute(
-							"delegate_task",
-							task.parsedParams.params,
-							{
-								...this.getToolExecutionContext(),
-								abortSignal: options.signal,
-							},
-						);
-						return {
-							promise: job.promise,
-							index,
-							workerId: task.id,
-							toolCallId: task.toolCall.id,
-							result: result.output || result.error || "",
-							error: result.success
-								? undefined
-								: result.error || "Worker delegado falló.",
-						};
-					})();
-					pending.add(job.promise);
-				}
-
-				const delegateResults = new Array<DelegateJobResult>(
-					delegatedTasks.length,
-				);
-				while (pending.size > 0) {
-					throwIfAborted(options.signal);
-					const settled = await Promise.race(pending);
-					pending.delete(settled.promise);
-					delegateResults[settled.index] = settled;
-					if (settled.error) {
-						await this.updateDelegateWorkflowTask(
-							delegateWorkflow,
-							settled.workerId,
-							"failed",
-							settled.error,
-						);
-						yield `\x00STATUS:worker_error:${settled.workerId}::${this.encodeStatusField(
-							JSON.stringify({
-								workerId: settled.workerId,
-								taskId: settled.workerId,
-								error: settled.error,
-							}),
-						)}\x00`;
-					} else {
-						await this.updateDelegateWorkflowTask(
-							delegateWorkflow,
-							settled.workerId,
-							"done",
-							settled.result,
-						);
-						yield `\x00STATUS:worker_done:${settled.workerId}::${this.encodeStatusField(
-							JSON.stringify({
-								workerId: settled.workerId,
-								taskId: settled.workerId,
-								result: settled.result.slice(0, 2000),
-							}),
-						)}\x00`;
+						})();
+						pending.add(job.promise);
 					}
-				}
 
-				for (const result of delegateResults) {
-					const resultContent =
-						result?.result ??
-						"Error: delegated worker did not return a result.";
-					this.workingMemory.updateFromToolResult(
-						"delegate_task",
-						!result?.error,
-						result?.error,
+					const delegateResults = new Array<DelegateJobResult>(
+						delegatedTasks.length,
 					);
-					messages.push({
-						role: "tool",
-						content: this.compactToolResultForContext(resultContent),
-						toolCallId: result?.toolCallId ?? "delegate_task",
-					});
-				}
-
-				if (otherCalls.length === 0) {
-					const delegateTaskResults = delegateResults.map((result, index) => {
-						const task = delegatedTasks[index];
-						return {
-							workerId: result?.workerId ?? task?.id ?? `delegate_${index + 1}`,
-							role: task?.role ?? "Delegated Worker",
-							task: task?.task ?? "Delegated task",
-							result:
-								result?.result ??
-								"Error: delegated worker did not return a result.",
-							error: result?.error,
-						};
-					});
-					yield "\x00STATUS:responding\x00";
-					const finalText = await this.generateDelegateSynthesis(
-						messages,
-						delegateTaskResults,
-					);
-					fullResponse += finalText;
-					yield finalText;
-					await this.finishDelegateWorkflow(
-						delegateWorkflow,
-						delegateTaskResults,
-						finalText,
-					);
-					stoppedByDecision = true;
-					break;
-				}
-			}
-
-			for (const toolCall of otherCalls) {
-				throwIfAborted(options.signal);
-				const isCodeTool =
-					toolCall.function.name === "execute_code" ||
-					toolCall.function.name === "run_shell";
-				const toolDef = this.toolRegistry?.get(toolCall.function.name);
-				const uiIconB64 = toolDef?.uiIcon
-					? Buffer.from(toolDef.uiIcon).toString("base64")
-					: "";
-				const statusType = isCodeTool ? "code" : "tool";
-
-				const parsedParams = this.parseToolParams(toolCall);
-				const params = parsedParams.params;
-
-				if (!parsedParams.error) {
-					const decision = this.decideBeforeToolCall(
-						toolCall.function.name,
-						params,
-						ledger,
-						this.getRemainingToolIterations(iterations),
-					);
-					if (decision.action === "stop") {
-						const detail = this.encodeStatusField(decision.reason);
-						yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${detail}\x00`;
-						yield "\x00STATUS:responding\x00";
-						let finalText = "";
-						for await (const finalChunk of this.streamFinalResponse(
-							messages,
-							ledger,
-							decision.reason,
-						)) {
-							finalText += finalChunk;
-							yield finalChunk;
+					while (pending.size > 0) {
+						throwIfAborted(options.signal);
+						const settled = await Promise.race(pending);
+						pending.delete(settled.promise);
+						delegateResults[settled.index] = settled;
+						if (settled.error) {
+							await this.updateDelegateWorkflowTask(
+								delegateWorkflow,
+								settled.workerId,
+								"failed",
+								settled.error,
+							);
+							yield `\x00STATUS:worker_error:${settled.workerId}::${this.encodeStatusField(
+								JSON.stringify({
+									workerId: settled.workerId,
+									taskId: settled.workerId,
+									error: settled.error,
+								}),
+							)}\x00`;
+						} else {
+							await this.updateDelegateWorkflowTask(
+								delegateWorkflow,
+								settled.workerId,
+								"done",
+								settled.result,
+							);
+							yield `\x00STATUS:worker_done:${settled.workerId}::${this.encodeStatusField(
+								JSON.stringify({
+									workerId: settled.workerId,
+									taskId: settled.workerId,
+									result: settled.result.slice(0, 2000),
+								}),
+							)}\x00`;
 						}
+					}
+
+					for (const result of delegateResults) {
+						const resultContent =
+							result?.result ??
+							"Error: delegated worker did not return a result.";
+						this.workingMemory.updateFromToolResult(
+							"delegate_task",
+							!result?.error,
+							result?.error,
+						);
+						messages.push({
+							role: "tool",
+							content: this.compactToolResultForContext(resultContent),
+							toolCallId: result?.toolCallId ?? "delegate_task",
+						});
+					}
+
+					if (otherCalls.length === 0) {
+						const delegateTaskResults = delegateResults.map((result, index) => {
+							const task = delegatedTasks[index];
+							return {
+								workerId:
+									result?.workerId ?? task?.id ?? `delegate_${index + 1}`,
+								role: task?.role ?? "Delegated Worker",
+								task: task?.task ?? "Delegated task",
+								result:
+									result?.result ??
+									"Error: delegated worker did not return a result.",
+								error: result?.error,
+							};
+						});
+						yield "\x00STATUS:responding\x00";
+						const finalText = await this.generateDelegateSynthesis(
+							messages,
+							delegateTaskResults,
+						);
 						fullResponse += finalText;
+						yield finalText;
+						await this.finishDelegateWorkflow(
+							delegateWorkflow,
+							delegateTaskResults,
+							finalText,
+						);
 						stoppedByDecision = true;
 						break;
 					}
 				}
 
+				for (const toolCall of otherCalls) {
+					throwIfAborted(options.signal);
+					const isCodeTool =
+						toolCall.function.name === "execute_code" ||
+						toolCall.function.name === "run_shell";
+					const toolDef = this.toolRegistry?.get(toolCall.function.name);
+					const uiIconB64 = toolDef?.uiIcon
+						? Buffer.from(toolDef.uiIcon).toString("base64")
+						: "";
+					const statusType = isCodeTool ? "code" : "tool";
 
-				let currentSubtaskId: string | undefined;
-				if (inlineRunId && this.subtaskTracker) {
-					try {
-						currentSubtaskId = await this.subtaskTracker.declareSubtask({
-							runId: inlineRunId,
-							title: toolCall.function.name,
-							toolName: toolCall.function.name,
-						});
-						await this.subtaskTracker.startSubtask(currentSubtaskId);
-					} catch { /* non-critical */ }
-				}
-				const activityDetail = this.describeToolActivity(
-					toolCall.function.name,
-					params,
-					chunkContent,
-				);
-				const activityDetailB64 = this.encodeStatusField(activityDetail);
-				yield `\x00STATUS:${statusType}:${toolCall.function.name}:${uiIconB64}:${activityDetailB64}\x00`;
+					const parsedParams = this.parseToolParams(toolCall);
+					const params = parsedParams.params;
 
-				let toolResult: ToolResult;
-				let skipped = false;
-				if (parsedParams.error) {
-					skipped = true;
-					const policyResult = this.createToolPolicyResult(
-						`Invalid JSON arguments for ${toolCall.function.name}: ${parsedParams.error}. Retry once with valid JSON arguments instead of executing with empty parameters.`,
-					);
-					toolResult = {
-						success: false,
-						output: "",
-						error: policyResult.resultContent,
-					};
-				} else {
-					const toolNameCount =
-						(toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
-					toolNameCounts.set(toolCall.function.name, toolNameCount);
-					const toolBudget = this.getToolBudget(toolCall.function.name);
-					const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
-					const signatureCount = (toolSignatureCounts.get(signature) ?? 0) + 1;
-					toolSignatureCounts.set(signature, signatureCount);
-
-					if (toolNameCount > toolBudget) {
-						if (this.shouldStopOnToolBudgetExceeded(toolCall.function.name)) {
-							const reason = `${toolCall.function.name} exceeded its strict per-response budget (${toolBudget}). Stop now, report the exact current state/error, and do not emit fake tool_call markup or attempt manual API workarounds.`;
-							const detail = this.encodeStatusField(reason);
+					if (!parsedParams.error) {
+						const decision = this.decideBeforeToolCall(
+							toolCall.function.name,
+							params,
+							ledger,
+							this.getRemainingToolIterations(iterations),
+						);
+						if (decision.action === "stop") {
+							const detail = this.encodeStatusField(decision.reason);
 							yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${detail}\x00`;
 							yield "\x00STATUS:responding\x00";
 							let finalText = "";
 							for await (const finalChunk of this.streamFinalResponse(
 								messages,
 								ledger,
-								reason,
+								decision.reason,
 							)) {
 								finalText += finalChunk;
 								yield finalChunk;
@@ -2591,19 +2823,35 @@ private extractArtifactsFromToolResult(
 							stoppedByDecision = true;
 							break;
 						}
+					}
+
+					let currentSubtaskId: string | undefined;
+					if (inlineRunId && this.subtaskTracker) {
+						try {
+							currentSubtaskId = await this.subtaskTracker.declareSubtask({
+								runId: inlineRunId,
+								title: toolCall.function.name,
+								toolName: toolCall.function.name,
+							});
+							await this.subtaskTracker.startSubtask(currentSubtaskId);
+						} catch {
+							/* non-critical */
+						}
+					}
+					const activityDetail = this.describeToolActivity(
+						toolCall.function.name,
+						params,
+						chunkContent,
+					);
+					const activityDetailB64 = this.encodeStatusField(activityDetail);
+					yield `\x00STATUS:${statusType}:${toolCall.function.name}:${uiIconB64}:${activityDetailB64}\x00`;
+
+					let toolResult: ToolResult;
+					let skipped = false;
+					if (parsedParams.error) {
 						skipped = true;
 						const policyResult = this.createToolPolicyResult(
-							`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
-						);
-						toolResult = {
-							success: false,
-							output: "",
-							error: policyResult.resultContent,
-						};
-					} else if (signatureCount > MAX_REPEATED_TOOL_SIGNATURES) {
-						skipped = true;
-						const policyResult = this.createToolPolicyResult(
-							`Repeated action suppressed for ${toolCall.function.name}. The same parameters were already tried ${MAX_REPEATED_TOOL_SIGNATURES} times. Choose a different approach or provide a final answer with the current evidence.`,
+							`Invalid JSON arguments for ${toolCall.function.name}: ${parsedParams.error}. Retry once with valid JSON arguments instead of executing with empty parameters.`,
 						);
 						toolResult = {
 							success: false,
@@ -2611,131 +2859,210 @@ private extractArtifactsFromToolResult(
 							error: policyResult.resultContent,
 						};
 					} else {
-						const decision = this.decideBeforeToolCall(
-							toolCall.function.name,
-							params,
-							ledger,
-							this.getRemainingToolIterations(iterations),
-						);
-						if (decision.action === "skip") {
+						const toolNameCount =
+							(toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
+						toolNameCounts.set(toolCall.function.name, toolNameCount);
+						const toolBudget = this.getToolBudget(toolCall.function.name);
+						const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
+						const signatureCount =
+							(toolSignatureCounts.get(signature) ?? 0) + 1;
+						toolSignatureCounts.set(signature, signatureCount);
+
+						if (toolNameCount > toolBudget) {
+							if (this.shouldStopOnToolBudgetExceeded(toolCall.function.name)) {
+								const reason = `${toolCall.function.name} exceeded its strict per-response budget (${toolBudget}). Stop now, report the exact current state/error, and do not emit fake tool_call markup or attempt manual API workarounds.`;
+								const detail = this.encodeStatusField(reason);
+								yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${detail}\x00`;
+								yield "\x00STATUS:responding\x00";
+								let finalText = "";
+								for await (const finalChunk of this.streamFinalResponse(
+									messages,
+									ledger,
+									reason,
+								)) {
+									finalText += finalChunk;
+									yield finalChunk;
+								}
+								fullResponse += finalText;
+								stoppedByDecision = true;
+								break;
+							}
 							skipped = true;
-							const policyResult = this.createToolPolicyResult(decision.reason);
+							const policyResult = this.createToolPolicyResult(
+								`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
+							);
+							toolResult = {
+								success: false,
+								output: "",
+								error: policyResult.resultContent,
+							};
+						} else if (signatureCount > this.getMaxRepeatedToolSignatures()) {
+							skipped = true;
+							const policyResult = this.createToolPolicyResult(
+								`Repeated action suppressed for ${toolCall.function.name}. The same parameters were already tried ${MAX_REPEATED_TOOL_SIGNATURES} times. Choose a different approach or provide a final answer with the current evidence.`,
+							);
 							toolResult = {
 								success: false,
 								output: "",
 								error: policyResult.resultContent,
 							};
 						} else {
-							toolResult = await this.toolExecutor.execute(
+							const decision = this.decideBeforeToolCall(
 								toolCall.function.name,
 								params,
-								this.getToolExecutionContext(),
+								ledger,
+								this.getRemainingToolIterations(iterations),
 							);
-							throwIfAborted(options.signal);
+							if (decision.action === "skip") {
+								skipped = true;
+								const policyResult = this.createToolPolicyResult(
+									decision.reason,
+								);
+								toolResult = {
+									success: false,
+									output: "",
+									error: policyResult.resultContent,
+								};
+							} else {
+								toolResult = await this.toolExecutor.execute(
+									toolCall.function.name,
+									params,
+									this.getToolExecutionContext(),
+								);
+								throwIfAborted(options.signal);
+							}
 						}
 					}
-				}
 
-				const rawResultContentStr = toolResult.success
-					? typeof toolResult.output === "string"
-						? toolResult.output
-						: JSON.stringify(toolResult.output, null, 2)
-					: `Error: ${toolResult.error ?? "Unknown error"}`;
-				const resultContentStr =
-					this.compactToolResultForContext(rawResultContentStr);
-				this.workingMemory.updateFromToolResult(
-					toolCall.function.name,
-					toolResult.success && !skipped,
-					toolResult.success ? undefined : toolResult.error,
-				);
-				this.updateEvidenceLedger(
-					ledger,
-					toolCall.function.name,
-					resultContentStr,
-					toolResult.success && !skipped,
-				);
-				fullResponse += this.buildContinuationCheckpoint(
-					ledger,
-					toolCall.function.name,
-					resultContentStr,
-					toolResult.success && !skipped,
-				);
-				toolTrace.push({
-					name: toolCall.function.name,
-					success: toolResult.success && !skipped,
-					useful:
-						!skipped &&
-						toolResult.success &&
-						!resultContentStr.startsWith("Error:"),
-					summary: resultContentStr.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
-					error: toolResult.success ? undefined : toolResult.error,
-				});
-
-
-				// Subtask tracking: complete or fail based on tool result
-				if (currentSubtaskId && this.subtaskTracker) {
-					if (toolResult.success && !skipped) {
-						const producedArtifacts = this.extractArtifactsFromToolResult(
-							toolCall.function.name,
-							resultContentStr,
-						);
-						try {
-							await this.subtaskTracker.completeSubtask(currentSubtaskId, producedArtifacts);
-						} catch { /* non-critical */ }
-					} else if (!toolResult.success) {
-						try {
-							await this.subtaskTracker.failSubtask(currentSubtaskId, toolResult.error ?? "Unknown error");
-						} catch { /* non-critical */ }
-					}
-				}
-				// Emit tool-done status (intercepted by frontend, not shown as text)
-				if (skipped) {
-					const skippedDetail = this.encodeStatusField(
-						resultContentStr.replace(/^Error:\s*/, ""),
+					const rawResultContentStr = toolResult.success
+						? typeof toolResult.output === "string"
+							? toolResult.output
+							: JSON.stringify(toolResult.output, null, 2)
+						: `Error: ${toolResult.error ?? "Unknown error"}`;
+					const resultContentStr =
+						this.compactToolResultForContext(rawResultContentStr);
+					this.workingMemory.updateFromToolResult(
+						toolCall.function.name,
+						toolResult.success && !skipped,
+						toolResult.success ? undefined : toolResult.error,
 					);
-					yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${skippedDetail}\x00`;
-				} else if (toolResult.success) {
-					yield `\x00STATUS:tool_done:${toolCall.function.name}:\x00`;
-				} else {
-					yield `\x00STATUS:tool_error:${toolCall.function.name}:\x00`;
-				}
-
-				fullResponse += `
-<!-- tool:${toolCall.function.name}:${toolResult.success ? "ok" : "error"} -->
-`;
-
-				const parsedContent = this.formatToolResultForModel(resultContentStr);
-
-				messages.push({
-					role: "tool",
-					content: parsedContent,
-					toolCallId: toolCall.id,
-				});
-				messages.push({
-					role: "system",
-					content: this.buildDecisionGuidance(
+					this.updateEvidenceLedger(
 						ledger,
 						toolCall.function.name,
 						resultContentStr,
 						toolResult.success && !skipped,
-						this.getRemainingToolIterations(iterations),
-					),
-				});
-			}
-			if (stoppedByDecision) break;
+					);
+					fullResponse += this.buildContinuationCheckpoint(
+						ledger,
+						toolCall.function.name,
+						resultContentStr,
+						toolResult.success && !skipped,
+					);
+					toolTrace.push({
+						name: toolCall.function.name,
+						success: toolResult.success && !skipped,
+						useful:
+							!skipped &&
+							toolResult.success &&
+							!resultContentStr.startsWith("Error:"),
+						summary: resultContentStr.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+						error: toolResult.success ? undefined : toolResult.error,
+					});
 
-			fullResponse += "\n\n";
+					// Subtask tracking: complete or fail based on tool result
+					if (currentSubtaskId && this.subtaskTracker) {
+						if (toolResult.success && !skipped) {
+							const producedArtifacts = this.extractArtifactsFromToolResult(
+								toolCall.function.name,
+								resultContentStr,
+							);
+							try {
+								await this.subtaskTracker.completeSubtask(
+									currentSubtaskId,
+									producedArtifacts,
+								);
+							} catch {
+								/* non-critical */
+							}
+						} else if (!toolResult.success) {
+							try {
+								await this.subtaskTracker.failSubtask(
+									currentSubtaskId,
+									toolResult.error ?? "Unknown error",
+								);
+							} catch {
+								/* non-critical */
+							}
+						}
+					}
+					// Emit tool-done status (intercepted by frontend, not shown as text)
+					if (skipped) {
+						const skippedDetail = this.encodeStatusField(
+							resultContentStr.replace(/^Error:\s*/, ""),
+						);
+						yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${skippedDetail}\x00`;
+					} else if (toolResult.success) {
+						yield `\x00STATUS:tool_done:${toolCall.function.name}:\x00`;
+					} else {
+						yield `\x00STATUS:tool_error:${toolCall.function.name}:\x00`;
+					}
+
+					fullResponse += `
+<!-- tool:${toolCall.function.name}:${toolResult.success ? "ok" : "error"} -->
+`;
+
+					const parsedContent = this.formatToolResultForModel(resultContentStr);
+
+					messages.push({
+						role: "tool",
+						content: parsedContent,
+						toolCallId: toolCall.id,
+					});
+					messages.push({
+						role: "system",
+						content: this.buildDecisionGuidance(
+							ledger,
+							toolCall.function.name,
+							resultContentStr,
+							toolResult.success && !skipped,
+							this.getRemainingToolIterations(iterations),
+						),
+					});
+				}
+				if (stoppedByDecision) break;
+
+				fullResponse += "\n\n";
+			}
+
+			if (!stoppedByDecision && this.hasReachedToolIterationLimit(iterations)) {
+				const autoContinuePrompt = await this.buildToolLimitAutoContinuePrompt({
+					guard: continuityGuard,
+					ledger,
+					toolsUsed: toolTrace,
+					iterations,
+					inlineRunId,
+				});
+				if (autoContinuePrompt) {
+					messages.push({ role: "system", content: autoContinuePrompt });
+					iterations = 0;
+					const continuationNotice =
+						"\n\n[Auto-continuing remaining media workflow...]\n\n";
+					fullResponse += continuationNotice;
+					yield continuationNotice;
+					continueAfterToolLimit = true;
+				}
+			}
 		}
 
-		// If we exhausted all iterations, warn the user
+		// If we exhausted all configured auto-continuations, warn without asking for a manual continue.
 		if (!stoppedByDecision && this.hasReachedToolIterationLimit(iterations)) {
 			const maxIterations = this.getToolIterationLimit().maxIterations;
-			let limitMsg = `\n\n⚠️ He alcanzado el límite máximo de herramientas en una sola respuesta (${maxIterations} iteraciones). Puedo continuar si me lo pides.`;
+			let limitMsg = `\n\n⚠️ He alcanzado el límite máximo de herramientas en esta ejecución (${maxIterations} iteraciones por segmento) y se agotaron las reanudaciones automáticas configuradas. Dejé el estado parcial guardado para reanudar desde el primer pendiente sin repetir trabajo.`;
 			if (ledger.usefulResults > 0) {
 				limitMsg = await this.generateFinalResponse(
 					messages,
 					ledger,
-					`se alcanzó el límite de ${maxIterations} iteraciones con evidencia útil disponible`,
+					`se alcanzó el límite de ${maxIterations} iteraciones; resume automáticamente desde el primer pendiente si la tarea original sigue incompleta`,
 				);
 			}
 			fullResponse += limitMsg;
@@ -2761,7 +3088,9 @@ private extractArtifactsFromToolResult(
 		if (inlineRunId && this.subtaskTracker) {
 			try {
 				await this.subtaskTracker.completeInlineRun(inlineRunId);
-			} catch { /* non-critical */ }
+			} catch {
+				/* non-critical */
+			}
 		}
 
 		this.updateActiveTask(fullResponse);
@@ -2896,7 +3225,7 @@ private extractArtifactsFromToolResult(
 									`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
 								).resultContent,
 							};
-						} else if (signatureCount > MAX_REPEATED_TOOL_SIGNATURES) {
+						} else if (signatureCount > this.getMaxRepeatedToolSignatures()) {
 							toolResult = {
 								success: false,
 								output: "",
@@ -3343,6 +3672,10 @@ private extractArtifactsFromToolResult(
 				"\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
 			systemContent +=
 				"\n\nMANDATORY MEDIA OUTPUT RULE (PERSISTENT, NON-NEGOTIABLE): Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description, metadata)`), the `save_media` tool ONLY for small base64 payloads that already come from an external API, or `import_media_file` for any existing local file and any large output such as ffmpeg videos. If a file already exists on disk, NEVER convert it to base64; ALWAYS call `import_media_file` with the local path. For user-attached images or Octopus media URLs, pass the existing `/api/media/file/...` URL directly to tools that accept image URLs. For `nano-banana-generate`, use attached/reference images directly in `reference_images` as `/api/media/file/...`, http(s)://, or gs:// URLs; NEVER call or invent an image-to-base64 conversion step and NEVER pass `data:image/...;base64` as a tool argument. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. For multi-step media workflows, every saved item MUST have a semantic description and metadata such as `workflowId`, `imageNumber`/`sceneNumber`, `stage`, `role`, `prompt`, and `parentMediaIds` so later steps can identify the correct file. Example description: `Construction timelapse Img 03 - sobre-cimientos final keyframe`; example metadata: `{ workflowId: 'construction-house-timelapse', imageNumber: 3, stage: 'sobre-cimientos', role: 'video-keyframe' }`. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
+			systemContent +=
+				"\n\nLONG MEDIA WORKFLOW AUTONOMY RULE: For numbered or multi-batch image/video/audio workflows, keep progressing until the original requested deliverables are complete. If a provider, tool, or execution segment reaches a per-task, per-batch, generation, timeout, or iteration limit but completed artifacts and pending items are clear, immediately continue from the first missing item using the existing `/api/media/file/...` URLs and metadata. Do not ask the user to type 'continua', 'sigue', or confirm continuation just because a batch ended. Stop only when every deliverable is complete or when a missing credential/reference, safety issue, unrecoverable repeated tool failure, or external manual action truly blocks progress.";
+			systemContent +=
+				"\n\nKANBAN SWARM RULE: If the latest user request is a complex multi-agent objective, has multiple deliverables, needs parallel specialist work, or has concrete artifact dependencies such as image_1 -> video_1, Octavio must create or continue a Kanban Swarm workflow with `kanban_create_plan_from_goal` instead of manually doing all steps in one agent turn. Octavio is the director/supervisor, not a normal worker card claimant. Use verified artifacts and task comments to synthesize the final answer.";
 		}
 
 		systemContent += `\n\nCRITICAL SYSTEM INSTRUCTION:

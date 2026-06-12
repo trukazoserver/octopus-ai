@@ -838,28 +838,40 @@ describe("AgentRuntime", () => {
 		});
 
 		it("should finish streamed delegate_task batches and persist a workflow", async () => {
-			mockLLMRouter.chatStream = vi.fn().mockImplementationOnce(async function* () {
-				yield {
-					toolCalls: {
-						id: "delegate-1",
-						type: "function" as const,
-						function: {
-							name: "delegate_task",
-							arguments: JSON.stringify({ role: "qa", task: "Review risks" }),
+			mockLLMRouter.chatStream = vi
+				.fn()
+				.mockImplementationOnce(async function* () {
+					yield {
+						toolCalls: {
+							id: "delegate-1",
+							type: "function" as const,
+							function: {
+								name: "delegate_task",
+								arguments: JSON.stringify({
+									role: "qa",
+									task: "Review risks",
+									arm_key: "crabby",
+									produces: [{ artifactKey: "risk_review", artifactType: "qa_result" }],
+									model: "cheap-model",
+								}),
+							},
 						},
-					},
-				};
-				yield {
-					toolCalls: {
-						id: "delegate-2",
-						type: "function" as const,
-						function: {
-							name: "delegate_task",
-							arguments: JSON.stringify({ role: "writer", task: "Draft plan" }),
+					};
+					yield {
+						toolCalls: {
+							id: "delegate-2",
+							type: "function" as const,
+							function: {
+								name: "delegate_task",
+								arguments: JSON.stringify({
+									role: "writer",
+									task: "Draft plan",
+									arm_key: "estelita",
+								}),
+							},
 						},
-					},
-				};
-			});
+					};
+				});
 			mockLLMRouter.chat.mockResolvedValueOnce({
 				content: "Final combined answer",
 				model: "test-model",
@@ -879,8 +891,8 @@ describe("AgentRuntime", () => {
 				updateRunStatus: vi.fn(),
 				createTask: vi
 					.fn()
-					.mockResolvedValueOnce({ id: "wf-task-1" })
-					.mockResolvedValueOnce({ id: "wf-task-2" }),
+					.mockResolvedValueOnce({ id: "wf-task-1", arm_key: "crabby" })
+					.mockResolvedValueOnce({ id: "wf-task-2", arm_key: "estelita" }),
 				recordEvent: vi.fn(),
 				updateTaskStatus: vi.fn(),
 			};
@@ -907,7 +919,17 @@ describe("AgentRuntime", () => {
 				expect.objectContaining({
 					conversationId: "conv-1",
 					rootAgentId: "test-agent",
-					metadata: expect.objectContaining({ source: "delegate_task" }),
+					metadata: expect.objectContaining({
+						source: "kanban_swarm_delegate",
+						workflowKind: "kanban_swarm",
+					}),
+				}),
+			);
+			expect(mockWorkflowManager.createTask).toHaveBeenCalledWith(
+				expect.objectContaining({
+					armKey: "crabby",
+					model: "cheap-model",
+					produces: [{ artifactKey: "risk_review", artifactType: "qa_result" }],
 				}),
 			);
 			expect(mockWorkflowManager.updateRunStatus).toHaveBeenCalledWith(
@@ -1130,6 +1152,66 @@ describe("AgentRuntime", () => {
 				expect.objectContaining({ prompt: "construction image 3" }),
 				expect.any(Object),
 			);
+		});
+
+		it("should auto-continue streamed media workflows after the tool iteration limit", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chatStream = vi
+				.fn()
+				.mockImplementationOnce(async function* () {
+					yield {
+						toolCalls: {
+							id: "call-image-1",
+							type: "function" as const,
+							function: {
+								name: "nano-banana-generate",
+								arguments: '{"prompt":"construction image 1"}',
+							},
+						},
+					};
+				})
+				.mockImplementationOnce(async function* () {
+					yield {
+						content: "Generé la siguiente imagen sin pedir confirmación.",
+					};
+				});
+			runtime = new AgentRuntime(
+				{
+					...baseConfig,
+					toolIterationLimit: { enabled: true, maxIterations: 1 },
+					continuityGuard: { enabled: true, maxAutoContinuations: 1 },
+				},
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "nano-banana-generate", description: "Generates images" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const chunks: string[] = [];
+			for await (const chunk of runtime.processMessageStream(
+				"genera 2 imágenes",
+				"conv-images",
+			)) {
+				chunks.push(chunk);
+			}
+
+			const output = chunks.join("");
+			expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+			expect(mockLLMRouter.chatStream).toHaveBeenCalledTimes(2);
+			expect(output).toContain("Auto-continuing remaining media workflow");
+			expect(output).toContain(
+				"Generé la siguiente imagen sin pedir confirmación.",
+			);
+			expect(output).not.toContain("Puedo continuar si me lo pides");
 		});
 
 		it("should allow expensive tools when feedback asks for a more creative revision", async () => {

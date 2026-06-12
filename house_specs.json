@@ -1,0 +1,592 @@
+{
+  "project": {
+    "name": "Casa Moderna de 3 Pisos",
+    "style": "Moderno Contemporáneo",
+    "location": "Campo/Suburbano",
+    "lotSize": "300 m²",
+    "totalBuiltArea": "420 m² (3 pisos)",
+    "videoTarget": "2-3 minutos timelapse de construcción"
+  },
+
+  "architecturalStyle": {
+    "primary": "Moderno Contemporáneo",
+    "characteristics": [
+      "Líneas limpias y geométricas",
+      "Volúmenes rectangulares apilados con ligeros desplazamientos (cantilevers)",
+      "Grandes ventanales de piso a techo",
+      "Fachada minimalista con texturas contrastantes",
+      "Azotea plana con jardín verde en tercer piso",
+      "Balcones con barandas de vidrio templado",
+      "Integración interior-exterior mediante muros cortina"
+    ],
+    "influences": "Arquitectura Bauhaus, Minimalismo Japonés, Tropical Modern"
+  },
+
+  "materials": {
+    "exterior": {
+      "primaryWalls": "Concreto expuesto texturizado gris claro",
+      "secondaryWalls": "Madera natural de cedro tratada (panels decorativos)",
+      "accent": "Piedra volcánica oscura en zócalo inferior",
+      "windows": "Aluminio negro mate con vidrio doble templado (floor-to-ceiling)",
+      "balconies": "Estructura de acero con barandas de vidrio templado transparente",
+      "roof": "Losa plana con membrana impermeabilizante + jardín verde (sedum, pasto)",
+      "facade": "Paneles de composite de aluminio en tono grafito oscuro",
+      "door": "Puerta principal de madera maciza con acabado nogal oscuro, diseño minimalista",
+      "garage": "Portón de aluminio negro mate con apertura automatizada"
+    },
+    "interior": {
+      "floors": {
+        "ground": "Porcelanato grande formato 120x120cm color cemento claro",
+        "upper": "Engineered hardwood (roble europeo) en recámaras",
+        "third": "Deck de madera composite IPÊ para terraza"
+      },
+      "walls": {
+        "primary": "Yeso pintado blanco mate (Benjamin Moore Chantilly Lace OC-65)",
+        "accent": "Muro de concreto expuesto en sala principal",
+        "bathrooms": "Porcelanato pared vertical blanco mate + detalles negro mate",
+        "kitchen": "Azulejo metro tile blanco brillante en pared trasera de countertops"
+      },
+      "ceilings": {
+        "primary": "Placa de yeso blanca con iluminación LED empotrada (downlights)",
+        "living": "Doble altura parcial en sala con vigas de concreto expuestas",
+        "terrace": "Techo retráctil de lona impermeable (pergola motorizada)"
+      },
+      "kitchen": {
+        "countertops": "Cuarzo Calacatta (blanco con venas grises sutiles)",
+        "cabinets": "MDF lacado blanco mate + isla con fachada de roble natural",
+        "backslash": "Azulejo metro tile blanco brillante 10x20cm",
+        "appliances": "Acero inoxidable empotrados (línea premium)"
+      }
+    }
+  },
+
+  "colorPalette": {
+    "exterior": {
+      "primary": "#D4D0C8 (Gris cálido / Concrete light)",
+      "secondary": "#2C2C2C (Grafito oscuro / Aluminum composite)",
+      "accent1": "#8B6F47 (Madera natural cedro)",
+      "accent2": "#4A5548 (Verde oliva oscuro - jardinera vertical)",
+      "stone": "#5C534A (Piedra volcánica)"
+    },
+    "interior": {
+      "primary": "#FFFFFF (Blanco puro - Chantilly Lace)",
+      "secondary": "#D4D0C8 (Gris cálido paredes)",
+      "accent": "#8B6F47 (Madera roble natural)",
+      "kitchen": "#F5F0E8 (Crema marfil gabinetes)",
+      "bathrooms": "#2C2C2C (Negro mate fittings)",
+      "textiles": "#B8A88A (Beige arena - sofás, cortinas)"
+    }
+  },
+
+  "floorPlan": {
+    "ground": {
+      "name": "Planta Baja",
+      "area": "140 m²",
+      "ceilingHeight": "3.20m (doble altura parcial en sala: 5.50m)",
+      "rooms": [
+        {
+          "name": "Sala Principal (Living Room)",
+          "area": "45 m²",
+          "features": [
+            "Doble altura con vigas de concreto expuestas",
+            "Muro de concreto expuesto con chimenea lineal empotrada",
+            "Ventanal de piso a techo (4m x 3m) con vista al jardín trasero",
+            "Iluminación LED empotrada + lámpara colgante minimalista sobre mesa",
+            "Piso porcelanato formato grande",
+            "Puertas corredizas de vidrio que abren completamente al jardín"
+          ]
+        },
+        {
+          "name": "Comedor Formal",
+          "area": "25 m²",
+          "features": [
+            "Mesa para 8 personas en madera maciza de roble",
+            "Lámpara colgante geométrica en negro mate",
+            "Ventanal lateral con vista al jardín lateral",
+            "Conexión visual directa con la sala y la cocina"
+          ]
+        },
+        {
+          "name": "Cocina Abierta",
+          "area": "30 m²",
+          "features": [
+            "Isla central de 3m con breakfast bar para 4",
+            "Countertops de cuarzo Calacatta",
+            "Gabinetes blancos mate + frente de isla en roble natural",
+            "Cocina empotrada de acero inoxidable (horno, microondas, dishwasher)",
+            "Campana extractora empotrada en gabinete",
+            "Pantry / Despensa de 4m² adyacente"
+          ]
+        },
+        {
+          "name": "Medio Baño de Visita",
+          "area": "4 m²",
+          "features": [
+            "Lavabo empotrado sobre tocador flotante de roble",
+            "Espejo rectangular con marco negro",
+            "Inodoro suspendido (wall-mounted)",
+            "Pared de acento con porcelanato negro mate"
+          ]
+        },
+        {
+          "name": "Hall de Entrada / Vestíbulo",
+          "area": "12 m²",
+          "features": [
+            "Puerta principal de madera nogal con manijaminimalista",
+            "Clóset de abrigos empotrado",
+            "Iluminación LED indirecta en zócalo",
+            "Recibidor con banca de madera y espejo vertical"
+          ]
+        },
+        {
+          "name": "Estacionamiento (2 autos)",
+          "area": "35 m²",
+          "features": [
+            "Portón de aluminio negro automatizado",
+            "Piso de concreto pulido",
+            "Acceso directo a la casa por puerta lateral",
+            "Espacio para 2 vehículos (5.5m x 6m)"
+          ]
+        },
+        {
+          "name": "Jardín Delantero",
+          "area": "25 m²",
+          "features": [
+            "Sendero de piedra natural hacia entrada",
+            "Césped natural con bordes de lavanda",
+            "Iluminación exterior empotrada en suelo"
+          ]
+        },
+        {
+          "name": "Jardín Trasero",
+          "area": "50 m²",
+          "features": [
+            "Terraza de madera composite con pergola",
+            "Área BBQ con mesada de concreto",
+            "Piscina pequeña (3x5m) o fontana decorativa",
+            "Césped natural con árboles frutales",
+            "Iluminación exterior LED en paisajismo"
+          ]
+        }
+      ]
+    },
+    "upper": {
+      "name": "Planta Alta (Segundo Piso)",
+      "area": "140 m²",
+      "ceilingHeight": "2.80m",
+      "rooms": [
+        {
+          "name": "Master Bedroom (Recámara Principal)",
+          "area": "35 m² (incluye walk-in closet)",
+          "features": [
+            "Ventanal de piso a techo con vista al jardín trasero",
+            "Balcón privado con baranda de vidrio (4m x 1.2m)",
+            "Walk-in closet de 8m² con organizadores modulares en roble",
+            "Piso de engineered hardwood (roble europeo)",
+            "Muro de acento en tono gris azulado (Benjamin Moore Stonington Gray)",
+            "Iluminación LED empotrada + lectores de cama empotrados en cabecera",
+            "Aire acondicionado split empotrado"
+          ]
+        },
+        {
+          "name": "Master Bathroom",
+          "area": "12 m²",
+          "features": [
+            "Ducha walk-in con muro de vidrio y regata de lluvia",
+            "Tina de独立的 freestanding blanca sobre deck de madera",
+            "Doble lavabo sobre tocador flotante de roble con countertop de cuarzo",
+            "Espejo de cuerpo entero con marco negro mate",
+            "Piso y paredes en porcelanato blanco mate",
+            "Accesorios en negro mate (grifería, toalleros)"
+          ]
+        },
+        {
+          "name": "Recámara 2",
+          "area": "20 m²",
+          "features": [
+            "Ventanal grande con vista lateral",
+            "Clóset empotrado de 3m de ancho",
+            "Piso de roble europeo",
+            "Baño compartido con Recámara 3 (jack & jill)"
+          ]
+        },
+        {
+          "name": "Recámara 3",
+          "area": "18 m²",
+          "features": [
+            "Ventanal con vista al frente",
+            "Clóset empotrado de 2.5m",
+            "Piso de roble europeo"
+          ]
+        },
+        {
+          "name": "Baño Compartido (Jack & Jill)",
+          "area": "8 m²",
+          "features": [
+            "Doble lavabo",
+            "Ducha walk-in con mampara de vidrio",
+            "Porcelanato blanco mate",
+            "Accesorios negro mate"
+          ]
+        },
+        {
+          "name": "Family Room / Sala TV",
+          "area": "20 m²",
+          "features": [
+            "Balcón con baranda de vidrio hacia la doble altura de la sala",
+            "TV empotrada en muro",
+            "Estantes flotantes para libros",
+            "Sofá sectional + puff"
+          ]
+        },
+        {
+          "name": "Lavandería",
+          "area": "8 m²",
+          "features": [
+            "Lavadora y secadora empotradas",
+            "Tina de lavado de manos",
+            "Gabinetes de almacenamiento",
+            "Tendedero interior retráctil"
+          ]
+        }
+      ]
+    },
+    "third": {
+      "name": "Tercer Piso (Terraza + Estudio)",
+      "area": "100 m²",
+      "ceilingHeight": "2.80m (interior) / Abierto (terraza)",
+      "rooms": [
+        {
+          "name": "Terraza Principal / Rooftop",
+          "area": "50 m²",
+          "features": [
+            "Jardín verde en azotea (sedum, pasto ornamental, plantas suculentas)",
+            "Pérgola motorizada con techo retráctil de lona",
+            "Jacuzzi para 4 personas con vista panorámica",
+            "Mobiliario outdoor: sofá modular, mesa de comedor para 6",
+            "Área BBQ / Bar exterior con mesada de concreto",
+            "Baranda perimetral de vidrio templado (1.20m de altura)",
+            "Iluminación LED ambiental en suelo y baranda",
+            "Vista 360° del entorno campestre"
+          ]
+        },
+        {
+          "name": "Estudio / Home Office",
+          "area": "20 m²",
+          "features": [
+            "Escritorio en L sobre ventana con vista panorámica",
+            "Estantes empotrados de piso a techo en roble",
+            "Sillón ejecutivo ergonómico",
+            "Iluminación LED regulable",
+            "Aire acondicionado split empotrado",
+            "Piso de roble europeo",
+            "Puerta de vidrio que conecta con terraza"
+          ]
+        },
+        {
+          "name": "Área Recreativa / Lounge",
+          "area": "25 m²",
+          "features": [
+            "Barra de bar con 4 taburetes",
+            "Mesa de billar o ping pong",
+            "TV de 65' en muro",
+            "Sofá modular + puff",
+            "Sistema de sonido empotrado",
+            "Ventanal con vista panorámica",
+            "Mini kitchenette (cafetera, mini-refri, lavabo)"
+          ]
+        },
+        {
+          "name": "Baño Completo (Terraza)",
+          "area": "5 m²",
+          "features": [
+            "Ducha exterior con muro de piedra natural",
+            "Lavabo sobre tocador flotante",
+            "Acceso directo desde terraza",
+            "Piso antiderrapante"
+          ]
+        }
+      ]
+    }
+  },
+
+  "specialFeatures": {
+    "balconies": [
+      "Balcón principal en master bedroom (4m x 1.2m) con baranda vidrio",
+      "Balcón en family room (3m x 1.2m) con vista a doble altura",
+      "Terraza rooftop perimetral (50m²) con baranda de vidrio"
+    ],
+    "windows": [
+      "Ventanales de piso a techo en sala principal (4m x 3m)",
+      "Ventanales en master bedroom con apertura corrediza",
+      "Claraboya (skylight) en escalera principal para luz natural",
+      "Ventanas de aluminio negro mate en toda la casa"
+    ],
+    "garden": [
+      "Jardín delantero con sendero de piedra y césped",
+      "Jardín trasero con terraza, BBQ y piscina/fontana",
+      "Jardinera vertical en fachada lateral",
+      "Azotea verde con plantas succulentas y pasto ornamental",
+      "Árboles frutales en jardín trasero (limón, mandarina)"
+    ],
+    "parking": [
+      "Estacionamiento techado para 2 autos",
+      "Portón automatizado de aluminio negro",
+      "Acceso directo a casa por puerta lateral",
+      "Piso de concreto pulido con marcación"
+    ],
+    "sustainability": [
+      "Panel solar en azotea (4 paneles para agua caliente)",
+      "Captación de agua de lluvia para riego",
+      "Iluminación LED en toda la casa",
+      "Ventanas de doble vidrio para aislamiento térmico",
+      "Azotea verde como aislante natural"
+    ]
+  },
+
+  "imageDescriptions": {
+    "fachada_principal": {
+      "title": "Fachada Principal - Vista Frontal",
+      "prompt": "Photorealistic architectural photograph of a modern 3-story contemporary house, front facade view, angled 30 degrees. Ground floor: concrete textured light gray walls, dark graphite aluminum composite panels, large floor-to-ceiling black frame windows, dark walnut wood main door with minimalist handle. Second floor: cedar wood decorative panels, large windows with glass balcony railing, master bedroom balcony. Third floor: rooftop terrace visible with green sedum garden, motorized pergola, glass perimeter railing. Stone volcano rock base/socle. Landscaped front garden with stone pathway, lavender borders, embedded ground lighting. 2-car garage with matte black aluminum automatic gate. Evening golden hour lighting, warm interior glow visible through windows. Architecture photography style, 8K resolution, hyperrealistic, professional architectural rendering.",
+      "style": "Photorealistic architecture photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "fachada_trasera": {
+      "title": "Fachada Trasera - Vista del Jardín",
+      "prompt": "Photorealistic architectural photograph of the rear facade of a modern 3-story house, viewed from the backyard garden. Ground floor: massive 4m x 3m floor-to-ceiling glass sliding doors fully open, revealing the living room interior with concrete accent wall and modern furniture. Wooden deck terrace with pergola, outdoor dining area, BBQ area with concrete countertop. Small 3x5m pool or decorative fountain. Fruit trees (lemon, tangerine). Second floor: master bedroom balcony with glass railing, visible bedroom interior with oak floors. Third floor: rooftop green garden with pergola and jacuzzi visible. Warm afternoon sunlight, natural shadows, lush green lawn. Vertical garden planter on side wall. Professional architectural photography, wide angle lens, 8K detail, photorealistic rendering.",
+      "style": "Photorealistic architecture photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "vista_lateral": {
+      "title": "Vista Lateral - Perfil de la Casa",
+      "prompt": "Photorealistic architectural photograph of a modern 3-story contemporary house, side elevation view showing the full profile. Ground floor: concrete textured walls with volcano stone base, garage visible on left side. Second floor: cantilevered volume extending 1m over ground floor, cedar wood cladding, large windows. Third floor: set back slightly with rooftop garden visible, glass railings. Vertical garden planter covering 2-story height on this facade. Side pathway with stepping stones. Skylight visible on roof above staircase area. Morning light casting dramatic shadows from the cantilevered volumes. Neighboring landscape of countryside field. Architecture side elevation photography, clean composition, 8K, photorealistic.",
+      "style": "Photorealistic architecture photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "vista_aerea": {
+      "title": "Vista Aérea - Drone Shot",
+      "prompt": "Aerial drone photography of a modern 3-story contemporary house from 45-degree bird's eye view, showing the full property. Rooftop green garden with sedum, ornamental grass, and succulent plants. Motorized pergola with retractable canvas roof. Jacuzzi for 4 people with panoramic view. The three floors visible from above showing the stepped volumes and cantilevers. Backyard with wooden deck terrace, small pool, BBQ area, fruit trees. Front yard with garden, stone pathway, 2-car garage. Surrounding countryside landscape with green fields and distant hills. Late afternoon golden light, long shadows, warm tones. DJI drone photography style, ultra-high detail, photorealistic architectural rendering, 8K resolution.",
+      "style": "Aerial drone photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "planta_baja": {
+      "title": "Planta Baja - Interior Sala Principal",
+      "prompt": "Photorealistic interior photography of a modern living room in a 3-story contemporary house, double-height ceiling (5.5m) with exposed concrete beams. Ground floor open plan layout. Large L-shaped sectional sofa in beige sand fabric (#B8A88A), marble coffee table, modern armchair. Concrete accent wall with linear fireplace built-in. Massive floor-to-ceiling window (4m x 3m) with black aluminum frames, open to backyard garden, flooding space with natural light. Porcelain tile floor in light cement color. Recessed LED ceiling lighting + minimalist pendant lamp. Connection to formal dining room visible with oak table for 8 and geometric black pendant. Open kitchen visible in background with white cabinets, Calacatta quartz island, and oak front. Staircase with open risers and glass railing visible on side. Professional interior design photography, wide angle, natural + artificial lighting, 8K detail, Architectural Digest style.",
+      "style": "Interior design photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "planta_alta": {
+      "title": "Planta Alta - Master Bedroom",
+      "prompt": "Photorealistic interior photography of a master bedroom on the second floor of a modern 3-story house. King-size bed with white linen bedding and beige throw blanket, flanked by floating oak nightstands with recessed reading lights. Accent wall behind bed in Stonington Gray (#9EAEB8), other walls white Chantilly Lace. Engineered oak floor (European white oak). Large floor-to-ceiling window with black frames and glass balcony railing, showing garden view. Walk-in closet visible through opening (8m² with oak modular organizers). Air conditioning split unit recessed in ceiling. LED recessed lighting, warm tone (3000K). Minimalist artwork on white walls. Clean, serene, contemporary hotel suite aesthetic. Professional interior photography, natural light from window, 8K, Architectural Digest style.",
+      "style": "Interior design photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "tercer_piso": {
+      "title": "Tercer Piso - Terraza Rooftop",
+      "prompt": "Photorealistic architectural photography of a rooftop terrace on the third floor of a modern 3-story house. 50m² outdoor living space. Green sedum roof garden with ornamental grasses and succulent plants. Motorized pergola with retractable white canvas roof, partially open. Outdoor modular sofa in weather-resistant gray fabric, dining table for 6 in teak wood. Jacuzzi for 4 people with chrome fittings, filled with blue water, panoramic countryside view. Glass perimeter railing (1.2m height). Built-in BBQ/bar area with concrete countertop, 4 bar stools. LED strip lighting in floor and railing. Late afternoon golden hour, warm light, sunset colors in sky. Distant green fields and hills. Luxury rooftop living, Ibiza-style terrace, professional photography, 8K, photorealistic.",
+      "style": "Lifestyle architectural photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "interior_cocina": {
+      "title": "Interior - Cocina Abierta",
+      "prompt": "Photorealistic interior photography of a modern open kitchen in a luxury contemporary house. 30m² kitchen with 3-meter island in Calacatta quartz (white with subtle gray veins), breakfast bar for 4 with leather counter stools. White matte lacquer cabinets above, natural oak front panels on island. Metro tile white glossy backsplash (10x20cm). Built-in stainless steel appliances (oven, microwave, dishwasher). Recessed extractor hood in cabinet. Large window above sink with garden view. Recessed LED ceiling lighting + 3 minimalist black pendant lights over island. Porcelain tile floor in light cement. White Chantilly Lace walls. Pantry door visible. Open connection to dining room and living room visible in background. Professional kitchen photography, bright natural light, clean styling, 8K detail, Elle Decor style.",
+      "style": "Interior design photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "master_bathroom": {
+      "title": "Interior - Master Bathroom",
+      "prompt": "Photorealistic interior photography of a luxury master bathroom in a modern 3-story house. 12m² en-suite bathroom. Freestanding white bathtub on wooden deck platform near large window with frosted lower portion and garden view. Walk-in shower with glass wall, rain shower head in matte black, large format white matte porcelain tiles. Double vanity with floating oak cabinet, Calacatta quartz countertop, two vessel sinks. Full-length mirror with black matte frame. Matte black fixtures (faucets, towel bars, shower hardware). White Chantilly Lace walls, accent wall in large format gray tile. Recessed LED lighting, backlit mirror. Small potted plant on vanity. Spa-like atmosphere, luxury hotel bathroom, professional interior photography, soft natural light, 8K detail.",
+      "style": "Interior design photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    },
+    "estudio_recreativa": {
+      "title": "Tercer Piso - Estudio y Área Recreativa",
+      "prompt": "Photorealistic interior photography of a home office and recreation area on the third floor of a modern 3-story house. Open plan divided into two zones. Study area: L-shaped desk in front of panoramic window with countryside view, floor-to-ceiling oak bookshelves, ergonomic black leather executive chair, adjustable LED desk lamp. Recreation area: 4-person bar with concrete countertop and 4 bar stools, 65-inch TV mounted on wall, modular gray sofa with pouf, visible door to rooftop terrace with green garden. Oak engineered wood floors. White walls with art prints. Glass door connecting to terrace. LED recessed ceiling lighting. Modern coworking + entertainment loft aesthetic. Professional interior photography, natural light from panoramic window, warm evening atmosphere, 8K, Architectural Digest style.",
+      "style": "Interior design photography",
+      "aspect_ratio": "16:9",
+      "resolution": "2K"
+    }
+  },
+
+  "constructionPhases": {
+    "description": "Fases de construcción para el timelapse de 2-3 minutos. Se necesitan ~15-18 escenas para cubrir un video de esta duración con transiciones first_last_frame.",
+    "totalScenes": 18,
+    "phases": [
+      {
+        "scene": 1,
+        "title": "Terreno Vacío",
+        "description": "Campo abierto con terreno limpio, ligeras marcas de nivelación. Sin estructura alguna. Pasto natural, árbol solitario al fondo. Maquinaria estacionada al costado: excavadora y camión. Ángulo cercano (15m de distancia).",
+        "machinery": "Excavadora estacionada, camión de volteo",
+        "workers": "2 ingenieros con planos revisando el terreno",
+        "constructionPercent": 0
+      },
+      {
+        "scene": 2,
+        "title": "Trazado y Excavación",
+        "description": "Zanjas profundas marcando el perímetro de los cimientos de la casa de 3 pisos. Excavadora CAT trabajando activamente, camión de volteo cargando tierra. Marcas de cal en el suelo delimitando áreas.",
+        "machinery": "Excavadora CAT 320 en acción, camión de volteo",
+        "workers": "4-5 obreros con cascos amarillos y chalecos naranja, moviendo tierra con palas",
+        "constructionPercent": 5
+      },
+      {
+        "scene": 3,
+        "title": "Cimientos - Vaciado de Concreto",
+        "description": "Zanjas llenas de concreto fresco, tuberías de PVC para drenaje visibles. Camión mezclador de concreto bombeando. Cimbra de madera reforzada.",
+        "machinery": "Camión mezclador de concreto con bomba, vibrocompactador",
+        "workers": "6-8 obreros nivelando y alisando concreto fresco, 1 maestro de obra supervisando",
+        "constructionPercent": 10
+      },
+      {
+        "scene": 4,
+        "title": "Cimientos Curados + Inicio Columnas Planta Baja",
+        "description": "Cimientos de concreto curados, acero de refuerzo (varilla) sobresaliendo para columnas. Inicio de armado de columnas del primer piso. Bloques de concreto apilados al costado.",
+        "machinery": "Grúa pequeña montada en terreno, camión de materiales",
+        "workers": "5-6 albañiles amarrando acero de refuerzo en columnas",
+        "constructionPercent": 15
+      },
+      {
+        "scene": 5,
+        "title": "Muros Planta Baja - Block/Concreto",
+        "description": "Muros de bloque de concreto levantados al 80% de planta baja. Columnas vaciadas. Aberturas para ventanas grandes visibles. Andamios de metal en el perímetro.",
+        "machinery": "Grúa pequeña, mezcladora de concreto en sitio",
+        "workers": "6-8 albañiles levantando muros, 2 ayudantes transportando bloques",
+        "constructionPercent": 25
+      },
+      {
+        "scene": 6,
+        "title": "Planta Baja Completa - Losa de Entrepiso",
+        "description": "Muros de planta baja terminados. Losa de concreto para el entrepiso del segundo piso siendo vaciada. Cimbra metálica de suelo visible. Columnas de apoyo en posición.",
+        "machinery": "Grúa mediana con bote de concreto, bomba de concreto",
+        "workers": "8-10 obreros vaciando y nivelando losa de entrepiso, 1 ingeniero con planos",
+        "constructionPercent": 35
+      },
+      {
+        "scene": 7,
+        "title": "Estructura Segundo Piso - Columnas y Muros",
+        "description": "Segundo piso en construcción: columnas de concreto armado, muros de bloque al 60%. Aberturas para ventanas y balcón del master bedroom visibles. Andamios perimetrales.",
+        "machinery": "Grúa mediana, elevador de materiales",
+        "workers": "6-8 albañiles en segundo piso, 2 ayudantes subiendo materiales",
+        "constructionPercent": 45
+      },
+      {
+        "scene": 8,
+        "title": "Muros Segundo Piso Completos + Losa Tercer Piso",
+        "description": "Segundo piso totalmente cerrado con muros. Losa del tercer piso en proceso de vaciado. Aberturas para grandes ventanales visibles. Balcón del master bedroom con estructura de acero.",
+        "machinery": "Grúa mediana con bote de concreto, bomba",
+        "workers": "8-10 obreros trabajando en losa de tercer piso",
+        "constructionPercent": 55
+      },
+      {
+        "scene": 9,
+        "title": "Tercer Piso - Estructura y Muros",
+        "description": "Tercer piso con muros parcialmente levantados. Estructura metálica para la pérgola del rooftop visible. Bordes de la azotea con forma definida.",
+        "machinery": "Grúa mediana, andamios de metal",
+        "workers": "6-8 obreros levantando muros del tercer piso, 2 soldadores en estructura metálica",
+        "constructionPercent": 65
+      },
+      {
+        "scene": 10,
+        "title": "Techo/Terraza - Estructura Completa",
+        "description": "Toda la estructura de 3 pisos completa vista desde afuera. Techo plano terminado con impermeabilizante. Pérgola del rooftop montada. Sin acabados todavía, solo concreto y block visto.",
+        "machinery": "Grúa retirando última carga, andamios comenzando a desmontarse",
+        "workers": "4-5 obreros en el techo instalando impermeabilizante, 2 desmontando andamios",
+        "constructionPercent": 70
+      },
+      {
+        "scene": 11,
+        "title": "Instalaciones - Electricidad y Plomería",
+        "description": "Interior de la casa: tuberías de PVC, cables eléctricos visibles en muros sin repellar. Escalera central con estructura visible. Ductos de aire acondicionado.",
+        "machinery": "Sin maquinaria pesada, herramientas manuales",
+        "workers": "4 electricistas instalando cableado, 3 plomeros con tuberías, 2 ayudantes",
+        "constructionPercent": 75
+      },
+      {
+        "scene": 12,
+        "title": "Repello y Acabados Interiores - Tabiquería",
+        "description": "Interior con muros repellados (yeso blanco). Tabiquería de yeso instalándose para separar habitaciones. Escalera con estructura metálica y vidrio. Pisos sin instalar aún.",
+        "machinery": "Sin maquinaria pesada",
+        "workers": "5-6 yeseros repellando muros, 2 instalando tabiques de yeso",
+        "constructionPercent": 80
+      },
+      {
+        "scene": 13,
+        "title": "Instalación de Ventanales y Puertas",
+        "description": "Exterior de la casa: grandes ventanales de aluminio negro mate siendo instalados en los 3 pisos. Puerta principal de madera nogal en posición. Vidrios de balcón del segundo piso instalándose.",
+        "machinery": "Grúa pequeña instalando ventanales grandes del tercer piso",
+        "workers": "4 instaladores de ventanas con ventanas, 2 instalando puerta principal, 1 con grúa",
+        "constructionPercent": 85
+      },
+      {
+        "scene": 14,
+        "title": "Pisos y Gabinetes - Interior",
+        "description": "Interior: porcelanato instalándose en planta baja, gabinetes de cocina blancos mate siendo montados. Isla de cocina visible. Baños con porcelanato en paredes.",
+        "machinery": "Sin maquinaria",
+        "workers": "3 instaladores de piso, 2 carpinteros montando gabinetes, 2 en bathrooms",
+        "constructionPercent": 88
+      },
+      {
+        "scene": 15,
+        "title": "Fachada - Paneles y Madera Decorativa",
+        "description": "Exterior: paneles de composite de aluminio grafito instalándose en fachada. Madera de cedro siendo montada en paneles decorativos del segundo piso. Piedra volcánica en zócalo completada.",
+        "machinery": "Andamio motorizado para fachada",
+        "workers": "4 instaladores de fachada con paneles, 2 carpinteros con madera de cedro",
+        "constructionPercent": 92
+      },
+      {
+        "scene": 16,
+        "title": "Pintura Final y Detalles Interiores",
+        "description": "Interior casi terminado: muros pintados blanco Chantilly Lace, acento gris en master bedroom. Muebles de sala en posición, cocina con electrodomésticos instalados. Iluminación LED funcionando.",
+        "machinery": "Sin maquinaria",
+        "workers": "3 pintores dando acabado final, 2 electricistas instalando luminarias LED, 1 decoradora",
+        "constructionPercent": 95
+      },
+      {
+        "scene": 17,
+        "title": "Jardín y Paisajismo",
+        "description": "Exterior: jardín delantero con césped plantándose, sendero de piedra instalado. Jardín trasero con deck de madera, BBQ area. Azotea verde con sedum y plantas. Piscina/fontana en construcción.",
+        "machinery": "Mini excavadora para paisajismo, camión de plantas",
+        "workers": "4 paisajistas plantando, 2 instalando deck de madera, 1 instalando iluminación exterior",
+        "constructionPercent": 97
+      },
+      {
+        "scene": 18,
+        "title": "Casa Terminada - Foto Final",
+        "description": "Casa de 3 pisos moderna completamente terminada iluminada al atardecer. Fachada completa con paneles grafito, madera de cedro, piedra volcánica. Grandes ventanales con luz interior cálida. Jardín verde con iluminación exterior. Terraza rooftop con jardín verde visible. Coches en el estacionamiento. Atardecer dorado, cielo con nubes rosadas.",
+        "machinery": "Sin maquinaria",
+        "workers": "Sin obreros - casa completamente terminada y habitada",
+        "constructionPercent": 100
+      }
+    ]
+  },
+
+  "videoPlan": {
+    "duration": "2-3 minutos (120-180 segundos)",
+    "scenesCount": 18,
+    "secondsPerTransition": 8,
+    "method": "first_last_frame (Veo)",
+    "model": "veo-3.1-fast-generate-001",
+    "resolution": "1080p",
+    "aspectRatio": "16:9",
+    "audioNotes": "ambient sounds only, no background music, diegetic audio only",
+    "negativePrompt": "background music, soundtrack, musical score, non-diegetic audio",
+    "totalClips": 17,
+    "estimatedDuration": "136 segundos (~2 min 16 seg)",
+    "steps": [
+      "1. Generar imagen final (Escena 18 - Casa terminada)",
+      "2. Usar nano-banana-edit (imagen-a-imagen) para crear Escenas 1-17 desde la imagen final",
+      "3. Generar 17 clips de video con Veo (first_last_frame) entre cada par consecutivo",
+      "4. Recortar últimos ~0.5 seg de cada clip (excepto el último) para evitar solapamiento",
+      "5. Concatenar los 17 clips en un solo video con FFmpeg",
+      "6. Video final: ~2 min 16 seg con sonido ambiental natural"
+    ]
+  }
+}

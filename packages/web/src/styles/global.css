@@ -47,6 +47,10 @@ body {
 	transform: translate(-50%, calc(-100% - 16px)) scale(0.96);
 }
 
+[data-tooltip][data-tooltip-placement="bottom"]::after {
+	transform: translate(-50%, 14px) scale(0.96);
+}
+
 [data-tooltip]:hover::after,
 [data-tooltip]:focus-visible::after {
 	opacity: 1;
@@ -55,4 +59,9 @@ body {
 [data-tooltip]:hover::after,
 [data-tooltip]:focus-visible::after {
 	transform: translate(-50%, calc(-100% - 14px)) scale(1);
+}
+
+[data-tooltip][data-tooltip-placement="bottom"]:hover::after,
+[data-tooltip][data-tooltip-placement="bottom"]:focus-visible::after {
+	transform: translate(-50%, 12px) scale(1);
 }

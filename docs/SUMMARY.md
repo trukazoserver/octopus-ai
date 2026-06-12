@@ -21,7 +21,7 @@ Asistente AI autoalojado con memoria persistente, aprendizaje continuo, automati
 - [Sistema de Memoria](./architecture/memory.md) — STM, rolling context, `recall_conversation`, LTM, consolidación, decaimiento y memoria procedural
 - [Orquestación de Memoria](./architecture/memory-orchestration.md) — Integridad, scopes, evidencia, incertidumbre, contexto avanzado y Centro de Memoria
 - [Motor de Aprendizaje](./architecture/learning.md) — Experiencias, insights, feedback y auto-mejora controlada
-- [Agente Autónomo, Workflows y Automatizaciones](./architecture/automation.md) — Daemon, heartbeat, cron, coordinación multi-agente, recovery y sandbox
+- [Agente Autónomo, Workflows y Automatizaciones](./architecture/automation.md) — Daemon, heartbeat, cron, coordinación multi-agente, Kanban Swarm, recovery y sandbox
 - [Skill Forge](./architecture/skills.md) — Creación automática, mejora, A/B testing
 - [Sistema de Plugins y MCP](./architecture/plugins.md) — Engine, Model Context Protocol, marketplace
 - Canales de Comunicación — WhatsApp, Telegram, Discord, Slack
@@ -29,8 +29,8 @@ Asistente AI autoalojado con memoria persistente, aprendizaje continuo, automati
 
 ## Referencia
 
-- [Comandos CLI](./api/cli.md) — Referencia completa de todos los comandos
-- [API HTTP y WebSocket](./api/http.md) — Health, auth, memoria, agentes, workflows, learning, skills, tools, canales y media
+- [Comandos CLI](./api/cli.md) — Referencia completa de todos los comandos, incluido Kanban Swarm
+- [API HTTP y WebSocket](./api/http.md) — Health, auth, memoria, agentes, workflows, Kanban, learning, skills, tools, canales y media
 
 ## Avanzado
 

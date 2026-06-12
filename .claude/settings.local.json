@@ -1,16 +1,52 @@
 {
-	"permissions": {
-		"allow": [
-			"Bash(npm run *)",
-			"Bash(npm test *)",
-			"Bash(pnpm install *)",
-			"Bash(pnpm add *)",
-			"Bash(node packages/cli/dist/index.js --help)",
-			"Bash(npm start *)",
-			"Bash(npx tsc *)",
-			"Bash(node -e ' *)",
-			"Bash(node _fix_start.cjs)",
-			"Bash(pnpm --filter @octopus-ai/core build)"
-		]
-	}
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm add *)",
+      "Bash(node packages/cli/dist/index.js --help)",
+      "Bash(npm start *)",
+      "Bash(npx tsc *)",
+      "Bash(node -e ' *)",
+      "Bash(node _fix_start.cjs)",
+      "Bash(pnpm --filter @octopus-ai/core build)",
+      "Bash(node -e \"const e = require\\('electron'\\); console.log\\(typeof e, Object.keys\\(e\\).slice\\(0,10\\)\\)\")",
+      "Bash(node -e \"console.log\\(require\\('./node_modules/electron/package.json'\\).version\\)\")",
+      "Bash(node -e \"const e = require\\('electron'\\); console.log\\('type:', typeof e, 'value:', e\\)\")",
+      "Bash(node -e \"console.log\\(require\\('electron'\\)\\)\")",
+      "Bash(ELECTRON_RUN_AS_NODE= timeout 8 npx electron .)",
+      "Bash(unset ELECTRON_RUN_AS_NODE)",
+      "Bash(ELECTRON_RUN_AS_NODE= NODE_ENV=production timeout 8 npx electron .)",
+      "Bash(node launcher *)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Bash(rm -f /tmp/test-electron.js /tmp/test-direct.js /tmp/test-bindings.js /tmp/test-bindings2.js /tmp/test-paths.js /tmp/test-app.js)",
+      "Bash(rm -rf /tmp/electron-test /tmp/electron-test2)",
+      "Bash(npx jest *)",
+      "Bash(npx vitest *)",
+      "Bash(powershell -Command \"Get-Process -Name 'node','electron','vite','vitest' -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime | Format-Table -AutoSize\")",
+      "Bash(powershell -Command \"Get-Process -Name 'node','electron','vite','vitest' -ErrorAction SilentlyContinue | Stop-Process -Force; Write-Output 'Procesos terminados'\")",
+      "Bash(powershell -Command \"Get-Process -Name 'node','electron','vite','vitest' -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count\")",
+      "Bash(pnpm start:desktop)",
+      "Bash(powershell -Command \"Test-NetConnection -ComputerName 127.0.0.1 -Port 18789 -WarningAction SilentlyContinue | Select-Object -ExpandProperty TcpTestSucceeded\")",
+      "Bash(node packages/cli/dist/index.js start --no-choice)",
+      "Bash(curl -s http://127.0.0.1:18789/api/status)",
+      "Bash(node -e \"const fs=require\\('fs'\\);const lines=fs.readFileSync\\('packages/core/src/agent/runtime.ts','utf8'\\).split\\('\\\\n'\\);lines.slice\\(2460,2470\\).forEach\\(\\(l,i\\)=>console.log\\(JSON.stringify\\(l\\)\\)\\)\")",
+      "Bash(pnpm run *)",
+      "Read(//c/Users/edfer/.claude/plans/**)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('scripts',{}\\), indent=2\\)\\)\")",
+      "Bash(tasklist /FI \"IMAGENAME eq node.exe\" /FO CSV)",
+      "Bash(findstr /i \"node\")",
+      "Bash(tasklist /FI \"IMAGENAME eq node.exe\" /FO TABLE)",
+      "Bash(powershell -Command \"Get-Process node -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, StartTime | Format-Table -AutoSize\")",
+      "Bash(taskkill /F /PID 26432 /PID 32516 /PID 10808 /PID 29828 /PID 36660)",
+      "Bash(cmd /c \"taskkill /F /PID 26432 & taskkill /F /PID 32516 & taskkill /F /PID 10808 & taskkill /F /PID 29828 & taskkill /F /PID 36660\")",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 26432,32516,10808,29828,36660 -Force -ErrorAction SilentlyContinue; Write-Output 'Done'\")",
+      "Bash(Start-Sleep -Seconds 5)",
+      "Bash(Get-Content \"C:\\\\Users\\\\edfer\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Aplicaciones-Visual-Estudio-code-octopus-ai\\\\dd8a9701-46ae-42f4-b313-d555349a6466\\\\tasks\\\\b94cyrgn1.output\" -Tail 30)",
+      "Bash(powershell -c \"\\(Get-Content 'packages/web/src/pages/tasks.tsx'\\)[841]\")"
+    ]
+  }
 }

@@ -8,6 +8,7 @@ import { createConfigCommand } from "./commands/config.js";
 import { createDoctorCommand } from "./commands/doctor.js";
 import { createMemoryCommand } from "./commands/memory.js";
 import { createPluginsCommand } from "./commands/plugins.js";
+import { createKanbanCommand } from "./commands/kanban.js";
 import { createSetupCommand } from "./commands/setup.js";
 import { createSkillsCommand } from "./commands/skills.js";
 import { createStartCommand, runStart } from "./commands/start.js";
@@ -33,6 +34,7 @@ program.addCommand(createSkillsCommand());
 program.addCommand(createAgentCommand());
 program.addCommand(createChannelsCommand());
 program.addCommand(createPluginsCommand());
+program.addCommand(createKanbanCommand());
 
 program.action(async (options: { web?: boolean; console?: boolean }) => {
 	await runStart({

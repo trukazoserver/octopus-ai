@@ -8,7 +8,7 @@ export interface ContinuityGuardConfig {
 
 export const DEFAULT_CONTINUITY_GUARD_CONFIG: ContinuityGuardConfig = {
 	enabled: true,
-	maxAutoContinuations: 10,
+	maxAutoContinuations: 25,
 	truncationDetection: true,
 };
 

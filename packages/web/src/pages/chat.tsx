@@ -19,6 +19,7 @@ import {
 	apiGet,
 	apiPatch,
 	apiPost,
+	apiPut,
 } from "../hooks/useApi.js";
 import { publicAsset } from "../utils/assets.js";
 
@@ -39,6 +40,7 @@ const MESSAGE_PAGE_SIZE = 20;
 const USER_MESSAGE_PREVIEW_WORDS = 180;
 const USER_MESSAGE_PREVIEW_CHARS = 1800;
 const SELECTED_WORKFLOW_STORAGE_KEY = "octopus-selected-workflow-run";
+const RESPONSE_ACTIVITY_GRACE_MS = 1200;
 
 const MediaLibraryPage = lazy(() =>
 	import("./media-library.js").then(({ MediaLibraryPage }) => ({
@@ -312,8 +314,9 @@ function resolveAgentAvatarImage(avatar?: string | null): string | null {
 	if (!value) return LOGO_SRC;
 	if (/^(https?:|data:|blob:)/i.test(value)) return value;
 	if (value.startsWith("/api/")) return value;
-	if (value.startsWith("/") || /\.(png|jpe?g|gif|webp|svg)$/i.test(value)) {
-		return publicAsset(value);
+	if (value.startsWith("/")) return publicAsset(value);
+	if (/\.(png|jpe?g|gif|webp|svg)$/i.test(value)) {
+		return publicAsset(`mascotas/${value}`);
 	}
 	return null;
 }
@@ -651,7 +654,9 @@ function asNumber(value: unknown): number | undefined {
 		: undefined;
 }
 
-function extractWorkflowRunIdFromDetail(detail?: string | null): string | undefined {
+function extractWorkflowRunIdFromDetail(
+	detail?: string | null,
+): string | undefined {
 	const parsed = parseActivityDetailJson(detail);
 	return asString(parsed?.workflowRunId);
 }
@@ -675,7 +680,9 @@ function extractWorkflowRunIdFromExecution(
 	if (!execution.activities) return undefined;
 	try {
 		const raw = JSON.parse(execution.activities) as ChatExecutionActivityWire[];
-		return Array.isArray(raw) ? extractWorkflowRunIdFromActivities(raw) : undefined;
+		return Array.isArray(raw)
+			? extractWorkflowRunIdFromActivities(raw)
+			: undefined;
 	} catch {
 		return undefined;
 	}
@@ -1254,7 +1261,12 @@ function AgentActivityPanel({
 												<img
 													src={avatar}
 													alt=""
-													style={{ width: 30, height: 30, borderRadius: "999px", objectFit: "cover" }}
+													style={{
+														width: 30,
+														height: 30,
+														borderRadius: "999px",
+														objectFit: "cover",
+													}}
 												/>
 											) : (
 												<span className="agent-glyph">{avatar ?? "◎"}</span>
@@ -2214,9 +2226,17 @@ export const ChatPage: React.FC<{
 			return true;
 		}
 	});
+	const [tenacidad, setTenacidad] = useState<"normal" | "tenaz">(() => {
+		try {
+			return (localStorage.getItem("octopus-tenacidad") as "normal" | "tenaz") ?? "normal";
+		} catch {
+			return "normal";
+		}
+	});
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle");
 	const [agentActivity, setAgentActivity] = useState<AgentActivity[]>([]);
+	const [activityClock, setActivityClock] = useState(() => Date.now());
 	const [multiAgentPlan, setMultiAgentPlan] =
 		useState<MultiAgentPlanState | null>(null);
 	const [multiAgentWorkers, setMultiAgentWorkers] = useState<
@@ -2226,6 +2246,7 @@ export const ChatPage: React.FC<{
 		Record<string, ConversationExecutionState>
 	>({});
 	const lastActivityKeyRef = useRef<string>("");
+	const lastResponseChunkAtRef = useRef(0);
 	const hydratedMultiAgentExecutionRef = useRef<string>("");
 	const notifiedExecutionRef = useRef<Set<string>>(new Set());
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
@@ -2270,6 +2291,7 @@ export const ChatPage: React.FC<{
 		setMultiAgentPlan(null);
 		setMultiAgentWorkers([]);
 		lastActivityKeyRef.current = "";
+		lastResponseChunkAtRef.current = 0;
 	}, []);
 
 	const applyMultiAgentEvent = useCallback(
@@ -2685,7 +2707,9 @@ export const ChatPage: React.FC<{
 							? "thinking"
 							: nextState.currentStatus,
 					);
-					setAgentActivity(nextState.activities);
+					setAgentActivity((prev) =>
+						nextState.activities.length > 0 ? nextState.activities : prev,
+					);
 					return;
 				}
 				if (
@@ -2952,10 +2976,13 @@ export const ChatPage: React.FC<{
 									? "thinking"
 									: nextState.currentStatus,
 							);
-							setAgentActivity(nextState.activities);
+							setAgentActivity((prev) =>
+								nextState.activities.length > 0 ? nextState.activities : prev,
+							);
 						} else {
 							setIsLoading(false);
 							setIsStreaming(false);
+							lastResponseChunkAtRef.current = 0;
 							setAgentStatus("idle");
 							setAgentActivity(nextState.activities);
 							pendingIdRef.current = "";
@@ -3054,11 +3081,15 @@ export const ChatPage: React.FC<{
 						}
 					}
 					setIsLoading(false);
+					setIsStreaming(false);
+					lastResponseChunkAtRef.current = 0;
 					pendingIdRef.current = "";
 					loadConversations();
 					inputRef.current?.focus();
 				} else if (msg.type === "stream") {
 					const chunk = getPayloadText(msg.payload);
+					lastResponseChunkAtRef.current = Date.now();
+					setActivityClock(lastResponseChunkAtRef.current);
 					const fallbackStreamId = `stream-${executionId ?? msg.id}`;
 					const streamId = assistantMessageId ?? fallbackStreamId;
 					const fullContent = msg.payload?.fullContent;
@@ -3134,6 +3165,7 @@ export const ChatPage: React.FC<{
 					}
 					setIsLoading(false);
 					setIsStreaming(false);
+					lastResponseChunkAtRef.current = 0;
 					resetAgentTrace();
 					pendingIdRef.current = "";
 					if (conversationId)
@@ -3223,6 +3255,7 @@ export const ChatPage: React.FC<{
 					}
 					setIsLoading(false);
 					setIsStreaming(false);
+					lastResponseChunkAtRef.current = 0;
 					resetAgentTrace();
 					pendingIdRef.current = "";
 					loadConversations();
@@ -3266,17 +3299,31 @@ export const ChatPage: React.FC<{
 		? executionByConversation[activeConversationId]
 		: undefined;
 	const activeBusy = isExecutionActive(activeExecution);
-	const visibleAgentActivity =
-		(activeBusy || isStreaming || agentStatus !== "idle") &&
-		agentActivity.length === 0
-			? [createFallbackAgentActivity(agentStatus)]
-			: agentActivity;
-	const latestVisibleAgentActivity =
-		visibleAgentActivity[visibleAgentActivity.length - 1];
-	const shouldShowAgentActivity =
-		(activeBusy || isStreaming || agentStatus !== "idle") &&
-		latestVisibleAgentActivity?.status !== "responding";
+	const hasActiveWork =
+		activeBusy || isLoading || isStreaming || agentStatus !== "idle";
+	const latestAgentActivity = agentActivity[agentActivity.length - 1];
+	const isActivelyReceivingResponse =
+		latestAgentActivity?.status === "responding" &&
+		lastResponseChunkAtRef.current > 0 &&
+		activityClock - lastResponseChunkAtRef.current < RESPONSE_ACTIVITY_GRACE_MS;
+	const fallbackStatus: AgentStatus =
+		agentStatus === "responding" ? "thinking" : agentStatus;
+	const visibleAgentActivity = hasActiveWork
+		? agentActivity.length === 0
+			? [createFallbackAgentActivity(fallbackStatus)]
+			: latestAgentActivity?.status === "responding" &&
+					!isActivelyReceivingResponse
+				? [createFallbackAgentActivity("thinking")]
+				: agentActivity
+		: agentActivity;
+	const shouldShowAgentActivity = hasActiveWork && !isActivelyReceivingResponse;
 	const activeWorkflowRunId = activeExecution?.workflowRunId;
+
+	useEffect(() => {
+		if (!hasActiveWork) return;
+		const timer = window.setInterval(() => setActivityClock(Date.now()), 400);
+		return () => window.clearInterval(timer);
+	}, [hasActiveWork]);
 
 	const openWorkflowMonitor = useCallback(
 		(workflowRunId: string) => {
@@ -3465,6 +3512,7 @@ export const ChatPage: React.FC<{
 		clearPendingAttachments();
 		setIsLoading(true);
 		setIsStreaming(false);
+		lastResponseChunkAtRef.current = 0;
 		setMultiAgentPlan(null);
 		setMultiAgentWorkers([]);
 		setAgentStatus("thinking");
@@ -4313,6 +4361,8 @@ export const ChatPage: React.FC<{
 						<div
 							className="chat-status-bar"
 							style={{
+								position: "relative",
+								zIndex: 10,
 								padding: "10px 24px",
 								background: "#09090b",
 								borderBottom: "1px solid #27272a",
@@ -4475,7 +4525,40 @@ export const ChatPage: React.FC<{
 								{streamEnabled ? "Stream" : "Completo"}
 							</button>
 
-							<div style={{ flex: 1 }} />
+							<button
+							type="button"
+							onClick={() => {
+								const next = tenacidad === "tenaz" ? "normal" : "tenaz";
+								setTenacidad(next);
+								try { localStorage.setItem("octopus-tenacidad", next); } catch {}
+								apiPut("/api/config/tenacidad.level", next).catch(() => {});
+							}}
+							data-tooltip={
+								tenacidad === "tenaz"
+									? "Modo Tenaz: el agente no se detiene hasta completar la tarea"
+									: "Modo Normal: el agente puede detenerse por l\u00edmites de iteraci\u00f3n"
+							}
+							style={{
+								marginLeft: "8px",
+								padding: "6px 12px",
+								borderRadius: "8px",
+								border: `1px solid ${tenacidad === "tenaz" ? "rgba(245, 158, 11, 0.4)" : "#3f3f46"}`,
+								background: tenacidad === "tenaz" ? "rgba(245, 158, 11, 0.1)" : "#18181b",
+								color: tenacidad === "tenaz" ? "#f59e0b" : "#71717a",
+								fontSize: "0.8rem",
+								cursor: "pointer",
+								display: "flex",
+								alignItems: "center",
+								gap: "6px",
+								fontWeight: 500,
+								transition: "all 0.2s",
+								fontFamily: "inherit",
+							}}
+						>
+							{tenacidad === "tenaz" ? "🔥" : "⚡"}
+							{tenacidad === "tenaz" ? "Tenaz" : "Normal"}
+						</button>
+						<div style={{ flex: 1 }} />
 							{status?.provider && (
 								<div
 									className="chat-status-meta"
@@ -4533,8 +4616,16 @@ export const ChatPage: React.FC<{
 											<div className="chat-welcome-logo">
 												<AgentAvatarContent
 													agent={selectedAgent}
-													alt={selectedAgent ? `${selectedAgent.name} avatar` : "Octopus"}
-													imageStyle={{ width: "100%", height: "100%", objectFit: "contain" }}
+													alt={
+														selectedAgent
+															? `${selectedAgent.name} avatar`
+															: "Octopus"
+													}
+													imageStyle={{
+														width: "100%",
+														height: "100%",
+														objectFit: "contain",
+													}}
 													textStyle={{ fontSize: "2.2rem" }}
 												/>
 											</div>
@@ -4612,14 +4703,14 @@ export const ChatPage: React.FC<{
 													{collapsedCount} restantes)
 												</button>
 											)}
-										{visible.map((msg) => (
-											<ChatMessage
-												key={msg.id}
-												msg={msg}
-												collapsed={false}
-												agent={selectedAgent}
-											/>
-										))}
+											{visible.map((msg) => (
+												<ChatMessage
+													key={msg.id}
+													msg={msg}
+													collapsed={false}
+													agent={selectedAgent}
+												/>
+											))}
 										</>
 									);
 								})()}
@@ -4643,7 +4734,11 @@ export const ChatPage: React.FC<{
 										>
 											<AgentAvatarContent
 												agent={selectedAgent}
-												alt={selectedAgent ? `${selectedAgent.name} avatar` : "Octopus"}
+												alt={
+													selectedAgent
+														? `${selectedAgent.name} avatar`
+														: "Octopus"
+												}
 											/>
 										</div>
 										<div className="agent-activity-card compact">
@@ -4653,12 +4748,15 @@ export const ChatPage: React.FC<{
 														Workflow durable registrado
 													</div>
 													<div className="agent-activity-detail">
-														El run {activeWorkflowRunId} tiene subtareas, eventos y artefactos persistidos.
+														El run {activeWorkflowRunId} tiene subtareas,
+														eventos y artefactos persistidos.
 													</div>
 												</div>
 												<button
 													type="button"
-													onClick={() => openWorkflowMonitor(activeWorkflowRunId)}
+													onClick={() =>
+														openWorkflowMonitor(activeWorkflowRunId)
+													}
 													className="multi-agent-pill"
 													style={{ cursor: "pointer" }}
 												>

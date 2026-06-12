@@ -261,7 +261,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		disabled: [],
 		iterationLimit: {
 			enabled: true,
-			maxIterations: 128,
+			maxIterations: 256,
 		},
 		timeouts: {
 			defaultMs: 45000,
@@ -303,8 +303,14 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 	},
 	continuityGuard: {
 		enabled: true,
-		maxAutoContinuations: 10,
+		maxAutoContinuations: 25,
 		truncationDetection: true,
+	},
+	tenacidad: {
+		level: "normal",
+		maxGenuineApiErrors: 3,
+		streamErrorRetries: 3,
+		emptyResponseRetries: 3,
 	},
 };
 

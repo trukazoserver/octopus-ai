@@ -8,6 +8,7 @@ import {
 	AgentManager,
 	AgentMessageBus,
 	AgentRuntime,
+	ArtifactVerifier,
 	AutomationManager,
 	AutomationRunner,
 	BrowserTool,
@@ -20,6 +21,8 @@ import {
 	EnvVarManager,
 	FTSSearchEngine,
 	GlobalDailyMemory,
+	KanbanDispatcher,
+	KanbanPlanner,
 	KnowledgeManager,
 	LLMRouter,
 	LearningEngine,
@@ -31,6 +34,7 @@ import {
 	MemoryRetrieval,
 	PluginMarketplace,
 	PluginRegistry,
+	RequirementResolver,
 	Scheduler,
 	ShortTermMemory,
 	SkillForge,
@@ -49,9 +53,9 @@ import {
 	createAgentCommsTools,
 	createAgentSpawnTools,
 	createAutomationTools,
+	createConfiguredKnowledgeExtractor,
 	createDatabaseAdapter,
 	createFileSystemTools,
-	createConfiguredKnowledgeExtractor,
 	createLogger,
 	createMediaTools,
 	createSandboxTools,
@@ -59,6 +63,8 @@ import {
 	createTeamCommTools,
 	createTeamTools,
 	createVectorStore,
+	createWorkflowTools,
+	createKanbanCardTools,
 	expandTildePath,
 	generateEncryptionKey,
 	getZaiMCPConfigs,
@@ -105,6 +111,9 @@ export interface OctopusSystem {
 	agentMessageBus: AgentMessageBus;
 	workflowManager: WorkflowManager;
 	workflowScheduler: WorkflowScheduler;
+	requirementResolver: RequirementResolver;
+	kanbanPlanner: KanbanPlanner;
+	kanbanDispatcher: KanbanDispatcher;
 	knowledgeManager: KnowledgeManager;
 	envVarManager: EnvVarManager;
 	taskManager: TaskManager;
@@ -724,18 +733,24 @@ function buildAgentRuntimeConfig(
 ): AgentConfig {
 	const config = parseJsonRecord(agent.config);
 	const defaultSkills = Array.isArray(config.defaultSkills)
-		? config.defaultSkills.filter((item): item is string => typeof item === "string")
+		? config.defaultSkills.filter(
+				(item): item is string => typeof item === "string",
+			)
 		: [];
 	const defaultTools = Array.isArray(config.defaultTools)
-		? config.defaultTools.filter((item): item is string => typeof item === "string")
+		? config.defaultTools.filter(
+				(item): item is string => typeof item === "string",
+			)
 		: [];
 	const capabilities = parseJsonStringArray(agent.capabilities);
 	const identityParts = [
-		`# Active Agent Identity`,
+		"# Active Agent Identity",
 		`- Name: ${agent.name}`,
 		`- Role: ${agent.role}`,
 		agent.personality ? `- Personality: ${agent.personality}` : null,
-		capabilities.length > 0 ? `- Capabilities: ${capabilities.join(", ")}` : null,
+		capabilities.length > 0
+			? `- Capabilities: ${capabilities.join(", ")}`
+			: null,
 		defaultSkills.length > 0
 			? `- Preferred skills: ${defaultSkills.join(", ")}`
 			: null,
@@ -756,6 +771,8 @@ function buildAgentRuntimeConfig(
 		model: agent.model ?? fallbackConfig.model,
 		maxTokens: fallbackConfig.maxTokens,
 		toolIterationLimit: fallbackConfig.toolIterationLimit,
+		continuityGuard: fallbackConfig.continuityGuard,
+		tenacidad: fallbackConfig.tenacidad,
 	};
 }
 
@@ -1020,6 +1037,15 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	const agentMessageBus = new AgentMessageBus();
 	const workflowManager = new WorkflowManager(db);
 	await workflowManager.markStaleRunsInterrupted();
+	const artifactVerifier = new ArtifactVerifier(db);
+	const requirementResolver = new RequirementResolver(
+		workflowManager,
+		artifactVerifier,
+	);
+	const kanbanPlanner = new KanbanPlanner(workflowManager, router, {
+		model: config.ai.default,
+		maxTokens: 3000,
+	});
 	const knowledgeManager = new KnowledgeManager(
 		db,
 		embedFn,
@@ -1133,6 +1159,14 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	for (const tool of mediaTools) {
 		registerSystemTool(tool);
 	}
+
+		const kanbanCardTools = createKanbanCardTools(
+			workflowManager,
+			requirementResolver,
+		);
+		for (const tool of kanbanCardTools) {
+			registerSystemTool(tool);
+		}
 
 	registerSystemTool({
 		name: "recall_conversation",
@@ -1517,7 +1551,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		registerSystemTool(tool);
 	}
 
-	const teamTools = createTeamTools(async (task, role) => {
+	const teamTools = createTeamTools(async (task, role, options) => {
 		// Obtener contexto de la conversación actual para el worker
 		const contextSummary = agentRuntime.getContextSummary(1500);
 		const contextBlock = contextSummary
@@ -1537,6 +1571,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 				...agentConfig,
 				id: workerId,
 				name: `Worker (${role})`,
+				model: options?.model ?? agentConfig.model,
 				systemPrompt: `You are a specialist worker deployed by Octopus Manager. Your role is: ${role}. Solve the task directly and report back concisely. Respond ONLY with the final result, no small talk.${contextBlock}`,
 			},
 			router,
@@ -1943,8 +1978,8 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 
 	const agentConfig: AgentConfig = {
 		id: "default-agent",
-		name: "Octopus AI",
-		description: "Default Octopus AI agent",
+		name: "Octavio",
+		description: "Agente principal de Octopus AI",
 		systemPrompt: `You are Octopus AI, an intelligent assistant with memory, tool execution, and code generation capabilities.
 
 You can:
@@ -2043,6 +2078,8 @@ Always be concise, helpful, and thorough.`,
 		model: config.ai.default,
 		maxTokens: config.ai.maxTokens,
 		toolIterationLimit: config.tools.iterationLimit,
+		continuityGuard: config.continuityGuard,
+		tenacidad: config.tenacidad,
 	};
 
 	const agentRuntime = new AgentRuntime(
@@ -2061,20 +2098,22 @@ Always be concise, helpful, and thorough.`,
 	agentRuntime.setLearningEngine(learningEngine);
 	agentRuntime.setChatManager(chatManager);
 	agentRuntime.setWorkflowManager(workflowManager);
-		agentRuntime.enableOrchestrator({
-			maxWorkers: config.orchestration?.maxArms ?? 8,
-			getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
-			complexityThreshold: 5,
+	agentRuntime.setKanbanPlanner(kanbanPlanner);
+	agentRuntime.setRequirementResolver(requirementResolver);
+	agentRuntime.enableOrchestrator({
+		maxWorkers: config.orchestration?.maxArms ?? 8,
+		getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+		complexityThreshold: 5,
 		decompositionTimeoutMs:
 			config.orchestration?.decompositionTimeoutMs ?? 30_000,
 		synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,
 		synthesisMaxTokens: config.orchestration?.synthesisMaxTokens ?? 1200,
 		workerConfig: {
-			maxToolIterations:
-				config.orchestration?.maxToolIterationsPerArm ?? 32,
+			maxToolIterations: config.orchestration?.maxToolIterationsPerArm ?? 32,
 			timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,
 		},
 	});
+	agentRuntime.getOrchestrator()?.setKanbanPlanner(kanbanPlanner, requirementResolver);
 	await agentRuntime.initialize();
 	teamBlackboard.registerOrchestrator(agentRuntime);
 
@@ -2083,11 +2122,12 @@ Always be concise, helpful, and thorough.`,
 		name: agentConfig.name,
 		description: agentConfig.description,
 		role: "coordinator",
-		personality: null,
+		personality:
+			"Director estrategico, cercano y resolutivo. Coordina a sus brazos con calma, exige evidencia verificable y sintetiza decisiones sin perder el contexto del usuario.",
 		system_prompt: agentConfig.systemPrompt,
 		model: agentConfig.model ?? null,
-		avatar: null,
-		color: null,
+		avatar: "Pulpo_octavio.png",
+		color: "#3b82f6",
 		is_default: 1,
 		is_main: 1,
 		parent_id: null,
@@ -2117,6 +2157,24 @@ Always be concise, helpful, and thorough.`,
 				mainAgentRecord.config,
 			],
 		);
+	} else if (
+		existingMain.name === "Octopus AI" ||
+		!existingMain.avatar ||
+		existingMain.description === "Default Octopus AI agent" ||
+		!existingMain.personality
+	) {
+		await db.run(
+			"UPDATE agents SET name = ?, description = ?, personality = CASE WHEN personality IS NULL OR personality = '' THEN ? ELSE personality END, avatar = ?, color = COALESCE(color, ?), updated_at = ? WHERE id = ?",
+			[
+				mainAgentRecord.name,
+				mainAgentRecord.description,
+				mainAgentRecord.personality,
+				mainAgentRecord.avatar,
+				mainAgentRecord.color,
+				new Date().toISOString(),
+				existingMain.id,
+			],
+		);
 	}
 	await agentManager.ensureBuiltinArmAgents(config.ai.default);
 	agentManager.registerRuntime(agentConfig.id, agentRuntime);
@@ -2131,10 +2189,7 @@ Always be concise, helpful, and thorough.`,
 			tokenCounter: {
 				countTokens: (text: string) => tokenCounter.countTokens(text),
 				countMessagesTokens: (msgs: { content: string }[]) =>
-					msgs.reduce(
-						(sum, m) => sum + tokenCounter.countTokens(m.content),
-						0,
-					),
+					msgs.reduce((sum, m) => sum + tokenCounter.countTokens(m.content), 0),
 			},
 		});
 		const runtime = new AgentRuntime(
@@ -2153,20 +2208,22 @@ Always be concise, helpful, and thorough.`,
 		runtime.setLearningEngine(learningEngine);
 		runtime.setChatManager(chatManager);
 		runtime.setWorkflowManager(workflowManager);
-			runtime.enableOrchestrator({
-				maxWorkers: config.orchestration?.maxArms ?? 8,
-				getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
-				complexityThreshold: 5,
+		runtime.setKanbanPlanner(kanbanPlanner);
+		runtime.setRequirementResolver(requirementResolver);
+		runtime.enableOrchestrator({
+			maxWorkers: config.orchestration?.maxArms ?? 8,
+			getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+			complexityThreshold: 5,
 			decompositionTimeoutMs:
 				config.orchestration?.decompositionTimeoutMs ?? 30_000,
 			synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,
 			synthesisMaxTokens: config.orchestration?.synthesisMaxTokens ?? 1200,
 			workerConfig: {
-				maxToolIterations:
-					config.orchestration?.maxToolIterationsPerArm ?? 32,
+				maxToolIterations: config.orchestration?.maxToolIterationsPerArm ?? 32,
 				timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,
 			},
 		});
+		runtime.getOrchestrator()?.setKanbanPlanner(kanbanPlanner, requirementResolver);
 		await runtime.initialize();
 		agentManager.registerRuntime(agent.id, runtime);
 	}
@@ -2225,22 +2282,144 @@ Always be concise, helpful, and thorough.`,
 	if (!orchestrator) {
 		throw new Error("Orchestrator was not initialized for durable workflows.");
 	}
-	const workflowScheduler = new WorkflowScheduler(workflowManager, orchestrator, {
-		limit: config.orchestration?.maxArms ?? 3,
-		onError: (error, run) => {
-			bootstrapLogger.error(
-				`Error resuming workflow '${run.id}': ${error instanceof Error ? error.message : String(error)}`,
-			);
+	const workflowScheduler = new WorkflowScheduler(
+		workflowManager,
+		orchestrator,
+		{
+			limit: config.orchestration?.maxArms ?? 3,
+			onError: (error, run) => {
+				bootstrapLogger.error(
+					`Error resuming workflow '${run.id}': ${error instanceof Error ? error.message : String(error)}`,
+				);
+			},
 		},
-	});
+	);
 	const durableOrchestrationEnabled =
 		config.orchestration?.enabled !== false &&
 		config.orchestration?.mode !== "legacy";
+	const kanbanDispatcher = new KanbanDispatcher(
+		workflowManager,
+		requirementResolver,
+		{
+			enabled: durableOrchestrationEnabled,
+			limit: config.orchestration?.maxArms ?? 5,
+			maxConcurrentTasks: config.orchestration?.maxArms ?? 5,
+			maxConcurrentPerArm: 2,
+			leaseTtlMs: config.orchestration?.workerTimeoutMs ?? 600_000,
+			defaultAgentId: agentConfig.id,
+			onError: (error, task) => {
+				bootstrapLogger.error(
+					`Error executing Kanban task '${task.id}': ${error instanceof Error ? error.message : String(error)}`,
+				);
+			},
+			taskExecutor: async ({ task, leaseToken }) => {
+				const taskContext = await workflowManager.getTaskContext(task.id);
+				const missingRequirements = taskContext?.missingRequirements
+					.slice(0, 10)
+					.map(
+						(requirement) =>
+							`- ${requirement.requirement_key}: ${requirement.requirement_type} ${requirement.artifact_key ?? requirement.required_task_id ?? "manual/time"} (${requirement.artifact_type ?? requirement.required_status ?? "pending"})`,
+					)
+					.join("\n");
+				const matchingArtifacts = taskContext?.matchingArtifacts
+					.slice(0, 10)
+					.map(
+						(artifact) =>
+							`- ${artifact.artifact_key ?? artifact.id}: ${artifact.artifact_type}, verified=${artifact.exists_verified === 1}, location=${artifact.url ?? artifact.path ?? "none"}`,
+					)
+					.join("\n");
+				const blockers = taskContext?.blockers
+					.filter((blocker) => !blocker.resolved_at)
+					.slice(0, 5)
+					.map((blocker) => `- ${blocker.severity}: ${blocker.reason}`)
+					.join("\n");
+				const recentComments = taskContext?.comments
+					.slice(-5)
+					.map((comment) => `- ${comment.comment_type}: ${comment.body}`)
+					.join("\n");
+				const runtime = task.assigned_agent_id
+					? agentManager.getRuntime(task.assigned_agent_id)
+					: undefined;
+				const selectedRuntime = runtime ?? agentRuntime;
+				const prompt = [
+					"Subtarea Kanban Swarm asignada por Octavio.",
+					`Task ID: ${task.id}`,
+					`Claim token: ${leaseToken}`,
+					task.arm_key ? `Arm key: ${task.arm_key}` : "",
+					`Titulo: ${task.title}`,
+					task.description ? `Descripcion: ${task.description}` : "",
+					task.acceptance_criteria
+						? `Criterios de aceptacion JSON: ${task.acceptance_criteria}`
+						: "",
+					task.produces ? `Artifacts esperados JSON: ${task.produces}` : "",
+					missingRequirements
+						? `Requisitos obligatorios pendientes:\n${missingRequirements}`
+						: "Requisitos obligatorios pendientes: ninguno.",
+					matchingArtifacts
+						? `Artifacts relacionados disponibles:\n${matchingArtifacts}`
+						: "Artifacts relacionados disponibles: ninguno registrado aun.",
+					blockers
+						? `Blockers abiertos:\n${blockers}`
+						: "Blockers abiertos: ninguno.",
+					recentComments
+						? `Comentarios recientes:\n${recentComments}`
+						: "Comentarios recientes: ninguno.",
+					"Este contexto es artifact-agnostico: puede representar research, report, spec, implementation, dataset, analysis, image, video, QA u otros tipos. Respeta artifact_key y artifact_type exactamente.",
+					"Puedes usar workflow_get_task_context para ver el contexto completo si necesitas mas detalle.",
+					"Durante tareas largas usa workflow_heartbeat con task_id y claim_token.",
+					"Si produces un artifact, registralo con workflow_record_artifact usando el artifact_key esperado.",
+					"Termina con workflow_complete_task. Si necesitas revision humana usa workflow_request_review. Si no puedes avanzar usa workflow_block_task.",
+				]
+					.filter(Boolean)
+					.join("\n\n");
+				for await (const _chunk of selectedRuntime.processMessageStream(
+					prompt,
+					"kanban_dispatcher",
+					{
+						disableOrchestrator: true,
+						disableDelegation: true,
+					},
+				)) {
+					/* progress is persisted through workflow tools */
+				}
+				const latest = await workflowManager.getTask(task.id);
+				if (latest?.status === "running") {
+					await workflowManager.updateTaskStatus(task.id, "review", {
+						metadata: {
+							reviewReason:
+								"Worker finished without explicit workflow_complete_task.",
+						},
+					});
+					await workflowManager.recordEvent({
+						runId: task.run_id,
+						taskId: task.id,
+						agentId: task.assigned_agent_id ?? agentConfig.id,
+						eventType: "review_requested",
+						message:
+							"Worker stream ended without explicit completion; Octavio review required.",
+					});
+				}
+			},
+		},
+	);
+	await kanbanDispatcher.loadPersistedState();
+	const workflowTools = createWorkflowTools(
+		workflowManager,
+		requirementResolver,
+		kanbanPlanner,
+		artifactVerifier,
+		kanbanDispatcher,
+	);
+	for (const tool of workflowTools) {
+		registerSystemTool(tool);
+	}
 	if (durableOrchestrationEnabled) {
 		void workflowScheduler.tick();
+		void kanbanDispatcher.tick();
 		systemScheduler.schedule("workflow-resume", "*/1 * * * *", async () => {
 			await workflowManager.markStaleRunsInterrupted();
 			await workflowScheduler.tick();
+			await kanbanDispatcher.tick();
 		});
 	}
 	const memoryRetentionScheduler = new MemoryRetentionScheduler(
@@ -2324,6 +2503,9 @@ Always be concise, helpful, and thorough.`,
 		agentMessageBus,
 		workflowManager,
 		workflowScheduler,
+		requirementResolver,
+		kanbanPlanner,
+		kanbanDispatcher,
 		knowledgeManager,
 		taskManager,
 		automationManager,

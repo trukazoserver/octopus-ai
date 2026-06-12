@@ -124,6 +124,7 @@ const SENSITIVE_API_PREFIXES = [
 	"/api/channels",
 	"/api/config",
 	"/api/env",
+	"/api/kanban",
 	"/api/learning",
 	"/api/mcp",
 	"/api/memory",
@@ -321,6 +322,54 @@ function parseMemoryIds(params: URLSearchParams): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+const KANBAN_MAX_GOAL_LENGTH = 4000;
+const KANBAN_MAX_TEXT_LENGTH = 4000;
+const KANBAN_MAX_COMMENT_TYPE_LENGTH = 64;
+const KANBAN_MAX_TASKS_PER_PLAN = 200;
+
+function badRequest(message: string): Error {
+	return new Error(`BAD_REQUEST:${message}`);
+}
+
+function badRequestMessage(err: unknown): string | null {
+	const message = err instanceof Error ? err.message : String(err);
+	return message.startsWith("BAD_REQUEST:")
+		? message.slice("BAD_REQUEST:".length)
+		: null;
+}
+
+function parseJsonRecord(raw: string): Record<string, unknown> {
+	try {
+		const parsed = raw ? (JSON.parse(raw) as unknown) : {};
+		if (!isRecord(parsed)) throw badRequest("JSON body must be an object");
+		return parsed;
+	} catch (err) {
+		if (badRequestMessage(err)) throw err;
+		throw badRequest("Invalid JSON body");
+	}
+}
+
+function boundedString(
+	value: unknown,
+	field: string,
+	maxLength: number,
+	options: { required?: boolean; fallback?: string } = {},
+): string | undefined {
+	if (value === undefined || value === null) {
+		if (options.required) throw badRequest(`${field} is required`);
+		return options.fallback;
+	}
+	if (typeof value !== "string") throw badRequest(`${field} must be a string`);
+	const trimmed = value.trim();
+	if (options.required && trimmed.length === 0) {
+		throw badRequest(`${field} is required`);
+	}
+	if (trimmed.length > maxLength) {
+		throw badRequest(`${field} must be ${maxLength} characters or less`);
+	}
+	return trimmed || options.fallback;
 }
 
 function normalizeMemorySourceTrust(value: unknown): string {
@@ -591,6 +640,11 @@ export class TransportServer {
 
 				if (req.method === "GET" && pathname === "/api/status") {
 					this.handleStatus(res);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/models") {
+					this.handleGetModels(res);
 					return;
 				}
 
@@ -1085,6 +1139,106 @@ export class TransportServer {
 					void this.handleListWorkflows(res, url);
 					return;
 				}
+				if (
+					req.method === "GET" &&
+					pathname === "/api/kanban/dispatcher/status"
+				) {
+					void this.handleKanbanDispatcherStatus(res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					pathname === "/api/kanban/dispatcher/tick"
+				) {
+					void this.handleKanbanDispatcherTick(res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					/^\/api\/kanban\/dispatcher\/(pause|resume)$/.test(pathname)
+				) {
+					void this.handleKanbanDispatcherControl(
+						res,
+						pathname.endsWith("/resume"),
+					);
+					return;
+				}
+				if (req.method === "POST" && pathname === "/api/kanban/plan") {
+					void this.handleCreateKanbanPlan(res, req);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					/^\/api\/kanban\/runs\/[^/]+$/.test(pathname)
+				) {
+					const workflowId = pathname.split("/").pop() ?? "";
+					void this.handleGetWorkflow(res, workflowId);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					/^\/api\/kanban\/tasks\/[^/]+\/context$/.test(pathname)
+				) {
+					const parts = pathname.split("/");
+					const taskId = parts[4] ?? "";
+					void this.handleGetKanbanTaskContext(res, taskId);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					/^\/api\/kanban\/requirements\/[^/]+\/(satisfy|reset)$/.test(pathname)
+				) {
+					const parts = pathname.split("/");
+					const requirementId = parts[4] ?? "";
+					const action = parts[5] ?? "";
+					void this.handleKanbanRequirementAction(
+						res,
+						req,
+						requirementId,
+						action,
+					);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					/^\/api\/kanban\/tasks\/[^/]+\/(retry|approve|reject|unblock|block|comment)$/.test(
+						pathname,
+					)
+				) {
+					const parts = pathname.split("/");
+					const taskId = parts[4] ?? "";
+					const action = parts[5] ?? "";
+					void this.handleKanbanTaskAction(res, req, taskId, action);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					pathname === "/api/kanban/workers/active"
+				) {
+					void this.handleKanbanWorkersActive(res);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					/^\/api\/kanban\/runs\/[^/]+\/board$/.test(pathname)
+				) {
+					const parts = pathname.split("/");
+					const runId = parts[4] ?? "";
+					void this.handleKanbanRunBoard(res, runId);
+					return;
+				}
+				if (req.method === "GET" && pathname === "/api/kanban/blackboard") {
+					void this.handleKanbanBlackboardGet(res);
+					return;
+				}
+				if (req.method === "POST" && pathname === "/api/kanban/blackboard") {
+					void this.handleKanbanBlackboardSet(req, res);
+					return;
+				}
+				if (req.method === "GET" && pathname === "/api/kanban/inspect") {
+					void this.handleKanbanInspect(res);
+					return;
+				}
 				if (req.method === "POST" && pathname === "/api/workflows/recover") {
 					void this.handleRecoverWorkflows(res);
 					return;
@@ -1508,6 +1662,35 @@ export class TransportServer {
 				},
 				uptime: process.uptime(),
 			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private handleGetModels(res: ServerResponse): void {
+		try {
+			const config = this.loadConfig();
+			const router = this.system?.router;
+			const registry = getProviderRegistry();
+			const availableProviders = new Set(router?.getAvailableProviders() ?? []);
+			const providers = Object.entries(config.ai.providers)
+				.filter(([provider]) => availableProviders.has(provider))
+				.map(([provider, providerConfig]) => {
+					const configuredModels =
+						"models" in providerConfig && Array.isArray(providerConfig.models)
+							? providerConfig.models
+							: [];
+					const defaultModels = registry[provider]?.defaultModels ?? [];
+					return {
+						provider,
+						providerDisplayName: registry[provider]?.displayName ?? provider,
+						models: [...new Set([...configuredModels, ...defaultModels])],
+					};
+				})
+				.filter((entry) => entry.models.length > 0);
+			jsonRes(res, 200, { providers });
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -4961,6 +5144,579 @@ export class TransportServer {
 			jsonRes(res, 200, { ok: true, ...result, scheduler });
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleKanbanDispatcherStatus(
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			if (!this.system?.kanbanDispatcher) {
+				jsonRes(res, 503, { error: "Kanban dispatcher not available" });
+				return;
+			}
+			jsonRes(res, 200, this.system.kanbanDispatcher.getStatus());
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleKanbanDispatcherTick(res: ServerResponse): Promise<void> {
+		try {
+			if (!this.system?.kanbanDispatcher) {
+				jsonRes(res, 503, { error: "Kanban dispatcher not available" });
+				return;
+			}
+			jsonRes(res, 200, await this.system.kanbanDispatcher.tick());
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleKanbanDispatcherControl(
+		res: ServerResponse,
+		enabled: boolean,
+	): Promise<void> {
+		try {
+			if (!this.system?.kanbanDispatcher) {
+				jsonRes(res, 503, { error: "Kanban dispatcher not available" });
+				return;
+			}
+			jsonRes(res, 200, await this.system.kanbanDispatcher.setEnabled(enabled));
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleGetKanbanTaskContext(
+		res: ServerResponse,
+		taskId: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.workflowManager) {
+				jsonRes(res, 503, { error: "Workflow manager not available" });
+				return;
+			}
+			const context = await this.system.workflowManager.getTaskContext(taskId);
+			if (!context) {
+				jsonRes(res, 404, { error: "Workflow task not found" });
+				return;
+			}
+			jsonRes(res, 200, context);
+		} catch (err) {
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleKanbanRequirementAction(
+		res: ServerResponse,
+		req: IncomingMessage,
+		requirementId: string,
+		action: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.workflowManager) {
+				jsonRes(res, 503, { error: "Workflow manager not available" });
+				return;
+			}
+			const requirement =
+				await this.system.workflowManager.getRequirement(requirementId);
+			if (!requirement) {
+				jsonRes(res, 404, { error: "Workflow requirement not found" });
+				return;
+			}
+			const body = parseJsonRecord(await readBody(req));
+			if (action === "satisfy") {
+				await this.system.workflowManager.markRequirementSatisfied(
+					requirementId,
+					{},
+				);
+				await this.system.workflowManager.recordEvent({
+					runId: requirement.run_id,
+					taskId: requirement.task_id,
+					eventType: "requirement_satisfied_manual",
+					message: `Requirement manually satisfied: ${requirement.requirement_key}`,
+					metadata: { requirementId, source: "kanban_api" },
+				});
+				await this.system.requirementResolver?.unlockSatisfiedTasks(
+					requirement.run_id,
+				);
+				await this.system.workflowManager.completeRunIfAllTasksTerminal(
+					requirement.run_id,
+				);
+			} else if (action === "reset") {
+				const reason =
+					boundedString(body.reason, "reason", KANBAN_MAX_TEXT_LENGTH, {
+						fallback: "Requirement reset from Kanban API",
+					}) ?? "Requirement reset from Kanban API";
+				await this.system.workflowManager.markRequirementPending(
+					requirementId,
+					reason,
+				);
+				await this.system.workflowManager.recordEvent({
+					runId: requirement.run_id,
+					taskId: requirement.task_id,
+					eventType: "requirement_reset_manual",
+					message: `Requirement reset: ${requirement.requirement_key}`,
+					metadata: { requirementId, reason, source: "kanban_api" },
+				});
+				await this.system.workflowManager.invalidateTaskForPendingRequirement({
+					taskId: requirement.task_id,
+					requirementId,
+					reason,
+				});
+			} else {
+				jsonRes(res, 400, {
+					error: `Unsupported Kanban requirement action: ${action}`,
+				});
+				return;
+			}
+			await this.system.kanbanDispatcher?.tick();
+			const [snapshot, context] = await Promise.all([
+				this.system.workflowManager.getRunSnapshot(requirement.run_id),
+				this.system.workflowManager.getTaskContext(requirement.task_id),
+			]);
+			jsonRes(res, 200, { snapshot, context });
+		} catch (err) {
+			const message = badRequestMessage(err);
+			if (message) {
+				jsonRes(res, 400, { error: message });
+				return;
+			}
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleCreateKanbanPlan(
+		res: ServerResponse,
+		req: IncomingMessage,
+	): Promise<void> {
+		try {
+			if (!this.system?.workflowManager || !this.system?.kanbanPlanner) {
+				jsonRes(res, 503, { error: "Kanban planner not available" });
+				return;
+			}
+			const body = parseJsonRecord(await readBody(req));
+			const goal = boundedString(body.goal, "goal", KANBAN_MAX_GOAL_LENGTH, {
+				required: true,
+			}) as string;
+			const tasks = Array.isArray(body.tasks)
+				? (body.tasks as Array<Record<string, unknown>>)
+				: [];
+			if (body.tasks !== undefined && !Array.isArray(body.tasks)) {
+				throw badRequest("tasks must be an array when provided");
+			}
+			if (tasks.length > KANBAN_MAX_TASKS_PER_PLAN) {
+				throw badRequest(
+					`tasks must contain ${KANBAN_MAX_TASKS_PER_PLAN} items or less`,
+				);
+			}
+			const persisted =
+				tasks.length > 0
+					? await this.system.kanbanPlanner.persistPlan({
+							goal,
+							conversationId:
+								typeof body.conversationId === "string"
+									? body.conversationId
+									: undefined,
+							rootAgentId:
+								typeof body.rootAgentId === "string"
+									? body.rootAgentId
+									: undefined,
+							plan: { goal, tasks },
+						})
+					: await this.system.kanbanPlanner.planFromGoal({
+							goal,
+							conversationId:
+								typeof body.conversationId === "string"
+									? body.conversationId
+									: undefined,
+							rootAgentId:
+								typeof body.rootAgentId === "string"
+									? body.rootAgentId
+									: undefined,
+						});
+			await this.system.requirementResolver?.evaluatePendingRequirements({
+				runId: persisted.run.id,
+			});
+			jsonRes(
+				res,
+				201,
+				await this.system.workflowManager.getRunSnapshot(persisted.run.id),
+			);
+		} catch (err) {
+			const message = badRequestMessage(err);
+			if (message) {
+				jsonRes(res, 400, { error: message });
+				return;
+			}
+			const messageText = err instanceof Error ? err.message : String(err);
+			if (
+				/Kanban plan|Task .*requires|Duplicate|Cycle|Invalid armKey/i.test(
+					messageText,
+				)
+			) {
+				jsonRes(res, 400, { error: messageText });
+				return;
+			}
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleKanbanTaskAction(
+		res: ServerResponse,
+		req: IncomingMessage,
+		taskId: string,
+		action: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.workflowManager) {
+				jsonRes(res, 503, { error: "Workflow manager not available" });
+				return;
+			}
+			const task = await this.system.workflowManager.getTask(taskId);
+			if (!task) {
+				jsonRes(res, 404, { error: "Workflow task not found" });
+				return;
+			}
+			const body = parseJsonRecord(await readBody(req));
+			if (action === "retry" || action === "unblock") {
+				await this.system.workflowManager.resolveTaskBlockers(
+					taskId,
+					`${action} from Kanban API`,
+				);
+				await this.system.workflowManager.updateTaskStatus(taskId, "ready", {
+					metadata: { action, source: "kanban_api" },
+				});
+			} else if (action === "approve") {
+				await this.system.workflowManager.resolveTaskBlockers(
+					taskId,
+					"Approved from Kanban API",
+				);
+				await this.system.workflowManager.updateTaskStatus(taskId, "done", {
+					metadata: { action, source: "kanban_api" },
+				});
+				await this.system.requirementResolver?.evaluatePendingRequirements({
+					runId: task.run_id,
+				});
+				await this.system.workflowManager.completeRunIfAllTasksTerminal(
+					task.run_id,
+				);
+			} else if (action === "reject") {
+				const bodyText =
+					boundedString(body.body, "body", KANBAN_MAX_TEXT_LENGTH) ??
+					boundedString(body.reason, "reason", KANBAN_MAX_TEXT_LENGTH, {
+						fallback: "Review rejected from Kanban API",
+					}) ??
+					"Review rejected from Kanban API";
+				await this.system.workflowManager.recordTaskComment({
+					runId: task.run_id,
+					taskId,
+					commentType: "review_rejected",
+					body: bodyText,
+					metadata: { source: "kanban_api" },
+				});
+				await this.system.workflowManager.resolveTaskBlockers(
+					taskId,
+					"Review rejected; card returned to ready",
+				);
+				await this.system.workflowManager.updateTaskStatus(taskId, "ready", {
+					metadata: { action, source: "kanban_api", reviewFeedback: bodyText },
+				});
+			} else if (action === "block") {
+				const reason =
+					boundedString(body.reason, "reason", KANBAN_MAX_TEXT_LENGTH, {
+						fallback: "Blocked from Kanban API",
+					}) ?? "Blocked from Kanban API";
+				await this.system.workflowManager.recordBlocker({
+					runId: task.run_id,
+					taskId,
+					blockerType: "manual",
+					reason,
+				});
+				await this.system.workflowManager.updateTaskStatus(taskId, "blocked");
+			} else if (action === "comment") {
+				const bodyText =
+					boundedString(body.body, "body", KANBAN_MAX_TEXT_LENGTH, {
+						fallback: "Comment from Kanban API",
+					}) ?? "Comment from Kanban API";
+				const commentType =
+					boundedString(
+						body.commentType,
+						"commentType",
+						KANBAN_MAX_COMMENT_TYPE_LENGTH,
+						{ fallback: "comment" },
+					) ?? "comment";
+				await this.system.workflowManager.recordTaskComment({
+					runId: task.run_id,
+					taskId,
+					commentType,
+					body: bodyText,
+					metadata: { source: "kanban_api" },
+				});
+			} else {
+				jsonRes(res, 400, {
+					error: `Unsupported Kanban task action: ${action}`,
+				});
+				return;
+			}
+			await this.system.kanbanDispatcher?.tick();
+			jsonRes(
+				res,
+				200,
+				await this.system.workflowManager.getRunSnapshot(task.run_id),
+			);
+		} catch (err) {
+			const message = badRequestMessage(err);
+			if (message) {
+				jsonRes(res, 400, { error: message });
+				return;
+			}
+			jsonRes(res, 500, { error: String(err) });
+		}
+	}
+
+	private async handleKanbanWorkersActive(
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const dispatcher = this.system?.kanbanDispatcher;
+			if (!dispatcher) {
+				jsonRes(res, 503, { error: "Kanban dispatcher not available" });
+				return;
+			}
+			const status = dispatcher.getStatus();
+			const workflowManager = this.system?.workflowManager;
+
+			let activeTasks: unknown[] = [];
+			let leases: unknown[] = [];
+			if (workflowManager && status.activeTaskIds.length > 0) {
+				const snapshotPromises = status.activeTaskIds.map(
+					async (taskId: string) => {
+						const task = await workflowManager.getTask(taskId);
+						return task ?? null;
+					},
+				);
+				activeTasks = (await Promise.all(snapshotPromises)).filter(Boolean);
+
+				if (workflowManager.getRunSnapshot) {
+					const runIds = new Set(
+						activeTasks.map((t: any) => t?.run_id).filter(Boolean),
+					);
+					const snapshotResults = await Promise.all(
+						[...runIds].map((runId) =>
+							workflowManager.getRunSnapshot(runId).catch(() => null),
+						),
+					);
+					leases = snapshotResults
+						.map((s: any) => s?.leases ?? [])
+						.flat();
+				}
+			}
+
+			jsonRes(res, 200, {
+				dispatcher: status,
+				activeTasks,
+				leases,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleKanbanRunBoard(
+		res: ServerResponse,
+		runId: string,
+	): Promise<void> {
+		try {
+			const workflowManager = this.system?.workflowManager;
+			if (!workflowManager) {
+				jsonRes(res, 503, { error: "Workflow manager not available" });
+				return;
+			}
+			if (!runId) {
+				jsonRes(res, 400, { error: "Missing runId" });
+				return;
+			}
+			const snapshot = await workflowManager.getRunSnapshot(runId);
+			if (!snapshot.run) {
+				jsonRes(res, 404, { error: "Workflow run not found" });
+				return;
+			}
+
+			const columns: Record<string, unknown[]> = {};
+			for (const task of snapshot.tasks) {
+				const status = (task as any).status ?? "unknown";
+				if (!columns[status]) columns[status] = [];
+				columns[status].push(task);
+			}
+
+			jsonRes(res, 200, {
+				run: snapshot.run,
+				columns,
+				metrics: snapshot.metrics,
+				requirements: snapshot.requirements,
+				blockers: snapshot.blockers,
+				leases: snapshot.leases,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleKanbanBlackboardGet(
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const bus =
+				this.system?.agentRuntime?.getOrchestrator?.()?.getCoordinationBus?.();
+			if (!bus) {
+				jsonRes(res, 200, {
+					sharedState: {},
+					artifacts: [],
+					messages: [],
+					summary: "",
+					available: false,
+				});
+				return;
+			}
+			const artifacts = bus.getAllArtifacts();
+			const messages = bus.getMessagesForAgent("*");
+			const summary = bus.getCoordinationSummary();
+			const sharedState: Record<string, unknown> = {};
+			for (const [key, value] of (bus as any).sharedState?.entries?.() ??
+				[]) {
+				sharedState[key] = value;
+			}
+			jsonRes(res, 200, {
+				sharedState,
+				artifacts,
+				messages,
+				summary,
+				messageCount: bus.messageCount,
+				artifactCount: bus.artifactCount,
+				available: true,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleKanbanBlackboardSet(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const bus =
+				this.system?.agentRuntime?.getOrchestrator?.()?.getCoordinationBus?.();
+			if (!bus) {
+				jsonRes(res, 503, {
+					error: "Agent coordination bus not available",
+				});
+				return;
+			}
+			const body = await this.readJsonBody(req, res);
+			if (!body) return;
+
+			const key = typeof body.key === "string" ? body.key.trim() : "";
+			if (!key) {
+				jsonRes(res, 400, { error: "Missing 'key'" });
+				return;
+			}
+			if (!Object.hasOwn(body, "value")) {
+				jsonRes(res, 400, { error: "Missing 'value'" });
+				return;
+			}
+
+			bus.setState(key, body.value);
+			const workflowManager = this.system?.workflowManager;
+			if (workflowManager) {
+				const requestedRunId =
+					typeof body.run_id === "string"
+						? body.run_id.trim()
+						: typeof body.runId === "string"
+							? body.runId.trim()
+							: "";
+				const run = requestedRunId
+					? await workflowManager.getRun(requestedRunId)
+					: (await workflowManager.listRuns({ limit: 1 }))[0];
+				if (run) {
+					await workflowManager.recordEvent({
+						runId: run.id,
+						eventType: "shared_state_update",
+						message: `Blackboard key updated: ${key}`,
+						metadata: { source: "kanban_blackboard_api", key, value: body.value },
+					});
+				}
+			}
+			jsonRes(res, 200, { ok: true, key, value: body.value });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleKanbanInspect(
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const dispatcher = this.system?.kanbanDispatcher;
+			const workflowManager = this.system?.workflowManager;
+			const requirementResolver = this.system?.requirementResolver;
+
+			const dispatcherStatus = dispatcher?.getStatus?.() ?? null;
+
+			let activeRuns: unknown[] = [];
+			if (workflowManager?.listRuns) {
+				try {
+					activeRuns = await workflowManager.listRuns({
+						status: undefined,
+						limit: 20,
+					});
+				} catch {
+					activeRuns = [];
+				}
+			}
+
+			let pendingRequirements: unknown[] = [];
+			if (workflowManager?.listRequirements) {
+				try {
+					pendingRequirements = await workflowManager.listRequirements({
+						status: "pending",
+						limit: 50,
+					});
+				} catch {
+					pendingRequirements = [];
+				}
+			}
+
+			let evaluationResult = null;
+			if (requirementResolver?.evaluatePendingRequirements) {
+				try {
+					evaluationResult =
+						await requirementResolver.evaluatePendingRequirements({});
+				} catch {
+					evaluationResult = null;
+				}
+			}
+
+			jsonRes(res, 200, {
+				dispatcher: dispatcherStatus,
+				activeRuns,
+				pendingRequirements,
+				evaluationResult,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
 	}
 

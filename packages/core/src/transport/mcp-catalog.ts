@@ -476,6 +476,44 @@ export const MCP_CATALOG: MCPCatalogEntry[] = [
 		homepage: "https://github.com/anthropics/anthropic-quickstarts",
 	},
 	{
+		name: "google-workspace",
+		displayName: "Google Workspace",
+		description:
+			"Controla Gmail, Drive, Calendar, Docs, Sheets, Slides, Forms, Tasks, Contacts, Chat y Apps Script desde un servidor MCP completo.",
+		category: "Productividad",
+		icon: "https://cdn.simpleicons.org/googleworkspace/4285F4",
+		tools: [
+			"search_gmail_messages",
+			"send_gmail_message",
+			"search_drive_files",
+			"get_drive_file_content",
+			"get_events",
+			"manage_event",
+			"get_doc_content",
+			"modify_doc_text",
+			"read_sheet_values",
+			"modify_sheet_values",
+			"create_presentation",
+			"create_form",
+			"list_tasks",
+			"search_contacts",
+			"search_custom",
+			"list_script_projects",
+		],
+		config: {
+			command: "uvx",
+			args: ["workspace-mcp", "--tool-tier", "core"],
+			env: {
+				GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID}",
+				GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET}",
+				OAUTHLIB_INSECURE_TRANSPORT: "1",
+			},
+		},
+		requiresApiKey:
+			"Google OAuth Client ID/Secret (GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET)",
+		homepage: "https://github.com/taylorwilsdon/google_workspace_mcp",
+	},
+	{
 		name: "n8n",
 		displayName: "n8n",
 		description:

@@ -504,6 +504,18 @@ export class AgentManager {
 				typeof extraConfig.temperature === "number"
 					? extraConfig.temperature
 					: undefined,
+			toolIterationLimit:
+				typeof extraConfig.toolIterationLimit === "object" && extraConfig.toolIterationLimit !== null
+					? extraConfig.toolIterationLimit as import("./types.js").ToolIterationLimitConfig
+					: undefined,
+			continuityGuard:
+				typeof extraConfig.continuityGuard === "object" && extraConfig.continuityGuard !== null
+					? extraConfig.continuityGuard as import("./types.js").ContinuityGuardRuntimeConfig
+					: undefined,
+			tenacidad:
+				typeof extraConfig.tenacidad === "object" && extraConfig.tenacidad !== null
+					? extraConfig.tenacidad as import("./types.js").TenacidadConfig
+					: undefined,
 		};
 	}
 

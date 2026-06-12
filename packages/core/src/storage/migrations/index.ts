@@ -13,6 +13,8 @@ import * as migration011 from "./011_conversation_context_snapshots.js";
 import * as migration012 from "./012_octopus_arms_workflows.js";
 import * as migration013 from "./013_workflow_recovery_indexes.js";
 import * as migration014 from "./014_subtask_verification.js";
+import * as migration015 from "./015_kanban_swarm_dependencies.js";
+import * as migration016 from "./016_task_model_column.js";
 
 export interface Migration {
 	version: number;
@@ -35,4 +37,6 @@ export const migrations: Migration[] = [
 	{ version: 12, up: migration012.up, down: migration012.down },
 	{ version: 13, up: migration013.up, down: migration013.down },
 	{ version: 14, up: migration014.up, down: migration014.down },
+	{ version: 15, up: migration015.up, down: migration015.down },
+	{ version: 16, up: migration016.up, down: migration016.down },
 ];

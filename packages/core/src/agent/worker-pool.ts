@@ -655,7 +655,7 @@ export class WorkerPool {
 		});
 
 		const finalResponse = await this.llmRouter.chat({
-			model: config.model || this.baseConfig.model || "default",
+			model: state.task.model || config.model || this.baseConfig.model || "default",
 			messages: state.messages,
 			maxTokens: this.baseConfig.maxTokens,
 			temperature: config.temperature,

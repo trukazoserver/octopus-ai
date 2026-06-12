@@ -10,12 +10,12 @@ export async function apiGet<T>(path: string): Promise<T> {
 
 export async function apiPut(
 	path: string,
-	value: unknown,
+	body: unknown,
 ): Promise<Record<string, unknown>> {
 	const res = await fetch(`${API_BASE}${path}`, {
 		method: "PUT",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ value }),
+		body: JSON.stringify(body),
 	});
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({ error: res.statusText }));

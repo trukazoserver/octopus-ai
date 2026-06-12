@@ -40,7 +40,7 @@ Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para c
 - 💾 **Memoria Orquestada Persistente:** STM + LTM con integridad, evidencia, scopes, búsqueda híbrida vectorial/FTS, perfil de usuario, resumen diario, recordatorios prospectivos y trazabilidad de uso.
 - 📈 **Aprendizaje Continuo:** Registra experiencias, extrae procedimientos/antipatrones, aprende qué funcionó y reutiliza esos insights en tareas futuras.
 - 🤖 **Automatización Autónoma:** Tareas programadas por cron, heartbeat proactivo evaluado por LLM, workflows persistentes y runtime listo para ejecución continua en segundo plano.
-- 🐙 **Coordinación Multi-Agente:** Bus de coordinación, workers especializados, perfiles de brazos, tracking de subtareas, recuperación de workflows, revisión cruzada y reconciliación de resultados.
+- 🐙 **Coordinación Multi-Agente:** Bus de coordinación, workers especializados, perfiles de brazos, tracking de subtareas, Kanban Swarm con dependencias por artifact, recuperación de workflows, revisión cruzada y reconciliación de resultados.
 - 🛠️ **Sistema de Tools Extensible:** Filesystem, shell, browser automation, media, sandbox Docker, comunicación/spawn de agentes, rate limiting y tools dinámicas creadas en tiempo real.
 - 🌐 **Multi-Canal:** Integra el mismo agente con Telegram, Discord, Slack, Teams, webchat y otros canales manteniendo memoria compartida.
 - 💻 **Interfaces Flexibles:** CLI, API HTTP/WebSocket, dashboard web servido por el backend compilado, modo desarrollo React/Vite y aplicación de escritorio con la misma base de runtime.
@@ -65,9 +65,11 @@ El runtime multi-agente incorpora piezas persistentes para dividir, recuperar y 
 
 - `AgentCoordinationBus` mantiene mensajería entre agentes, broadcasts e inbox por agente.
 - `WorkflowManager` y `WorkflowScheduler` persisten runs, subtareas, attempts, artifacts y eventos para permitir recovery/resume.
+- `KanbanPlanner`, `KanbanDispatcher` y `RequirementResolver` convierten objetivos complejos en tableros DAG, reclaman cards listas y desbloquean trabajo solo cuando los artifacts requeridos estan verificados.
 - `SubtaskTracker`, `ArtifactVerifier`, `CrossReviewEngine` y `ReconciliationService` verifican entregables y sintetizan resultados de varios workers.
 - `RetryPolicy` evita bucles de reintento sin progreso usando `progress_signature`, `step_key` y contadores de estancamiento.
-- La API expone `/api/workflows`, acciones `retry`/`cancel`/`recover` y mensajería de agentes en `/api/agents/messages`.
+- La API expone `/api/workflows`, acciones `retry`/`cancel`/`recover`, endpoints `/api/kanban/*` para operar tableros swarm y mensajería de agentes en `/api/agents/messages`.
+- El CLI incluye `kanban swarm`, `kanban status`, `kanban list` y `kanban inspect` para crear, ejecutar e inspeccionar runs desde terminal.
 
 Guía detallada: [Workflows y Automatizaciones](docs/architecture/automation.md)
 
@@ -83,6 +85,7 @@ Octopus AI no es solo un chatbot. Es un asistente inteligente que aprende de ti 
 | **Escritura asistida** | "Ayúdame a redactar un email formal" → Genera, edita y mejora textos |
 | **Investigación** | "Resume los puntos clave de este tema" → Sintetiza información compleja |
 | **Automatización** | "Cada mañana revisa mis tareas y genera un resumen" → Programa cron jobs, ejecuta prompts en segundo plano y mantiene seguimiento diario |
+| **Kanban Swarm** | "Crea una campaña con investigacion, copy, assets y QA" → Divide el objetivo en cards paralelas con dependencias por artifact y gates de revision |
 | **Gestión de archivos** | "Lee el archivo config.json y muéstrame los errores" → Opera con tu sistema de archivos |
 | **Multi-canal** | Pregunta lo mismo desde WhatsApp, Telegram, Discord o la web → Misma memoria, misma IA |
 | **Integración MCP** | Conecta con servidores Model Context Protocol (MCP) → Expande capacidades con herramientas externas |
@@ -169,6 +172,9 @@ node packages/cli/dist/index.js chat
 # Enviar un comando directo
 node packages/cli/dist/index.js agent --message "Resume los últimos cambios del proyecto" --stream
 
+# Crear y ejecutar un Kanban Swarm desde un objetivo complejo
+node packages/cli/dist/index.js kanban swarm "Investiga, planifica y valida una landing page"
+
 # Buscar recuerdos previos
 node packages/cli/dist/index.js memory search "proyecto"
 
@@ -237,7 +243,7 @@ octopus-ai/
 - [Sistema de Memoria](docs/architecture/memory.md) — STM, LTM, consolidación, grafo, decaimiento y memoria procedural
 - [Orquestación de Memoria](docs/architecture/memory-orchestration.md) — Integridad, scopes, evidencia, incertidumbre, contexto avanzado y UI del Centro de Memoria
 - [Motor de Aprendizaje](docs/architecture/learning.md) — Experiencias, insights, feedback y auto-mejora controlada
-- [Agente Autónomo, Workflows y Automatizaciones](docs/architecture/automation.md) — Daemon, heartbeat, cron, coordinación multi-agente, recovery y sandbox
+- [Agente Autónomo, Workflows y Automatizaciones](docs/architecture/automation.md) — Daemon, heartbeat, cron, coordinación multi-agente, Kanban Swarm, recovery y sandbox
 - [Motor de Habilidades (Skills)](docs/architecture/skills.md) — Creación automática, mejora, A/B testing
 - [Sistema de Plugins](docs/architecture/plugins.md) — Engine, MCP, marketplace
 

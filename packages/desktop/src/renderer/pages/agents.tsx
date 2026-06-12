@@ -166,7 +166,7 @@ export const Agents: React.FC = () => {
 				role: form.role,
 				personality: form.personality || null,
 				description: form.description || null,
-				system_prompt: form.system_prompt,
+				systemPrompt: form.system_prompt,
 				model: form.model || null,
 				avatar: form.avatar || null,
 				color: form.color || null,

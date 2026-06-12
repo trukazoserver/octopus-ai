@@ -1,16 +1,24 @@
-import { nanoid } from "nanoid";
 import type { DatabaseAdapter } from "../storage/database.js";
-import type { ArtifactVerifier, ArtifactVerificationResult } from "./artifact-verifier.js";
-import type { WorkflowManager, WorkflowStatus, WorkflowTaskRecord } from "./workflow-manager.js";
+import type {
+	ArtifactVerificationResult,
+	ArtifactVerifier,
+} from "./artifact-verifier.js";
+import type {
+	WorkflowManager,
+	WorkflowStatus,
+	WorkflowTaskRecord,
+} from "./workflow-manager.js";
 
 export interface ExpectedArtifact {
 	artifactType: string;
+	artifactKey?: string;
 	description: string;
 	count: number;
 }
 
 export interface ProducedArtifact {
 	artifactType: string;
+	artifactKey?: string;
 	url?: string;
 	path?: string;
 	description?: string;
@@ -27,7 +35,12 @@ export interface PersistedLedgerSnapshot {
 	blockers: string[];
 	usefulResults: number;
 	consecutiveErrors: number;
-	toolHistory: Array<{ name: string; success: boolean; useful: boolean; summary: string }>;
+	toolHistory: Array<{
+		name: string;
+		success: boolean;
+		useful: boolean;
+		summary: string;
+	}>;
 }
 
 export interface ReconciliationReport {
@@ -119,18 +132,18 @@ export class SubtaskTracker {
 
 		const verifiedIds: string[] = [];
 		for (const artifact of artifacts) {
-			const id = nanoid(16);
-			await this.workflowManager.recordArtifact({
+			const record = await this.workflowManager.recordArtifact({
 				runId: task.run_id,
 				taskId,
 				agentId: task.assigned_agent_id ?? undefined,
 				artifactType: artifact.artifactType,
+				artifactKey: artifact.artifactKey,
 				url: artifact.url,
 				path: artifact.path,
 				description: artifact.description,
 				existsVerified: false,
 			});
-			verifiedIds.push(id);
+			verifiedIds.push(record.id);
 		}
 
 		await this.db.run(
@@ -205,9 +218,13 @@ export class SubtaskTracker {
 
 	async reconcileInterruptedRun(runId: string): Promise<ReconciliationReport> {
 		const tasks = await this.workflowManager.listRunTasks(runId);
-		const allVerificationResults = await this.artifactVerifier.verifyRunArtifacts(runId);
+		const allVerificationResults =
+			await this.artifactVerifier.verifyRunArtifacts(runId);
 
-		const verificationByArtifactId = new Map<string, ArtifactVerificationResult>();
+		const verificationByArtifactId = new Map<
+			string,
+			ArtifactVerificationResult
+		>();
 		for (const vr of allVerificationResults) {
 			verificationByArtifactId.set(vr.artifactId, vr);
 		}
@@ -218,7 +235,10 @@ export class SubtaskTracker {
 		let genuinelyMissing = 0;
 
 		for (const task of tasks) {
-			const artifacts = await this.db.all<{ id: string; artifact_type: string }>(
+			const artifacts = await this.db.all<{
+				id: string;
+				artifact_type: string;
+			}>(
 				"SELECT id, artifact_type FROM agent_workflow_artifacts WHERE task_id = ? AND artifact_type != 'evidence_ledger_snapshot'",
 				[task.id],
 			);
@@ -228,11 +248,21 @@ export class SubtaskTracker {
 			).length;
 
 			const expectedArtifacts = this.parseExpectedArtifacts(task);
-			const expectedCount = expectedArtifacts.reduce((sum, ea) => sum + ea.count, 0);
-			const missingTypes = this.getMissingArtifactTypes(artifacts, verificationByArtifactId);
+			const expectedCount = expectedArtifacts.reduce(
+				(sum, ea) => sum + ea.count,
+				0,
+			);
+			const missingTypes = this.getMissingArtifactTypes(
+				artifacts,
+				verificationByArtifactId,
+			);
 
 			let effectiveStatus = task.status;
-			if ((task.status === "running" || task.status === "ready") && verifiedCount > 0 && verifiedCount === (expectedCount || artifacts.length)) {
+			if (
+				(task.status === "running" || task.status === "ready") &&
+				verifiedCount > 0 &&
+				verifiedCount === (expectedCount || artifacts.length)
+			) {
 				effectiveStatus = "done";
 				await this.workflowManager.updateTaskStatus(task.id, "done");
 			} else if (task.status === "done" && verifiedCount < artifacts.length) {
@@ -240,7 +270,11 @@ export class SubtaskTracker {
 				await this.workflowManager.updateTaskStatus(task.id, "partial");
 			}
 
-			if (effectiveStatus === "done" && verifiedCount === (expectedCount || artifacts.length) && missingTypes.length === 0) {
+			if (
+				effectiveStatus === "done" &&
+				verifiedCount === (expectedCount || artifacts.length) &&
+				missingTypes.length === 0
+			) {
 				verifiedCompleted++;
 			} else if (verifiedCount > 0) {
 				verifiedPartial++;
@@ -258,7 +292,12 @@ export class SubtaskTracker {
 			});
 		}
 
-		const verifiedContext = this.buildVerifiedContext(taskDetails, verifiedCompleted, verifiedPartial, genuinelyMissing);
+		const verifiedContext = this.buildVerifiedContext(
+			taskDetails,
+			verifiedCompleted,
+			verifiedPartial,
+			genuinelyMissing,
+		);
 
 		return {
 			runId,
@@ -281,7 +320,9 @@ export class SubtaskTracker {
 				const meta = JSON.parse(task.metadata);
 				if (meta.expectedArtifacts) return meta.expectedArtifacts;
 			}
-		} catch { /* ignore */ }
+		} catch {
+			/* ignore */
+		}
 		return [];
 	}
 
@@ -316,26 +357,34 @@ export class SubtaskTracker {
 		if (completed > 0) {
 			const completedTasks = details.filter((d) => d.status === "done");
 			for (const t of completedTasks) {
-				lines.push(`Completed (verified): "${t.title}" — ${t.verifiedArtifactCount}/${t.expectedArtifactCount} artifacts confirmed`);
+				lines.push(
+					`Completed (verified): "${t.title}" — ${t.verifiedArtifactCount}/${t.expectedArtifactCount} artifacts confirmed`,
+				);
 			}
 		}
 
 		if (partial > 0) {
 			const partialTasks = details.filter((d) => d.status === "partial");
 			for (const t of partialTasks) {
-				lines.push(`Partial (verified): "${t.title}" — ${t.verifiedArtifactCount}/${t.expectedArtifactCount} artifacts found, missing: ${t.missingTypes.join(", ")}`);
+				lines.push(
+					`Partial (verified): "${t.title}" — ${t.verifiedArtifactCount}/${t.expectedArtifactCount} artifacts found, missing: ${t.missingTypes.join(", ")}`,
+				);
 			}
 		}
 
 		if (missing > 0) {
 			const missingTasks = details.filter((d) => d.verifiedArtifactCount === 0);
 			for (const t of missingTasks) {
-				lines.push(`Incomplete (verified missing): "${t.title}" — 0/${t.expectedArtifactCount} artifacts found`);
+				lines.push(
+					`Incomplete (verified missing): "${t.title}" — 0/${t.expectedArtifactCount} artifacts found`,
+				);
 			}
 		}
 
 		lines.push("");
-		lines.push("IMPORTANT: Do NOT regenerate confirmed artifacts. Resume only from genuinely missing items.");
+		lines.push(
+			"IMPORTANT: Do NOT regenerate confirmed artifacts. Resume only from genuinely missing items.",
+		);
 
 		return lines.join("\n");
 	}

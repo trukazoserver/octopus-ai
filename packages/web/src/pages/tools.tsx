@@ -997,7 +997,7 @@ export const ToolsPage: React.FC = () => {
 							name="mcpCatalogSearch"
 							value={search}
 							onChange={(e) => setSearch(e.target.value)}
-							placeholder="Buscar n8n, Notion, GitHub, Claude Code, OpenClaw..."
+							placeholder="Buscar n8n, Notion, GitHub, Google Workspace..."
 							style={{ ...S.input, maxWidth: 460 }}
 						/>
 						<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

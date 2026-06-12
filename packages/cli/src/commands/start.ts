@@ -81,6 +81,9 @@ export function buildTransportSystemContext(
 		agentRuntime: system.agentRuntime,
 		toolRegistry: system.toolRegistry,
 		dailyMemory: system.dailyMemory,
+		kanbanDispatcher: system.kanbanDispatcher,
+		kanbanPlanner: system.kanbanPlanner,
+		requirementResolver: system.requirementResolver,
 	};
 }
 

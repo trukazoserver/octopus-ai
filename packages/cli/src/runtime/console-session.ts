@@ -153,14 +153,16 @@ export async function applyModelOverride(
 	const runtime = new AgentRuntime(
 		{
 			id: "default-agent",
-			name: "Octopus AI",
-			description: "Default Octopus AI agent",
+			name: "Octavio",
+			description: "Agente principal de Octopus AI",
 			systemPrompt: `You are Octopus AI, an intelligent assistant with memory and skill capabilities.
 You help users accomplish tasks efficiently by leveraging your memory of past interactions
 and your library of learned skills. Be concise, helpful, and proactive.`,
 			model,
 			maxTokens: system.config.ai.maxTokens,
 			toolIterationLimit: system.config.tools.iterationLimit,
+			continuityGuard: system.config.continuityGuard,
+			tenacidad: system.config.tenacidad,
 		},
 		system.router,
 		system.stm,

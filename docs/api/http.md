@@ -233,6 +233,26 @@ curl -X DELETE http://localhost:18789/api/learning/insights/learn_123
 | `POST` | `/api/workflows/recover` | Reanuda workflows interrumpidos o recuperables |
 | `POST` | `/api/workflows/{id}/retry` | Reintenta un workflow fallido o bloqueado |
 | `POST` | `/api/workflows/{id}/cancel` | Cancela un workflow activo o pendiente |
+| `GET` | `/api/kanban/dispatcher/status` | Consulta estado del dispatcher Kanban Swarm |
+| `POST` | `/api/kanban/dispatcher/tick` | Ejecuta un tick manual: expira leases, evalúa requirements y reclama cards listas |
+| `POST` | `/api/kanban/dispatcher/pause` | Pausa nuevos claims del dispatcher sin cancelar workflows ni cards activas |
+| `POST` | `/api/kanban/dispatcher/resume` | Reanuda nuevos claims del dispatcher |
+| `POST` | `/api/kanban/plan` | Crea un workflow Kanban Swarm desde `goal` natural o desde `tasks` estructuradas |
+| `GET` | `/api/kanban/runs/{id}` | Consulta snapshot Kanban de un workflow con tasks, requirements, leases, blockers, comments y metrics |
+| `GET` | `/api/kanban/runs/{id}/board` | Consulta el tablero de un run agrupado por columnas y dependencias |
+| `GET` | `/api/kanban/workers/active` | Lista workers activos y claims en ejecucion del dispatcher |
+| `GET` | `/api/kanban/blackboard` | Lee el blackboard compartido del swarm |
+| `POST` | `/api/kanban/blackboard` | Escribe valores compartidos en el blackboard del swarm |
+| `GET` | `/api/kanban/inspect` | Devuelve inspeccion global del subsistema Kanban |
+| `POST` | `/api/kanban/tasks/{id}/approve` | Aprueba una card en review y la marca como completada |
+| `POST` | `/api/kanban/tasks/{id}/reject` | Rechaza una card en review, guarda feedback y vuelve la card a ready |
+| `GET` | `/api/kanban/tasks/{id}/context` | Consulta contexto operativo de una card: requisitos faltantes, artifacts relacionados, blockers, comentarios y leases |
+| `POST` | `/api/kanban/tasks/{id}/comment` | Añade comentario persistente a una card |
+| `POST` | `/api/kanban/tasks/{id}/block` | Bloquea manualmente una card |
+| `POST` | `/api/kanban/tasks/{id}/unblock` | Resuelve blockers abiertos y vuelve la card a ready |
+| `POST` | `/api/kanban/tasks/{id}/retry` | Reintenta una card fallida, expirada o bloqueada |
+| `POST` | `/api/kanban/requirements/{id}/satisfy` | Marca manualmente un requirement como satisfecho y desbloquea la card si todos sus requisitos están completos |
+| `POST` | `/api/kanban/requirements/{id}/reset` | Devuelve un requirement a pendiente y retira la evidencia previa de satisfacción |
 | `GET` | `/api/automations` | Lista automatizaciones |
 | `POST` | `/api/automations` | Crea automatizacion |
 | `GET` | `/api/automations/{id}` | Consulta automatizacion |

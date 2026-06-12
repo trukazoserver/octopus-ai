@@ -2,6 +2,7 @@ import type React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { AppIcon } from "../components/ui/AppIcon.js";
 import { API_BASE, apiGet, apiPost, apiPutJson } from "../hooks/useApi.js";
+import { publicAsset } from "../utils/assets.js";
 
 interface AgentRecord {
 	id: string;
@@ -66,6 +67,20 @@ interface AgentStoredMessage {
 interface KnowledgeCollection {
 	id: string;
 	name: string;
+}
+
+interface ModelOptionGroup {
+	providerKey: string;
+	providerName: string;
+	models: Array<{ value: string; label: string }>;
+}
+
+interface ModelsResponse {
+	providers?: Array<{
+		provider: string;
+		providerDisplayName: string;
+		models: string[];
+	}>;
 }
 
 const ROLE_OPTIONS = [
@@ -150,6 +165,80 @@ function joinList(items: string[]): string {
 	return items.join("\n");
 }
 
+function toModelRef(providerKey: string, model: string): string {
+	return model.startsWith(`${providerKey}/`)
+		? model
+		: `${providerKey}/${model}`;
+}
+
+function buildModelGroups(response: ModelsResponse): ModelOptionGroup[] {
+	const seen = new Set<string>();
+	return (response.providers ?? [])
+		.map((providerInfo) => {
+			const models = providerInfo.models
+				.map((model) => {
+					const value = toModelRef(providerInfo.provider, model);
+					if (seen.has(value)) return null;
+					seen.add(value);
+					return { value, label: model };
+				})
+				.filter((item): item is { value: string; label: string } =>
+					Boolean(item),
+				);
+			return models.length > 0
+				? {
+						providerKey: providerInfo.provider,
+						providerName: providerInfo.providerDisplayName,
+						models,
+					}
+				: null;
+		})
+		.filter((item): item is ModelOptionGroup => Boolean(item));
+}
+
+function modelValues(groups: ModelOptionGroup[]): string[] {
+	return groups.flatMap((group) => group.models.map((model) => model.value));
+}
+
+function normalizeModelValue(
+	model: string,
+	groups: ModelOptionGroup[],
+): string {
+	if (!model) return "";
+	const values = modelValues(groups);
+	if (values.includes(model)) return model;
+	if (!model.includes("/")) {
+		return values.find((value) => value.endsWith(`/${model}`)) ?? model;
+	}
+	return model;
+}
+
+function avatarImageSrc(value: string | null | undefined): string | null {
+	if (!value) return null;
+	const trimmed = value.trim();
+	if (!/\.(png|jpe?g|webp|gif|svg)$/i.test(trimmed)) return null;
+	if (/^(https?:|data:|\/)/i.test(trimmed)) return trimmed;
+	return publicAsset(`mascotas/${trimmed}`);
+}
+
+function displayAgentName(agent: AgentRecord): string {
+	return agent.is_main === 1 && agent.name === "Octopus AI"
+		? "Octavio"
+		: agent.name;
+}
+
+function displayAgentDescription(agent: AgentRecord): string | null {
+	return agent.is_main === 1 && agent.description === "Default Octopus AI agent"
+		? "Agente principal de Octopus AI"
+		: agent.description;
+}
+
+function displayAgentAvatar(agent: AgentRecord): string | null {
+	return agent.is_main === 1
+		? (agent.avatar ?? "Pulpo_octavio.png")
+		: agent.avatar;
+}
+
 async function deleteAgent(id: string): Promise<void> {
 	const res = await fetch(`${API_BASE}/api/agents/${id}`, { method: "DELETE" });
 	if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
@@ -157,7 +246,10 @@ async function deleteAgent(id: string): Promise<void> {
 
 export const AgentsPage: React.FC = () => {
 	const [agents, setAgents] = useState<AgentRecord[]>([]);
-	const [knowledgeCollections, setKnowledgeCollections] = useState<KnowledgeCollection[]>([]);
+	const [knowledgeCollections, setKnowledgeCollections] = useState<
+		KnowledgeCollection[]
+	>([]);
+	const [modelGroups, setModelGroups] = useState<ModelOptionGroup[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -174,8 +266,9 @@ export const AgentsPage: React.FC = () => {
 	const [agentMessages, setAgentMessages] = useState<AgentStoredMessage[]>([]);
 	const [messagesLoading, setMessagesLoading] = useState(false);
 	const [unreadOnly, setUnreadOnly] = useState(false);
+	const [showBroadcasts, setShowBroadcasts] = useState(false);
 	const editingAgent = editingId
-		? agents.find((agent) => agent.id === editingId) ?? null
+		? (agents.find((agent) => agent.id === editingId) ?? null)
 		: null;
 	const editingBuiltinArm = editingAgent?.is_builtin_arm === 1;
 
@@ -183,12 +276,18 @@ export const AgentsPage: React.FC = () => {
 		setLoading(true);
 		setError(null);
 		try {
-			const [data, collections] = await Promise.all([
+			const [data, collections, models] = await Promise.all([
 				apiGet<AgentRecord[]>("/api/agents"),
-				apiGet<KnowledgeCollection[]>("/api/memory/knowledge/collections").catch(() => []),
+				apiGet<KnowledgeCollection[]>(
+					"/api/memory/knowledge/collections",
+				).catch(() => []),
+				apiGet<ModelsResponse>("/api/models").catch(
+					(): ModelsResponse => ({ providers: [] }),
+				),
 			]);
 			setAgents(data);
 			setKnowledgeCollections(collections);
+			setModelGroups(buildModelGroups(models));
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
 		} finally {
@@ -209,10 +308,11 @@ export const AgentsPage: React.FC = () => {
 
 	const loadAgentMessages = useCallback(async () => {
 		if (!selectedInboxAgentId) return;
+		setAgentMessages([]);
 		setMessagesLoading(true);
 		try {
 			const params = new URLSearchParams({
-				includeBroadcasts: "true",
+				includeBroadcasts: String(showBroadcasts),
 				limit: "30",
 			});
 			if (unreadOnly) params.set("unreadOnly", "true");
@@ -225,7 +325,7 @@ export const AgentsPage: React.FC = () => {
 		} finally {
 			setMessagesLoading(false);
 		}
-	}, [selectedInboxAgentId, unreadOnly]);
+	}, [selectedInboxAgentId, unreadOnly, showBroadcasts]);
 
 	useEffect(() => {
 		void loadAgentMessages();
@@ -252,13 +352,20 @@ export const AgentsPage: React.FC = () => {
 			personality: agent.personality ?? "",
 			description: agent.description ?? "",
 			systemPrompt: agent.system_prompt,
-			model: agent.model ?? "",
-			fallbackModel: agent.fallback_model ?? "",
+			model: normalizeModelValue(agent.model ?? "", modelGroups),
+			fallbackModel: normalizeModelValue(
+				agent.fallback_model ?? "",
+				modelGroups,
+			),
 			avatar: agent.avatar ?? "🤖",
 			color: agent.color ?? "#3b82f6",
-			capabilitiesText: joinList(parseJsonStringArray(agent.capabilities ?? null)),
+			capabilitiesText: joinList(
+				parseJsonStringArray(agent.capabilities ?? null),
+			),
 			toolPermissionMode:
-				typeof toolPermissions.mode === "string" ? toolPermissions.mode : "inherit",
+				typeof toolPermissions.mode === "string"
+					? toolPermissions.mode
+					: "inherit",
 			toolPermissionTools: joinList(
 				Array.isArray(toolPermissions.tools)
 					? toolPermissions.tools.filter(
@@ -272,7 +379,9 @@ export const AgentsPage: React.FC = () => {
 			maxTokens:
 				typeof config.maxTokens === "number" ? String(config.maxTokens) : "",
 			temperature:
-				typeof config.temperature === "number" ? String(config.temperature) : "",
+				typeof config.temperature === "number"
+					? String(config.temperature)
+					: "",
 		});
 		setShowForm(true);
 	};
@@ -297,11 +406,18 @@ export const AgentsPage: React.FC = () => {
 			const temperature = form.temperature.trim()
 				? Number.parseFloat(form.temperature.trim())
 				: undefined;
-			if (Number.isNaN(maxSpawnDepth) || maxSpawnDepth < 0 || maxSpawnDepth > 5) {
+			if (
+				Number.isNaN(maxSpawnDepth) ||
+				maxSpawnDepth < 0 ||
+				maxSpawnDepth > 5
+			) {
 				showMessage("La profundidad máxima debe estar entre 0 y 5", false);
 				return;
 			}
-			if (maxTokens !== undefined && (Number.isNaN(maxTokens) || maxTokens < 1)) {
+			if (
+				maxTokens !== undefined &&
+				(Number.isNaN(maxTokens) || maxTokens < 1)
+			) {
 				showMessage("Max tokens debe ser un número positivo", false);
 				return;
 			}
@@ -330,8 +446,11 @@ export const AgentsPage: React.FC = () => {
 				personality: form.personality.trim(),
 				description: form.description.trim(),
 				systemPrompt: form.systemPrompt.trim(),
-				model: form.model.trim(),
-				fallbackModel: form.fallbackModel.trim(),
+				model: normalizeModelValue(form.model.trim(), modelGroups),
+				fallbackModel: normalizeModelValue(
+					form.fallbackModel.trim(),
+					modelGroups,
+				),
 				avatar: form.avatar.trim(),
 				color: form.color.trim(),
 				capabilities: splitList(form.capabilitiesText),
@@ -341,16 +460,18 @@ export const AgentsPage: React.FC = () => {
 				maxSpawnDepth,
 				config,
 			};
-			if (!payload.fallbackModel) delete payload.fallbackModel;
-			if ((payload.capabilities as string[]).length === 0) delete payload.capabilities;
-			if (!toolPermissions) delete payload.toolPermissions;
-			if (form.knowledgeBaseIds.length === 0) delete payload.knowledgeBaseIds;
-			if (Object.keys(config).length === 0) delete payload.config;
+			if (!payload.fallbackModel) payload.fallbackModel = undefined;
+			if ((payload.capabilities as string[]).length === 0)
+				payload.capabilities = undefined;
+			if (!toolPermissions) payload.toolPermissions = undefined;
+			if (form.knowledgeBaseIds.length === 0)
+				payload.knowledgeBaseIds = undefined;
+			if (Object.keys(config).length === 0) payload.config = undefined;
 			if (editingBuiltinArm) {
-				delete payload.name;
-				delete payload.role;
-				delete payload.systemPrompt;
-				delete payload.avatar;
+				payload.name = undefined;
+				payload.role = undefined;
+				payload.systemPrompt = undefined;
+				payload.avatar = undefined;
 			}
 			if (editingId) {
 				await apiPutJson(`/api/agents/${editingId}`, payload);
@@ -397,7 +518,8 @@ export const AgentsPage: React.FC = () => {
 			await apiPost("/api/agents/messages", {
 				fromAgentId: selectedFromAgentId,
 				toAgentId: selectedToAgentId === "broadcast" ? null : selectedToAgentId,
-				messageType: selectedToAgentId === "broadcast" ? "broadcast" : messageType,
+				messageType:
+					selectedToAgentId === "broadcast" ? "broadcast" : messageType,
 				content: messageContent,
 				metadata: { source: "web-agents-page" },
 			});
@@ -638,8 +760,8 @@ export const AgentsPage: React.FC = () => {
 							}}
 						>
 							Envía mensajes directos o broadcasts entre brazos y agentes. Los
-							workers también usan esta bandeja para coordinarse durante workflows
-							durables.
+							workers también usan esta bandeja para coordinarse durante
+							workflows durables.
 						</p>
 					</div>
 					<div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -748,23 +870,49 @@ export const AgentsPage: React.FC = () => {
 									onChange={setSelectedInboxAgentId}
 								/>
 							</div>
-							<label
+							<div
 								style={{
 									display: "flex",
-									alignItems: "center",
-									gap: "8px",
-									color: "#a1a1aa",
-									fontSize: "0.82rem",
+									flexDirection: "column",
+									gap: "6px",
 									paddingBottom: "10px",
 								}}
 							>
-								<input
-									type="checkbox"
-									checked={unreadOnly}
-									onChange={(event) => setUnreadOnly(event.target.checked)}
-								/>
-								Solo sin leer
-							</label>
+								<label
+									style={{
+										display: "flex",
+										alignItems: "center",
+										gap: "8px",
+										color: "#a1a1aa",
+										fontSize: "0.82rem",
+									}}
+								>
+									<input
+										type="checkbox"
+										checked={unreadOnly}
+										onChange={(event) => setUnreadOnly(event.target.checked)}
+									/>
+									Solo sin leer
+								</label>
+								<label
+									style={{
+										display: "flex",
+										alignItems: "center",
+										gap: "8px",
+										color: "#a1a1aa",
+										fontSize: "0.82rem",
+									}}
+								>
+									<input
+										type="checkbox"
+										checked={showBroadcasts}
+										onChange={(event) =>
+											setShowBroadcasts(event.target.checked)
+										}
+									/>
+									Incluir broadcasts
+								</label>
+							</div>
 						</div>
 
 						<div
@@ -779,7 +927,9 @@ export const AgentsPage: React.FC = () => {
 							{messagesLoading ? (
 								<div style={emptyMessageStyle}>Cargando mensajes...</div>
 							) : agentMessages.length === 0 ? (
-								<div style={emptyMessageStyle}>Sin mensajes para esta bandeja.</div>
+								<div style={emptyMessageStyle}>
+									Sin mensajes para esta bandeja.
+								</div>
 							) : (
 								agentMessages.map((message) => (
 									<div key={message.id} style={agentMessageItemStyle}>
@@ -792,20 +942,49 @@ export const AgentsPage: React.FC = () => {
 											}}
 										>
 											<strong style={{ color: "#e4e4e7", fontSize: "0.84rem" }}>
-												{getAgentLabel(message.from_agent_id)} hacia {getAgentLabel(message.to_agent_id)}
+												{getAgentLabel(message.from_agent_id)}{" "}
+												{message.to_agent_id
+													? `→ ${getAgentLabel(message.to_agent_id)}`
+													: "→ Todos"}
 											</strong>
 											<span style={{ color: "#71717a", fontSize: "0.72rem" }}>
 												{formatAgentMessageDate(message.created_at)}
 											</span>
 										</div>
-										<div style={{ color: "#a1a1aa", fontSize: "0.8rem", marginBottom: "8px" }}>
-											<span style={messageBadgeStyle}>{message.message_type}</span>
+										<div
+											style={{
+												color: "#a1a1aa",
+												fontSize: "0.8rem",
+												marginBottom: "8px",
+											}}
+										>
+											<span
+												style={
+													message.to_agent_id
+														? messageBadgeStyle
+														: broadcastBadgeStyle
+												}
+											>
+												{message.to_agent_id
+													? message.message_type
+													: "broadcast"}
+											</span>
 											{message.run_id && <span> Run: {message.run_id}</span>}
-											{message.to_agent_id === selectedInboxAgentId && !message.read_at && (
-												<span style={{ color: "#f59e0b", marginLeft: "8px" }}>Sin leer</span>
-											)}
+											{message.to_agent_id === selectedInboxAgentId &&
+												!message.read_at && (
+													<span style={{ color: "#f59e0b", marginLeft: "8px" }}>
+														Sin leer
+													</span>
+												)}
 										</div>
-										<div style={{ color: "#d4d4d8", fontSize: "0.86rem", lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+										<div
+											style={{
+												color: "#d4d4d8",
+												fontSize: "0.86rem",
+												lineHeight: 1.55,
+												whiteSpace: "pre-wrap",
+											}}
+										>
 											{message.content}
 										</div>
 									</div>
@@ -855,8 +1034,8 @@ export const AgentsPage: React.FC = () => {
 							}}
 						>
 							Este es un brazo integrado de Octopus. Puedes cambiar modelo,
-							 personalidad y limites, pero su identidad base y mascota estan
-							 protegidas.
+							personalidad y limites, pero su identidad base y mascota estan
+							protegidas.
 						</div>
 					)}
 
@@ -884,11 +1063,12 @@ export const AgentsPage: React.FC = () => {
 						className="responsive-grid-2"
 						style={{ gap: "16px", marginBottom: "16px" }}
 					>
-						<FormInput
+						<ModelSelect
 							label="Modelo"
 							value={form.model}
 							onChange={(v) => setForm((f) => ({ ...f, model: v }))}
-							placeholder="e.g. openai/gpt-4o"
+							groups={modelGroups}
+							placeholder="Selecciona un modelo"
 						/>
 						<FormInput
 							label="Avatar (emoji o texto)"
@@ -948,26 +1128,43 @@ export const AgentsPage: React.FC = () => {
 						}}
 					>
 						<div style={{ marginBottom: "14px" }}>
-							<div style={{ color: "#e0e7ff", fontWeight: 800, fontSize: "0.95rem" }}>
+							<div
+								style={{
+									color: "#e0e7ff",
+									fontWeight: 800,
+									fontSize: "0.95rem",
+								}}
+							>
 								Configuración avanzada
 							</div>
-							<div style={{ color: "#a1a1aa", fontSize: "0.8rem", marginTop: 4 }}>
-								Ajusta permisos, contexto, subagentes y límites del runtime. Los agentes personalizados heredan permisos completos si no restringes herramientas.
+							<div
+								style={{ color: "#a1a1aa", fontSize: "0.8rem", marginTop: 4 }}
+							>
+								Ajusta permisos, contexto, subagentes y límites del runtime. Los
+								agentes personalizados heredan permisos completos si no
+								restringes herramientas.
 							</div>
 						</div>
 
-						<div className="responsive-grid-2" style={{ gap: "16px", marginBottom: "16px" }}>
-							<FormInput
+						<div
+							className="responsive-grid-2"
+							style={{ gap: "16px", marginBottom: "16px" }}
+						>
+							<ModelSelect
 								label="Modelo fallback"
 								value={form.fallbackModel}
 								onChange={(v) => setForm((f) => ({ ...f, fallbackModel: v }))}
-								placeholder="e.g. ollama/llama3.1"
+								groups={modelGroups}
+								placeholder="Sin fallback"
+								allowEmpty
 							/>
 							<FormSelect
 								label="Permisos de herramientas"
 								value={form.toolPermissionMode}
 								options={["inherit", "allowlist", "denylist"]}
-								onChange={(v) => setForm((f) => ({ ...f, toolPermissionMode: v }))}
+								onChange={(v) =>
+									setForm((f) => ({ ...f, toolPermissionMode: v }))
+								}
 							/>
 						</div>
 
@@ -984,7 +1181,9 @@ export const AgentsPage: React.FC = () => {
 						<FormTextarea
 							label="Herramientas permitidas/bloqueadas"
 							value={form.toolPermissionTools}
-							onChange={(v) => setForm((f) => ({ ...f, toolPermissionTools: v }))}
+							onChange={(v) =>
+								setForm((f) => ({ ...f, toolPermissionTools: v }))
+							}
 							placeholder="Una herramienta por línea. Vacío = sin lista específica."
 							rows={3}
 							disabled={form.toolPermissionMode === "inherit"}
@@ -992,7 +1191,10 @@ export const AgentsPage: React.FC = () => {
 
 						<div style={{ height: "14px" }} />
 
-						<div className="responsive-grid-2" style={{ gap: "16px", marginBottom: "16px" }}>
+						<div
+							className="responsive-grid-2"
+							style={{ gap: "16px", marginBottom: "16px" }}
+						>
 							<FormInput
 								label="Max tokens"
 								value={form.maxTokens}
@@ -1009,7 +1211,10 @@ export const AgentsPage: React.FC = () => {
 							/>
 						</div>
 
-						<div className="responsive-grid-2" style={{ gap: "16px", marginBottom: "16px" }}>
+						<div
+							className="responsive-grid-2"
+							style={{ gap: "16px", marginBottom: "16px" }}
+						>
 							<FormInput
 								label="Profundidad subagentes"
 								value={form.maxSpawnDepth}
@@ -1017,11 +1222,25 @@ export const AgentsPage: React.FC = () => {
 								placeholder="0-5"
 								type="number"
 							/>
-							<label style={{ display: "flex", alignItems: "center", gap: "10px", color: "#a1a1aa", fontSize: "0.86rem", paddingTop: "22px" }}>
+							<label
+								style={{
+									display: "flex",
+									alignItems: "center",
+									gap: "10px",
+									color: "#a1a1aa",
+									fontSize: "0.86rem",
+									paddingTop: "22px",
+								}}
+							>
 								<input
 									type="checkbox"
 									checked={form.canSpawnSubagents}
-									onChange={(e) => setForm((f) => ({ ...f, canSpawnSubagents: e.target.checked }))}
+									onChange={(e) =>
+										setForm((f) => ({
+											...f,
+											canSpawnSubagents: e.target.checked,
+										}))
+									}
 								/>
 								Puede crear subagentes
 							</label>
@@ -1036,7 +1255,9 @@ export const AgentsPage: React.FC = () => {
 							) : (
 								<div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
 									{knowledgeCollections.map((collection) => {
-										const selected = form.knowledgeBaseIds.includes(collection.id);
+										const selected = form.knowledgeBaseIds.includes(
+											collection.id,
+										);
 										return (
 											<button
 												key={collection.id}
@@ -1045,8 +1266,12 @@ export const AgentsPage: React.FC = () => {
 												style={{
 													padding: "7px 10px",
 													borderRadius: "999px",
-													border: selected ? "1px solid #818cf8" : "1px solid #3f3f46",
-													background: selected ? "rgba(129, 140, 248, 0.16)" : "#18181b",
+													border: selected
+														? "1px solid #818cf8"
+														: "1px solid #3f3f46",
+													background: selected
+														? "rgba(129, 140, 248, 0.16)"
+														: "#18181b",
 													color: selected ? "#c7d2fe" : "#a1a1aa",
 													fontSize: "0.78rem",
 													fontWeight: 700,
@@ -1179,6 +1404,9 @@ const AgentCard: React.FC<{
 	const agentColor = agent.color ?? "#3b82f6";
 	const roleIcon = ROLE_ICONS[agent.role] ?? "🤖";
 	const isConfirming = deleteConfirm === agent.id;
+	const avatar = displayAgentAvatar(agent);
+	const avatarSrc = avatarImageSrc(avatar);
+	const description = displayAgentDescription(agent);
 
 	return (
 		<div
@@ -1242,9 +1470,28 @@ const AgentCard: React.FC<{
 							justifyContent: "center",
 							fontSize: "1.3rem",
 							flexShrink: 0,
+							overflow: "hidden",
 						}}
 					>
-						{agent.avatar ?? roleIcon}
+						{avatarSrc ? (
+							<img
+								src={avatarSrc}
+								alt=""
+								aria-hidden="true"
+								style={{
+									width: "100%",
+									height: "100%",
+									objectFit: "cover",
+									display: "block",
+								}}
+								onError={(event) => {
+									event.currentTarget.style.display = "none";
+									event.currentTarget.parentElement?.replaceChildren(roleIcon);
+								}}
+							/>
+						) : (
+							(avatar ?? roleIcon)
+						)}
 					</div>
 					<div style={{ minWidth: 0 }}>
 						<div
@@ -1265,7 +1512,7 @@ const AgentCard: React.FC<{
 									textOverflow: "ellipsis",
 								}}
 							>
-								{agent.name}
+								{displayAgentName(agent)}
 							</span>
 							{agent.is_main === 1 && (
 								<span
@@ -1299,7 +1546,7 @@ const AgentCard: React.FC<{
 				</div>
 			</div>
 
-			{agent.description && (
+			{description && (
 				<div
 					style={{
 						fontSize: "0.82rem",
@@ -1312,7 +1559,7 @@ const AgentCard: React.FC<{
 						overflow: "hidden",
 					}}
 				>
-					{agent.description}
+					{description}
 				</div>
 			)}
 
@@ -1484,6 +1731,64 @@ const AgentSelect: React.FC<{
 	);
 };
 
+const ModelSelect: React.FC<{
+	label: string;
+	value: string;
+	groups: ModelOptionGroup[];
+	onChange: (value: string) => void;
+	placeholder?: string;
+	allowEmpty?: boolean;
+}> = ({ label, value, groups, onChange, placeholder, allowEmpty }) => {
+	const id = slugifyLabel(label);
+	const normalizedValue = normalizeModelValue(value, groups);
+	const values = modelValues(groups);
+	const hasOptions = values.length > 0;
+	const showCustom = Boolean(
+		normalizedValue && !values.includes(normalizedValue),
+	);
+	return (
+		<div>
+			<label htmlFor={id} style={labelStyle}>
+				{label}
+			</label>
+			<select
+				id={id}
+				name={id}
+				value={normalizedValue}
+				onChange={(event) => onChange(event.target.value)}
+				disabled={!hasOptions && !showCustom}
+				style={{
+					...inputStyle,
+					appearance: "auto",
+					opacity: !hasOptions && !showCustom ? 0.6 : 1,
+				}}
+			>
+				{(allowEmpty || !normalizedValue) && (
+					<option value="">
+						{hasOptions
+							? (placeholder ?? "Selecciona un modelo")
+							: "Configura un proveedor primero"}
+					</option>
+				)}
+				{showCustom && (
+					<optgroup label="Modelo actual">
+						<option value={normalizedValue}>{normalizedValue}</option>
+					</optgroup>
+				)}
+				{groups.map((group) => (
+					<optgroup key={group.providerKey} label={group.providerName}>
+						{group.models.map((model) => (
+							<option key={model.value} value={model.value}>
+								{model.label}
+							</option>
+						))}
+					</optgroup>
+				))}
+			</select>
+		</div>
+	);
+};
+
 const FormInput: React.FC<{
 	label: string;
 	value: string;
@@ -1636,6 +1941,19 @@ const messageBadgeStyle: React.CSSProperties = {
 	background: "rgba(59, 130, 246, 0.12)",
 	border: "1px solid rgba(59, 130, 246, 0.24)",
 	color: "#93c5fd",
+	fontSize: "0.72rem",
+	fontWeight: 700,
+	marginRight: "8px",
+};
+
+const broadcastBadgeStyle: React.CSSProperties = {
+	display: "inline-flex",
+	alignItems: "center",
+	padding: "2px 8px",
+	borderRadius: "999px",
+	background: "rgba(168, 85, 247, 0.12)",
+	border: "1px solid rgba(168, 85, 247, 0.24)",
+	color: "#c4b5fd",
 	fontSize: "0.72rem",
 	fontWeight: 700,
 	marginRight: "8px",

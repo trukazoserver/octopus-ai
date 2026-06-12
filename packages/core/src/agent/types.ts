@@ -3,6 +3,25 @@ export interface ToolIterationLimitConfig {
 	maxIterations?: number;
 }
 
+export interface ContinuityGuardRuntimeConfig {
+	enabled?: boolean;
+	maxAutoContinuations?: number;
+	truncationDetection?: boolean;
+}
+
+export type TenacidadLevel = "normal" | "tenaz";
+
+export interface TenacidadConfig {
+	/** Enable relentless mode where the agent continues until task completion */
+	level?: TenacidadLevel;
+	/** Maximum consecutive genuine API/auth errors before stopping (default: 3) */
+	maxGenuineApiErrors?: number;
+	/** Retry attempts for stream errors before giving up (default: 3) */
+	streamErrorRetries?: number;
+	/** Retry attempts for empty model responses (default: 3) */
+	emptyResponseRetries?: number;
+}
+
 export interface AgentConfig {
 	id: string;
 	name: string;
@@ -14,6 +33,8 @@ export interface AgentConfig {
 	maxTokens?: number;
 	temperature?: number;
 	toolIterationLimit?: ToolIterationLimitConfig;
+	continuityGuard?: ContinuityGuardRuntimeConfig;
+	tenacidad?: TenacidadConfig;
 }
 
 export interface TaskState {

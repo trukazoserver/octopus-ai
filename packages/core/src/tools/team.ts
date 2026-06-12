@@ -1,6 +1,16 @@
 import type { ToolDefinition } from "./registry.js";
 
-export type WorkerSpawner = (task: string, role: string) => Promise<string>;
+export interface WorkerSpawnOptions {
+	armKey?: string;
+	produces?: unknown;
+	model?: string;
+}
+
+export type WorkerSpawner = (
+	task: string,
+	role: string,
+	options?: WorkerSpawnOptions,
+) => Promise<string>;
 
 export function createTeamTools(spawnWorker: WorkerSpawner): ToolDefinition[] {
 	return [
@@ -22,13 +32,33 @@ export function createTeamTools(spawnWorker: WorkerSpawner): ToolDefinition[] {
 						"The highly detailed prompt or goal that the worker needs to accomplish. Provide all necessary context.",
 					required: true,
 				},
+				arm_key: {
+					type: "string",
+					description:
+						"Optional arm to assign the worker to: bibi, anita, ari, cali, crabby, estelita, langi, medi.",
+				},
+				produces: {
+					type: "array",
+					description:
+						"Optional artifacts this worker is expected to produce: [{artifactKey, artifactType, description?}] (for Kanban Swarm integration).",
+				},
+				model: {
+					type: "string",
+					description:
+						"Optional model override for this worker (e.g. a cheaper model for boilerplate, expensive for hard tasks).",
+				},
 			},
 			handler: async (args) => {
 				const role = String(args.role);
 				const task = String(args.task);
+				const options: WorkerSpawnOptions = {
+					armKey: typeof args.arm_key === "string" ? args.arm_key : undefined,
+					produces: args.produces,
+					model: typeof args.model === "string" ? args.model : undefined,
+				};
 
 				try {
-					const result = await spawnWorker(task, role);
+					const result = await spawnWorker(task, role, options);
 					return {
 						success: true,
 						output: `Worker '${role}' completed the task. Result:\n${result}`,
