@@ -2137,6 +2137,7 @@ Always be concise, helpful, and thorough.`,
 		skillLoader,
 	);
 	agentRuntime.setToolSystem(toolRegistry, toolExecutor);
+	agentRuntime.setResearcher(skillResearcher);
 	agentRuntime.setDailyMemory(dailyMemory);
 	agentRuntime.setUserProfileManager(userProfileManager);
 	agentRuntime.setMemoryOrchestrator(memoryOrchestrator);
@@ -2249,6 +2250,7 @@ Always be concise, helpful, and thorough.`,
 			skillLoader,
 		);
 		runtime.setToolSystem(toolRegistry, toolExecutor);
+		runtime.setResearcher(skillResearcher);
 		runtime.setDailyMemory(dailyMemory);
 		runtime.setUserProfileManager(userProfileManager);
 		runtime.setMemoryOrchestrator(memoryOrchestrator);

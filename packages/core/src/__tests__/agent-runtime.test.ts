@@ -14,6 +14,7 @@ import type {
 import type { LoadedSkill } from "../skills/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry, ToolResult } from "../tools/registry.js";
+import type { SkillResearcher } from "../skills/researcher.js";
 
 function createMockLLMRouter(responseOverrides?: Partial<LLMResponse>) {
 	const defaultResponse: LLMResponse = {
@@ -1595,6 +1596,83 @@ describe("AgentRuntime", () => {
 			);
 			expect(result).not.toContain("⚠️");
 			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe("fresh research before codegen", () => {
+		it("researches and injects Fresh Research for technical codegen requests", async () => {
+			mockLLMRouter = createMockLLMRouter({
+				content: "Aquí está la herramienta con el endpoint correcto.",
+				finishReason: "stop",
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const researcher = {
+				research: vi.fn().mockResolvedValue({
+					isTechnical: true,
+					context: "OPENAI-IMAGE-2-DOCS-MARKER",
+					sources: ["context7:/openai/image"],
+					fetchedAt: "2026-06-13T00:00:00.000Z",
+					summary: "researched",
+				}),
+			};
+			runtime.setResearcher(researcher as unknown as SkillResearcher);
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				addTaskLedgerEntry: vi.fn(),
+			};
+			runtime.setChatManager(mockChatManager as never);
+
+			await runtime.processMessage(
+				"crea una herramienta de generación de imagen con la API de OpenAI Image 2",
+				"conv-codegen",
+			);
+
+			expect(researcher.research).toHaveBeenCalledWith(
+				expect.objectContaining({
+					description: expect.stringContaining("OpenAI"),
+				}),
+			);
+			const req = mockLLMRouter.chat.mock.calls[0]?.[0] as
+				| { messages?: Array<{ role: string; content: string }> }
+				| undefined;
+			const system = req?.messages?.find((m) => m.role === "system");
+			expect(system?.content).toContain("Fresh Research");
+			expect(system?.content).toContain("OPENAI-IMAGE-2-DOCS-MARKER");
+		});
+
+		it("does NOT research for non-technical requests", async () => {
+			mockLLMRouter = createMockLLMRouter({
+				content: "Son las 3 de la tarde.",
+				finishReason: "stop",
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const researcher = { research: vi.fn() };
+			runtime.setResearcher(researcher as unknown as SkillResearcher);
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				addTaskLedgerEntry: vi.fn(),
+			};
+			runtime.setChatManager(mockChatManager as never);
+
+			await runtime.processMessage("¿qué hora es?", "conv-noop");
+
+			expect(researcher.research).not.toHaveBeenCalled();
 		});
 	});
 

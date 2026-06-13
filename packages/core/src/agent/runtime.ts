@@ -33,6 +33,7 @@ import type { UserProfileManager } from "../memory/user-profile.js";
 import { WorkingMemory } from "../memory/working-memory.js";
 import type { SkillLoader } from "../skills/loader.js";
 import type { LoadedSkill } from "../skills/types.js";
+import { SkillResearcher } from "../skills/researcher.js";
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
@@ -202,6 +203,7 @@ export class AgentRuntime {
 	private skillLoader: SkillLoader;
 	private toolRegistry?: ToolRegistry;
 	private toolExecutor?: ToolExecutor;
+	private researcher?: SkillResearcher;
 	private dailyMemory?: GlobalDailyMemory;
 	private userProfileManager?: UserProfileManager;
 	private memoryOrchestrator?: MemoryOrchestrator;
@@ -283,6 +285,14 @@ export class AgentRuntime {
 	setToolSystem(registry: ToolRegistry, executor: ToolExecutor): void {
 		this.toolRegistry = registry;
 		this.toolExecutor = executor;
+	}
+
+	/**
+	 * Cablea el investigador de documentación fresca (Context7 → web → browser).
+	 * Lo usa buildContext para inyectar docs verificadas antes de tareas de código.
+	 */
+	setResearcher(researcher: SkillResearcher): void {
+		this.researcher = researcher;
 	}
 
 	setDailyMemory(dailyMemory: GlobalDailyMemory): void {
@@ -3546,6 +3556,25 @@ export class AgentRuntime {
 		return lines.join("\n");
 	}
 
+	/**
+	 * Detecta pedidos que implican escribir/modificar código técnico y, por tanto,
+	 * merecen research fresco (Context7 → web → browser) antes de responder, para
+	 * no asumir endpoints, nombres de modelo/versiones ni compatibilidad del stack.
+	 */
+	private isCodegenRequest(message: string): boolean {
+		const text = message.toLowerCase();
+		const tech =
+			SkillResearcher.isTechnicalText(message) ||
+			/\b(openai|anthropic|claude|gemini|google ai|stripe|vercel|supabase|firebase|aws|azure|hugging ?face|replicate|together|groq|mistral|zhipu|deepseek)\b/.test(
+				text,
+			);
+		const codeVerb =
+			/\b(crea|crear|creaci(?:ó|o)n|desarroll[ao]|implement[ao]|construy[ea]|build|program[ao]|codific[ao]|c(?:ó|o)digo|app|aplicaci(?:ó|o)n|script|funci(?:ó|o)n|herramienta|tool|endpoint|integr[ao]|integrar|configur[ao])\b/.test(
+				text,
+			);
+		return tech && codeVerb;
+	}
+
 	private async buildContext(
 		memories: MemoryContext,
 		skills: LoadedSkill[],
@@ -3644,6 +3673,24 @@ export class AgentRuntime {
 				})
 				.join("\n");
 			systemContent += `\n\n# Learned Operating Guidance\nUse these prior operational learnings when they are relevant. Prefer higher-confidence procedures and avoid listed anti-patterns.\n${guidance}`;
+		}
+
+		// Fresh research before codegen: for technical/code-writing requests, fetch
+		// up-to-date docs (Context7 -> web -> browser) and ground the response in them
+		// so the agent does not assume endpoints, model names, versions or compatibility.
+		if (this.researcher && this.isCodegenRequest(userMessage)) {
+			try {
+				const research = await this.researcher.research({
+					description: userMessage,
+					keywords: [],
+					domains: [],
+				});
+				if (research.context) {
+					systemContent += `\n\n# Fresh Research (verified — prefer over assumptions)\nUp-to-date documentation gathered for this request. Ground your code in it. Verify the exact model/library names, endpoints, request/response shapes and current versions, and confirm compatibility across the stack you choose. Do NOT invent APIs, options or signatures that are not present here.\nSources: ${research.sources.join(", ") || "n/a"}\n\n${research.context}`;
+				}
+			} catch {
+				/* best-effort: proceed without fresh research */
+			}
 		}
 
 		const selectedAgentContext = this.formatSelectedAgentContext(selectedAgent);
@@ -3759,7 +3806,8 @@ export class AgentRuntime {
 		systemContent += `\n\nCRITICAL SYSTEM INSTRUCTION:
 - You have access to a persistent Long-Term Memory (LTM) system.
 - NEVER claim that you do not have memory or that "each conversation starts fresh".
-- If no memories are provided in the context below, simply state that you don't have relevant information.`;
+- If no memories are provided in the context below, simply state that you don't have relevant information.
+- RESEARCH BEFORE CODING: when a request involves writing or modifying code that uses a library, framework, API or SDK, you MUST ground it in verified, up-to-date information — never assume. When a "# Fresh Research" section is provided, use it as the source of truth. If it is missing or insufficient, call context7 / web search first to confirm the correct endpoint, model/library name, request shape and current version, and verify compatibility across the stack before writing code.`;
 
 		systemContent += `\n\n## AUTHENTICATED BROWSING (MANDATORY)
 Your browser has PERSISTENT SESSIONS. Cookies and login state are automatically saved to disk and restored when revisiting sites. This means:

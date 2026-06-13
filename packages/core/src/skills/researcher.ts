@@ -129,7 +129,12 @@ export class SkillResearcher {
 		return this.classifyHeuristic(text, input.domains);
 	}
 
-	private classifyHeuristic(text: string, domains: string[]): boolean {
+	/**
+	 * Heurística técnica/documentable compartida (skills y codegen general).
+	 * Estática/pública para que el runtime la reutilice al detectar pedidos de
+	 * código que merecen research fresco antes de responder.
+	 */
+	static isTechnicalText(text: string, domains: string[] = []): boolean {
 		const lower = text.toLowerCase();
 		if (
 			/\b(api|sdk|librer(?:í|i)a|framework|package|m(?:ó|o)dulo|endpoint|cli|library|compiler|runtime)\b/.test(
@@ -148,6 +153,10 @@ export class SkillResearcher {
 		if (domains.some((d) => /code|api|backend|frontend|devops|database|web|ml|data|cloud/i.test(d)))
 			return true;
 		return false;
+	}
+
+	private classifyHeuristic(text: string, domains: string[]): boolean {
+		return SkillResearcher.isTechnicalText(text, domains);
 	}
 
 	private async classifyWithLlm(text: string): Promise<boolean> {

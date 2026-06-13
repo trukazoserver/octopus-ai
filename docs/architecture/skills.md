@@ -176,6 +176,12 @@ skill con freshInfo = { sources, fetchedAt, summary }
 | **Trazabilidad** | Cada skill guarda `freshInfo = { sources, fetchedAt, summary }` con las fuentes consultadas. |
 | **Sin LLM** | Si no hay `router` o la skill no es técnica, se usa el generador heurístico (comportamiento anterior). |
 
+### También al programar (no solo al crear skills)
+
+El mismo `SkillResearcher` alimenta al **agente en tiempo real**, no solo a las skills. Cuando un pedido implica **escribir o modificar código técnico** (crear una herramienta, una app, un script, integrar una API), el runtime lo detecta (`isCodegenRequest`) y **investiga antes de responder**: obtiene la doc actualizada (Context7 → web → browser) y la inyecta como `# Fresh Research (verified)` en el contexto, junto a una directiva permanente que obliga a verificar nombres de modelo/librería, endpoints, versiones actuales y **compatibilidad del stack**, sin asumir.
+
+Así, pedir p. ej. *"crea una herramienta de generación de imagen con OpenAI Image 2"* hace que el agente trabaje con el endpoint y el nombre de modelo reales y actuales, en vez de suposiciones. Para pedidos no técnicos no se investiga (eficiencia).
+
 ### Activar Context7 (opcional, recomendado)
 
 Context7 es gratuito y **no requiere API key**. Añádelo como MCP server en `~/.octopus/config.json`:
