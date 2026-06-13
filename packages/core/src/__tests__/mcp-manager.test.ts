@@ -159,4 +159,36 @@ describe("MCPManager", () => {
 		expect(registry.has("zai-zread__read_file")).toBe(false);
 		expect(registry.has("read_file")).toBe(true);
 	});
+
+	it("redacts secrets from MCP tool errors", async () => {
+		const registry = new ToolRegistry();
+		mockRequest.mockResolvedValue({
+			tools: [
+				{
+					name: "leaky_tool",
+					description: "Leaks an error",
+					inputSchema: {},
+				},
+			],
+		});
+		mockCallTool.mockRejectedValue(
+			new Error("failed with apiKey=sk-testSecretValue12345"),
+		);
+
+		const manager = new MCPManager();
+		manager.setToolRegistry(registry);
+		await manager.addServer("leaky", {
+			command: "node",
+			args: [],
+			env: {},
+		});
+
+		const tool = registry.get("leaky_tool");
+		expect(tool).toBeDefined();
+		const result = await tool?.handler({}, {} as never);
+
+		expect(result?.success).toBe(false);
+		expect(result?.error).toContain("[REDACTED]");
+		expect(result?.error).not.toContain("sk-testSecretValue12345");
+	});
 });

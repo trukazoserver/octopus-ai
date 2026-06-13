@@ -120,6 +120,31 @@ El sistema usa SQLite con la extensión VSS (Vector Similarity Search) para bús
 
 Adicionalmente, el core exporta `FTSSearchEngine`, un componente basado en SQLite FTS5 para despliegues que necesiten complementar la búsqueda vectorial con coincidencias exactas de texto.
 
+### FTS5 y el WASM personalizado
+
+> **Importante:** el WASM que sql.js 1.12.0 trae por defecto **no incluye FTS5** (al instanciar la tabla virtual se obtiene `no such module: fts5`). Para disponer de búsqueda de texto completo, Octopus carga un **WASM compilado a medida con FTS5 habilitado**.
+
+| Pieza | Ruta | Descripción |
+|---|---|---|
+| WASM FTS5 | `packages/core/src/assets/sql-wasm-fts5.wasm` | Binario compilado desde sql.js 1.12.0 con `-DSQLITE_ENABLE_FTS5` |
+| Script de build | `packages/core/scripts/build-sqljs-fts5.sh` | Recompila el WASM con Emscripten 3.1.64 + SQLite 3.45.2 |
+| Cargador | `packages/core/src/storage/sqlite.ts` (`locateCustomWasm`) | Resuelve el WASM en `dist/assets` o `src/assets` y cae al default con un aviso si no existe |
+| Comando | `pnpm --filter @octopus-ai/core build:wasm` | Regenera el binario (solo necesario al actualizar sql.js) |
+
+`FTSSearchEngine.initialize()` crea la tabla `memory_fts USING fts5(... tokenize='unicode61 remove_diacritics 2')`; si FTS5 no está disponible, degrada de forma transparente a una búsqueda léxica (`fallbackSearch`) para que la memoria siga funcionando.
+
+#### Ranking híbrido
+
+La búsqueda FTS5 no devuelve resultados por BM25 puro: el score final combina la relevancia BM25 normalizada con **señales de memoria** para que coincidencias directas tengan prioridad:
+
+| Señal | Efecto | Origen |
+|---|---|---|
+| Token discriminante (identificador) | Se priorizan los tokens **más largos** al construir la query FTS5, para que un identificador (p. ej. `FocusCobaltPublic`, una API key, un usuario) no quede fuera del límite de tokens | `sanitizeQuery` |
+| Tipo de memoria | `semantic`/`user`/`org` suman; `episodic` resta | `directMemoryTypeBoost` |
+| Negación del asistente ("denial echo") | Penaliza recuerdos donde el agente respondió "no lo recuerdo" | `isAssistantMemoryDenialEcho` |
+
+El orden final se calcula con estas señales en **ambos** caminos (FTS5 real y fallback léxico), de modo que un recuerdo semántico directo prevalezca sobre un "denial echo" incluso cuando este último tenga mejor BM25. Los pesos de la búsqueda híbrida (FTS vs vector) son configurables en `FTSSearchConfig` (`ftsWeight`, `vectorWeight`).
+
 ---
 
 ## Orquestación Avanzada

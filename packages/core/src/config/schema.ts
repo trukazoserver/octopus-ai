@@ -271,9 +271,9 @@ const ChannelsSchema = Type.Object({
 	telegram: ChannelSchema,
 	discord: ChannelSchema,
 	slack: ChannelSchema,
-	teams: ChannelSchema,
-	signal: ChannelSchema,
-	wechat: ChannelSchema,
+	teams: Type.Optional(ChannelSchema),
+	signal: Type.Optional(ChannelSchema),
+	wechat: Type.Optional(ChannelSchema),
 	webchat: Type.Object({ enabled: Type.Boolean({ default: true }) }),
 });
 
@@ -428,6 +428,7 @@ const ForgeSchema = Type.Object({
 	includeExamples: Type.Boolean({ default: true }),
 	includeTemplates: Type.Boolean({ default: true }),
 	includeAntiPatterns: Type.Boolean({ default: true }),
+	llmGeneration: Type.Boolean({ default: true }),
 });
 
 const ImprovementSchema = Type.Object({
@@ -452,6 +453,26 @@ const RegistrySchema = Type.Object({
 	}),
 });
 
+const Context7Schema = Type.Object({
+	enabled: Type.Boolean({ default: true }),
+	mcpServer: Type.String({ default: "context7" }),
+	httpEndpoint: Type.String({ default: "https://context7.com" }),
+	apiKey: Type.Optional(Type.String()),
+	timeoutMs: Type.Number({ default: 8000 }),
+});
+
+const ResearchSchema = Type.Object({
+	enabled: Type.Boolean({ default: true }),
+	onlyTechnical: Type.Boolean({ default: true }),
+	useLlmClassifier: Type.Boolean({ default: false }),
+	context7: Context7Schema,
+	webSearchTool: Type.String({ default: "zai-web-search" }),
+	webReaderTool: Type.String({ default: "zai-web-reader" }),
+	browserFetchTool: Type.String({ default: "browser_navigate" }),
+	maxContextTokens: Type.Number({ default: 2000 }),
+	maxSources: Type.Number({ default: 4 }),
+});
+
 const SkillsSchema = Type.Object({
 	enabled: Type.Boolean({ default: true }),
 	autoCreate: Type.Boolean({ default: true }),
@@ -460,6 +481,7 @@ const SkillsSchema = Type.Object({
 	improvement: ImprovementSchema,
 	loading: LoadingSchema,
 	registry: RegistrySchema,
+	research: Type.Optional(ResearchSchema),
 });
 
 const LearningSchema = Type.Object({
@@ -493,6 +515,49 @@ const SecuritySchema = Type.Object({
 		default: ["~/Documents", "~/Desktop"],
 	}),
 	sandboxCommands: Type.Boolean({ default: true }),
+	commandApproval: Type.Object({
+		mode: Type.Union(
+			[Type.Literal("manual"), Type.Literal("smart"), Type.Literal("off")],
+			{ default: "smart" },
+		),
+		timeoutMs: Type.Number({ default: 30000, minimum: 1000 }),
+		allowlist: Type.Array(Type.String(), { default: [] }),
+	}),
+	redaction: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		mask: Type.String({ default: "[REDACTED]" }),
+		extraSecretKeys: Type.Array(Type.String(), { default: [] }),
+	}),
+	urlPolicy: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		allowedProtocols: Type.Array(Type.String(), {
+			default: ["https:", "http:"],
+		}),
+		allowPrivateNetworks: Type.Boolean({ default: false }),
+		dnsLookup: Type.Object({
+			enabled: Type.Boolean({ default: true }),
+			failClosed: Type.Boolean({ default: true }),
+		}),
+		blocklist: Type.Array(Type.String(), { default: [] }),
+		allowlist: Type.Array(Type.String(), { default: [] }),
+	}),
+	envFiltering: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		allowlist: Type.Array(Type.String(), { default: [] }),
+		blocklist: Type.Array(Type.String(), { default: [] }),
+	}),
+	contentScanning: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		mode: Type.Union(
+			[Type.Literal("report"), Type.Literal("annotate"), Type.Literal("block")],
+			{ default: "annotate" },
+		),
+		blockSeverity: Type.Union(
+			[Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")],
+			{ default: "high" },
+		),
+		extraPatterns: Type.Array(Type.String(), { default: [] }),
+	}),
 });
 
 const MCPServerEntrySchema = Type.Object({
@@ -506,12 +571,19 @@ const MCPServerEntrySchema = Type.Object({
 });
 
 const ContinuityGuardSchema = Type.Object({
-		enabled: Type.Boolean({ default: true }),
-		maxAutoContinuations: Type.Integer({ default: 10, minimum: 1 }),
-		truncationDetection: Type.Boolean({ default: true }),
-	});
+	enabled: Type.Boolean({ default: true }),
+	maxAutoContinuations: Type.Integer({ default: 10, minimum: 1 }),
+	truncationDetection: Type.Boolean({ default: true }),
+	stallDetection: Type.Optional(Type.Boolean({ default: true })),
+	maxStallForcings: Type.Optional(
+		Type.Integer({ default: 3, minimum: 0 }),
+	),
+	stallSignatureHistory: Type.Optional(
+		Type.Integer({ default: 4, minimum: 1 }),
+	),
+});
 
-	const MCPchema = Type.Object({
+const MCPchema = Type.Object({
 	servers: Type.Record(Type.String(), MCPServerEntrySchema, { default: {} }),
 	autoDisabled: Type.Array(Type.String(), { default: [] }),
 });
@@ -586,10 +658,9 @@ const MascotsConfigSchema = Type.Object({
 });
 
 const TenacidadSchema = Type.Object({
-	level: Type.Union(
-		[Type.Literal("normal"), Type.Literal("tenaz")],
-		{ default: "default" },
-	),
+	level: Type.Union([Type.Literal("normal"), Type.Literal("tenaz")], {
+		default: "default",
+	}),
 	maxGenuineApiErrors: Type.Integer({ default: 3, minimum: 1 }),
 	streamErrorRetries: Type.Integer({ default: 3, minimum: 0, maximum: 10 }),
 	emptyResponseRetries: Type.Integer({ default: 3, minimum: 0, maximum: 10 }),

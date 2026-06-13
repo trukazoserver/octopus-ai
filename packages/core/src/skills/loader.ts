@@ -1,5 +1,9 @@
 import type { TaskDescription } from "../agent/types.js";
 import type { EmbeddingFunction } from "../memory/types.js";
+import {
+	ContentSafetyScanner,
+	type ContentSafetyScannerConfig,
+} from "../security/content-safety-scanner.js";
 import type { SkillRegistry } from "./registry.js";
 import type { LoadedSkill, Skill, TaskNeeds } from "./types.js";
 
@@ -9,12 +13,14 @@ export interface SkillLoaderConfig {
 	progressiveLevels: boolean;
 	autoUnload: boolean;
 	searchThreshold: number;
+	contentScanning?: ContentSafetyScannerConfig;
 }
 
 export class SkillLoader {
 	private registry: SkillRegistry;
 	private embedFn: EmbeddingFunction;
 	private config: SkillLoaderConfig;
+	private contentScanner: ContentSafetyScanner;
 	private loaded: Map<string, LoadedSkill> = new Map();
 
 	constructor(
@@ -25,10 +31,14 @@ export class SkillLoader {
 		this.registry = registry;
 		this.embedFn = embedFn;
 		this.config = { enabled: true, ...config };
+		this.contentScanner = new ContentSafetyScanner(this.config.contentScanning);
 	}
 
 	updateConfig(config: Partial<SkillLoaderConfig>): void {
 		this.config = { ...this.config, ...config };
+		if (config.contentScanning) {
+			this.contentScanner = new ContentSafetyScanner(config.contentScanning);
+		}
 		if (config.enabled === false || config.autoUnload === true) {
 			this.unloadSkills();
 		}
@@ -353,7 +363,12 @@ export class SkillLoader {
 			}
 		}
 
-		return parts.join("\n");
+		const content = parts.join("\n");
+		const scan = this.contentScanner.scan(content);
+		if (!scan.allowed) {
+			return `# ${skill.name}\nThis skill was blocked by the content safety scanner and was not loaded. Findings: ${scan.findings.map((finding) => `${finding.severity}:${finding.id}`).join(", ")}`;
+		}
+		return this.contentScanner.annotate(content, `skill:${skill.name}`);
 	}
 
 	private selectBestExample(

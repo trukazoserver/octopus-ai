@@ -1,6 +1,10 @@
 import { promises as fs } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgentConfig } from "../agent/types.js";
+import {
+	ContentSafetyScanner,
+	type ContentSafetyScannerConfig,
+} from "../security/content-safety-scanner.js";
 import { createLogger } from "../utils/logger.js";
 
 /**
@@ -71,9 +75,14 @@ export interface ToolPreferences {
 
 export class SoulParser {
 	private workspacePath: string;
+	private contentScanner: ContentSafetyScanner;
 
-	constructor(workspacePath: string) {
+	constructor(
+		workspacePath: string,
+		options: { contentScanning?: ContentSafetyScannerConfig } = {},
+	) {
 		this.workspacePath = resolve(workspacePath);
+		this.contentScanner = new ContentSafetyScanner(options.contentScanning);
 	}
 
 	/**
@@ -152,7 +161,10 @@ export class SoulParser {
 		}
 
 		// Build system prompt from all sections
-		config.systemPrompt = this.buildSystemPromptFromSoul(config, content);
+		config.systemPrompt = this.contentScanner.annotate(
+			this.buildSystemPromptFromSoul(config, content),
+			"SOUL.md",
+		);
 
 		logger.info(`Parsed SOUL.md: agent "${config.name}"`);
 		return config;

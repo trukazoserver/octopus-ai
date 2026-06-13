@@ -51,6 +51,7 @@ import type {
 } from "../memory/types.js";
 import type { MCPManagedServer } from "../plugins/mcp/manager.js";
 import { getZaiMCPConfigs } from "../plugins/mcp/zai-servers.js";
+import { SecretRedactor } from "../security/secret-redactor.js";
 import type { Skill } from "../skills/types.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
 import { MCP_CATALOG } from "./mcp-catalog.js";
@@ -170,6 +171,8 @@ const BROWSER_TOOL_ENV_KEYS = new Set([
 	"DECODO_API_PASSWORD",
 ]);
 
+const API_CONFIG_REDACTOR = new SecretRedactor({ mask: "****" });
+
 function getSecretPreview(value: string): string {
 	if (value.length <= 8) return "configured";
 	return `${value.slice(0, 6)}...${value.slice(-4)}`;
@@ -203,6 +206,7 @@ export interface MediaItem {
 
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
 const MEDIA_META_PATH = join(MEDIA_DIR, "meta.json");
+const MEDIA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 const MIME_EXTENSIONS: Record<string, string> = {
 	"image/png": ".png",
@@ -438,14 +442,9 @@ function setNestedValue(
 	}
 }
 
-function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
-	const masked = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
-	const sensitiveKeyPattern =
-		/(apiKey|accessToken|refreshToken|idToken|token|secret|password|privateKey|credentialsJson|cookie|session)/i;
-	const isSensitiveKey = (key: string): boolean =>
-		!/(env|envVar)$/i.test(key) && sensitiveKeyPattern.test(key);
-	const maskUrlCredentials = (value: unknown): unknown => {
-		if (typeof value !== "string" || value.length === 0) return value;
+function maskUrlCredentials(value: unknown, seen = new WeakSet()): unknown {
+	if (typeof value === "string") {
+		if (value.length === 0) return value;
 		try {
 			const url = new URL(value);
 			if (url.username || url.password) {
@@ -456,25 +455,27 @@ function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 		} catch {
 			return value;
 		}
-	};
-	const redact = (value: unknown, key = ""): unknown => {
-		if (typeof value === "string") {
-			const urlMasked = maskUrlCredentials(value);
-			if (isSensitiveKey(key) && value.length > 0) return "****";
-			return urlMasked;
-		}
-		if (!value || typeof value !== "object") return value;
-		if (Array.isArray(value)) return value.map((item) => redact(item, key));
+	}
+	if (!value || typeof value !== "object") return value;
+	if (seen.has(value)) return "[Circular]";
+	seen.add(value);
+	if (Array.isArray(value)) {
+		return value.map((item) => maskUrlCredentials(item, seen));
+	}
 
-		const record = value as Record<string, unknown>;
-		for (const [childKey, childValue] of Object.entries(record)) {
-			record[childKey] = redact(childValue, childKey);
-		}
-		return record;
-	};
-
-	redact(masked);
+	const masked: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(value)) {
+		masked[key] = maskUrlCredentials(item, seen);
+	}
 	return masked;
+}
+
+function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
+	const cloned = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+	return API_CONFIG_REDACTOR.redact(maskUrlCredentials(cloned)) as Record<
+		string,
+		unknown
+	>;
 }
 
 function configuredApiKey(config: OctopusConfig | undefined): string {
@@ -1211,10 +1212,7 @@ export class TransportServer {
 					void this.handleKanbanTaskAction(res, req, taskId, action);
 					return;
 				}
-				if (
-					req.method === "GET" &&
-					pathname === "/api/kanban/workers/active"
-				) {
+				if (req.method === "GET" && pathname === "/api/kanban/workers/active") {
 					void this.handleKanbanWorkersActive(res);
 					return;
 				}
@@ -5476,9 +5474,7 @@ export class TransportServer {
 		}
 	}
 
-	private async handleKanbanWorkersActive(
-		res: ServerResponse,
-	): Promise<void> {
+	private async handleKanbanWorkersActive(res: ServerResponse): Promise<void> {
 		try {
 			const dispatcher = this.system?.kanbanDispatcher;
 			if (!dispatcher) {
@@ -5501,16 +5497,20 @@ export class TransportServer {
 
 				if (workflowManager.getRunSnapshot) {
 					const runIds = new Set(
-						activeTasks.map((t: any) => t?.run_id).filter(Boolean),
+						activeTasks
+							.map((task) => (task as { run_id?: unknown })?.run_id)
+							.filter((runId): runId is string => typeof runId === "string"),
 					);
 					const snapshotResults = await Promise.all(
 						[...runIds].map((runId) =>
 							workflowManager.getRunSnapshot(runId).catch(() => null),
 						),
 					);
-					leases = snapshotResults
-						.map((s: any) => s?.leases ?? [])
-						.flat();
+					leases = snapshotResults.flatMap((snapshot) => {
+						const snapshotLeases = (snapshot as { leases?: unknown[] } | null)
+							?.leases;
+						return Array.isArray(snapshotLeases) ? snapshotLeases : [];
+					});
 				}
 			}
 
@@ -5548,7 +5548,8 @@ export class TransportServer {
 
 			const columns: Record<string, unknown[]> = {};
 			for (const task of snapshot.tasks) {
-				const status = (task as any).status ?? "unknown";
+				const rawStatus = (task as { status?: unknown }).status;
+				const status = typeof rawStatus === "string" ? rawStatus : "unknown";
 				if (!columns[status]) columns[status] = [];
 				columns[status].push(task);
 			}
@@ -5568,12 +5569,11 @@ export class TransportServer {
 		}
 	}
 
-	private async handleKanbanBlackboardGet(
-		res: ServerResponse,
-	): Promise<void> {
+	private async handleKanbanBlackboardGet(res: ServerResponse): Promise<void> {
 		try {
-			const bus =
-				this.system?.agentRuntime?.getOrchestrator?.()?.getCoordinationBus?.();
+			const bus = this.system?.agentRuntime
+				?.getOrchestrator?.()
+				?.getCoordinationBus?.();
 			if (!bus) {
 				jsonRes(res, 200, {
 					sharedState: {},
@@ -5588,8 +5588,10 @@ export class TransportServer {
 			const messages = bus.getMessagesForAgent("*");
 			const summary = bus.getCoordinationSummary();
 			const sharedState: Record<string, unknown> = {};
-			for (const [key, value] of (bus as any).sharedState?.entries?.() ??
-				[]) {
+			const sharedStateEntries = (
+				bus as { sharedState?: { entries?: () => Iterable<[string, unknown]> } }
+			).sharedState?.entries?.();
+			for (const [key, value] of sharedStateEntries ?? []) {
 				sharedState[key] = value;
 			}
 			jsonRes(res, 200, {
@@ -5613,8 +5615,9 @@ export class TransportServer {
 		res: ServerResponse,
 	): Promise<void> {
 		try {
-			const bus =
-				this.system?.agentRuntime?.getOrchestrator?.()?.getCoordinationBus?.();
+			const bus = this.system?.agentRuntime
+				?.getOrchestrator?.()
+				?.getCoordinationBus?.();
 			if (!bus) {
 				jsonRes(res, 503, {
 					error: "Agent coordination bus not available",
@@ -5651,7 +5654,11 @@ export class TransportServer {
 						runId: run.id,
 						eventType: "shared_state_update",
 						message: `Blackboard key updated: ${key}`,
-						metadata: { source: "kanban_blackboard_api", key, value: body.value },
+						metadata: {
+							source: "kanban_blackboard_api",
+							key,
+							value: body.value,
+						},
 					});
 				}
 			}
@@ -5663,9 +5670,7 @@ export class TransportServer {
 		}
 	}
 
-	private async handleKanbanInspect(
-		res: ServerResponse,
-	): Promise<void> {
+	private async handleKanbanInspect(res: ServerResponse): Promise<void> {
 		try {
 			const dispatcher = this.system?.kanbanDispatcher;
 			const workflowManager = this.system?.workflowManager;
@@ -6498,11 +6503,13 @@ export class TransportServer {
 	} | null {
 		// Strip any extension from the id (e.g. "uuid.png" -> "uuid")
 		const pureId = id.replace(/\.[^.]+$/, "");
+		if (!MEDIA_ID_PATTERN.test(pureId)) return null;
 		const items = loadMediaMeta();
 		const item = items.find((m) => m.id === pureId);
 		if (!item) return null;
 		const ext = extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
-		const filePath = join(MEDIA_DIR, pureId + ext);
+		const filePath = resolveRelativePathInside(MEDIA_DIR, pureId + ext);
+		if (!filePath) return null;
 		if (!existsSync(filePath)) return null;
 		return { item, pureId, filePath, size: statSync(filePath).size };
 	}
@@ -6519,7 +6526,14 @@ export class TransportServer {
 				return;
 			}
 
-			const posterPath = join(MEDIA_DIR, `${resolved.pureId}.poster.jpg`);
+			const posterPath = resolveRelativePathInside(
+				MEDIA_DIR,
+				`${resolved.pureId}.poster.jpg`,
+			);
+			if (!posterPath) {
+				jsonRes(res, 404, { error: "Media not found" });
+				return;
+			}
 			if (!existsSync(posterPath)) {
 				const result = spawnSync(
 					"ffmpeg",
@@ -6636,7 +6650,11 @@ export class TransportServer {
 			if (!item) return;
 			const ext =
 				extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
-			const filePath = join(MEDIA_DIR, id + ext);
+			const filePath = resolveRelativePathInside(MEDIA_DIR, id + ext);
+			if (!filePath) {
+				jsonRes(res, 404, { error: "Media not found" });
+				return;
+			}
 			try {
 				unlinkSync(filePath);
 			} catch {

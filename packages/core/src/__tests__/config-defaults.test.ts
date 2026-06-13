@@ -45,6 +45,9 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.channels.slack).toBeDefined();
 			expect(DEFAULT_CONFIG.channels.webchat).toBeDefined();
 			expect(DEFAULT_CONFIG.channels.webchat.enabled).toBe(true);
+			expect(DEFAULT_CONFIG.channels.teams).toBeUndefined();
+			expect(DEFAULT_CONFIG.channels.signal).toBeUndefined();
+			expect(DEFAULT_CONFIG.channels.wechat).toBeUndefined();
 		});
 
 		it("should have connection config", () => {
@@ -118,11 +121,22 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.security).toBeDefined();
 			expect(DEFAULT_CONFIG.security.memoryApiKey).toBe("");
 			expect(DEFAULT_CONFIG.security.sandboxCommands).toBe(true);
+			expect(DEFAULT_CONFIG.security.commandApproval.mode).toBe("smart");
+			expect(DEFAULT_CONFIG.security.commandApproval.allowlist).toEqual([]);
+			expect(DEFAULT_CONFIG.security.redaction.enabled).toBe(true);
+			expect(DEFAULT_CONFIG.security.urlPolicy.enabled).toBe(true);
+			expect(DEFAULT_CONFIG.security.urlPolicy.allowPrivateNetworks).toBe(
+				false,
+			);
+			expect(DEFAULT_CONFIG.security.urlPolicy.dnsLookup.enabled).toBe(true);
+			expect(DEFAULT_CONFIG.security.urlPolicy.dnsLookup.failClosed).toBe(true);
+			expect(DEFAULT_CONFIG.security.envFiltering.enabled).toBe(true);
+			expect(DEFAULT_CONFIG.security.contentScanning.mode).toBe("annotate");
 		});
 
 		it("should enable tool iteration limits by default", () => {
 			expect(DEFAULT_CONFIG.tools.iterationLimit.enabled).toBe(true);
-			expect(DEFAULT_CONFIG.tools.iterationLimit.maxIterations).toBe(128);
+			expect(DEFAULT_CONFIG.tools.iterationLimit.maxIterations).toBe(256);
 		});
 
 		it("should have valid retrieval weight sum close to 1", () => {

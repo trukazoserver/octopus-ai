@@ -128,6 +128,44 @@ describe("CodeExecutor", () => {
 			);
 			expect(result.success).toBe(false);
 		}, 10000);
+
+		it("should reject workspace files that escape the execution session", async () => {
+			const tempDir = `${process.env.TEMP ?? "/tmp"}/octopus-test-traversal-${Date.now()}`;
+			const executor = new CodeExecutor({ tempDir });
+			await executor.initialize();
+
+			const result = await executor.executeCode(
+				'console.log("no-op")',
+				"javascript",
+				{ workspaceFiles: { "../escape.txt": "bad" } },
+			);
+
+			expect(result.success).toBe(false);
+			expect(result.stderr).toContain("Workspace file path denied");
+		});
+
+		it("should filter secret environment variables during execution", async () => {
+			const previous = process.env.OCTOPUS_TEST_API_KEY;
+			process.env.OCTOPUS_TEST_API_KEY = "secret-value";
+			try {
+				const executor = new CodeExecutor({
+					tempDir: `${process.env.TEMP ?? "/tmp"}/octopus-test-env-${Date.now()}`,
+				});
+				await executor.initialize();
+
+				const result = await executor.executeCode(
+					'console.log(process.env.OCTOPUS_TEST_API_KEY || "missing")',
+					"javascript",
+				);
+
+				expect(result.success).toBe(true);
+				expect(result.stdout.trim()).toBe("missing");
+			} finally {
+				if (previous === undefined)
+					process.env.OCTOPUS_TEST_API_KEY = undefined;
+				else process.env.OCTOPUS_TEST_API_KEY = previous;
+			}
+		});
 	});
 
 	describe("createTools", () => {

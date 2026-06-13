@@ -278,6 +278,8 @@ export {
 	SkillImprover,
 	SkillEvaluator,
 	SkillMarketplace,
+	SkillResearcher,
+	Context7HttpClient,
 } from "./skills/index.js";
 export type {
 	Skill,
@@ -289,6 +291,10 @@ export type {
 	SkillForgeConfig,
 	SharedSkillMetadata,
 	SkillMarketplaceConfig,
+	Context7Config,
+	SkillResearchConfig,
+	SkillResearchInput,
+	SkillResearchResult,
 } from "./skills/index.js";
 
 export { LearningEngine } from "./learning/index.js";
@@ -337,6 +343,32 @@ export type {
 	HumanScrollOptions,
 } from "./tools/index.js";
 export type { ProxyConfig as BrowserProxyConfig } from "./tools/index.js";
+
+export {
+	CommandApprovalService,
+	ContentSafetyScanner,
+	EnvironmentFilter,
+	isCommandHardBlocked,
+	SecretRedactor,
+	secretRedactor,
+	PathSafetyPolicy,
+	UrlSafetyPolicy,
+} from "./security/index.js";
+export type {
+	CommandApprovalConfig,
+	CommandApprovalMode,
+	CommandDecision,
+	ContentSafetyFinding,
+	ContentSafetyMode,
+	ContentSafetyScannerConfig,
+	ContentSafetyScanResult,
+	ContentSafetySeverity,
+	EnvironmentFilterConfig,
+	PathSafetyPolicyConfig,
+	SecretRedactorOptions,
+	UrlSafetyDecision,
+	UrlSafetyPolicyConfig,
+} from "./security/index.js";
 
 export {
 	TransportServer,

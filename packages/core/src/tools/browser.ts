@@ -7,6 +7,10 @@ import stealthPlugin from "puppeteer-extra-plugin-stealth";
 
 chromium.use(stealthPlugin());
 
+import {
+	UrlSafetyPolicy,
+	type UrlSafetyPolicyConfig,
+} from "../security/url-safety.js";
 import { HumanBehavior } from "./human-behavior.js";
 import type { ToolContext, ToolDefinition, ToolResult } from "./registry.js";
 
@@ -710,6 +714,7 @@ export interface BrowserConfig {
 	blockTrackerDomains?: boolean;
 	humanBehavior?: boolean;
 	autoDismissPopups?: boolean;
+	urlPolicy?: UrlSafetyPolicyConfig;
 }
 
 interface BrowserBlockDetectionResult {
@@ -735,6 +740,7 @@ export class BrowserTool {
 	private activeProvider: BrowserProvider | null = null;
 	private fingerprint: ReturnType<typeof generateFingerprint> | null = null;
 	private humanSim = new HumanBehavior();
+	private urlSafetyPolicy: UrlSafetyPolicy;
 	private lastSnapshot: {
 		id: string;
 		url: string;
@@ -745,6 +751,7 @@ export class BrowserTool {
 
 	constructor(config: BrowserConfig) {
 		this.config = config;
+		this.urlSafetyPolicy = new UrlSafetyPolicy(config.urlPolicy);
 	}
 
 	private ensureFingerprint(): ReturnType<typeof generateFingerprint> {
@@ -908,9 +915,25 @@ export class BrowserTool {
 		url: string,
 		options: Record<string, unknown> = {},
 	): Promise<unknown> {
+		await this.urlSafetyPolicy.assertAllowedAsync(
+			url,
+			"Browser navigation URL",
+		);
 		await this.loadSessionForUrl(url);
 		this.invalidateSnapshotCache();
-		return this.page.goto(url, options);
+		const response = await this.page.goto(url, options);
+		const finalUrl = this.page.url();
+		if (
+			typeof finalUrl === "string" &&
+			finalUrl &&
+			finalUrl !== "about:blank"
+		) {
+			await this.urlSafetyPolicy.assertAllowedAsync(
+				finalUrl,
+				"Browser redirect URL",
+			);
+		}
+		return response;
 	}
 
 	private getTwoCaptchaProxyConfig(): Record<string, unknown> | null {
@@ -1763,6 +1786,7 @@ export class BrowserTool {
 	async updateConfig(config: BrowserConfig): Promise<void> {
 		const previous = JSON.stringify(this.config);
 		this.config = { ...this.config, ...config };
+		this.urlSafetyPolicy = new UrlSafetyPolicy(this.config.urlPolicy);
 		if (JSON.stringify(this.config) !== previous) {
 			await this.close();
 		}
@@ -3382,7 +3406,13 @@ export class BrowserTool {
 									? params.proxyPool
 									: "premium",
 						};
-						if (url) body.url = url;
+						if (url) {
+							await this.urlSafetyPolicy.assertAllowedAsync(
+								url,
+								"Decodo scrape URL",
+							);
+							body.url = url;
+						}
 						if (query) body.query = query;
 						if (typeof params.target === "string" && params.target.trim())
 							body.target = params.target.trim();

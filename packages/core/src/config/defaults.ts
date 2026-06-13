@@ -103,9 +103,6 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		telegram: { enabled: false },
 		discord: { enabled: false },
 		slack: { enabled: false },
-		teams: { enabled: false },
-		signal: { enabled: false },
-		wechat: { enabled: false },
 		webchat: { enabled: true },
 	},
 	connection: {
@@ -206,6 +203,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			includeExamples: true,
 			includeTemplates: true,
 			includeAntiPatterns: true,
+			llmGeneration: true,
 		},
 		improvement: {
 			triggerOnSuccessRate: 0.7,
@@ -228,6 +226,22 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 				"writing",
 				"research",
 			],
+		},
+		research: {
+			enabled: true,
+			onlyTechnical: true,
+			useLlmClassifier: false,
+			context7: {
+				enabled: true,
+				mcpServer: "context7",
+				httpEndpoint: "https://context7.com",
+				timeoutMs: 8000,
+			},
+			webSearchTool: "zai-web-search",
+			webReaderTool: "zai-web-reader",
+			browserFetchTool: "browser_navigate",
+			maxContextTokens: 2000,
+			maxSources: 4,
 		},
 	},
 	learning: {
@@ -256,6 +270,38 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		memoryApiKey: "",
 		allowedPaths: ["~/Documents", "~/Desktop"],
 		sandboxCommands: true,
+		commandApproval: {
+			mode: "smart",
+			timeoutMs: 30000,
+			allowlist: [],
+		},
+		redaction: {
+			enabled: true,
+			mask: "[REDACTED]",
+			extraSecretKeys: [],
+		},
+		urlPolicy: {
+			enabled: true,
+			allowedProtocols: ["https:", "http:"],
+			allowPrivateNetworks: false,
+			dnsLookup: {
+				enabled: true,
+				failClosed: true,
+			},
+			blocklist: [],
+			allowlist: [],
+		},
+		envFiltering: {
+			enabled: true,
+			allowlist: [],
+			blocklist: [],
+		},
+		contentScanning: {
+			enabled: true,
+			mode: "annotate",
+			blockSeverity: "high",
+			extraPatterns: [],
+		},
 	},
 	tools: {
 		disabled: [],
@@ -305,6 +351,9 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		enabled: true,
 		maxAutoContinuations: 25,
 		truncationDetection: true,
+		stallDetection: true,
+		maxStallForcings: 3,
+		stallSignatureHistory: 4,
 	},
 	tenacidad: {
 		level: "normal",

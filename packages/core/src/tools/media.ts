@@ -8,7 +8,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, join, resolve, sep } from "node:path";
+import { basename, extname, join } from "node:path";
+import { PathSafetyPolicy } from "../security/path-safety-policy.js";
+import { resolveRelativePathInside } from "../utils/path-safety.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
@@ -120,31 +122,10 @@ function compactMetadata(metadata?: Record<string, unknown>): string {
 		.join(" | ");
 }
 
-function expandHome(filePath: string): string {
-	if (filePath === "~") return homedir();
-	if (filePath.startsWith(`~${sep}`) || filePath.startsWith("~/")) {
-		return join(homedir(), filePath.slice(2));
-	}
-	return filePath;
-}
-
-function isPathInside(child: string, parent: string): boolean {
-	return child === parent || child.startsWith(`${parent}${sep}`);
-}
-
-function resolveImportPath(filePath: string): string {
-	const resolved = resolve(expandHome(filePath));
-	const allowedRoots = [
-		homedir(),
-		join(homedir(), ".octopus"),
-		process.cwd(),
-	].map((root) => resolve(root));
-	if (!allowedRoots.some((root) => isPathInside(resolved, root))) {
-		throw new Error(
-			`Access denied: path '${resolved}' is not within allowed paths`,
-		);
-	}
-	return resolved;
+function createDefaultImportPathPolicy(): PathSafetyPolicy {
+	return new PathSafetyPolicy({
+		allowedPaths: [homedir(), join(homedir(), ".octopus"), process.cwd()],
+	});
 }
 
 export const mediaContext = {
@@ -190,7 +171,10 @@ export const mediaContext = {
 		} else {
 			filename = urlStr;
 		}
-		const filePath = join(MEDIA_DIR, filename);
+		const filePath = resolveRelativePathInside(MEDIA_DIR, filename);
+		if (!filePath) {
+			throw new Error(`Media path denied by path safety policy: ${urlStr}`);
+		}
 		if (!existsSync(filePath)) {
 			throw new Error(`Media not found: ${urlStr}`);
 		}
@@ -209,7 +193,10 @@ export const mediaContext = {
 	},
 };
 
-export function createMediaTools(): ToolDefinition[] {
+export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
+	const importPathPolicy = allowedPaths
+		? new PathSafetyPolicy({ allowedPaths })
+		: createDefaultImportPathPolicy();
 	return [
 		{
 			name: "save_media",
@@ -368,7 +355,10 @@ export function createMediaTools(): ToolDefinition[] {
 				}
 
 				try {
-					const sourcePath = resolveImportPath(inputPath);
+					const sourcePath = importPathPolicy.assertAllowed(
+						inputPath,
+						"Media import path",
+					);
 					if (!existsSync(sourcePath)) {
 						return {
 							success: false,

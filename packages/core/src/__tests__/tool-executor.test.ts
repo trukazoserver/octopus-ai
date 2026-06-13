@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ToolExecutor } from "../tools/executor.js";
 import { ToolRegistry } from "../tools/registry.js";
@@ -183,7 +184,7 @@ describe("ToolExecutor", () => {
 				path: "/etc/passwd",
 			});
 			expect(result.success).toBe(false);
-			expect(result.error).toContain("Access denied");
+			expect(result.error).toContain("outside allowed paths");
 		});
 
 		it("should allow paths within allowed paths", async () => {
@@ -201,6 +202,23 @@ describe("ToolExecutor", () => {
 			expect(result.output).toBe("file contents");
 		});
 
+		it("should block sibling paths that only share an allowed path prefix", async () => {
+			const tool = createPathTool();
+			registry.register(tool);
+			const allowedPath = path.join(process.cwd(), "safe-dir");
+			const executor = new ToolExecutor(registry, {
+				sandboxCommands: false,
+				allowedPaths: [allowedPath],
+			});
+
+			const result = await executor.execute("file-reader", {
+				path: `${allowedPath}-evil/file.txt`,
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.error).toContain("outside allowed paths");
+		});
+
 		it("should block dangerous commands in sandbox mode", async () => {
 			const tool = createCommandTool();
 			registry.register(tool);
@@ -213,7 +231,7 @@ describe("ToolExecutor", () => {
 				command: "rm -rf /",
 			});
 			expect(result.success).toBe(false);
-			expect(result.error).toContain("blocked by sandbox policy");
+			expect(result.error).toContain("hard security policy");
 		});
 
 		it("should block shutdown commands in sandbox mode", async () => {
@@ -228,7 +246,7 @@ describe("ToolExecutor", () => {
 				command: "shutdown -h now",
 			});
 			expect(result.success).toBe(false);
-			expect(result.error).toContain("blocked by sandbox policy");
+			expect(result.error).toContain("hard security policy");
 		});
 
 		it("should allow safe commands in sandbox mode", async () => {
@@ -245,7 +263,7 @@ describe("ToolExecutor", () => {
 			expect(result.success).toBe(true);
 		});
 
-		it("should allow dangerous commands when sandbox is off", async () => {
+		it("should still enforce hard-blocked commands when sandbox is off", async () => {
 			const tool = createCommandTool();
 			registry.register(tool);
 			const executor = new ToolExecutor(registry, {
@@ -256,7 +274,29 @@ describe("ToolExecutor", () => {
 			const result = await executor.execute("shell-runner", {
 				command: "rm -rf /",
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
+			expect(result.error).toContain("hard security policy");
+		});
+
+		it("should redact secrets from tool output and metadata", async () => {
+			const tool = createTestTool({
+				handler: vi.fn().mockResolvedValue({
+					success: true,
+					output: "apiKey=sk-testSecretValue12345",
+					metadata: { accessToken: "ghp_testSecretValue12345" },
+				} satisfies ToolResult),
+			});
+			registry.register(tool);
+			const executor = new ToolExecutor(registry, {
+				sandboxCommands: false,
+				allowedPaths: [],
+			});
+
+			const result = await executor.execute("test-tool", { input: "hello" });
+
+			expect(result.output).not.toContain("sk-testSecretValue12345");
+			expect(result.output).toContain("[REDACTED]");
+			expect(result.metadata?.accessToken).toBe("[REDACTED]");
 		});
 
 		it("should handle tool handler errors gracefully", async () => {

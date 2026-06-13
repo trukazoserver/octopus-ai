@@ -1,29 +1,67 @@
 import { nanoid } from "nanoid";
+import type { LLMRouter } from "../ai/router.js";
 import type { TaskDescription, TaskResult } from "../agent/types.js";
 import type { EmbeddingFunction } from "../memory/types.js";
 import type { SkillRegistry } from "./registry.js";
-import type { Skill, SkillForgeConfig } from "./types.js";
+import type { SkillResearcher } from "./researcher.js";
+import type { Skill, SkillForgeConfig, SkillResearchResult } from "./types.js";
 
 export class SkillForge {
 	private registry: SkillRegistry;
 	private embedFn: EmbeddingFunction;
 	private config: SkillForgeConfig;
+	private router?: LLMRouter;
+	private researcher?: SkillResearcher;
 	private readonly _FORGE_SYSTEM_PROMPT: string =
-		"You are a skill forge engine. Your task is to create, refine, and improve reusable skills from task outcomes. Generate clear, specific, actionable skill instructions with examples.";
+		"You are a skill forge engine. Your task is to create, refine, and improve reusable skills from task outcomes. Generate clear, specific, actionable skill instructions with examples. When fresh documentation is provided, ground the instructions in it and prefer it over general knowledge.";
 
 	constructor(
 		registry: SkillRegistry,
 		embedFn: EmbeddingFunction,
 		config: SkillForgeConfig,
+		deps?: { router?: LLMRouter; researcher?: SkillResearcher },
 	) {
 		this.registry = registry;
 		this.embedFn = embedFn;
 		this.config = config;
+		this.router = deps?.router;
+		this.researcher = deps?.researcher;
+	}
+
+	/** Inyección diferida: cablea el LLM y el researcher tras la construcción. */
+	setDeps(deps: { router?: LLMRouter; researcher?: SkillResearcher }): void {
+		if (deps.router) this.router = deps.router;
+		if (deps.researcher) this.researcher = deps.researcher;
 	}
 
 	async createSkill(task: TaskDescription, result: TaskResult): Promise<Skill> {
 		const name = this.generateSkillName(task);
-		const instructions = this.generateInstructions(task, result);
+
+		// Research fresh info (Context7 → web → browser) for technical/documentable skills.
+		let research: SkillResearchResult | undefined;
+		if (this.researcher) {
+			try {
+				research = await this.researcher.research({
+					description: task.description,
+					keywords: task.keywords,
+					domains: task.domains,
+				});
+			} catch {
+				/* best-effort: generate without research */
+			}
+		}
+		const useLLM =
+			this.config.llmGeneration !== false &&
+			!!this.router &&
+			!!research?.isTechnical;
+		const instructions = useLLM
+			? await this.generateInstructionsLLM(
+					task,
+					result,
+					research?.context ?? "",
+				)
+			: this.generateInstructions(task, result);
+
 		const example = `Task: ${task.description}\nResult: ${result.summary}\nWhat worked: ${result.whatWorked}`;
 
 		const keywords = task.keywords.slice(0, 10);
@@ -65,6 +103,15 @@ export class SkillForge {
 			},
 			dependencies: [],
 			related: [],
+			...(research && (research.context || research.sources.length)
+				? {
+						freshInfo: {
+							sources: research.sources,
+							fetchedAt: research.fetchedAt,
+							summary: research.summary,
+						},
+					}
+				: {}),
 		};
 
 		if (this.config.selfCritique) {
@@ -148,6 +195,58 @@ export class SkillForge {
 		}
 
 		return sections.join("\n");
+	}
+
+	/**
+	 * Genera instrucciones con el LLM, ancladas en la documentación actualizada
+	 * (freshContext) cuando está disponible. Cae al generador heurístico si el
+	 * LLM no devuelve contenido útil.
+	 */
+	private async generateInstructionsLLM(
+		task: TaskDescription,
+		result: TaskResult,
+		freshContext: string,
+	): Promise<string> {
+		const userLines: string[] = [
+			"# Task",
+			task.description,
+			"",
+			"# Outcome",
+			`Summary: ${result.summary}`,
+			`What worked: ${result.whatWorked}`,
+			`What could improve: ${result.whatCouldImprove}`,
+		];
+		if (result.patterns.length > 0) {
+			userLines.push("", "# Patterns");
+			for (const p of result.patterns) userLines.push(`- ${p}`);
+		}
+		if (task.domains.length > 0) {
+			userLines.push("", "# Domains", task.domains.join(", "));
+		}
+		if (freshContext) {
+			userLines.push(
+				"",
+				"# Fresh Documentation (authoritative — prefer over general knowledge)",
+				freshContext,
+			);
+		}
+		userLines.push(
+			"",
+			"# Your job",
+			"Write clear, specific, actionable SKILL INSTRUCTIONS in markdown (use ## sections) that a future agent can follow to reproduce this outcome. Incorporate the fresh documentation above where relevant; do not invent APIs, options, or signatures that are not present in it.",
+		);
+
+		const response = await this.router!.chat({
+			model: "default",
+			maxTokens: 1200,
+			temperature: 0.2,
+			messages: [
+				{ role: "system", content: this._FORGE_SYSTEM_PROMPT },
+				{ role: "user", content: userLines.join("\n") },
+			],
+		});
+		const generated = (response.content ?? "").trim();
+		return generated.length > 0 ? generated : this.generateInstructions(task, result);
 	}
 
 	private selfCritique(skill: Partial<Skill>): {

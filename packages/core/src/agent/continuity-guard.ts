@@ -4,12 +4,21 @@ export interface ContinuityGuardConfig {
 	enabled: boolean;
 	maxAutoContinuations: number;
 	truncationDetection: boolean;
+	/** Detect "promised-but-not-acted" responses and repeated text without tool calls. */
+	stallDetection: boolean;
+	/** Max number of forced re-prompts before giving up (warning + stop). */
+	maxStallForcings: number;
+	/** How many recent response signatures to remember for repetition detection. */
+	stallSignatureHistory: number;
 }
 
 export const DEFAULT_CONTINUITY_GUARD_CONFIG: ContinuityGuardConfig = {
 	enabled: true,
 	maxAutoContinuations: 25,
 	truncationDetection: true,
+	stallDetection: true,
+	maxStallForcings: 3,
+	stallSignatureHistory: 4,
 };
 
 export interface ContinuityState {
@@ -17,7 +26,23 @@ export interface ContinuityState {
 	continuationCount: number;
 	lastFinishReason: string | null;
 	totalToolIterations: number;
+	stallForceCount: number;
+	recentStallSignatures: string[];
 }
+
+export interface StallDecision {
+	force: boolean;
+	reason: string;
+	repeated: boolean;
+	exhausted: boolean;
+}
+
+/**
+ * Intent phrases that signal the model planned an imminent action in its text
+ * but did not emit the corresponding tool call. Bilingual ES/EN.
+ */
+const ACTION_PROMISE_RE =
+	/(lo agrego|lo añado|voy a (editar|agreg|añad|modific|cambi|cre|actualiz)|déjame.*?(editar|agreg|añad|modific|leer y .*?agreg|leer y .*?añad)|ahora:|let me (edit|add|update|modify|write|apply|read.*?(?:and|y).*?(?:edit|add|update|modify|write|apply))|i'?ll (edit|add|update|modify|write|apply)|adding now|applying now|updating now)/i;
 
 export class ContinuityGuard {
 	private config: ContinuityGuardConfig;
@@ -30,6 +55,8 @@ export class ContinuityGuard {
 			continuationCount: 0,
 			lastFinishReason: null,
 			totalToolIterations: 0,
+			stallForceCount: 0,
+			recentStallSignatures: [],
 		};
 	}
 
@@ -39,6 +66,8 @@ export class ContinuityGuard {
 			continuationCount: 0,
 			lastFinishReason: null,
 			totalToolIterations: 0,
+			stallForceCount: 0,
+			recentStallSignatures: [],
 		};
 	}
 
@@ -86,6 +115,114 @@ export class ContinuityGuard {
 		this.state.continuationCount++;
 	}
 
+	/**
+	 * Normalize response text into a signature for repetition comparison:
+	 * lowercase, strip code blocks/markdown noise, collapse whitespace.
+	 */
+	private normalizeForSignature(content: string): string {
+		return content
+			.toLowerCase()
+			.replace(/```[\s\S]*?```/g, " ")
+			.replace(/`[^`]*`/g, " ")
+			.replace(/[>*#_|]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim()
+			.slice(0, 500);
+	}
+
+	private hasActionPromise(content: string): boolean {
+		return ACTION_PROMISE_RE.test(content);
+	}
+
+	/**
+	 * Decide whether a turn that ended without tool calls should be forced into a
+	 * retry because the model promised an action it did not perform, or repeated
+	 * earlier text without progressing. Returns `exhausted` separately so the
+	 * caller can emit a final warning when the retry budget is spent.
+	 */
+	shouldForceActOnStall(
+		content: string,
+		finishReason: string | undefined,
+	): StallDecision {
+		const reason = finishReason ?? "stop";
+		const noSignal: StallDecision = {
+			force: false,
+			reason: "no-signal",
+			repeated: false,
+			exhausted: false,
+		};
+
+		if (!this.config.stallDetection) {
+			return { ...noSignal, reason: "disabled" };
+		}
+		// Truncation is handled by the length-continuation path.
+		if (reason === "length") {
+			return { ...noSignal, reason: "length-handled-elsewhere" };
+		}
+		if (!content || content.trim().length === 0) {
+			return { ...noSignal, reason: "empty" };
+		}
+
+		const exhausted = this.state.stallForceCount >= this.config.maxStallForcings;
+		if (exhausted) {
+			return { force: false, reason: "exhausted", repeated: false, exhausted: true };
+		}
+
+		const signature = this.normalizeForSignature(content);
+		const repeated = this.state.recentStallSignatures.includes(signature);
+		const promised = this.hasActionPromise(content);
+
+		if (!promised && !repeated) {
+			return noSignal;
+		}
+
+		return {
+			force: true,
+			reason: repeated ? "repeated-text-no-action" : "promised-action-no-toolcall",
+			repeated,
+			exhausted: false,
+		};
+	}
+
+	/** Record a stall: store the signature and bump the forced-retry counter. */
+	recordStall(content: string): void {
+		const signature = this.normalizeForSignature(content);
+		this.state.recentStallSignatures.push(signature);
+		while (this.state.recentStallSignatures.length > this.config.stallSignatureHistory) {
+			this.state.recentStallSignatures.shift();
+		}
+		this.state.stallForceCount++;
+	}
+
+	/** Clear accumulated stall state — call when the model produces real progress. */
+	clearStall(): void {
+		this.state.stallForceCount = 0;
+		this.state.recentStallSignatures = [];
+	}
+
+	buildForceActPrompt(stallReason: string, repeated: boolean): string {
+		const lines: string[] = [
+			"# PENDING ACTION — EXECUTE NOW",
+			"",
+			repeated
+				? "Your previous turns REPEATED the same intention/analysis without emitting any tool call. Repeating intent without acting is blocked."
+				: 'Your previous turn stated an intention to act (e.g. "lo agrego ahora" / "voy a editar" / "let me edit") but emitted NO tool call. Stating intent without acting is blocked.',
+			"",
+			"IMMEDIATELY emit the exact tool call you described. Do NOT re-explain, re-analyze, restate intent, quote the plan again, or produce another preamble.",
+			"- If you said you would edit/add an entry to a list: call the Edit tool now with the exact old_string/new_string (or Write).",
+			"- If you said you would modify code: call the Edit tool now with the exact old/new snippets.",
+			"Issue exactly ONE concrete tool call this turn. Any text before it must be a single short line at most.",
+		];
+		if (repeated) {
+			lines.push(
+				"",
+				"This is your final forced attempt before the run stops to avoid an infinite loop.",
+			);
+		}
+		lines.push("", `(stall reason: ${stallReason})`);
+		return lines.join("\n");
+	}
+
 	buildContinuePrompt(report?: ReconciliationReport | null): string {
 		const parts: string[] = [
 			"# AUTO-CONTINUATION",
@@ -105,6 +242,10 @@ export class ContinuityGuard {
 
 	get continuationCount(): number {
 		return this.state.continuationCount;
+	}
+
+	get stallForceCount(): number {
+		return this.state.stallForceCount;
 	}
 
 	get lastFinishReason(): string | null {

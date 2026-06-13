@@ -1,5 +1,10 @@
-import * as os from "node:os";
 import * as path from "node:path";
+import {
+	type CommandApprovalConfig,
+	CommandApprovalService,
+} from "../security/command-approval.js";
+import { PathSafetyPolicy } from "../security/path-safety-policy.js";
+import { SecretRedactor } from "../security/secret-redactor.js";
 import { mediaContext } from "./media.js";
 import { ToolRateLimiter } from "./rate-limiter.js";
 import type { ToolRateLimitConfig } from "./rate-limiter.js";
@@ -55,9 +60,11 @@ export interface ToolExecutionContext {
 export class ToolExecutor {
 	private registry: ToolRegistry;
 	private sandboxCommands: boolean;
-	private allowedPaths: string[];
+	private pathPolicy: PathSafetyPolicy;
 	private timeouts: Required<ToolTimeoutConfig>;
 	private rateLimiter: ToolRateLimiter;
+	private commandApproval: CommandApprovalService;
+	private redactor: SecretRedactor;
 
 	constructor(
 		registry: ToolRegistry,
@@ -66,15 +73,22 @@ export class ToolExecutor {
 			allowedPaths: string[];
 			timeouts?: ToolTimeoutConfig;
 			rateLimits?: ToolRateLimitConfig;
+			commandApproval?: CommandApprovalConfig;
+			redactor?: SecretRedactor;
 		},
 	) {
 		this.registry = registry;
 		this.sandboxCommands = config.sandboxCommands;
-		this.allowedPaths = config.allowedPaths.map((p) =>
-			path.resolve(p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p),
-		);
+		this.pathPolicy = new PathSafetyPolicy({
+			allowedPaths: config.allowedPaths,
+		});
 		this.timeouts = this.normalizeTimeouts(config.timeouts);
 		this.rateLimiter = new ToolRateLimiter(config.rateLimits);
+		this.commandApproval = new CommandApprovalService({
+			mode: config.sandboxCommands ? "smart" : "off",
+			...config.commandApproval,
+		});
+		this.redactor = config.redactor ?? new SecretRedactor();
 	}
 
 	updateConfig(config: {
@@ -384,7 +398,7 @@ export class ToolExecutor {
 		toolName: string,
 		result: ToolResult,
 	): Promise<ToolResult> {
-		if (!result.success) return result;
+		if (!result.success) return this.redactToolResult(result);
 
 		const savedMedia: SavedToolMedia[] = [];
 		const output = await this.sanitizeMediaPayloads(
@@ -400,7 +414,8 @@ export class ToolExecutor {
 			"metadata",
 		);
 
-		if (!output.changed && !metadata.changed) return result;
+		if (!output.changed && !metadata.changed)
+			return this.redactToolResult(result);
 
 		const mediaSummary = savedMedia
 			.map(
@@ -413,7 +428,7 @@ export class ToolExecutor {
 				? output.value
 				: JSON.stringify(output.value, null, 2);
 
-		return {
+		return this.redactToolResult({
 			...result,
 			output: `Generated media was saved to the Octopus media library.\n${mediaSummary}\nUse these URLs directly in the response; do not request or expose base64.\n\nSanitized tool output:\n${sanitizedOutput}`,
 			metadata: {
@@ -422,6 +437,21 @@ export class ToolExecutor {
 					: {}),
 				savedMedia,
 			},
+		});
+	}
+
+	private redactToolResult(result: ToolResult): ToolResult {
+		const redactedOutput =
+			typeof result.output === "string"
+				? this.redactor.redactText(result.output)
+				: (this.redactor.redact(result.output) as ToolResult["output"]);
+		return {
+			...result,
+			output: redactedOutput,
+			error: result.error ? this.redactor.redactText(result.error) : undefined,
+			metadata: result.metadata
+				? this.redactor.redact(result.metadata)
+				: undefined,
 		};
 	}
 
@@ -506,42 +536,24 @@ export class ToolExecutor {
 		}
 
 		for (const pathParam of this.getPathParams(params)) {
-			const resolved = path.resolve(
-				pathParam.startsWith("~")
-					? path.join(os.homedir(), pathParam.slice(1))
-					: pathParam,
-			);
-			if (
-				this.allowedPaths.length > 0 &&
-				!this.allowedPaths.some((allowed) => resolved.startsWith(allowed))
-			) {
+			try {
+				this.pathPolicy.assertAllowed(pathParam, "Tool path");
+			} catch (error) {
 				return {
 					success: false,
 					output: "",
-					error: `Access denied: path '${resolved}' is not within allowed paths`,
+					error: error instanceof Error ? error.message : String(error),
 				};
 			}
 		}
 
-		if (
-			this.sandboxCommands &&
-			params.command &&
-			typeof params.command === "string"
-		) {
-			const dangerous = [
-				/rm\s+-rf\s+\//,
-				/:\(\)\{\s*:\|\:&\s*\}/,
-				/\bformat\s+[a-zA-Z]:/i,
-				/\bdel\s+\/[sS]/,
-				/\bshutdown\b/,
-				/\breboot\b/,
-				/\bmkfs\b/,
-			];
-			if (dangerous.some((p) => p.test(params.command as string))) {
+		if (params.command && typeof params.command === "string") {
+			const decision = this.commandApproval.evaluate(params.command);
+			if (!decision.allowed) {
 				return {
 					success: false,
 					output: "",
-					error: "Command blocked by sandbox policy",
+					error: decision.reason ?? "Command blocked by security policy",
 				};
 			}
 		}
@@ -585,7 +597,7 @@ export class ToolExecutor {
 			return {
 				success: false,
 				output: "",
-				error: `Tool execution failed: ${message}`,
+				error: this.redactor.redactText(`Tool execution failed: ${message}`),
 			};
 		}
 	}

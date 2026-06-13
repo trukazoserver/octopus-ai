@@ -240,6 +240,7 @@ export class AgentRuntime {
 			this.continuityGuard = new ContinuityGuard({
 				...guardConfig,
 				maxAutoContinuations: guardConfig.maxAutoContinuations ?? 50,
+				maxStallForcings: guardConfig.maxStallForcings ?? 5,
 			});
 		} else {
 			this.continuityGuard = new ContinuityGuard(config.continuityGuard);
@@ -2452,6 +2453,12 @@ export class AgentRuntime {
 					(tc) => tc.function.name.length > 0,
 				);
 
+				// Real progress this turn (tool calls emitted): clear accumulated stall state
+				// so a fresh "promised-but-not-acted" cycle can be detected later.
+				if (validToolCalls.length > 0 && continuityGuard) {
+					continuityGuard.clearStall();
+				}
+
 								if (!hasContent && validToolCalls.length === 0) {
 					const persistence = this.getTenacidad();
 
@@ -2516,6 +2523,41 @@ export class AgentRuntime {
 							fullResponse += "\n\n[Auto-continuing...]\n\n";
 							yield "\n\n[Auto-continuing...]\n\n";
 							continue; // Continue the while loop for another LLM call
+						}
+					}
+					// Stall / "promised-but-not-acted" detection (active in all modes).
+					// If the model ended its turn with text but no tool call, and either
+					// promised an imminent action or repeated earlier text, force another
+					// turn that must emit the tool call. When the retry budget is spent,
+					// emit a clear warning and fall through to the break.
+					if (continuityGuard && chunkContent) {
+						const stall = continuityGuard.shouldForceActOnStall(
+							chunkContent,
+							streamFinishReason,
+						);
+						if (stall.force) {
+							continuityGuard.recordStall(chunkContent);
+							const forcePrompt = continuityGuard.buildForceActPrompt(
+								stall.reason,
+								stall.repeated,
+							);
+							messages.push({ role: "assistant", content: chunkContent });
+							messages.push({ role: "system", content: forcePrompt });
+							const notice = stall.repeated
+								? "\n\n[Repetición sin acción detectada — forzando tool call...]\n\n"
+								: "\n\n[Acción pendiente prometida sin ejecutar — forzando tool call...]\n\n";
+							fullResponse += notice;
+							yield notice;
+							yield ` STATUS:persistence_retry:stall_force::${this.encodeStatusField(
+								`Stall force ${continuityGuard.stallForceCount}: ${stall.reason}`,
+							)} `;
+							continue; // re-enter the inner loop for another LLM call
+						}
+						if (stall.exhausted && continuityGuard.stallForceCount > 0) {
+							const stallWarnMsg =
+								"\n\n⚠️ El agente declaró una intención de acción varias veces pero no emitió la tool call correspondiente tras varios reintentos. La ejecución se detiene para evitar un bucle. Revisa el historial: la última intención declarada NO se completó.";
+							fullResponse += stallWarnMsg;
+							yield stallWarnMsg;
 						}
 					}
 					if (chunkContent) {
@@ -3156,6 +3198,10 @@ export class AgentRuntime {
 				this.toolExecutor &&
 				this.toolRegistry
 			) {
+				// Real progress this turn (tool calls emitted): clear accumulated stall state.
+				if (this.continuityGuard) {
+					this.continuityGuard.clearStall();
+				}
 				const assistantMessage: LLMMessage = {
 					role: "assistant",
 					content: response.content || "",
@@ -3304,6 +3350,38 @@ export class AgentRuntime {
 					});
 				}
 			} else {
+				// Stall / "promised-but-not-acted" detection (all modes). If the turn
+				// ended with text but no tool call, and either promised an action or
+				// repeated earlier text, force another iteration that must emit the
+				// tool call. When the retry budget is spent, return with a clear warning.
+				const stallContent = response.content ?? "";
+				const guard = this.continuityGuard;
+				if (guard && stallContent) {
+					const stall = guard.shouldForceActOnStall(
+						stallContent,
+						response.finishReason,
+					);
+					if (stall.force) {
+						guard.recordStall(stallContent);
+						messages.push({ role: "assistant", content: stallContent });
+						messages.push({
+							role: "system",
+							content: guard.buildForceActPrompt(
+								stall.reason,
+								stall.repeated,
+							),
+						});
+						continue; // re-enter the while loop for another LLM call
+					}
+					if (stall.exhausted && guard.stallForceCount > 0) {
+						return {
+							content:
+								stallContent +
+								"\n\n⚠️ El agente declaró una intención de acción varias veces pero no emitió la tool call correspondiente tras varios reintentos. La ejecución se detiene para evitar un bucle. Revisa el historial: la última intención declarada NO se completó.",
+							toolCallsExecuted,
+						};
+					}
+				}
 				return { content: response.content, toolCallsExecuted };
 			}
 		}

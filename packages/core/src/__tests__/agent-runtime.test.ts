@@ -1471,6 +1471,133 @@ describe("AgentRuntime", () => {
 		});
 	});
 
+	describe("stall detection (promised-but-not-acted)", () => {
+		it("forces a retry and recovers when the model promises an action without emitting a tool call", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "Encontré el problema. Lo agrego ahora:",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+					finishReason: "stop",
+				})
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-edit",
+							type: "function" as const,
+							function: {
+								name: "edit_file",
+								arguments: '{"path":"config.ts"}',
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "Listo, edité el archivo correctamente.",
+					model: "test-model",
+					usage: { promptTokens: 14, completionTokens: 6, totalTokens: 20 },
+					finishReason: "stop",
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "edit_file", description: "Edits a file" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const result = await runtime.processMessage(
+				"agrega veo-3.1-generate-001 a la lista de modelos",
+				"conv-stall-recover",
+			);
+
+			expect(mockExecutor.execute).toHaveBeenCalledWith(
+				"edit_file",
+				expect.objectContaining({ path: "config.ts" }),
+				expect.any(Object),
+			);
+			expect(result).toBe("Listo, edité el archivo correctamente.");
+		});
+
+		it("stops with a clear warning after the stall retry budget is spent", async () => {
+			mockLLMRouter = createMockLLMRouter({
+				content: "Encontré el problema. Lo agrego ahora:",
+				finishReason: "stop",
+			});
+			runtime = new AgentRuntime(
+				{
+					...baseConfig,
+					continuityGuard: {
+						enabled: true,
+						maxAutoContinuations: 25,
+						truncationDetection: true,
+						stallDetection: true,
+						maxStallForcings: 2,
+						stallSignatureHistory: 4,
+					},
+				},
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			// No tool system configured: every turn ends without tool calls → stall path.
+
+			const result = await runtime.processMessage(
+				"agrega el modelo a la lista",
+				"conv-stall-exhaust",
+			);
+
+			expect(result).toContain("Lo agrego ahora:");
+			expect(result).toContain("⚠️");
+			expect(result).toContain("NO se completó");
+			// 2 forced retries + 1 exhausted = 3 LLM calls.
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(3);
+		});
+
+		it("does not force or warn on a neutral final response without an action promise", async () => {
+			mockLLMRouter = createMockLLMRouter({
+				content:
+					"Listo, ya terminé el análisis del problema sin necesidad de editar nada.",
+				finishReason: "stop",
+			});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+
+			const result = await runtime.processMessage(
+				"analiza el problema",
+				"conv-stall-neutral",
+			);
+
+			expect(result).toBe(
+				"Listo, ya terminé el análisis del problema sin necesidad de editar nada.",
+			);
+			expect(result).not.toContain("⚠️");
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
+		});
+	});
+
 	describe("getState", () => {
 		it("should return stm load, conversation length, and active task", () => {
 			const state = runtime.getState();

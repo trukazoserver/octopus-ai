@@ -76,7 +76,7 @@
 		}
 	},
 	"scripts": {
-		"build": "tsc",
+		"build": "tsc && npm run copy:assets",
 		"dev": "tsc --watch",
 		"lint": "biome check src/",
 		"test": "vitest run",
@@ -84,7 +84,11 @@
 		"test:live:postgres": "vitest run src/__tests__/storage-postgres-live.test.ts",
 		"test:live:vectors": "vitest run src/__tests__/vector-store-live.test.ts",
 		"typecheck": "tsc --noEmit",
-		"clean": "rimraf dist"
+		"clean": "rimraf dist",
+		"copy:assets": "node scripts/copy-assets.cjs",
+		"build:wasm": "bash scripts/build-sqljs-fts5.sh",
+		"build:full": "npm run build:wasm && npm run build",
+		"prebuild": "node -e \"const p=require('path');const f=p.join(__dirname,'src','assets','sql-wasm-fts5.wasm');const fs=require('fs');if(!fs.existsSync(f)){console.warn('⚠️  Custom FTS5 WASM not found. Run: npm run build:wasm');console.warn('   Falling back to default sql.js WASM (FTS5 will be unavailable).')}\""
 	},
 	"dependencies": {
 		"@fastify/cors": "^11.2.0",

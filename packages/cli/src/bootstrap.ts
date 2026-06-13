@@ -42,8 +42,11 @@ import {
 	SkillLoader,
 	SkillMarketplace,
 	SkillRegistry,
+	SkillResearcher,
 	TaskManager,
 	TeamBlackboard,
+	EnvironmentFilter,
+	SecretRedactor,
 	TokenCounter,
 	ToolExecutor,
 	ToolRegistry,
@@ -989,6 +992,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		progressiveLevels: config.skills.loading.progressiveLevels,
 		autoUnload: config.skills.loading.autoUnload,
 		searchThreshold: config.skills.loading.searchThreshold,
+		contentScanning: config.security.contentScanning,
 	});
 	(
 		skillLoader as unknown as {
@@ -1080,20 +1084,51 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	}
 	const taskManager = new TaskManager(db);
 	const automationManager = new AutomationManager(db);
-	const mcpManager = new MCPManager();
+	const mcpEnvFilter = new EnvironmentFilter(config.security.envFiltering);
+	const mcpRedactor = new SecretRedactor({
+		enabled: config.security.redaction.enabled,
+		mask: config.security.redaction.mask,
+		extraSecretKeys: config.security.redaction.extraSecretKeys,
+	});
+	const mcpManager = new MCPManager({
+		envFilter: mcpEnvFilter,
+		redactor: mcpRedactor,
+	});
 
 	const toolRegistry = new ToolRegistry();
+	const toolConfig = config.tools as OctopusConfig["tools"] & {
+		disabled?: string[];
+		allowedPaths?: string[];
+	};
+	const disabledTools = toolConfig.disabled || [];
+	const defaultAllowedPaths = [
+		os.homedir(),
+		path.join(os.homedir(), ".octopus"),
+		process.cwd(),
+	];
+	const legacyToolAllowedPaths = toolConfig.allowedPaths || [];
+	const securityAllowedPaths = config.security.allowedPaths || [];
+	const allowedPaths = [
+		...new Set([
+			...defaultAllowedPaths,
+			...securityAllowedPaths,
+			...legacyToolAllowedPaths,
+		]),
+	];
 	const dynamicToolsDir = join(homedir(), ".octopus", "tools");
 	const reloadDynamicTool = async (name: string): Promise<boolean> => {
 		const toolDir = join(dynamicToolsDir, name);
 		return Boolean(registerDynamicTool(toolRegistry, toolDir, name));
 	};
 
-	const codeExecutor = new CodeExecutor(undefined, {
-		onToolCreated: async ({ name }) => {
-			await reloadDynamicTool(name);
+	const codeExecutor = new CodeExecutor(
+		{ allowedPaths, envFiltering: config.security.envFiltering },
+		{
+			onToolCreated: async ({ name }) => {
+				await reloadDynamicTool(name);
+			},
 		},
-	});
+	);
 	await codeExecutor.initialize();
 	mcpManager.setToolRegistry(toolRegistry);
 
@@ -1111,34 +1146,38 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		}
 	});
 
-	const toolConfig = config.tools as OctopusConfig["tools"] & {
-		disabled?: string[];
-		allowedPaths?: string[];
-	};
-	const disabledTools = toolConfig.disabled || [];
-
 	const registerSystemTool = (tool: ToolDefinition) => {
 		if (disabledTools.includes(tool.name)) return;
 		tool.metadata = { ...tool.metadata, source: "system" };
 		toolRegistry.register(tool);
 	};
 
-	const defaultAllowedPaths = [
-		os.homedir(),
-		path.join(os.homedir(), ".octopus"),
-		process.cwd(),
-	];
-	const userAllowedPaths = toolConfig.allowedPaths || [];
-	const allowedPaths = [
-		...new Set([...defaultAllowedPaths, ...userAllowedPaths]),
-	];
+	const redactor = new SecretRedactor({
+		enabled: config.security.redaction.enabled,
+		mask: config.security.redaction.mask,
+		extraSecretKeys: config.security.redaction.extraSecretKeys,
+	});
+	const commandApproval = config.security.commandApproval;
 
 	const toolExecutor = new ToolExecutor(toolRegistry, {
-		sandboxCommands: true,
+		sandboxCommands: config.security.sandboxCommands,
 		allowedPaths,
 		timeouts: config.tools.timeouts,
 		rateLimits: config.tools.rateLimits,
+		commandApproval,
+		redactor,
 	});
+
+	// Skill researcher (Context7 → web → browser) for fresh-info-grounded skills.
+	// Wired after the tool executor exists; forge/improver are already shared with
+	// the LearningEngine by reference, so setDeps propagates to skill creation.
+	const skillResearcher = new SkillResearcher(
+		toolExecutor,
+		router,
+		config.skills.research ?? {},
+	);
+	skillForge.setDeps({ router, researcher: skillResearcher });
+	skillImprover.setDeps({ router, researcher: skillResearcher });
 
 	const filesystemTools = createFileSystemTools(allowedPaths);
 	for (const tool of filesystemTools) {
@@ -1146,7 +1185,11 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	}
 
 	const shellTool = createShellTool({
-		sandboxCommands: true,
+		sandboxCommands: config.security.sandboxCommands,
+		allowedPaths,
+		commandApproval,
+		envFiltering: config.security.envFiltering,
+		redactor,
 	});
 	registerSystemTool(shellTool);
 
@@ -1155,18 +1198,18 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		registerSystemTool(tool);
 	}
 
-	const mediaTools = createMediaTools();
+	const mediaTools = createMediaTools(allowedPaths);
 	for (const tool of mediaTools) {
 		registerSystemTool(tool);
 	}
 
-		const kanbanCardTools = createKanbanCardTools(
-			workflowManager,
-			requirementResolver,
-		);
-		for (const tool of kanbanCardTools) {
-			registerSystemTool(tool);
-		}
+	const kanbanCardTools = createKanbanCardTools(
+		workflowManager,
+		requirementResolver,
+	);
+	for (const tool of kanbanCardTools) {
+		registerSystemTool(tool);
+	}
 
 	registerSystemTool({
 		name: "recall_conversation",
@@ -1589,10 +1632,12 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			}
 		}
 		const workerToolExecutor = new ToolExecutor(workerToolRegistry, {
-			sandboxCommands: true,
+			sandboxCommands: config.security.sandboxCommands,
 			allowedPaths,
 			timeouts: config.tools.timeouts,
 			rateLimits: config.tools.rateLimits,
+			commandApproval,
+			redactor,
 		});
 		workerRuntime.setToolSystem(workerToolRegistry, workerToolExecutor);
 		workerRuntime.setLearningEngine(learningEngine);
@@ -1713,6 +1758,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			blockTrackerDomains: browserCfg.blockTrackerDomains,
 			humanBehavior: browserCfg.humanBehavior,
 			autoDismissPopups: browserCfg.autoDismissPopups,
+			urlPolicy: config.security.urlPolicy,
 		};
 
 		if (!(isEmbedded || isBrightData || isDecodo || isAuto)) {
@@ -2113,7 +2159,9 @@ Always be concise, helpful, and thorough.`,
 			timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,
 		},
 	});
-	agentRuntime.getOrchestrator()?.setKanbanPlanner(kanbanPlanner, requirementResolver);
+	agentRuntime
+		.getOrchestrator()
+		?.setKanbanPlanner(kanbanPlanner, requirementResolver);
 	await agentRuntime.initialize();
 	teamBlackboard.registerOrchestrator(agentRuntime);
 
@@ -2223,7 +2271,9 @@ Always be concise, helpful, and thorough.`,
 				timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,
 			},
 		});
-		runtime.getOrchestrator()?.setKanbanPlanner(kanbanPlanner, requirementResolver);
+		runtime
+			.getOrchestrator()
+			?.setKanbanPlanner(kanbanPlanner, requirementResolver);
 		await runtime.initialize();
 		agentManager.registerRuntime(agent.id, runtime);
 	}

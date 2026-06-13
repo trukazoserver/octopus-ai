@@ -39,6 +39,10 @@ desktop.ini
 packages/*/dist/
 packages/plugins/*/dist/
 
+# sql.js build temp (emsdk + source clone — only needed for rebuilds)
+.sql-js-build/
+.emsdk/
+
 # Accidental artifacts
 $null
 -p/

@@ -171,6 +171,36 @@ describe("memory API endpoints", () => {
 		expect(allowed.body.version).toBe(1);
 	});
 
+	it("redacts secrets from the config API response", async () => {
+		const config = getDefaults();
+		config.security.memoryApiKey = "test-api-key";
+		config.ai.providers.openai.apiKey = "sk-testSecretValue12345";
+		config.ai.providers.openai.baseUrl =
+			"https://url-user:url-password@example.com/v1";
+		(config.ai.providers.openai as JsonObject).oauthAccessToken =
+			"ya29.testSecretValue12345";
+		const baseUrl = await startServer({}, { config });
+
+		const response = await getJson(`${baseUrl}/api/config`, {
+			"X-Octopus-Api-Key": "test-api-key",
+		});
+		const body = JSON.stringify(response.body);
+		const security = response.body.security as JsonObject;
+		const ai = response.body.ai as JsonObject;
+		const providers = ai.providers as JsonObject;
+		const openai = providers.openai as JsonObject;
+
+		expect(response.status).toBe(200);
+		expect(security.memoryApiKey).toBe("****");
+		expect(openai.apiKey).toBe("****");
+		expect(openai.oauthAccessToken).toBe("****");
+		expect(body).not.toContain("test-api-key");
+		expect(body).not.toContain("sk-testSecretValue12345");
+		expect(body).not.toContain("ya29.testSecretValue12345");
+		expect(body).not.toContain("url-user");
+		expect(body).not.toContain("url-password");
+	});
+
 	it("returns active conversation execution for reconnect recovery", async () => {
 		const activeExecution = {
 			id: "exec-1",

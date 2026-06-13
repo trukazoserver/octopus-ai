@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { resolveMCPSpawnCommand } from "../plugins/mcp/client.js";
+import {
+	createMCPProcessEnv,
+	resolveMCPSpawnCommand,
+} from "../plugins/mcp/client.js";
+import { EnvironmentFilter } from "../security/environment-filter.js";
 
 describe("resolveMCPSpawnCommand", () => {
 	it("uses the .cmd shim for package-manager commands on Windows", () => {
@@ -34,5 +38,21 @@ describe("resolveMCPSpawnCommand", () => {
 			command: "npx",
 			shell: false,
 		});
+	});
+});
+
+describe("createMCPProcessEnv", () => {
+	it("filters inherited secrets but preserves explicit server env", () => {
+		const env = createMCPProcessEnv(
+			{
+				PATH: "/usr/bin",
+				OCTOPUS_TEST_API_KEY: "inherited-secret",
+			},
+			{ OCTOPUS_TEST_API_KEY: "explicit-secret" },
+			new EnvironmentFilter(),
+		);
+
+		expect(env.PATH).toBe("/usr/bin");
+		expect(env.OCTOPUS_TEST_API_KEY).toBe("explicit-secret");
 	});
 });

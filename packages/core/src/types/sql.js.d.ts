@@ -20,7 +20,13 @@ declare module "sql.js" {
 		reset(): boolean;
 	}
 
-	export default function initSqlJs(config?: {
-		locateFile?: (file: string) => string;
-	}): Promise<SqlJsStatic>;
+	export interface SqlJsConfig {
+		/**
+		 * Override the path where sql.js looks for the .wasm binary.
+		 * Used to load a custom FTS5-enabled WASM build.
+		 */
+		locateFile?: (filename: string) => string;
+	}
+
+	export default function initSqlJs(config?: SqlJsConfig): Promise<SqlJsStatic>;
 }

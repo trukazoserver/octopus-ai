@@ -1,6 +1,13 @@
+import { EnvironmentFilter } from "../../security/environment-filter.js";
+import { SecretRedactor } from "../../security/secret-redactor.js";
 import type { ToolDefinition, ToolRegistry } from "../../tools/registry.js";
 import type { MCPServerConfig } from "../types.js";
 import { MCPClient } from "./client.js";
+
+export interface MCPManagerOptions {
+	envFilter?: EnvironmentFilter;
+	redactor?: SecretRedactor;
+}
 
 interface MCPToolSchemaProperty {
 	type?: string;
@@ -40,6 +47,13 @@ export class MCPManager {
 	private toolToServer: Map<string, string> = new Map();
 	private persistCallback?: (servers: Record<string, MCPServerConfig>) => void;
 	private toolRegistry?: ToolRegistry;
+	private envFilter: EnvironmentFilter;
+	private redactor: SecretRedactor;
+
+	constructor(options: MCPManagerOptions = {}) {
+		this.envFilter = options.envFilter ?? new EnvironmentFilter();
+		this.redactor = options.redactor ?? new SecretRedactor();
+	}
 
 	setToolRegistry(registry: ToolRegistry): void {
 		this.toolRegistry = registry;
@@ -106,7 +120,7 @@ export class MCPManager {
 				await this.connectServer(name);
 			} catch (err) {
 				entry.status = "error";
-				entry.error = err instanceof Error ? err.message : String(err);
+				entry.error = this.redactError(err);
 			}
 		}
 		this.persist();
@@ -146,7 +160,7 @@ export class MCPManager {
 				await this.connectServer(name);
 			} catch (err) {
 				entry.status = "error";
-				entry.error = err instanceof Error ? err.message : String(err);
+				entry.error = this.redactError(err);
 			}
 		}
 		this.persist();
@@ -195,9 +209,15 @@ export class MCPManager {
 			await this.connectServer(name);
 		} catch (err) {
 			existing.status = "error";
-			existing.error = err instanceof Error ? err.message : String(err);
+			existing.error = this.redactError(err);
 		}
 		return existing;
+	}
+
+	private redactError(error: unknown): string {
+		return this.redactor.redactText(
+			error instanceof Error ? error.message : String(error),
+		);
 	}
 
 	listServers(): MCPManagedServer[] {
@@ -255,10 +275,13 @@ export class MCPManager {
 			return;
 		}
 
-		const client = new MCPClient({
-			...entry.config,
-			args: entry.config.args ?? [],
-		});
+		const client = new MCPClient(
+			{
+				...entry.config,
+				args: entry.config.args ?? [],
+			},
+			{ envFilter: this.envFilter, redactor: this.redactor },
+		);
 
 		await client.connect();
 		this.clients.set(name, client);
@@ -342,7 +365,7 @@ export class MCPManager {
 									return {
 										success: false,
 										output: "",
-										error: err instanceof Error ? err.message : String(err),
+										error: this.redactError(err),
 									};
 								}
 							},
@@ -355,7 +378,10 @@ export class MCPManager {
 			}
 		} catch (e) {
 			this.unregisterPublishedTools(publishedToolNames);
-			console.error(`Error loading tools for MCP server ${name}:`, e);
+			console.error(
+				`Error loading tools for MCP server ${name}:`,
+				this.redactError(e),
+			);
 			entry.tools = [];
 		}
 	}

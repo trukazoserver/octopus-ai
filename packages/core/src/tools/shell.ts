@@ -1,34 +1,36 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import {
+	type CommandApprovalConfig,
+	CommandApprovalService,
+} from "../security/command-approval.js";
+import {
+	EnvironmentFilter,
+	type EnvironmentFilterConfig,
+} from "../security/environment-filter.js";
+import { PathSafetyPolicy } from "../security/path-safety-policy.js";
+import { SecretRedactor } from "../security/secret-redactor.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
 const execAsync = promisify(exec);
 
-const DANGEROUS_PATTERNS = [
-	/rm\s+-rf\s+\//,
-	/rm\s+-rf\s+\~/,
-	/:\(\)\{\s*:\|\:&\s*\}/,
-	/\bformat\s+[a-zA-Z]:/i,
-	/\bdel\s+\/[sS]/,
-	/\brd\s+\/[sS]/,
-	/\bshutdown\b/,
-	/\breboot\b/,
-	/\bmkfs\b/,
-	/\bdd\s+if=/,
-	/\b>\s*\/dev\//,
-	/\bchmod\s+-R\s+777\s+\//,
-	/\bchown\s+-R\s+\//,
-	/\bmv\s+\/\s+/,
-	/\bkill\s+-9\s+1\b/,
-];
-
-function isCommandDangerous(command: string): boolean {
-	return DANGEROUS_PATTERNS.some((pattern) => pattern.test(command));
-}
-
 export function createShellTool(config: {
 	sandboxCommands: boolean;
+	allowedPaths?: string[];
+	commandApproval?: CommandApprovalConfig;
+	envFiltering?: EnvironmentFilterConfig;
+	redactor?: SecretRedactor;
 }): ToolDefinition {
+	const approval = new CommandApprovalService({
+		mode: config.sandboxCommands ? "smart" : "off",
+		...config.commandApproval,
+	});
+	const pathPolicy = new PathSafetyPolicy({
+		allowedPaths: config.allowedPaths,
+	});
+	const envFilter = new EnvironmentFilter(config.envFiltering);
+	const redactor = config.redactor ?? new SecretRedactor();
+
 	return {
 		name: "run_command",
 		description: "Execute a shell command and return stdout and stderr",
@@ -51,14 +53,26 @@ export function createShellTool(config: {
 		},
 		handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
 			const command = String(params.command);
-			const cwd = params.cwd ? String(params.cwd) : undefined;
-			const timeout = params.timeout ? Number(params.timeout) : 30000;
-
-			if (config.sandboxCommands && isCommandDangerous(command)) {
+			let cwd: string | undefined;
+			try {
+				cwd = params.cwd
+					? pathPolicy.assertAllowed(String(params.cwd), "Command cwd")
+					: undefined;
+			} catch (error) {
 				return {
 					success: false,
 					output: "",
-					error: `Command blocked by sandbox: '${command}' matches a dangerous pattern`,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+			const timeout = params.timeout ? Number(params.timeout) : 30000;
+
+			const decision = approval.evaluate(command);
+			if (!decision.allowed) {
+				return {
+					success: false,
+					output: "",
+					error: decision.reason ?? "Command blocked by security policy",
 				};
 			}
 
@@ -67,8 +81,11 @@ export function createShellTool(config: {
 					cwd,
 					timeout,
 					maxBuffer: 1024 * 1024 * 10,
+					env: envFilter.filter(process.env),
 				});
-				const output = stdout + (stderr ? `\n[stderr]\n${stderr}` : "");
+				const output = redactor.redactText(
+					stdout + (stderr ? `\n[stderr]\n${stderr}` : ""),
+				);
 				return { success: true, output };
 			} catch (err) {
 				const error = err as Error & {
@@ -79,17 +96,18 @@ export function createShellTool(config: {
 				if (error.killed) {
 					return {
 						success: false,
-						output: error.stdout ?? "",
+						output: redactor.redactText(error.stdout ?? ""),
 						error: `Command timed out after ${timeout}ms`,
 					};
 				}
-				const output =
+				const output = redactor.redactText(
 					(error.stdout ?? "") +
-					(error.stderr ? `\n[stderr]\n${error.stderr}` : "");
+						(error.stderr ? `\n[stderr]\n${error.stderr}` : ""),
+				);
 				return {
 					success: false,
 					output,
-					error: error.message,
+					error: redactor.redactText(error.message),
 				};
 			}
 		},

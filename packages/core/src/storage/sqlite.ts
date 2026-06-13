@@ -1,18 +1,77 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Database, SqlJsStatic, Statement } from "sql.js";
+import { createLogger } from "../utils/logger.js";
 import { expandTildePath } from "../utils/helpers.js";
 import type { DatabaseAdapter } from "./database.js";
 import { migrations } from "./migrations/index.js";
 
+const logger = createLogger("sqlite");
+
 let initSqlJsFn: (() => Promise<SqlJsStatic>) | null = null;
 let staticInstance: SqlJsStatic | null = null;
 
+const WASM_FILENAME = "sql-wasm-fts5.wasm";
+
+/**
+ * Resolve the path to the custom FTS5-enabled WASM binary.
+ * This WASM was compiled from sql.js 1.12.0 source with -DSQLITE_ENABLE_FTS5
+ * using Emscripten 3.1.64 (matching the npm package's build toolchain).
+ *
+ * Search order:
+ *   1. dist/assets/  — production (this file compiled at dist/storage/sqlite.js)
+ *   2. src/assets/   — development / tests / REPL
+ *
+ * Falls back to the default sql.js WASM if the custom binary is not found.
+ */
+function locateCustomWasm(): string | undefined {
+	try {
+		const thisFile = fileURLToPath(import.meta.url);
+		const thisDir = dirname(thisFile);
+
+		const candidates = [
+			// Production: dist/storage/sqlite.js → dist/assets/
+			resolve(thisDir, "assets", WASM_FILENAME),
+			// Development: dist/storage/ → src/assets/
+			resolve(thisDir, "..", "..", "src", "assets", WASM_FILENAME),
+			// Running from package root (tests, REPL): packages/core/src/assets/
+			resolve(thisDir, "src", "assets", WASM_FILENAME),
+			// Monorepo root or other: try absolute sibling
+			resolve(thisDir, "..", "src", "assets", WASM_FILENAME),
+		];
+
+		for (const candidate of candidates) {
+			if (existsSync(candidate)) {
+				return candidate;
+			}
+		}
+	} catch {
+		// import.meta.url unavailable
+	}
+	return undefined;
+}
+
 try {
 	const mod = await import("sql.js");
-	initSqlJsFn = mod.default;
+	initSqlJsFn = async () => {
+		const customWasmPath = locateCustomWasm();
+		const config: { locateFile?: (file: string) => string } = {};
+
+		if (customWasmPath) {
+			config.locateFile = () => customWasmPath;
+			logger.info("Loading FTS5-enabled WASM from %s", customWasmPath);
+		} else {
+			logger.warn(
+				"Custom FTS5 WASM not found — falling back to default sql.js WASM. " +
+					"FTS5 full-text search will be unavailable.",
+			);
+		}
+
+		return mod.default(config);
+	};
 } catch {
-	console.warn(
+	logger.warn(
 		"sql.js not found or failed to load. Operating in volatile mode without DB.",
 	);
 }
@@ -57,9 +116,9 @@ export class SqliteDatabase implements DatabaseAdapter {
 				this.persistTimer = setInterval(() => this.persist(), 30_000);
 			}
 		} catch (e) {
-			console.warn(
-				"Failed to initialize SQLite database. Operating without persistence.",
-				e instanceof Error ? e.message : e,
+			logger.warn(
+				"Failed to initialize SQLite database. Operating without persistence. %s",
+				e instanceof Error ? e.message : String(e),
 			);
 			this.db = null;
 		}
@@ -168,7 +227,10 @@ export class SqliteDatabase implements DatabaseAdapter {
 			writeFileSync(this.dbPath, buffer);
 			this.dirty = false;
 		} catch (e) {
-			console.warn("Failed to persist SQLite database:", e);
+			logger.warn(
+				"Failed to persist SQLite database: %s",
+				e instanceof Error ? e.message : String(e),
+			);
 		}
 	}
 }

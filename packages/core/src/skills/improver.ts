@@ -1,7 +1,9 @@
 import { nanoid } from "nanoid";
+import type { LLMRouter } from "../ai/router.js";
 import type { EmbeddingFunction } from "../memory/types.js";
 import type { SkillRegistry } from "./registry.js";
-import type { ABTest, Skill, SkillUsage } from "./types.js";
+import type { SkillResearcher } from "./researcher.js";
+import type { ABTest, Skill, SkillResearchResult, SkillUsage } from "./types.js";
 
 export class SkillImprover {
 	private registry: SkillRegistry;
@@ -14,6 +16,8 @@ export class SkillImprover {
 		abTestMajorChanges: boolean;
 		abTestSampleSize: number;
 	};
+	private router?: LLMRouter;
+	private researcher?: SkillResearcher;
 
 	constructor(
 		registry: SkillRegistry,
@@ -25,10 +29,19 @@ export class SkillImprover {
 			abTestMajorChanges: boolean;
 			abTestSampleSize: number;
 		},
+		deps?: { router?: LLMRouter; researcher?: SkillResearcher },
 	) {
 		this.registry = registry;
 		this.embedFn = embedFn;
 		this.config = { enabled: true, ...config };
+		this.router = deps?.router;
+		this.researcher = deps?.researcher;
+	}
+
+	/** Inyección diferida: cablea el LLM y el researcher tras la construcción. */
+	setDeps(deps: { router?: LLMRouter; researcher?: SkillResearcher }): void {
+		if (deps.router) this.router = deps.router;
+		if (deps.researcher) this.researcher = deps.researcher;
 	}
 
 	updateConfig(config: Partial<typeof this.config>): void {
@@ -42,11 +55,35 @@ export class SkillImprover {
 
 		const improved: Partial<Skill> = { ...skill };
 
-		const improvedInstructions = this.generateImprovedInstructions(
-			skill,
-			failureAnalysis,
-		);
+		// Research fresh info (Context7 → web → browser) for technical/documentable skills.
+		let research: SkillResearchResult | undefined;
+		if (this.researcher) {
+			try {
+				research = await this.researcher.research({
+					description: skill.description,
+					keywords: skill.triggerConditions.keywords,
+					domains: skill.triggerConditions.domains,
+				});
+			} catch {
+				/* best-effort */
+			}
+		}
+		const useLLM = !!this.router && !!research?.isTechnical;
+		const improvedInstructions = useLLM
+			? await this.generateImprovedInstructionsLLM(
+					skill,
+					failureAnalysis,
+					research?.context ?? "",
+				)
+			: this.generateImprovedInstructions(skill, failureAnalysis);
 		improved.instructions = improvedInstructions;
+		if (research && (research.context || research.sources.length)) {
+			improved.freshInfo = {
+				sources: research.sources,
+				fetchedAt: research.fetchedAt,
+				summary: research.summary,
+			};
+		}
 
 		if (failureAnalysis.suggestions.length > 0) {
 			improved.instructions += `\n\n## Improvement Notes\n${failureAnalysis.suggestions.map((s) => `- ${s}`).join("\n")}`;
@@ -326,5 +363,61 @@ export class SkillImprover {
 		}
 
 		return instructions;
+	}
+
+	/**
+	 * Reescribe las instrucciones con el LLM, ancladas en la documentación
+	 * actualizada y enfocadas en los patrones de fallo observados. Cae al
+	 * heurístico si el LLM no devuelve contenido útil.
+	 */
+	private async generateImprovedInstructionsLLM(
+		skill: Skill,
+		failureAnalysis: { patterns: string[]; suggestions: string[] },
+		freshContext: string,
+	): Promise<string> {
+		const userLines: string[] = [
+			"# Current skill instructions",
+			skill.instructions,
+			"",
+			"# Failure analysis",
+		];
+		if (failureAnalysis.patterns.length > 0) {
+			userLines.push("Patterns:");
+			for (const p of failureAnalysis.patterns) userLines.push(`- ${p}`);
+		}
+		if (failureAnalysis.suggestions.length > 0) {
+			userLines.push("Suggestions:");
+			for (const s of failureAnalysis.suggestions) userLines.push(`- ${s}`);
+		}
+		if (freshContext) {
+			userLines.push(
+				"",
+				"# Fresh Documentation (authoritative — prefer over general knowledge)",
+				freshContext,
+			);
+		}
+		userLines.push(
+			"",
+			"# Your job",
+			"Rewrite the skill instructions (markdown, ## sections) to address the failure patterns, leveraging the fresh documentation. Preserve what already works. Do not invent APIs, options, or signatures that are not present in the fresh docs.",
+		);
+
+		const response = await this.router!.chat({
+			model: "default",
+			maxTokens: 1200,
+			temperature: 0.2,
+			messages: [
+				{
+					role: "system",
+					content:
+						"You are a skill improver. You revise skill instructions to address observed failures, grounding changes in fresh documentation when provided.",
+				},
+				{ role: "user", content: userLines.join("\n") },
+			],
+		});
+		const generated = (response.content ?? "").trim();
+		return generated.length > 0
+			? generated
+			: this.generateImprovedInstructions(skill, failureAnalysis);
 	}
 }

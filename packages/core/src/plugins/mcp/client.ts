@@ -1,5 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { EnvironmentFilter } from "../../security/environment-filter.js";
+import { SecretRedactor } from "../../security/secret-redactor.js";
 import type { MCPServerConfig } from "../types.js";
 
 const MCP_REQUEST_TIMEOUT_MS = 45_000;
@@ -7,6 +9,11 @@ const MCP_REQUEST_TIMEOUT_MS = 45_000;
 export interface MCPSpawnCommand {
 	command: string;
 	shell: boolean;
+}
+
+export interface MCPClientOptions {
+	envFilter?: EnvironmentFilter;
+	redactor?: SecretRedactor;
 }
 
 export function resolveMCPSpawnCommand(
@@ -60,8 +67,18 @@ function resolveConfigTemplates(config: MCPServerConfig): MCPServerConfig {
 	};
 }
 
+export function createMCPProcessEnv(
+	baseEnv: NodeJS.ProcessEnv,
+	serverEnv: Record<string, string> | undefined,
+	envFilter = new EnvironmentFilter(),
+): NodeJS.ProcessEnv {
+	return { ...envFilter.filter(baseEnv), ...(serverEnv ?? {}) };
+}
+
 export class MCPClient {
 	private config: MCPServerConfig;
+	private envFilter: EnvironmentFilter;
+	private redactor: SecretRedactor;
 	private process: ChildProcess | null = null;
 	private pendingRequests = new Map<
 		string,
@@ -71,8 +88,10 @@ export class MCPClient {
 	private isReady = false;
 	private httpSessionId?: string;
 
-	constructor(config: MCPServerConfig) {
+	constructor(config: MCPServerConfig, options: MCPClientOptions = {}) {
 		this.config = resolveConfigTemplates(config);
+		this.envFilter = options.envFilter ?? new EnvironmentFilter();
+		this.redactor = options.redactor ?? new SecretRedactor();
 	}
 
 	/**
@@ -142,7 +161,11 @@ export class MCPClient {
 				}
 				const spawnCommand = resolveMCPSpawnCommand(this.config.command);
 				this.process = spawn(spawnCommand.command, this.config.args || [], {
-					env: { ...process.env, ...this.config.env },
+					env: createMCPProcessEnv(
+						process.env,
+						this.config.env,
+						this.envFilter,
+					),
 					stdio: ["pipe", "pipe", "pipe"], // changed stderr from "inherit" to "pipe" so we can read it
 					shell: spawnCommand.shell,
 				});
@@ -150,7 +173,7 @@ export class MCPClient {
 				// Forward stderr to console for debugging
 				if (this.process.stderr) {
 					this.process.stderr.on("data", (chunk: Buffer) => {
-						const text = chunk.toString("utf-8");
+						const text = this.redactor.redactText(chunk.toString("utf-8"));
 						console.error(
 							`[MCP ${this.config.args?.find((a) => typeof a === "string" && a.includes("mcp-remote")) ? "remote" : "local"}] ${text.trim()}`,
 						);
@@ -159,7 +182,7 @@ export class MCPClient {
 
 				this.process.on("error", (err) => {
 					if (this.pendingRequests.size === 0) {
-						reject(err);
+						reject(new Error(this.redactor.redactText(err.message)));
 					}
 				});
 
@@ -200,7 +223,9 @@ export class MCPClient {
 								// Fallback to ping for non-standard servers
 								this.request("ping", {})
 									.then(() => resolve())
-									.catch(() => reject(err));
+									.catch(() =>
+										reject(new Error(this.redactor.redactText(err.message))),
+									);
 							});
 					})
 					.catch(reject);
@@ -340,14 +365,18 @@ export class MCPClient {
 			const message = result as Record<string, unknown>;
 			if (message.error) {
 				const err = message.error as Record<string, unknown>;
-				throw new Error(String(err.message ?? "JSON-RPC Error"));
+				throw new Error(
+					this.redactor.redactText(String(err.message ?? "JSON-RPC Error")),
+				);
 			}
 			if ("result" in message) {
 				return message.result as T;
 			}
 			if ("code" in message || "msg" in message) {
 				throw new Error(
-					String(message.msg ?? message.code ?? "MCP HTTP error"),
+					this.redactor.redactText(
+						String(message.msg ?? message.code ?? "MCP HTTP error"),
+					),
 				);
 			}
 		}
@@ -377,7 +406,9 @@ export class MCPClient {
 
 		const text = await response.text();
 		if (!response.ok) {
-			throw new Error(text || `MCP HTTP error ${response.status}`);
+			throw new Error(
+				this.redactor.redactText(text || `MCP HTTP error ${response.status}`),
+			);
 		}
 
 		if (!text.trim()) return {};
@@ -430,8 +461,10 @@ export class MCPClient {
 				if ("error" in message && message.error) {
 					request.reject(
 						new Error(
-							(message.error as Record<string, string>).message ||
-								"JSON-RPC Error",
+							this.redactor.redactText(
+								(message.error as Record<string, string>).message ||
+									"JSON-RPC Error",
+							),
 						),
 					);
 				} else {

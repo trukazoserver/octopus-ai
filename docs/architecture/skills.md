@@ -20,7 +20,7 @@ Lo especial de Octopus AI es que **puede crear nuevas skills por sí mismo** cua
 
 ```
 1. Detección → La IA nota que una tarea compleja se repite
-2. Creación  → Skill Forge genera código para la nueva skill
+2. Creación  → SkillForge genera las instrucciones con LLM + info actualizada (si es técnica)
 3. Validación → Un evaluador puntúa la skill (1-10)
 4. Almacenamiento → Se guarda en el registro con embeddings
 5. Carga     → Se carga según la tarea (lazy loading)
@@ -34,7 +34,7 @@ Lo especial de Octopus AI es que **puede crear nuevas skills por sí mismo** cua
 | Fase | Descripción |
 |---|---|
 | **Detección** | El analizador de tareas detecta que una tarea compleja podría beneficiarse de una skill dedicada |
-| **Creación** | Skill Forge genera el código de la skill con auto-crítica (self-critique) |
+| **Creación** | `SkillForge` genera las instrucciones con el LLM, ancladas en documentación actualizada (Context7 → web → browser) cuando la skill es técnica/documentable; si no, generador heurístico |
 | **Validación** | El evaluador de calidad puntúa la skill del 1 al 10. Mínimo requerido: 7 |
 | **Almacenamiento** | Se guarda en el registro de skills con embeddings para búsqueda semántica |
 | **Carga** | Se carga de forma perezosa (lazy) solo cuando la tarea es relevante |
@@ -153,6 +153,70 @@ Los cambios mayores en skills se someten a pruebas A/B antes de ser aceptados:
 4. La versión ganadora reemplaza a la perdedora
 
 Esto asegura que las "mejoras" realmente mejoren el resultado y no lo empeoren.
+
+## Generación con información actualizada (Skill Researcher)
+
+Para que las skills reflejen el estado **actual** de librerías, frameworks y APIs (y no el conocimiento con fecha del modelo), la creación y la mejora de skills técnicas se anclan en documentación fresca obtenida en el momento por el `SkillResearcher`.
+
+```text
+tarea técnica/documentable
+        ↓
+SkillResearcher → Context7 (MCP) → fallback HTTP → web (zai) → browser invisible
+        ↓  (contexto autoritativo, acotado a tokens)
+SkillForge / SkillImprover → generan instrucciones con el LLM
+        ↓
+skill con freshInfo = { sources, fetchedAt, summary }
+```
+
+| Aspecto | Comportamiento |
+|---|---|
+| **Cuándo investigar** | Solo skills técnicas/documentables (lib, framework, API, SDK, CLI, versión, URL de docs). Las experienciales usan solo la experiencia (`skills.research.onlyTechnical`). Clasificador heurístico; opcionalmente con LLM (`useLlmClassifier`). |
+| **Cadena de fuentes** | **Context7** (tools MCP `context7_*` si están registradas) → **fallback HTTP** (`context7.com/api/v2`) → **web** (`zai-web-search` + `zai-web-reader`) → **browser invisible** (headless). Cada paso es opcional y best-effort. |
+| **Degradación** | Si ninguna fuente aporta, el contexto queda vacío y la skill se genera sin research (no se bloquea). |
+| **Trazabilidad** | Cada skill guarda `freshInfo = { sources, fetchedAt, summary }` con las fuentes consultadas. |
+| **Sin LLM** | Si no hay `router` o la skill no es técnica, se usa el generador heurístico (comportamiento anterior). |
+
+### Activar Context7 (opcional, recomendado)
+
+Context7 es gratuito y **no requiere API key**. Añádelo como MCP server en `~/.octopus/config.json`:
+
+```json
+"mcp": {
+  "servers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "env": {},
+      "enabled": true
+    }
+  }
+}
+```
+
+Sin esta entrada, el `SkillResearcher` usa automáticamente el **fallback HTTP** a la API pública de Context7, así que el feature funciona igualmente.
+
+### Configuración
+
+```json
+{
+  "skills": {
+    "forge": { "llmGeneration": true },
+    "research": {
+      "enabled": true,
+      "onlyTechnical": true,
+      "useLlmClassifier": false,
+      "context7": { "enabled": true, "httpEndpoint": "https://context7.com", "timeoutMs": 8000 },
+      "webSearchTool": "zai-web-search",
+      "webReaderTool": "zai-web-reader",
+      "browserFetchTool": "browser_navigate",
+      "maxContextTokens": 2000,
+      "maxSources": 4
+    }
+  }
+}
+```
+
+---
 
 ## Relación con LearningEngine
 

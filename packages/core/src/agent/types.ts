@@ -7,6 +7,12 @@ export interface ContinuityGuardRuntimeConfig {
 	enabled?: boolean;
 	maxAutoContinuations?: number;
 	truncationDetection?: boolean;
+	/** Detect "promised-but-not-acted" responses and repeated text without tool calls. */
+	stallDetection?: boolean;
+	/** Max number of forced re-prompts before giving up (warning + stop). */
+	maxStallForcings?: number;
+	/** How many recent response signatures to remember for repetition detection. */
+	stallSignatureHistory?: number;
 }
 
 export type TenacidadLevel = "normal" | "tenaz";

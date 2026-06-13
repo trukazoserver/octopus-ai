@@ -182,10 +182,16 @@ export class FTSSearchEngine {
 					};
 					if (!this.isVisible(item)) continue;
 
-					// Normalize rank to 0-1 (BM25 rank is negative, lower = better)
+					// Normalize BM25 rank (negative; more negative = better match) to a
+					// 0-1 score where HIGHER = better match. This composes correctly with
+					// the memory-type/denial-echo ranking signals below and with
+					// hybridSearch (which sorts descending by combined score). The previous
+					// formula 1/(1+|rank|) inverted the ranking (better matches scored
+					// lower), which silently devalued FTS hits in hybrid search.
+					const absRank = Math.abs(row.rank);
 					const normalizedScore = Math.max(
 						0,
-						Math.min(1, 1 / (1 + Math.abs(row.rank))),
+						Math.min(1, absRank / (1 + absRank)),
 					);
 
 					results.push({
@@ -195,6 +201,11 @@ export class FTSSearchEngine {
 				}
 			}
 
+			// Order by the final ftsScore (BM25 + memory-type boost + denial-echo
+			// penalty), mirroring fallbackSearch so both paths agree on ranking.
+			// The raw SQL ORDER BY rank alone ignores those signals, which let a
+			// denial-echo outrank a direct semantic match.
+			results.sort((a, b) => b.ftsScore - a.ftsScore);
 			return results.slice(0, this.config.maxFTSResults);
 		} catch (err) {
 			logger.error(`FTS search failed: ${String(err)}`);
@@ -372,22 +383,32 @@ export class FTSSearchEngine {
 	 * Sanitize a query string for FTS5 MATCH syntax.
 	 */
 	private sanitizeQuery(query: string): string {
-		// Remove FTS5 special characters, keep words
-		const words = this.queryWords(query);
+		// FTS5 matches whole tokens exactly, so a discriminative identifier
+		// (e.g. "FocusCobaltPublic", an API key, a username) is what makes a
+		// relevant document surface. Tokenize, then keep the LONGEST tokens
+		// (most discriminative) instead of the first N, so a long identifier
+		// sitting at the tail of the query is not dropped by the cap — otherwise
+		// the only document that contains it never matches and cannot rank.
+		const tokens = this.tokenizeQuery(query)
+			.sort((a, b) => b.length - a.length)
+			.slice(0, 10);
 
-		if (words.length === 0) return "";
+		if (tokens.length === 0) return "";
 
 		// Use OR matching for flexibility
-		return words.map((w) => `"${w}"`).join(" OR ");
+		return tokens.map((w) => `"${w}"`).join(" OR ");
 	}
 
-	private queryWords(query: string): string[] {
+	private tokenizeQuery(query: string): string[] {
 		return query
 			.toLowerCase()
 			.replace(/[^\w\sáéíóúñü]/g, " ")
 			.split(/\s+/)
-			.filter((w) => w.length > 1)
-			.slice(0, 10);
+			.filter((w) => w.length > 1);
+	}
+
+	private queryWords(query: string): string[] {
+		return this.tokenizeQuery(query).slice(0, 10);
 	}
 
 	private applyRankingSignals(item: MemoryItem, score: number): number {

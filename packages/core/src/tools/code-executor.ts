@@ -9,6 +9,11 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
+import {
+	EnvironmentFilter,
+	type EnvironmentFilterConfig,
+} from "../security/environment-filter.js";
+import { PathSafetyPolicy } from "../security/path-safety-policy.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
 import { mediaContext } from "./media.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
@@ -39,6 +44,8 @@ export interface CodeExecutorConfig {
 	workspaceDir: string;
 	tempDir: string;
 	sandboxMode: "docker" | "local" | "isolated";
+	allowedPaths?: string[];
+	envFiltering?: EnvironmentFilterConfig;
 }
 
 export interface CodeExecutorHooks {
@@ -119,6 +126,8 @@ const LANGUAGE_CONFIG: Record<
 export class CodeExecutor {
 	private config: CodeExecutorConfig;
 	private hooks: CodeExecutorHooks;
+	private pathPolicy: PathSafetyPolicy;
+	private envFilter: EnvironmentFilter;
 	private tempCounter = 0;
 
 	constructor(
@@ -127,11 +136,18 @@ export class CodeExecutor {
 	) {
 		this.config = { ...DEFAULT_CODE_CONFIG, ...config };
 		this.hooks = hooks;
+		this.pathPolicy = new PathSafetyPolicy({
+			allowedPaths: this.config.allowedPaths,
+		});
+		this.envFilter = new EnvironmentFilter(this.config.envFiltering);
 	}
 
 	async initialize(): Promise<void> {
-		const tempDir = this.resolvePath(this.config.tempDir);
-		const workspaceDir = this.resolvePath(this.config.workspaceDir);
+		const tempDir = this.getAllowedPath(this.config.tempDir, "Code tempDir");
+		const workspaceDir = this.getAllowedPath(
+			this.config.workspaceDir,
+			"Code workspaceDir",
+		);
 		await mkdirAsync(tempDir, { recursive: true });
 		await mkdirAsync(workspaceDir, { recursive: true });
 	}
@@ -190,7 +206,7 @@ export class CodeExecutor {
 			};
 		}
 
-		const tempDir = this.resolvePath(this.config.tempDir);
+		const tempDir = this.getAllowedPath(this.config.tempDir, "Code tempDir");
 		const sessionId = `exec_${Date.now()}_${++this.tempCounter}`;
 		const sessionDir = path.join(tempDir, sessionId);
 		await mkdirAsync(sessionDir, { recursive: true });
@@ -200,7 +216,18 @@ export class CodeExecutor {
 				for (const [fileName, content] of Object.entries(
 					options.workspaceFiles,
 				)) {
-					const filePath = path.join(sessionDir, fileName);
+					const filePath = resolveRelativePathInside(sessionDir, fileName);
+					if (!filePath) {
+						return {
+							success: false,
+							stdout: "",
+							stderr: `Workspace file path denied: ${fileName}`,
+							exitCode: 1,
+							executionTime: 0,
+							language: normalizedLang,
+							artifacts: [],
+						};
+					}
 					await mkdirAsync(path.dirname(filePath), { recursive: true });
 					await writeFile(filePath, content, "utf-8");
 				}
@@ -230,7 +257,7 @@ export class CodeExecutor {
 					timeout,
 					maxBuffer: this.config.maxOutputBytes,
 					env: {
-						...process.env,
+						...this.envFilter.filter(process.env),
 						NODE_NO_WARNINGS: "1",
 					},
 				};
@@ -302,7 +329,7 @@ export class CodeExecutor {
 			input?: string;
 		},
 	): Promise<CodeExecutionResult & { files: Record<string, string> }> {
-		const tempDir = this.resolvePath(this.config.tempDir);
+		const tempDir = this.getAllowedPath(this.config.tempDir, "Code tempDir");
 		const sessionId = `collect_${Date.now()}_${++this.tempCounter}`;
 		const sessionDir = path.join(tempDir, sessionId);
 		await mkdirAsync(sessionDir, { recursive: true });
@@ -444,9 +471,16 @@ export class CodeExecutor {
 
 				let command: string;
 				if (manager === "pip") {
-					command = `pip install "${pkg}" --target "${this.resolvePath(this.config.workspaceDir)}/python-libs" 2>&1 || pip3 install "${pkg}" --target "${this.resolvePath(this.config.workspaceDir)}/python-libs" 2>&1`;
+					const wsDir = this.getAllowedPath(
+						this.config.workspaceDir,
+						"Code workspaceDir",
+					);
+					command = `pip install "${pkg}" --target "${wsDir}/python-libs" 2>&1 || pip3 install "${pkg}" --target "${wsDir}/python-libs" 2>&1`;
 				} else {
-					const wsDir = this.resolvePath(this.config.workspaceDir);
+					const wsDir = this.getAllowedPath(
+						this.config.workspaceDir,
+						"Code workspaceDir",
+					);
 					command = `cd "${wsDir}" && npm install "${pkg}" --save 2>&1`;
 				}
 
@@ -454,6 +488,7 @@ export class CodeExecutor {
 					const { stdout, stderr } = await execAsync(command, {
 						timeout: 120000,
 						maxBuffer: 1024 * 1024 * 5,
+						env: this.envFilter.filter(process.env),
 					});
 					return {
 						success: true,
@@ -616,7 +651,10 @@ export class CodeExecutor {
 				const relPath = String(params.path);
 				const content = params.content ? String(params.content) : undefined;
 
-				const workspaceRoot = this.resolvePath(this.config.workspaceDir);
+				const workspaceRoot = this.getAllowedPath(
+					this.config.workspaceDir,
+					"Code workspaceDir",
+				);
 				const fullPath = resolveRelativePathInside(workspaceRoot, relPath);
 
 				if (!fullPath) {
@@ -792,6 +830,10 @@ export class CodeExecutor {
 			return path.join(os.homedir(), p.slice(1));
 		}
 		return path.resolve(p);
+	}
+
+	private getAllowedPath(p: string, context: string): string {
+		return this.pathPolicy.assertAllowed(this.resolvePath(p), context);
 	}
 }
 
