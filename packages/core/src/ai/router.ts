@@ -371,6 +371,7 @@ const PROVIDER_REGISTRY: Record<
 		hasCodingPlan: true,
 		hasFreeTier: true,
 		defaultModels: [
+			"glm-5.2",
 			"glm-5.1",
 			"glm-5",
 			"glm-5-turbo",

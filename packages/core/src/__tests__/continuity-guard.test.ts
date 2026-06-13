@@ -117,4 +117,38 @@ describe("ContinuityGuard stall detection", () => {
 		const again = guard.buildForceActPrompt("repeated-text-no-action", true);
 		expect(again).toContain("final forced attempt");
 	});
+
+	it("injects a write_file scaffold when the stalled content signals edit intent", () => {
+		const guard = new ContinuityGuard();
+		const prompt = guard.buildForceActPrompt(
+			"promised-action-no-toolcall",
+			false,
+			{ content: "Voy a agregar veo-3.1-generate-001 al index.mjs", attempt: 1 },
+		);
+		expect(prompt).toContain("write_file");
+		expect(prompt).toContain('"path"');
+		expect(prompt).toContain("`content`");
+	});
+
+	it("keeps the generic nudge when the stalled content shows no edit intent", () => {
+		const guard = new ContinuityGuard();
+		const prompt = guard.buildForceActPrompt(
+			"promised-action-no-toolcall",
+			false,
+			{ content: "Lo envío ahora", attempt: 1 },
+		);
+		expect(prompt).toContain("EXECUTE NOW");
+		expect(prompt).not.toContain("write_file");
+	});
+
+	it("escalates to a no-prose, tool-call-only demand on attempt >= 2", () => {
+		const guard = new ContinuityGuard();
+		const prompt = guard.buildForceActPrompt(
+			"repeated-text-no-action",
+			true,
+			{ content: "Lo agrego ahora:", attempt: 2 },
+		);
+		expect(prompt).toContain("attempt #2");
+		expect(prompt).toContain("ONLY the tool call");
+	});
 });

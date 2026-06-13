@@ -30,7 +30,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		defaultId: "pulpo-octavio",
 	},
 	ai: {
-		default: "zhipu/glm-5.1",
+		default: "zhipu/glm-5.2",
 		fallback: "openai/gpt-4.1",
 		providers: {
 			anthropic: {
@@ -53,6 +53,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 				apiKey: "",
 				mode: "coding-plan",
 				models: [
+					"glm-5.2",
 					"glm-5.1",
 					"glm-5",
 					"glm-5-turbo",

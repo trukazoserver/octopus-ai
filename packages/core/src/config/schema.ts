@@ -152,6 +152,7 @@ const ZhipuProviderSchema = Type.Object({
 	),
 	models: Type.Array(Type.String(), {
 		default: [
+			"glm-5.2",
 			"glm-5.1",
 			"glm-5",
 			"glm-5-turbo",
@@ -244,7 +245,7 @@ const ProvidersSchema = Type.Object({
 });
 
 const AiSchema = Type.Object({
-	default: Type.String({ default: "zhipu/glm-5.1" }),
+	default: Type.String({ default: "zhipu/glm-5.2" }),
 	fallback: Type.String({ default: "openai/gpt-4.1" }),
 	providers: ProvidersSchema,
 	thinking: Type.Union(

@@ -1385,7 +1385,7 @@ export class AgentRuntime {
 		const text = [params.code, params.command, params.script]
 			.filter((value): value is string => typeof value === "string")
 			.join("\n");
-		return /\b(veo-3\.|aiplatform\.googleapis\.com|predictLongRunning|fetchPredictOperation|generateVideos|GOOGLE_APPLICATION_CREDENTIALS|gcloud\s+auth\s+print-access-token)\b/i.test(
+		return /\b(aiplatform\.googleapis\.com|predictLongRunning|fetchPredictOperation|generateVideos|GOOGLE_APPLICATION_CREDENTIALS|gcloud\s+auth\s+print-access-token)\b/i.test(
 			text,
 		);
 	}
@@ -2550,6 +2550,10 @@ export class AgentRuntime {
 							const forcePrompt = continuityGuard.buildForceActPrompt(
 								stall.reason,
 								stall.repeated,
+								{
+									content: chunkContent,
+									attempt: continuityGuard.stallForceCount,
+								},
 							);
 							messages.push({ role: "assistant", content: chunkContent });
 							messages.push({ role: "system", content: forcePrompt });
@@ -3379,6 +3383,7 @@ export class AgentRuntime {
 							content: guard.buildForceActPrompt(
 								stall.reason,
 								stall.repeated,
+								{ content: stallContent, attempt: guard.stallForceCount },
 							),
 						});
 						continue; // re-enter the while loop for another LLM call

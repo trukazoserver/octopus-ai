@@ -347,6 +347,7 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"claude-opus-4-6": 1_048_576,
 	"claude-sonnet-4-6": 1_048_576,
 	"claude-haiku-4-5": 200_000,
+	"glm-5.2": 1_000_000,
 	"glm-5.1": 200_000,
 	"glm-5": 200_000,
 	"glm-5-turbo": 200_000,

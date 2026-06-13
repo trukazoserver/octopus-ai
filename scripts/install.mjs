@@ -412,6 +412,7 @@ async function setupWizard() {
 					apiKey: zhipuKey || "",
 					mode: "coding-plan",
 					models: [
+						"glm-5.2",
 						"glm-5.1",
 						"glm-5",
 						"glm-5-turbo",

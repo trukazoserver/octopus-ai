@@ -44,6 +44,14 @@ export interface StallDecision {
 const ACTION_PROMISE_RE =
 	/(lo agrego|lo añado|voy a (editar|agreg|añad|modific|cambi|cre|actualiz)|déjame.*?(editar|agreg|añad|modific|leer y .*?agreg|leer y .*?añad)|ahora:|let me (edit|add|update|modify|write|apply|read.*?(?:and|y).*?(?:edit|add|update|modify|write|apply))|i'?ll (edit|add|update|modify|write|apply)|adding now|applying now|updating now)/i;
 
+/**
+ * Signals that the stalled text described an edit/write to a file (so the
+ * force-act prompt can inject a concrete tool-call scaffold instead of a
+ * generic nudge). Bilingual ES/EN.
+ */
+const EDIT_INTENT_RE =
+	/(write_file|manage_workspace|edit_file|editar|editarlo|modific(?:ar|o)|agreg(?:ar|o|ue).*(?:a la lista|al archivo|al c[oó]digo|al config|a la herramienta|a los modelos)|actualiz(?:ar|o).*archivo|cambiar.*c[oó]digo|al index\.mjs|\.(?:ts|js|mjs|mts|json|tsx|py)\b)/i;
+
 export class ContinuityGuard {
 	private config: ContinuityGuardConfig;
 	private state: ContinuityState;
@@ -200,7 +208,17 @@ export class ContinuityGuard {
 		this.state.recentStallSignatures = [];
 	}
 
-	buildForceActPrompt(stallReason: string, repeated: boolean): string {
+	private hasEditIntent(content: string): boolean {
+		return EDIT_INTENT_RE.test(content);
+	}
+
+	buildForceActPrompt(
+		stallReason: string,
+		repeated: boolean,
+		opts?: { content?: string; attempt?: number },
+	): string {
+		const attempt = opts?.attempt ?? 1;
+		const editIntent = opts?.content ? this.hasEditIntent(opts.content) : false;
 		const lines: string[] = [
 			"# PENDING ACTION — EXECUTE NOW",
 			"",
@@ -209,10 +227,34 @@ export class ContinuityGuard {
 				: 'Your previous turn stated an intention to act (e.g. "lo agrego ahora" / "voy a editar" / "let me edit") but emitted NO tool call. Stating intent without acting is blocked.',
 			"",
 			"IMMEDIATELY emit the exact tool call you described. Do NOT re-explain, re-analyze, restate intent, quote the plan again, or produce another preamble.",
-			"- If you said you would edit/add an entry to a list: call the Edit tool now with the exact old_string/new_string (or Write).",
-			"- If you said you would modify code: call the Edit tool now with the exact old/new snippets.",
-			"Issue exactly ONE concrete tool call this turn. Any text before it must be a single short line at most.",
 		];
+
+		if (editIntent) {
+			lines.push(
+				"",
+				"You said you would edit/add something to a file. Emit that edit as a tool call NOW:",
+				'- Call `write_file` with {"path": "<absolute path>", "content": "<full new file content>"} — pass the new content as the `content` argument, NOT in the message text.',
+				'- Or call `manage_workspace` with {"action":"write","path":"<absolute path>","content":"..."} if write_file is unavailable.',
+				'Example tool call shape: {"name":"write_file","arguments":{"path":"C:\\\\Users\\\\...\\\\file.mjs","content":"..."}}',
+			);
+		} else {
+			lines.push(
+				"- If you said you would edit/add an entry to a list: call the Edit tool now with the exact old_string/new_string (or Write).",
+				"- If you said you would modify code: call the Edit tool now with the exact old/new snippets.",
+			);
+		}
+
+		if (attempt >= 2) {
+			lines.push(
+				"",
+				`This is attempt #${attempt}. Output ONLY the tool call this turn — no prose, no explanation, no preamble. The tool call must be the first and only thing you emit.`,
+			);
+		} else {
+			lines.push(
+				"Issue exactly ONE concrete tool call this turn. Any text before it must be a single short line at most.",
+			);
+		}
+
 		if (repeated) {
 			lines.push(
 				"",

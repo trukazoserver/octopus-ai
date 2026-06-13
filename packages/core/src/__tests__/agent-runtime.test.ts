@@ -1470,6 +1470,67 @@ describe("AgentRuntime", () => {
 			expect(mockExecutor.execute).not.toHaveBeenCalled();
 			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(2);
 		});
+
+		it("allows editing a tool file that merely mentions veo-3.* model names (no API endpoint)", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+					finishReason: "tool_calls",
+					toolCalls: [
+						{
+							id: "call-edit",
+							type: "function" as const,
+							function: {
+								name: "execute_code",
+								arguments: JSON.stringify({
+									language: "javascript",
+									code: "fs.writeFileSync('index.mjs', src.replace('veo-3.1-generate-preview', 'veo-3.1-generate-001'));",
+								}),
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					content: "Listo, agregué veo-3.1-generate-001 a VALID_MODELS.",
+					model: "test-model",
+					usage: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
+					finishReason: "stop",
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "execute_code", description: "Executes code" },
+				{ name: "veo-video-generator", description: "Generates videos" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const result = await runtime.processMessage(
+				"agrega veo-3.1-generate-001 a la lista de modelos de veo-video-generator",
+				"conv-edit-allowed",
+			);
+
+			expect(mockExecutor.execute).toHaveBeenCalledWith(
+				"execute_code",
+				expect.anything(),
+				expect.anything(),
+			);
+			expect(result).toBe(
+				"Listo, agregué veo-3.1-generate-001 a VALID_MODELS.",
+			);
+		});
 	});
 
 	describe("stall detection (promised-but-not-acted)", () => {
