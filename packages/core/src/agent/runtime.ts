@@ -50,6 +50,8 @@ import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
 import type { WorkflowManager } from "./workflow-manager.js";
 import type { KanbanPlanner } from "./kanban-planner.js";
 import type { RequirementResolver } from "./requirement-resolver.js";
+import type { KanbanDispatcher } from "./kanban-dispatcher.js";
+import type { AgentEvent, EventStream } from "./event-stream.js";
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 128;
 const MAX_REPEATED_TOOL_SIGNATURES = 3;
@@ -214,6 +216,8 @@ export class AgentRuntime {
 	private orchestrator?: OctopusOrchestrator;
 	private kanbanPlanner?: KanbanPlanner;
 	private requirementResolver?: RequirementResolver;
+	private kanbanDispatcher?: KanbanDispatcher;
+	private durableEventStream?: EventStream;
 	private subtaskTracker?: import("./subtask-tracker.js").SubtaskTracker;
 	private continuityGuard: ContinuityGuard;
 	private workingMemory: WorkingMemory = new WorkingMemory();
@@ -345,6 +349,125 @@ export class AgentRuntime {
 
 	setRequirementResolver(resolver: RequirementResolver): void {
 		this.requirementResolver = resolver;
+	}
+
+	setKanbanDispatcher(dispatcher: KanbanDispatcher): void {
+		this.kanbanDispatcher = dispatcher;
+	}
+
+	setDurableEventStream(stream: EventStream): void {
+		this.durableEventStream = stream;
+	}
+
+	/**
+	 * After a successful kanban_create_plan_from_goal, optionally stream the
+	 * durable workflow's progress live into the chat (Hermes-style) until all
+	 * cards complete or the user interrupts. No-op unless a dispatcher and
+	 * event stream are wired via setKanbanDispatcher/setDurableEventStream.
+	 */
+	private async *maybeStreamCreatedWorkflow(
+		toolCall: LLMToolCall,
+		toolResult: ToolResult,
+		signal: AbortSignal | undefined,
+	): AsyncGenerator<string> {
+		if (
+			toolCall.function.name !== "kanban_create_plan_from_goal" ||
+			!toolResult.success ||
+			!this.kanbanDispatcher ||
+			!this.durableEventStream
+		) {
+			return;
+		}
+		const planMeta = toolResult.metadata as
+			| { run?: { id?: string }; tasks?: Array<{ id?: string }> }
+			| undefined;
+		const runId = planMeta?.run?.id;
+		const taskIds =
+			planMeta?.tasks
+				?.map((t) => t.id)
+				.filter((id): id is string => !!id) ?? [];
+		if (!runId || taskIds.length === 0) return;
+		yield* this.streamDurableWorkflow(runId, taskIds, signal);
+	}
+
+	/**
+	 * Drive the dispatcher's ticks and stream workflow events live until all
+	 * tasks complete, the user aborts, or the stream budget is exhausted. The
+	 * workflow itself keeps running in the background via the cron scheduler
+	 * even if this loop exits early.
+	 */
+	private async *streamDurableWorkflow(
+		runId: string,
+		taskIds: string[],
+		signal: AbortSignal | undefined,
+	): AsyncGenerator<string> {
+		const dispatcher = this.kanbanDispatcher;
+		const stream = this.durableEventStream;
+		if (!dispatcher || !stream) return;
+
+		const pending: AgentEvent[] = [];
+		const unsubscribe = stream.subscribe((event) => {
+			if (event.runId === runId) pending.push(event);
+		});
+
+		const pollMs =
+			Number.parseInt(
+				process.env.OCTOPUS_WORKFLOW_STREAM_POLL_MS ?? "1500",
+				10,
+			) || 1500;
+		const maxWaitMs =
+			Number.parseInt(
+				process.env.OCTOPUS_WORKFLOW_STREAM_MAX_MS ?? "1800000",
+				10,
+			) || 1800000;
+		const startedAt = Date.now();
+		let idleTicks = 0;
+
+		try {
+			yield `\n🟢 Workflow ${runId} en ejecución (${taskIds.length} subtareas). Streaming en vivo…\n\n`;
+			while (true) {
+				throwIfAborted(signal);
+				if (Date.now() - startedAt > maxWaitMs) {
+					yield `\n⏱ Stream pausado tras ${Math.round(maxWaitMs / 60000)} min; el workflow sigue en background.\n`;
+					return;
+				}
+				try {
+					await dispatcher.tick();
+				} catch {
+					/* transient tick errors must not kill the stream */
+				}
+				while (pending.length > 0) {
+					const event = pending.shift();
+					if (!event) continue;
+					const message = event.data?.message ?? event.type;
+					const prefix =
+						event.type === "result"
+							? "✅"
+							: event.type === "error"
+								? "❌"
+								: event.type === "task_claimed"
+									? "▶"
+									: "📋";
+					yield `${prefix} ${message}\n`;
+				}
+				if (stream.areAllTasksComplete(taskIds, runId)) {
+					yield `\n✅ Workflow ${runId} completado.\n`;
+					return;
+				}
+				if (dispatcher.getStatus().activeCount === 0) {
+					idleTicks += 1;
+					if (idleTicks >= 3) {
+						yield `\n⏸ No hay cards activas ahora; el workflow continúa en background (algunas pueden requerir revisión).\n`;
+						return;
+					}
+				} else {
+					idleTicks = 0;
+				}
+				await new Promise((resolve) => setTimeout(resolve, pollMs));
+			}
+		} finally {
+			unsubscribe();
+		}
 	}
 
 	setSubtaskTracker(
@@ -2986,6 +3109,7 @@ export class AgentRuntime {
 									this.getToolExecutionContext(),
 								);
 								throwIfAborted(options.signal);
+								yield* this.maybeStreamCreatedWorkflow(toolCall, toolResult, options.signal);
 							}
 						}
 					}

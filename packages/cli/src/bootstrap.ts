@@ -18,6 +18,7 @@ import {
 	ConnectionManager,
 	ContextAssembler,
 	EmbeddingProvider,
+	EventStream,
 	EnvVarManager,
 	FTSSearchEngine,
 	GlobalDailyMemory,
@@ -2349,6 +2350,10 @@ Always be concise, helpful, and thorough.`,
 	const durableOrchestrationEnabled =
 		config.orchestration?.enabled !== false &&
 		config.orchestration?.mode !== "legacy";
+	// Shared event stream for durable workflows: the dispatcher's taskExecutor
+	// appends progress events here, and the agent runtime subscribes to stream
+	// them live into the chat (Hermes-style) after kanban_create_plan_from_goal.
+	const durableEventStream = new EventStream();
 	const kanbanDispatcher = new KanbanDispatcher(
 		workflowManager,
 		requirementResolver,
@@ -2363,6 +2368,16 @@ Always be concise, helpful, and thorough.`,
 				bootstrapLogger.error(
 					`Error executing Kanban task '${task.id}': ${error instanceof Error ? error.message : String(error)}`,
 				);
+				durableEventStream.append({
+					runId: task.run_id,
+					taskId: task.id,
+					workerId: task.assigned_agent_id ?? agentConfig.id,
+					type: "error",
+					data: {
+						error: error instanceof Error ? error.message : String(error),
+						message: `Error en: ${task.title}`,
+					},
+				});
 			},
 			taskExecutor: async ({ task, leaseToken }) => {
 				const taskContext = await workflowManager.getTaskContext(task.id);
@@ -2424,6 +2439,13 @@ Always be concise, helpful, and thorough.`,
 				]
 					.filter(Boolean)
 					.join("\n\n");
+				durableEventStream.append({
+					runId: task.run_id,
+					taskId: task.id,
+					workerId: task.assigned_agent_id ?? agentConfig.id,
+					type: "task_claimed",
+					data: { message: `Iniciando: ${task.title}` },
+				});
 				for await (const _chunk of selectedRuntime.processMessageStream(
 					prompt,
 					"kanban_dispatcher",
@@ -2435,6 +2457,18 @@ Always be concise, helpful, and thorough.`,
 					/* progress is persisted through workflow tools */
 				}
 				const latest = await workflowManager.getTask(task.id);
+				durableEventStream.append({
+					runId: task.run_id,
+					taskId: task.id,
+					workerId: task.assigned_agent_id ?? agentConfig.id,
+					type: latest?.status === "done" ? "result" : "progress",
+					data: {
+						message:
+							latest?.status === "done"
+								? `Completada: ${task.title}`
+								: `Requiere revisión: ${task.title}`,
+					},
+				});
 				if (latest?.status === "running") {
 					await workflowManager.updateTaskStatus(task.id, "review", {
 						metadata: {
@@ -2455,6 +2489,8 @@ Always be concise, helpful, and thorough.`,
 		},
 	);
 	await kanbanDispatcher.loadPersistedState();
+	agentRuntime.setKanbanDispatcher(kanbanDispatcher);
+	agentRuntime.setDurableEventStream(durableEventStream);
 	const workflowTools = createWorkflowTools(
 		workflowManager,
 		requirementResolver,
