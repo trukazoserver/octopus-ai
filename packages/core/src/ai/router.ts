@@ -297,9 +297,12 @@ export function resolveProviderConfig(
 	}
 }
 
-function isRetryableProviderError(error: unknown): boolean {
+export function isRetryableProviderError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
-	return /fetch failed|network|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR|socket|terminated/i.test(
+	// Network/transient errors AND provider rate-limiting (HTTP 429 / 503).
+	// Without 429 here, parallel workers that burst the provider's rate limit
+	// die on the first attempt with no backoff.
+	return /fetch failed|network|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR|socket|terminated|429|503|rate.?limit|too many requests/i.test(
 		message,
 	);
 }

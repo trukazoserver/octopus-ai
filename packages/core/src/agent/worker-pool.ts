@@ -18,6 +18,18 @@ import type { AgentConfig } from "./types.js";
 const STATUS_RE =
 	/^\x00STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\x00$/;
 
+/**
+ * Delay (ms) between consecutive worker starts inside a concurrency chunk.
+ * Staggers parallel workers so they don't all hit the provider API at the
+ * same instant and trip rate limits (HTTP 429). Tunable via env.
+ */
+const WORKER_STAGGER_MS =
+	Number.parseInt(process.env.OCTOPUS_WORKER_STAGGER_MS ?? "300", 10) || 300;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export interface LiveAgentRuntime {
 	processMessageStream?(
 		message: string,
@@ -693,10 +705,14 @@ export class WorkerPool {
 			}
 
 			for (const chunk of chunks) {
-				const promises = chunk.map((task) =>
-					this.executeWorker(task, config).then((result) => {
-						results.set(task.id, result);
-					}),
+				// Stagger worker starts within the chunk so they don't all hit
+				// the provider API at the same instant (avoids 429 bursts).
+				const promises = chunk.map((task, index) =>
+					sleep(index * WORKER_STAGGER_MS).then(() =>
+						this.executeWorker(task, config).then((result) => {
+							results.set(task.id, result);
+						}),
+					),
 				);
 				await Promise.allSettled(promises);
 			}
