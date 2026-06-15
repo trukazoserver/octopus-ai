@@ -218,6 +218,7 @@ export class AgentRuntime {
 	private requirementResolver?: RequirementResolver;
 	private kanbanDispatcher?: KanbanDispatcher;
 	private durableEventStream?: EventStream;
+	private readonly toolBillingFailures = new Map<string, number>();
 	private subtaskTracker?: import("./subtask-tracker.js").SubtaskTracker;
 	private continuityGuard: ContinuityGuard;
 	private workingMemory: WorkingMemory = new WorkingMemory();
@@ -1712,12 +1713,37 @@ export class AgentRuntime {
 		);
 	}
 
+	private isToolBillingBlocked(toolName: string): boolean {
+		return (this.toolBillingFailures.get(toolName) ?? 0) >= 3;
+	}
+
+	private recordToolResultForBilling(
+		toolName: string,
+		toolResult: ToolResult,
+	): void {
+		const text = `${toolResult.error ?? ""} ${toolResult.output ?? ""}`;
+		if (/403|billing|permission.?denied|requires billing|enabled billing/i.test(text)) {
+			this.toolBillingFailures.set(
+				toolName,
+				(this.toolBillingFailures.get(toolName) ?? 0) + 1,
+			);
+		} else if (toolResult.success) {
+			this.toolBillingFailures.delete(toolName);
+		}
+	}
+
 	private decideBeforeToolCall(
 		toolName: string,
 		params: Record<string, unknown>,
 		ledger: EvidenceLedger,
 		remainingIterations: number | null,
 	): ToolDecision {
+		if (this.isToolBillingBlocked(toolName)) {
+			return {
+				action: "stop",
+				reason: `La herramienta '${toolName}' está temporalmente desactivada: falló varias veces seguidas por falta de facturación/permisos (HTTP 403). Habilita la facturación del proveedor o corrige los permisos y vuelve a intentarlo; no la reintentes hasta entonces.`,
+			};
+		}
 		if (
 			this.isManualVeoApiAttempt(toolName, params) &&
 			this.toolRegistry?.has("veo-video-generator")
@@ -2564,8 +2590,12 @@ export class AgentRuntime {
 						continue;
 					}
 
-					fullResponse += "\n\n⚠️ Error: " + errMsg;
-						yield errMsg;
+					const llmFailureNotice =
+						"\n\n⚠️ No pude completar la respuesta: el servicio de IA falló tras varios reintentos (incluido el modelo de respaldo). Detalle técnico: " +
+						errMsg.slice(0, 300) +
+						".\n\nPuedes reintentar en unos momentos; si persiste, revisa los créditos o permisos del proveedor en Ajustes.";
+					fullResponse += llmFailureNotice;
+					yield llmFailureNotice;
 						// Interrupt inline run tracking
 						if (inlineRunId && this.subtaskTracker) {
 							try {
@@ -3114,6 +3144,7 @@ export class AgentRuntime {
 						}
 					}
 
+					this.recordToolResultForBilling(toolCall.function.name, toolResult);
 					const rawResultContentStr = toolResult.success
 						? typeof toolResult.output === "string"
 							? toolResult.output

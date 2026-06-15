@@ -307,6 +307,16 @@ export function isRetryableProviderError(error: unknown): boolean {
 	);
 }
 
+/**
+ * Compact one-line summary of a provider error for logs (truncated, whitespace-
+ * normalized) so router WARN lines show the actual status/message instead of
+ * a bare "transient failure".
+ */
+function summarizeError(error: unknown): string {
+	const msg = error instanceof Error ? error.message : String(error);
+	return msg.replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
 const PROVIDER_REGISTRY: Record<
 	string,
 	{
@@ -733,7 +743,7 @@ export class LLMRouter {
 					) {
 						const delay = this.providerRetryBaseDelayMs * 2 ** attempt;
 						logger.warn(
-							`Provider '${providerName}' transient failure; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries})`,
+							`Provider '${providerName}' transient failure; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries}): ${summarizeError(error)}`,
 						);
 						await sleep(delay);
 						continue;
@@ -750,7 +760,7 @@ export class LLMRouter {
 						providerName: fallbackProviderName,
 					} = this.resolveProvider(this.config.fallback);
 					logger.warn(
-						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}'`,
+						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}': ${summarizeError(error)}`,
 					);
 					const fallbackResolved = this.applyVisionRouting(
 						{ ...enriched, model: fallbackModelName },
@@ -761,7 +771,10 @@ export class LLMRouter {
 						await fallbackProvider.chat(fallbackResolved);
 					this.trackUsage(fallbackProviderName, fallbackResponse.usage);
 					return fallbackResponse;
-				} catch {
+				} catch (fallbackError) {
+					logger.warn(
+						`Fallback '${this.config.fallback}' also failed: ${summarizeError(fallbackError)}`,
+					);
 					// Surface the original provider error when fallback is unavailable.
 				}
 			}
@@ -800,7 +813,7 @@ export class LLMRouter {
 					) {
 						const delay = this.providerRetryBaseDelayMs * 2 ** attempt;
 						logger.warn(
-							`Provider '${providerName}' stream failed before output; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries})`,
+							`Provider '${providerName}' stream failed before output; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries}): ${summarizeError(error)}`,
 						);
 						await sleep(delay);
 						continue;
@@ -817,7 +830,7 @@ export class LLMRouter {
 						providerName: fallbackProviderName,
 					} = this.resolveProvider(this.config.fallback);
 					logger.warn(
-						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}'`,
+						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}': ${summarizeError(error)}`,
 					);
 					const fallbackResolved = this.applyVisionRouting(
 						{ ...enriched, model: fallbackModelName },
@@ -830,7 +843,10 @@ export class LLMRouter {
 						yield chunk;
 					}
 					return;
-				} catch {
+				} catch (fallbackError) {
+					logger.warn(
+						`Fallback '${this.config.fallback}' also failed: ${summarizeError(fallbackError)}`,
+					);
 					// Surface the original provider error when fallback is unavailable.
 				}
 			}
