@@ -903,6 +903,286 @@ function activityColor(status: AgentActivityStatus): string {
 	return "#818cf8";
 }
 
+// Semantic action kinds derived from the activity status, the tool in use and
+// the detail text. Each kind maps to a distinct animated glyph so the card shows
+// what Octopus is *actually* doing (writing, browsing, searching memory, ...).
+type AgentActionKind =
+	| "thinking"
+	| "writing"
+	| "reading"
+	| "web"
+	| "memory"
+	| "image-analysis"
+	| "image-generation"
+	| "video"
+	| "code"
+	| "search"
+	| "delegate"
+	| "message"
+	| "plan"
+	| "media"
+	| "responding"
+	| "orchestrating"
+	| "done"
+	| "error"
+	| "skipped"
+	| "tool";
+
+function getActivityActionKind(activity: AgentActivity): AgentActionKind {
+	const status = activity.status;
+	if (status === "thinking") return "thinking";
+	if (status === "responding") return "responding";
+	if (status === "tool_done" || status === "worker_done") return "done";
+	if (status === "tool_error" || status === "worker_error") return "error";
+	if (status === "tool_skipped") return "skipped";
+	if (status === "orchestrating") return "orchestrating";
+
+	const tool = (activity.toolName ?? "").toLowerCase();
+	const detail = (activity.detail ?? "").toLowerCase();
+
+	if (tool.includes("delegate") || tool.includes("agent_spawn")) return "delegate";
+	if (
+		tool.includes("send_message") ||
+		tool.includes("broadcast") ||
+		tool.includes("ask_orchestrator") ||
+		tool.includes("report_file") ||
+		tool.includes("list_messages") ||
+		tool.includes("mark_messages")
+	)
+		return "message";
+	if (
+		tool.startsWith("kanban") ||
+		tool.startsWith("workflow") ||
+		tool.includes("schedule_task") ||
+		tool.includes("list_tasks")
+	)
+		return "plan";
+
+	// Image generation vs. analysis vs. video (checked before generic web/code).
+	if (
+		tool.includes("nano-banana") ||
+		(detail.includes("gener") &&
+			(detail.includes("imagen") || detail.includes("image")))
+	)
+		return "image-generation";
+	if (tool.includes("veo") || detail.includes("video") || detail.includes("reel"))
+		return "video";
+	if (
+		tool.includes("extract_images") ||
+		detail.includes("analiz") ||
+		((detail.includes("imagen") || detail.includes("image")) &&
+			!detail.includes("gener"))
+	)
+		return "image-analysis";
+
+	if (
+		tool.startsWith("browser") ||
+		tool.includes("decodo") ||
+		tool.includes("scrape")
+	)
+		return "web";
+
+	if (
+		tool.includes("execute_code") ||
+		tool.includes("install_package") ||
+		tool.includes("create_tool") ||
+		tool.includes("manage_workspace") ||
+		tool.includes("sandbox") ||
+		tool.includes("run_command") ||
+		status === "code"
+	)
+		return "code";
+
+	if (
+		tool === "write_file" ||
+		tool === "edit_file" ||
+		detail.includes("escribi") ||
+		detail.includes("editand") ||
+		detail.includes("redactand")
+	)
+		return "writing";
+	if (tool === "read_file" || detail.includes("leyendo")) return "reading";
+	if (
+		tool === "search_files" ||
+		tool === "list_directory" ||
+		tool === "create_directory"
+	)
+		return "search";
+
+	if (
+		tool.includes("save_media") ||
+		tool.includes("list_media") ||
+		tool.includes("import_media")
+	)
+		return "media";
+
+	if (
+		tool.includes("memory") ||
+		detail.includes("memoria") ||
+		detail.includes("recuerd")
+	)
+		return "memory";
+
+	return "tool";
+}
+
+function renderActionGlyph(kind: AgentActionKind): React.ReactNode {
+	switch (kind) {
+		case "thinking":
+			return (
+				<>
+					<path d="M12 5a3 3 0 1 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+					<path d="M12 5a3 3 0 1 1 5.997.142 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+					<path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" />
+					<path d="M17.599 6.5a3 3 0 0 0 .399-1.358" />
+					<path d="M6.401 6.5a3 3 0 0 1-.399-1.358" />
+				</>
+			);
+		case "writing":
+			return (
+				<>
+					<path d="M12 20h9" />
+					<path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+				</>
+			);
+		case "reading":
+			return (
+				<>
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<path d="M14 2v6h6" />
+					<path d="M8 13h8" />
+					<path d="M8 17h6" />
+				</>
+			);
+		case "web":
+			return (
+				<>
+					<circle cx="12" cy="12" r="9" />
+					<path d="M3 12h18" />
+					<path d="M12 3a14 14 0 0 1 0 18" />
+					<path d="M12 3a14 14 0 0 0 0 18" />
+				</>
+			);
+		case "memory":
+			return (
+				<>
+					<path d="M4 6c0-1.66 3.58-3 8-3s8 1.34 8 3-3.58 3-8 3-8-1.34-8-3Z" />
+					<path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" />
+					<path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+				</>
+			);
+		case "image-analysis":
+			return (
+				<>
+					<path d="M3 7V5a2 2 0 0 1 2-2h2" />
+					<path d="M17 3h2a2 2 0 0 1 2 2v2" />
+					<path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+					<path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+					<circle cx="12" cy="12" r="3" />
+				</>
+			);
+		case "image-generation":
+			return (
+				<>
+					<path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3Z" />
+					<path d="M19 3v4" />
+					<path d="M21 5h-4" />
+				</>
+			);
+		case "video":
+			return (
+				<>
+					<rect x="2" y="6" width="14" height="12" rx="2" />
+					<path d="m22 8-6 4 6 4z" />
+				</>
+			);
+		case "code":
+			return (
+				<>
+					<path d="m16 18 4-6-4-6" />
+					<path d="m8 6-4 6 4 6" />
+					<path d="m14.5 4-5 16" />
+				</>
+			);
+		case "search":
+			return (
+				<>
+					<circle cx="11" cy="11" r="7" />
+					<path d="m21 21-4.3-4.3" />
+				</>
+			);
+		case "delegate":
+			return (
+				<>
+					<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+					<circle cx="9" cy="7" r="4" />
+					<path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+					<path d="M16 3.13a4 4 0 0 1 0 7.75" />
+				</>
+			);
+		case "message":
+			return (
+				<>
+					<path d="m22 2-7 20-4-9-9-4Z" />
+					<path d="M22 2 11 13" />
+				</>
+			);
+		case "plan":
+			return (
+				<>
+					<path d="m3 17 2 2 4-4" />
+					<path d="m3 7 2 2 4-4" />
+					<path d="M13 6h8" />
+					<path d="M13 12h8" />
+					<path d="M13 18h8" />
+				</>
+			);
+		case "media":
+			return (
+				<>
+					<rect x="3" y="3" width="18" height="18" rx="2" />
+					<circle cx="8.5" cy="8.5" r="1.5" />
+					<path d="m21 15-5-5L5 21" />
+				</>
+			);
+		case "responding":
+			return (
+				<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+			);
+		case "orchestrating":
+			return (
+				<>
+					<circle cx="6" cy="6" r="2.5" />
+					<circle cx="18" cy="6" r="2.5" />
+					<circle cx="12" cy="18" r="2.5" />
+					<path d="M7.8 7.8 10.4 15.6" />
+					<path d="M16.2 7.8 13.6 15.6" />
+					<path d="M8.5 6h7" />
+				</>
+			);
+		case "done":
+			return <path d="M20 6 9 17l-5-5" />;
+		case "error":
+			return (
+				<>
+					<circle cx="12" cy="12" r="9" />
+					<path d="m15 9-6 6M9 9l6 6" />
+				</>
+			);
+		case "skipped":
+			return (
+				<>
+					<path d="M5 12h14" />
+					<path d="M12 5v14" opacity="0.35" />
+				</>
+			);
+		default:
+			return (
+				<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+			);
+	}
+}
+
 function AgentActivityIcon({
 	activity,
 	active,
@@ -911,190 +1191,26 @@ function AgentActivityIcon({
 	active?: boolean;
 }) {
 	const color = activityColor(activity.status);
-	if (
-		activity.iconSvg &&
-		(activity.status === "tool" || activity.status === "code")
-	) {
-		const sanitizedSvg = DOMPurify.sanitize(activity.iconSvg, {
-			USE_PROFILES: { svg: true, svgFilters: true },
-			ADD_TAGS: [
-				"svg",
-				"path",
-				"circle",
-				"line",
-				"polyline",
-				"polygon",
-				"rect",
-				"ellipse",
-				"g",
-				"defs",
-				"use",
-				"animate",
-				"animateTransform",
-			],
-			ADD_ATTR: [
-				"viewBox",
-				"fill",
-				"stroke",
-				"stroke-width",
-				"stroke-linecap",
-				"stroke-linejoin",
-				"d",
-				"cx",
-				"cy",
-				"r",
-				"x",
-				"y",
-				"x1",
-				"y1",
-				"x2",
-				"y2",
-				"width",
-				"height",
-				"points",
-				"opacity",
-				"transform",
-				"style",
-			],
-			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
-			FORBID_TAGS: [
-				"script",
-				"iframe",
-				"object",
-				"embed",
-				"image",
-				"foreignObject",
-			],
-		});
-		const hasRenderableVector =
-			/<svg\b/i.test(sanitizedSvg) &&
-			/<(path|circle|line|polyline|polygon|rect|ellipse|g|use)\b/i.test(
-				sanitizedSvg,
-			);
-		if (hasRenderableVector)
-			return (
-				<span
-					className="agent-activity-icon"
-					style={{
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "center",
-						width: 18,
-						height: 18,
-						color,
-						flexShrink: 0,
-						lineHeight: 0,
-						overflow: "hidden",
-						position: "relative",
-						animation: active
-							? "toolFloat 1.4s infinite ease-in-out"
-							: undefined,
-					}}
-					// biome-ignore lint/security/noDangerouslySetInnerHtml: SVG sanitized via DOMPurify
-					dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
-				/>
-			);
-	}
-
-	if (activity.status === "tool_done") {
-		return (
-			<svg
-				aria-hidden="true"
-				width="18"
-				height="18"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke={color}
-				strokeWidth="2.2"
-				strokeLinecap="round"
-				strokeLinejoin="round"
-			>
-				<path d="M20 6 9 17l-5-5" />
-			</svg>
-		);
-	}
-
-	if (activity.status === "tool_error") {
-		return (
-			<svg
-				aria-hidden="true"
-				width="18"
-				height="18"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke={color}
-				strokeWidth="2.2"
-				strokeLinecap="round"
-				strokeLinejoin="round"
-			>
-				<circle cx="12" cy="12" r="9" />
-				<path d="m15 9-6 6M9 9l6 6" />
-			</svg>
-		);
-	}
-
-	if (activity.status === "tool_skipped") {
-		return (
-			<svg
-				aria-hidden="true"
-				width="18"
-				height="18"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke={color}
-				strokeWidth="2.2"
-				strokeLinecap="round"
-				strokeLinejoin="round"
-			>
-				<path d="M5 12h14" />
-				<path d="M12 5v14" opacity="0.35" />
-			</svg>
-		);
-	}
-
-	if (activity.status === "responding") {
-		return (
-			<svg
-				aria-hidden="true"
-				width="18"
-				height="18"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke={color}
-				strokeWidth="2"
-				strokeLinecap="round"
-				strokeLinejoin="round"
-				style={{
-					animation: active ? "pulse 1.4s infinite ease-in-out" : undefined,
-				}}
-			>
-				<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-			</svg>
-		);
-	}
-
+	const kind = getActivityActionKind(activity);
 	return (
 		<svg
 			aria-hidden="true"
-			width="18"
-			height="18"
+			width="20"
+			height="20"
 			viewBox="0 0 24 24"
 			fill="none"
-			style={{ animation: active ? "spin 1.8s linear infinite" : undefined }}
+			stroke={color}
+			strokeWidth="1.7"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			style={{
+				animation: active ? "iconPulse 1.6s infinite ease-in-out" : undefined,
+				transformOrigin: "center",
+				transformBox: "fill-box",
+				filter: active ? `drop-shadow(0 0 5px ${color}88)` : undefined,
+			}}
 		>
-			<circle
-				cx="12"
-				cy="12"
-				r="9"
-				stroke="rgba(255,255,255,0.14)"
-				strokeWidth="2"
-			/>
-			<path
-				d="M12 3a9 9 0 0 1 9 9"
-				stroke={color}
-				strokeWidth="2.4"
-				strokeLinecap="round"
-			/>
+			{renderActionGlyph(kind)}
 		</svg>
 	);
 }
@@ -1114,9 +1230,12 @@ function AgentActivityPanel({
 	workflowRunId?: string;
 	onOpenWorkflow?: (workflowRunId: string) => void;
 }) {
+	const [expanded, setExpanded] = useState(false);
 	const latest = activities[activities.length - 1];
 	if (!latest) return null;
-	const recent = activities.slice(-5);
+	// Exclude the latest activity from the history: it is already rendered as the
+	// main animated card, so listing it again produced a duplicate "thinking" row.
+	const recent = activities.slice(0, -1).slice(-5);
 	const color = activityColor(latest.status);
 	const rawWorkers = multiAgentWorkers ?? [];
 	const workers = rawWorkers.length > 1 ? rawWorkers : [];
@@ -1156,6 +1275,18 @@ function AgentActivityPanel({
 						? `${completedWorkers}/${workers.length} brazos completaron su tarea; ${failedWorkers} tuvieron problemas.`
 						: `Los ${workers.length} brazos vivos completaron sus tareas.`
 			: latest.detail;
+	// Only the current card is animated and visible by default; the rest of the
+	// trace (plan summary, workers, historical steps) stays collapsed until the
+	// user expands it, so only one thinking container is shown at a time.
+	const hasHiddenDetail =
+		Boolean(multiAgentPlan) || workers.length > 0 || recent.length > 0;
+	const toggleLabel = expanded
+		? "Ocultar detalle"
+		: workers.length > 0
+			? `Ver ${workers.length} agentes`
+			: recent.length > 0
+				? `Ver ${recent.length} paso${recent.length === 1 ? "" : "s"}`
+				: "Ver detalle";
 
 	return (
 		<div className="agent-activity-row">
@@ -1177,7 +1308,7 @@ function AgentActivityPanel({
 				className="agent-activity-card compact"
 				style={{ borderColor: `${color}55` }}
 			>
-				{(multiAgentPlan || workers.length > 0) && (
+				{expanded && (multiAgentPlan || workers.length > 0) && (
 					<div className="multi-agent-summary">
 						<div className="multi-agent-summary-top">
 							<span className="multi-agent-pill">
@@ -1229,7 +1360,34 @@ function AgentActivityPanel({
 						))}
 					</div>
 				</div>
-				{showWorkerDetails && (
+				{hasHiddenDetail && (
+					<button
+						type="button"
+						className="agent-activity-toggle"
+						onClick={() => setExpanded((value) => !value)}
+						aria-expanded={expanded}
+					>
+						<svg
+							aria-hidden="true"
+							width="12"
+							height="12"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							strokeWidth="2.4"
+							strokeLinecap="round"
+							strokeLinejoin="round"
+							style={{
+								transform: expanded ? "rotate(180deg)" : "none",
+								transition: "transform .18s ease",
+							}}
+						>
+							<path d="m6 9 6 6 6-6" />
+						</svg>
+						{toggleLabel}
+					</button>
+				)}
+				{expanded && showWorkerDetails && (
 					<div className="multi-agent-workers compact-list">
 						{workers.map((worker, index) => {
 							const statusColor =
@@ -1297,12 +1455,12 @@ function AgentActivityPanel({
 						})}
 					</div>
 				)}
-				{workers.length > 6 && (
+				{expanded && workers.length > 6 && (
 					<div className="multi-agent-collapsed-note">
 						Detalle de {workers.length} brazos colapsado. {mainSummary}
 					</div>
 				)}
-				{workers.length === 0 && recent.length > 1 && (
+				{expanded && workers.length === 0 && recent.length > 0 && (
 					<div className="agent-activity-steps">
 						{recent.map((activity, index) => (
 							<div key={activity.id} className="agent-activity-step">
@@ -4609,9 +4767,6 @@ export const ChatPage: React.FC<{
 							>
 								{messages.length === 0 && (
 									<div className="chat-welcome">
-										<div className="chat-welcome-plan">
-											Plan local · Octopus AI
-										</div>
 										<div className="chat-welcome-title-row">
 											<div className="chat-welcome-logo">
 												<AgentAvatarContent
@@ -4630,12 +4785,18 @@ export const ChatPage: React.FC<{
 												/>
 											</div>
 											<h1 className="chat-welcome-title">
-												Buenos dias, {userDisplayName}
+												{(() => {
+													const h = new Date().getHours();
+													const g =
+														h < 12
+															? "Buenos dias"
+															: h < 19
+																? "Buenas tardes"
+																: "Buenas noches";
+													return `${g}, ${userDisplayName}`;
+												})()}
 											</h1>
 										</div>
-										<p className="chat-welcome-subtitle">
-											Como puedo ayudarte hoy?
-										</p>
 										<div className="chat-welcome-chips">
 											{[
 												{ label: "Escribir", prompt: "Ayudame a escribir " },
@@ -5222,7 +5383,8 @@ export const ChatPage: React.FC<{
 				.agent-thought-cloud span:nth-child(3) { width: 9px; height: 9px; left: 0; top: 24px; opacity: .78; animation: thoughtDotPulse 1.35s .18s infinite ease-in-out; }
 				@keyframes thoughtCloudFloat { 0%, 100% { transform: translateY(0) scale(.96); opacity: .82; } 50% { transform: translateY(-4px) scale(1.04); opacity: 1; } }
 				@keyframes thoughtDotPulse { 0%, 100% { transform: scale(.82); opacity: .62; } 50% { transform: scale(1.08); opacity: 1; } }
-				.agent-activity-card { min-width: 260px; max-width: min(820px, calc(100vw - 120px)); padding: 12px 14px; border-radius: 16px; background: linear-gradient(135deg, rgba(24,24,27,0.92), rgba(9,9,11,0.84)); border: 1px solid rgba(63,63,70,0.75); box-shadow: 0 12px 34px rgba(0,0,0,0.28); backdrop-filter: blur(10px); }
+				@keyframes iconPulse { 0%, 100% { transform: scale(.9); opacity: .82; } 50% { transform: scale(1.1); opacity: 1; } }
+				.agent-activity-card { width: 440px; max-width: calc(100vw - 120px); padding: 12px 14px; border-radius: 16px; background: linear-gradient(135deg, rgba(24,24,27,0.92), rgba(9,9,11,0.84)); border: 1px solid rgba(63,63,70,0.75); box-shadow: 0 12px 34px rgba(0,0,0,0.28); backdrop-filter: blur(10px); }
 				.multi-agent-summary { margin-bottom: 12px; padding: 10px 11px; border: 1px solid rgba(99,102,241,0.24); border-radius: 14px; background: rgba(99,102,241,0.08); }
 				.multi-agent-summary-top { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
 				.multi-agent-pill { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; background: rgba(99,102,241,0.18); color: #c4b5fd; font-size: 0.72rem; font-weight: 800; }
@@ -5269,6 +5431,8 @@ export const ChatPage: React.FC<{
 				.agent-activity-detail { margin-top: 2px; font-size: 0.76rem; color: #a1a1aa; line-height: 1.35; }
 				.agent-activity-dots { margin-left: auto; display: flex; gap: 4px; padding-left: 10px; }
 				.agent-activity-dots span { width: 5px; height: 5px; border-radius: 999px; opacity: 0.35; animation: pulse 1s infinite ease-in-out; }
+				.agent-activity-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(99,102,241,.32); background: rgba(99,102,241,.1); color: #c4b5fd; font-size: .72rem; font-weight: 800; font-family: inherit; cursor: pointer; transition: background .16s ease, border-color .16s ease; }
+				.agent-activity-toggle:hover { background: rgba(99,102,241,.18); border-color: rgba(99,102,241,.5); }
 				.agent-activity-steps { margin-top: 12px; padding-top: 11px; border-top: 1px solid rgba(63,63,70,0.45); display: grid; gap: 8px; }
 				.agent-activity-step { display: flex; align-items: center; gap: 9px; color: #d4d4d8; font-size: 0.76rem; min-width: 0; position: relative; }
 				.agent-activity-step-line { width: 7px; height: 1px; border-radius: 999px; background: #3f3f46; flex-shrink: 0; }
