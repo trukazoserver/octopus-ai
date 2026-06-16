@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import * as os from "node:os";
 import { join } from "node:path";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	AgentManager,
 	AgentMessageBus,
@@ -1115,6 +1115,14 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	} catch {
 		// Best-effort: tool handlers create missing parents on write anyway.
 	}
+	// Where Octopus itself is installed (the directory that contains packages/).
+	// Resolved from this module's own location, NEVER from process.cwd() (which
+	// changes depending on how the backend is launched). Exposed to the agent via
+	// the system prompt so it treats its own install as off-limits.
+	const installRoot = path.resolve(
+		path.dirname(fileURLToPath(import.meta.url)),
+		"../../..",
+	);
 	const defaultAllowedPaths = [
 		os.homedir(),
 		path.join(os.homedir(), ".octopus"),
@@ -2123,8 +2131,10 @@ IMPORTANT - Sandbox Execution:
 - Use this when the user asks you to run code you generated, test scripts, or execute commands that could affect the system.
 - If Docker is not installed, inform the user they need Docker Desktop for sandbox features.
 
-IMPORTANT - File Creation & Workspace:
-- Relative paths in read_file/write_file/list_directory/search_files/create_directory/move_file/copy_file/delete_file resolve against the Octopus workspace (~/.octopus/workspace/), NOT the current working directory. They cannot escape it with "..". Use relative paths for anything you generate so it stays in one predictable place.
+IMPORTANT - File Creation & Workspace (two explicit roots, never derived from process.cwd()):
+- workspaceDir = ${workspaceDir} — where you CREATE files. Relative paths in read_file/write_file/list_directory/search_files/create_directory/move_file/copy_file/delete_file resolve here and cannot escape it with "..".
+- installRoot = ${installRoot} — where Octopus itself is installed. NEVER read, modify, or delete anything under installRoot (its own source/code/config) unless the user explicitly asks for it.
+- For the user's OWN files outside the workspace, use an absolute or ~/ path within the allowed paths, only when the user asks.
 - Create new projects, documents, and generated artifacts inside the workspace by default (e.g. "myproject/index.html"). The tool result returns the absolute path where the file landed.
 - To organize files (move, copy, rename, delete), PREFER move_file/copy_file/delete_file over run_command; they enforce the same workspace and allowed-paths policy and reject ".." escapes.
 - Only touch a different absolute/~/ location when the user explicitly asks for it and that path is within the allowed paths. Never write into the application's own source directory or assume a layout there.

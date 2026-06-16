@@ -443,7 +443,7 @@ export class KnowledgeManager {
 			? join(homedir(), filePath.slice(2))
 			: filePath;
 		const resolved = resolve(expanded);
-		const allowedRoots = [process.cwd(), homedir(), join(homedir(), ".octopus")].map((root) => resolve(root));
+		const allowedRoots = [homedir(), join(homedir(), ".octopus")].map((root) => resolve(root));
 		if (!allowedRoots.some((root) => isPathInside(root, resolved))) {
 			throw new Error(`Access denied: '${resolved}' is outside allowed knowledge import paths`);
 		}

@@ -124,7 +124,9 @@ function compactMetadata(metadata?: Record<string, unknown>): string {
 
 function createDefaultImportPathPolicy(): PathSafetyPolicy {
 	return new PathSafetyPolicy({
-		allowedPaths: [homedir(), join(homedir(), ".octopus"), process.cwd()],
+		// No process.cwd(): generated/imported media must stay under the user's
+		// home or ~/.octopus, never wherever the backend was launched from.
+		allowedPaths: [homedir(), join(homedir(), ".octopus")],
 	});
 }
 
