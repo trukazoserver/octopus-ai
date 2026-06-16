@@ -535,15 +535,17 @@ export class ToolExecutor {
 			};
 		}
 
-		for (const pathParam of this.getPathParams(params)) {
-			try {
-				this.pathPolicy.assertAllowed(pathParam, "Tool path");
-			} catch (error) {
-				return {
-					success: false,
-					output: "",
-					error: error instanceof Error ? error.message : String(error),
-				};
+		if (!tool.managesOwnPathPolicy) {
+			for (const pathParam of this.getPathParams(params)) {
+				try {
+					this.pathPolicy.assertAllowed(pathParam, "Tool path");
+				} catch (error) {
+					return {
+						success: false,
+						output: "",
+						error: error instanceof Error ? error.message : String(error),
+					};
+				}
 			}
 		}
 

@@ -14,7 +14,7 @@ import {
 	type EnvironmentFilterConfig,
 } from "../security/environment-filter.js";
 import { PathSafetyPolicy } from "../security/path-safety-policy.js";
-import { resolveRelativePathInside } from "../utils/path-safety.js";
+import { assertRealPathInside, resolveRelativePathInside } from "../utils/path-safety.js";
 import { mediaContext } from "./media.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
@@ -630,6 +630,7 @@ export class CodeExecutor {
 			description:
 				"Manage the workspace directory. List, read, write, or delete files in the Octopus AI workspace. Use this to organize project files, save outputs, and manage artifacts.",
 			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: pulse 2s infinite ease-in-out"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`,
+			managesOwnPathPolicy: true,
 			parameters: {
 				action: {
 					type: "string",
@@ -649,7 +650,8 @@ export class CodeExecutor {
 			handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
 				const action = String(params.action);
 				const relPath = String(params.path);
-				const content = params.content ? String(params.content) : undefined;
+				const content =
+					params.content === undefined ? undefined : String(params.content);
 
 				const workspaceRoot = this.getAllowedPath(
 					this.config.workspaceDir,
@@ -662,6 +664,18 @@ export class CodeExecutor {
 						success: false,
 						output: "",
 						error: "Access denied: path outside workspace",
+					};
+				}
+
+				// Guard against symlinks/junctions inside the workspace pointing
+				// outside: follow the real on-disk target before operating.
+				try {
+					await assertRealPathInside(fullPath, [workspaceRoot]);
+				} catch (err) {
+					return {
+						success: false,
+						output: "",
+						error: err instanceof Error ? err.message : String(err),
 					};
 				}
 

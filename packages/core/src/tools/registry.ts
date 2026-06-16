@@ -63,6 +63,13 @@ export interface ToolDefinition {
 	description: string;
 	uiIcon?: string;
 	metadata?: Record<string, unknown>;
+	/**
+	 * When true, the tool resolves and validates path parameters itself (e.g.
+	 * anchoring relative paths to the workspace) instead of relying on the
+	 * ToolExecutor's generic cwd-based prevalidation. ToolExecutor skips its
+	 * path prevalidation for these tools.
+	 */
+	managesOwnPathPolicy?: boolean;
 	parameters: Record<
 		string,
 		{ type: string; description: string; required?: boolean }

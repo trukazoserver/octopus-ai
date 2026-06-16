@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import * as os from "node:os";
 import { join } from "node:path";
@@ -1105,10 +1105,19 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		allowedPaths?: string[];
 	};
 	const disabledTools = toolConfig.disabled || [];
+	// Canonical workspace for agent-generated projects and files. Relative paths
+	// in the filesystem tools resolve here, and it is the only place the agent
+	// should write by default; other locations require an explicit user request
+	// (and must be within the allowed paths below).
+	const workspaceDir = path.join(os.homedir(), ".octopus", "workspace");
+	try {
+		mkdirSync(workspaceDir, { recursive: true });
+	} catch {
+		// Best-effort: tool handlers create missing parents on write anyway.
+	}
 	const defaultAllowedPaths = [
 		os.homedir(),
 		path.join(os.homedir(), ".octopus"),
-		process.cwd(),
 	];
 	const legacyToolAllowedPaths = toolConfig.allowedPaths || [];
 	const securityAllowedPaths = config.security.allowedPaths || [];
@@ -1126,7 +1135,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	};
 
 	const codeExecutor = new CodeExecutor(
-		{ allowedPaths, envFiltering: config.security.envFiltering },
+		{ allowedPaths, workspaceDir, envFiltering: config.security.envFiltering },
 		{
 			onToolCreated: async ({ name }) => {
 				await reloadDynamicTool(name);
@@ -1183,7 +1192,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	skillForge.setDeps({ router, researcher: skillResearcher });
 	skillImprover.setDeps({ router, researcher: skillResearcher });
 
-	const filesystemTools = createFileSystemTools(allowedPaths);
+	const filesystemTools = createFileSystemTools(allowedPaths, workspaceDir);
 	for (const tool of filesystemTools) {
 		registerSystemTool(tool);
 	}
@@ -1191,6 +1200,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	const shellTool = createShellTool({
 		sandboxCommands: config.security.sandboxCommands,
 		allowedPaths,
+		workspaceDir,
 		commandApproval,
 		envFiltering: config.security.envFiltering,
 		redactor,
@@ -2112,6 +2122,13 @@ IMPORTANT - Sandbox Execution:
 - The container has no network access, limited memory, and is destroyed after execution.
 - Use this when the user asks you to run code you generated, test scripts, or execute commands that could affect the system.
 - If Docker is not installed, inform the user they need Docker Desktop for sandbox features.
+
+IMPORTANT - File Creation & Workspace:
+- Relative paths in read_file/write_file/list_directory/search_files/create_directory/move_file/copy_file/delete_file resolve against the Octopus workspace (~/.octopus/workspace/), NOT the current working directory. They cannot escape it with "..". Use relative paths for anything you generate so it stays in one predictable place.
+- Create new projects, documents, and generated artifacts inside the workspace by default (e.g. "myproject/index.html"). The tool result returns the absolute path where the file landed.
+- To organize files (move, copy, rename, delete), PREFER move_file/copy_file/delete_file over run_command; they enforce the same workspace and allowed-paths policy and reject ".." escapes.
+- Only touch a different absolute/~/ location when the user explicitly asks for it and that path is within the allowed paths. Never write into the application's own source directory or assume a layout there.
+- Destructive actions (delete_file) OUTSIDE the workspace require explicit user confirmation before you run them; inside the workspace they are fine.
 
 				IMPORTANT - Z.AI MCP Tools:
 				- When a user shares an image, the message can contain a media URL like ![Image](/api/media/file/uuid.png) plus a runtime-injected local media path, or a file path like [Uploaded image: C:\\Users\\...\\media\\uuid.png].
