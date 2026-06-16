@@ -65,6 +65,8 @@ const STM_MIN_TURNS = 30;
 const STM_MAX_TURNS = 60;
 const TOOL_IMAGE_RE = /\[IMG:(data:image\/[a-zA-Z0-9-]+;base64,[^\]]+)\]/;
 const MEDIA_FILE_RE = /\/api\/media\/file\/([^\s)\]]+)/g;
+const ZAI_VISION_REQUIRED_MARKER = "[ZAI VISION REQUIRED]";
+const ZAI_VISION_REQUIRED_RE = /\s*\[ZAI VISION REQUIRED\][\s\S]*$/;
 const VISIBLE_MEMORY_IDENTIFIER_RE =
 	/\b(?=[A-Za-z0-9_-]{8,}\b)(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b/g;
 
@@ -1081,10 +1083,58 @@ export class AgentRuntime {
 		return parts;
 	}
 
+	/**
+	 * Attach the local media paths for an image-bearing message as a discrete
+	 * HTML comment.
+	 *
+	 * The directive to call a Z.AI Vision MCP tool lives in the system prompt,
+	 * NOT here. Inlining the `[ZAI VISION REQUIRED] ...` imperative into message
+	 * content made Z.ai GLM echo it back verbatim into its visible reply. Keeping
+	 * only the paths (data, not an instruction) avoids that echo while still
+	 * letting the model resolve the image to pass to the vision tool.
+	 */
 	private appendZaiVisionHint(content: string, localPaths: string[]): string {
 		if (localPaths.length === 0) return content;
 		const quotedPaths = localPaths.map((p) => JSON.stringify(p)).join(", ");
-		return `${content}\n\n[ZAI VISION REQUIRED] This image must be inspected with an available Z.AI Vision MCP tool because the active model is Z.ai GLM. Use the exact vision tool name exposed in Available Tools (for example analyze_image, extract_text_from_screenshot, or a namespaced alias containing that name) and pass one of these local media paths (${quotedPaths}) using the parameter required by that tool schema before answering.`;
+		return `${content}\n\n<!-- octopus-local-media-paths: ${quotedPaths} -->`;
+	}
+
+	private sanitizeAssistantOutput(content: string | undefined): string {
+		return (content ?? "").replace(ZAI_VISION_REQUIRED_RE, "").trimEnd();
+	}
+
+	private createAssistantOutputStreamSanitizer(): {
+		push: (chunk: string) => string;
+		flush: () => string;
+	} {
+		let buffer = "";
+		let suppressed = false;
+		const retainedTailLength = ZAI_VISION_REQUIRED_MARKER.length - 1;
+
+		return {
+			push: (chunk: string): string => {
+				if (suppressed) return "";
+				buffer += chunk;
+				const markerIndex = buffer.indexOf(ZAI_VISION_REQUIRED_MARKER);
+				if (markerIndex >= 0) {
+					const visible = buffer.slice(0, markerIndex).trimEnd();
+					buffer = "";
+					suppressed = true;
+					return visible;
+				}
+				if (buffer.length <= retainedTailLength) return "";
+				const emitLength = buffer.length - retainedTailLength;
+				const visible = buffer.slice(0, emitLength);
+				buffer = buffer.slice(emitLength);
+				return visible;
+			},
+			flush: (): string => {
+				if (suppressed) return "";
+				const visible = buffer;
+				buffer = "";
+				return visible;
+			},
+		};
 	}
 
 	private stripInlineImageData(content: string): string {
@@ -1965,6 +2015,7 @@ export class AgentRuntime {
 		reason: string,
 	): AsyncIterable<string> {
 		let yielded = false;
+		const sanitizer = this.createAssistantOutputStreamSanitizer();
 		try {
 			const request: LLMRequest = {
 				model: this.config.model ?? "default",
@@ -1975,8 +2026,15 @@ export class AgentRuntime {
 			};
 			for await (const chunk of this.llmRouter.chatStream(request)) {
 				if (!chunk.content) continue;
+				const visibleContent = sanitizer.push(chunk.content);
+				if (!visibleContent) continue;
 				yielded = true;
-				yield chunk.content;
+				yield visibleContent;
+			}
+			const tail = sanitizer.flush();
+			if (tail) {
+				yielded = true;
+				yield tail;
 			}
 		} catch (err) {
 			if (yielded) {
@@ -2005,7 +2063,8 @@ export class AgentRuntime {
 				maxTokens: this.config.maxTokens,
 				temperature: this.config.temperature,
 			});
-			if (response.content?.trim()) return response.content;
+			const content = this.sanitizeAssistantOutput(response.content);
+			if (content.trim()) return content;
 		} catch {
 			/* fallback below */
 		}
@@ -2076,7 +2135,8 @@ export class AgentRuntime {
 				}),
 				DELEGATE_SYNTHESIS_TIMEOUT_MS,
 			);
-			if (response.content?.trim()) return response.content;
+			const content = this.sanitizeAssistantOutput(response.content);
+			if (content.trim()) return content;
 		} catch {
 			/* fallback below */
 		}
@@ -2145,26 +2205,28 @@ export class AgentRuntime {
 								synthesisResult = event.result;
 							}
 							throwIfAborted(options.signal);
-						}
-						if (synthesisResult) {
-							const assistantTurn: ConversationTurn = {
-								role: "assistant",
-								content: synthesisResult,
-								timestamp: new Date(),
-								metadata: channelId ? { conversationId: channelId } : undefined,
-							};
-							this.stm.add(assistantTurn);
-							this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
-							this.recordLearningExperience({
-								userRequest: message,
-								finalResponse: synthesisResult,
-								channelId,
-								startedAt,
-								metadata: { mode: "multi-agent" },
-							});
-							return synthesisResult;
-						}
 					}
+					if (synthesisResult) {
+						const safeSynthesisResult =
+							this.sanitizeAssistantOutput(synthesisResult);
+						const assistantTurn: ConversationTurn = {
+							role: "assistant",
+							content: safeSynthesisResult,
+							timestamp: new Date(),
+							metadata: channelId ? { conversationId: channelId } : undefined,
+						};
+						this.stm.add(assistantTurn);
+							this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
+						this.recordLearningExperience({
+							userRequest: message,
+							finalResponse: safeSynthesisResult,
+							channelId,
+							startedAt,
+							metadata: { mode: "multi-agent" },
+						});
+						return safeSynthesisResult;
+					}
+				}
 				}
 			} catch (err) {
 				console.error(
@@ -2204,10 +2266,11 @@ export class AgentRuntime {
 			channelId,
 		);
 		throwIfAborted(options.signal);
+		const safeResponseContent = this.sanitizeAssistantOutput(response.content);
 
 		const assistantTurn: ConversationTurn = {
 			role: "assistant",
-			content: response.content,
+			content: safeResponseContent,
 			timestamp: new Date(),
 			metadata: channelId ? { conversationId: channelId } : undefined,
 		};
@@ -2225,11 +2288,11 @@ export class AgentRuntime {
 			})),
 		});
 
-		this.updateActiveTask(response.content);
+		this.updateActiveTask(safeResponseContent);
 
 		this.recordLearningExperience({
 			userRequest: message,
-			finalResponse: response.content,
+			finalResponse: safeResponseContent,
 			channelId,
 			startedAt,
 			toolsUsed: response.toolCallsExecuted.map((tool) => ({
@@ -2240,7 +2303,7 @@ export class AgentRuntime {
 			skillsUsed: this.toSkillTrace(skills),
 		});
 
-		return response.content;
+		return safeResponseContent;
 	}
 
 	static readonly STATUS_RE =
@@ -2384,15 +2447,16 @@ export class AgentRuntime {
 								case "telemetry":
 									yield `\x00STATUS:orchestrating:telemetry::${this.encodeStatusField(JSON.stringify(event.data))}\x00`;
 									break;
-								case "synthesis": {
-									yield "\x00STATUS:responding\x00";
-									yield event.result;
-									// Guardar en STM y memoria
-									const assistantTurn: ConversationTurn = {
-										role: "assistant",
-										content: event.result,
-										timestamp: new Date(),
-										metadata: channelId
+							case "synthesis": {
+								const safeResult = this.sanitizeAssistantOutput(event.result);
+								yield "\x00STATUS:responding\x00";
+								if (safeResult) yield safeResult;
+								// Guardar en STM y memoria
+								const assistantTurn: ConversationTurn = {
+									role: "assistant",
+									content: safeResult,
+									timestamp: new Date(),
+									metadata: channelId
 											? { conversationId: channelId }
 											: undefined,
 									};
@@ -2402,10 +2466,10 @@ export class AgentRuntime {
 										assistantTurn,
 										channelId,
 									);
-									this.recordLearningExperience({
-										userRequest: message,
-										finalResponse: event.result,
-										channelId,
+								this.recordLearningExperience({
+									userRequest: message,
+									finalResponse: safeResult,
+									channelId,
 										startedAt,
 										metadata: {
 											mode: "multi-agent",
@@ -2514,6 +2578,7 @@ export class AgentRuntime {
 				let isThinking = false;
 				let hasYieldedResponding = false;
 				let streamFinishReason: string | undefined;
+				const outputSanitizer = this.createAssistantOutputStreamSanitizer();
 
 				try {
 					yield "\x00STATUS:thinking\x00";
@@ -2529,13 +2594,16 @@ export class AgentRuntime {
 							if (isThinking) {
 								isThinking = false;
 							}
-							chunkContent += chunk.content;
-							hasContent = true;
-							if (!hasYieldedResponding) {
-								yield "\x00STATUS:responding\x00";
-								hasYieldedResponding = true;
+							const visibleContent = outputSanitizer.push(chunk.content);
+							if (visibleContent) {
+								chunkContent += visibleContent;
+								hasContent = true;
+								if (!hasYieldedResponding) {
+									yield "\x00STATUS:responding\x00";
+									hasYieldedResponding = true;
+								}
+								yield visibleContent;
 							}
-							yield chunk.content;
 						}
 						if (chunk.toolCalls) {
 							const tc = chunk.toolCalls;
@@ -2560,6 +2628,16 @@ export class AgentRuntime {
 						if (chunk.finishReason) {
 							streamFinishReason = chunk.finishReason;
 						}
+					}
+					const visibleTail = outputSanitizer.flush();
+					if (visibleTail) {
+						chunkContent += visibleTail;
+						hasContent = true;
+						if (!hasYieldedResponding) {
+							yield "\x00STATUS:responding\x00";
+							hasYieldedResponding = true;
+						}
+						yield visibleTail;
 					}
 								} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
@@ -3280,9 +3358,10 @@ export class AgentRuntime {
 			yield limitMsg;
 		}
 
+		const safeFullResponse = this.sanitizeAssistantOutput(fullResponse);
 		const assistantTurn: ConversationTurn = {
 			role: "assistant",
-			content: fullResponse,
+			content: safeFullResponse,
 			timestamp: new Date(),
 			metadata: channelId ? { conversationId: channelId } : undefined,
 		};
@@ -3304,10 +3383,10 @@ export class AgentRuntime {
 			}
 		}
 
-		this.updateActiveTask(fullResponse);
+		this.updateActiveTask(safeFullResponse);
 		this.recordLearningExperience({
 			userRequest: message,
-			finalResponse: fullResponse,
+			finalResponse: safeFullResponse,
 			channelId,
 			startedAt,
 			toolsUsed: toolTrace,
@@ -3523,7 +3602,7 @@ export class AgentRuntime {
 				// ended with text but no tool call, and either promised an action or
 				// repeated earlier text, force another iteration that must emit the
 				// tool call. When the retry budget is spent, return with a clear warning.
-				const stallContent = response.content ?? "";
+				const stallContent = this.sanitizeAssistantOutput(response.content);
 				const guard = this.continuityGuard;
 				if (guard && stallContent) {
 					const stall = guard.shouldForceActOnStall(
@@ -3552,7 +3631,7 @@ export class AgentRuntime {
 						};
 					}
 				}
-				return { content: response.content, toolCallsExecuted };
+				return { content: stallContent, toolCallsExecuted };
 			}
 		}
 
@@ -3569,7 +3648,9 @@ export class AgentRuntime {
 		}
 
 		return {
-			content: `I reached the maximum number of tool iterations. Here is what I have so far:\n${messages[messages.length - 1]?.content ?? ""}`,
+			content: this.sanitizeAssistantOutput(
+				`I reached the maximum number of tool iterations. Here is what I have so far:\n${messages[messages.length - 1]?.content ?? ""}`,
+			),
 			toolCallsExecuted,
 		};
 	}

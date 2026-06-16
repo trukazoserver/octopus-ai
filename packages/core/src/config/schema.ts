@@ -16,7 +16,10 @@ const ServerSchema = Type.Object({
 
 const BrowserSchema = Type.Object({
 	headless: Type.Boolean({ default: false }),
+	userDataDir: Type.Optional(Type.String()),
 	chromiumSandbox: Type.Optional(Type.Boolean()),
+	nativeFingerprint: Type.Boolean({ default: true }),
+	stealth: Type.Boolean({ default: false }),
 	provider: Type.Union(
 		[
 			Type.Literal("embedded"),
@@ -38,7 +41,7 @@ const BrowserSchema = Type.Object({
 	persistCookies: Type.Boolean({ default: true }),
 	sessionStorageDir: Type.Optional(Type.String()),
 	sessionTtlHours: Type.Number({ default: 168 }),
-	autoFallbackOnBlock: Type.Boolean({ default: true }),
+	autoFallbackOnBlock: Type.Boolean({ default: false }),
 	blockFallbackProvider: Type.Union(
 		[
 			Type.Literal("brightdata"),
@@ -49,9 +52,9 @@ const BrowserSchema = Type.Object({
 	),
 	confirmBlockWithVision: Type.Boolean({ default: true }),
 	blockResources: Type.Array(Type.String(), {
-		default: ["font"],
+		default: [],
 	}),
-	blockTrackerDomains: Type.Boolean({ default: true }),
+	blockTrackerDomains: Type.Boolean({ default: false }),
 	humanBehavior: Type.Boolean({ default: true }),
 	autoDismissPopups: Type.Boolean({ default: true }),
 });

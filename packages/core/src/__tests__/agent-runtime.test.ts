@@ -259,6 +259,54 @@ describe("AgentRuntime", () => {
 			expect(result).toBe("Hello from assistant");
 		});
 
+		it("should not expose internal Z.AI vision requirements in final text", async () => {
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content:
+					'Cambios aplicados.\n\n[ZAI VISION REQUIRED] This image must be inspected with an available Z.AI Vision MCP tool because the active model is Z.ai GLM. Use one of these local media paths ("C:\\tmp\\image.png") before answering.',
+				model: "test-model",
+				usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+				finishReason: "stop",
+			});
+
+			const result = await runtime.processMessage("describe generated image");
+
+			expect(result).toBe("Cambios aplicados.");
+			expect(result).not.toContain("ZAI VISION REQUIRED");
+			const assistantTurn = mockSTM.add.mock.calls.find(
+				([turn]) => turn.role === "assistant",
+			)?.[0];
+			expect(assistantTurn?.content).toBe("Cambios aplicados.");
+		});
+
+		it("does not inline the Z.AI vision directive into context (system-prompt driven)", async () => {
+			const glmRuntime = new AgentRuntime(
+				{ ...baseConfig, model: "zai/glm-5.2" },
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mediaMarkdown =
+				"Describe this picture: ![Image](/api/media/file/test-image.png)";
+			await glmRuntime.processMessage(mediaMarkdown);
+
+			const request = mockLLMRouter.chat.mock.calls.at(-1)?.[0];
+			expect(request).toBeTruthy();
+			const userMessages = request.messages.filter(
+				(m) =>
+					m.role === "user" &&
+					typeof m.content === "string" &&
+					m.content.includes(mediaMarkdown),
+			);
+			expect(userMessages.length).toBeGreaterThan(0);
+			expect(userMessages[0].content).toContain(
+				"/api/media/file/test-image.png",
+			);
+			expect(userMessages[0].content).not.toContain("[ZAI VISION REQUIRED]");
+			expect(userMessages[0].content).not.toContain("must be inspected");
+		});
+
 		it("should add user and assistant turns to STM", async () => {
 			await runtime.processMessage("Hello");
 			expect(mockSTM.add).toHaveBeenCalledTimes(2);
@@ -836,6 +884,34 @@ describe("AgentRuntime", () => {
 			expect(request.messages[0]?.content).toContain(
 				"https://example.com/docs",
 			);
+		});
+
+		it("should filter internal Z.AI vision requirements across stream chunks", async () => {
+			mockLLMRouter.chatStream = vi.fn().mockImplementation(async function* () {
+				yield { content: "Cambios" } satisfies LLMChunk;
+				yield { content: " aplicados.\n\n[ZAI" } satisfies LLMChunk;
+				yield {
+					content:
+						' VISION REQUIRED] This image must be inspected with an available Z.AI Vision MCP tool. Use "C:\\tmp\\image.png" before answering.',
+				} satisfies LLMChunk;
+			});
+
+			const chunks: string[] = [];
+			for await (const chunk of runtime.processMessageStream(
+				"describe generated image",
+			)) {
+				chunks.push(chunk);
+			}
+
+			const output = chunks.join("");
+			expect(output).toContain("Cambios aplicados.");
+			expect(output).not.toContain("ZAI VISION REQUIRED");
+			expect(output).not.toContain("C:\\tmp\\image.png");
+			const assistantTurn = mockSTM.add.mock.calls.find(
+				([turn]) => turn.role === "assistant",
+			)?.[0];
+			expect(assistantTurn?.content).toContain("Cambios aplicados.");
+			expect(assistantTurn?.content).not.toContain("ZAI VISION REQUIRED");
 		});
 
 		it("should finish streamed delegate_task batches and persist a workflow", async () => {

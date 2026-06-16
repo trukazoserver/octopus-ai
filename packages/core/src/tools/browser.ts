@@ -1,11 +1,13 @@
 // @ts-nocheck
 import fs from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { chromium } from "playwright-extra";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { chromium as nativeChromium } from "playwright";
+import { chromium as stealthChromium } from "playwright-extra";
 import stealthPlugin from "puppeteer-extra-plugin-stealth";
 
-chromium.use(stealthPlugin());
+stealthChromium.use(stealthPlugin());
 
 import {
 	UrlSafetyPolicy,
@@ -30,6 +32,12 @@ const A11Y_TREE_MAX_TEXT_LENGTH = 300;
 const CAPTCHA_POLL_INTERVAL_MS = 5_000;
 const CAPTCHA_SOLVE_TIMEOUT_MS = 120_000;
 const DECODO_SCRAPE_URL = "https://scraper-api.decodo.com/v2/scrape";
+
+function isNavigationTimeoutError(error: unknown): boolean {
+	return /timeout|timed out/i.test(
+		error instanceof Error ? error.message : String(error),
+	);
+}
 
 const REALISTIC_USER_AGENTS = [
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -686,8 +694,11 @@ function parseProxyUrl(proxyUrl: string): {
 
 export interface BrowserConfig {
 	executablePath?: string | null;
+	userDataDir?: string;
 	headless?: boolean;
 	chromiumSandbox?: boolean;
+	nativeFingerprint?: boolean;
+	stealth?: boolean;
 	provider?: "embedded" | "brightdata" | "decodo" | "auto";
 	brightDataEnabled?: boolean;
 	brightDataWsUrl?: string;
@@ -748,10 +759,21 @@ export class BrowserTool {
 		output: string;
 		uidToSelector: Map<string, string>;
 	} | null = null;
+	private imageNetworkIssues: Array<{
+		url: string;
+		status?: number;
+		failure?: string;
+		resourceType?: string;
+	}> = [];
+	private networkDiagnosticsAttached = false;
 
 	constructor(config: BrowserConfig) {
 		this.config = config;
 		this.urlSafetyPolicy = new UrlSafetyPolicy(config.urlPolicy);
+	}
+
+	private chromiumController(): typeof nativeChromium {
+		return this.config.stealth === true ? stealthChromium : nativeChromium;
 	}
 
 	private ensureFingerprint(): ReturnType<typeof generateFingerprint> {
@@ -763,6 +785,11 @@ export class BrowserTool {
 
 	private buildBrowserContextOptions(): Record<string, unknown> {
 		const fp = this.ensureFingerprint();
+		if (this.config.nativeFingerprint !== false) {
+			return {
+				viewport: fp.viewport,
+			};
+		}
 		const acceptLangs = fp.locales.join(",");
 		return {
 			viewport: fp.viewport,
@@ -778,16 +805,8 @@ export class BrowserTool {
 			geolocation: { latitude: 0, longitude: 0 },
 			permissions: ["geolocation"],
 			extraHTTPHeaders: {
-				Accept:
-					"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
 				"Accept-Language": `${acceptLangs};q=0.9`,
-				"Accept-Encoding": "gzip, deflate, br",
 				DNT: "1",
-				"Upgrade-Insecure-Requests": "1",
-				"Sec-Fetch-Dest": "document",
-				"Sec-Fetch-Mode": "navigate",
-				"Sec-Fetch-Site": "none",
-				"Sec-Fetch-User": "?1",
 			},
 		};
 	}
@@ -795,10 +814,12 @@ export class BrowserTool {
 	private async addBrowserInitScripts(): Promise<void> {
 		if (!this.context) return;
 		const fp = this.ensureFingerprint();
-		await this.context.addInitScript((locales) => {
-			window.__octopusFpLanguages = locales;
-		}, fp.locales);
-		await this.context.addInitScript(STEALTH_INIT_SCRIPT);
+		if (this.config.stealth === true) {
+			await this.context.addInitScript((locales) => {
+				window.__octopusFpLanguages = locales;
+			}, fp.locales);
+			await this.context.addInitScript(STEALTH_INIT_SCRIPT);
+		}
 		await this.context.addInitScript(CAPTCHA_INIT_SCRIPT);
 	}
 
@@ -921,6 +942,7 @@ export class BrowserTool {
 		);
 		await this.loadSessionForUrl(url);
 		this.invalidateSnapshotCache();
+		this.resetImageNetworkIssues();
 		const response = await this.page.goto(url, options);
 		const finalUrl = this.page.url();
 		if (
@@ -934,6 +956,111 @@ export class BrowserTool {
 			);
 		}
 		return response;
+	}
+
+	private async waitForImageElements(timeoutMs = 5000): Promise<void> {
+		if (!this.page) return;
+		if (typeof this.page.waitForFunction !== "function") return;
+		await this.page
+			.waitForFunction(
+				() => Array.from(document.images).every((img) => img.complete),
+				undefined,
+				{ timeout: timeoutMs },
+			)
+			.catch(() => {});
+	}
+
+	private resetImageNetworkIssues(): void {
+		this.imageNetworkIssues = [];
+	}
+
+	private recordImageNetworkIssue(issue: {
+		url: string;
+		status?: number;
+		failure?: string;
+		resourceType?: string;
+	}): void {
+		if (!issue.url) return;
+		this.imageNetworkIssues.push(issue);
+		if (this.imageNetworkIssues.length > 25) this.imageNetworkIssues.shift();
+	}
+
+	private setupNetworkDiagnostics(): void {
+		if (!this.page || this.networkDiagnosticsAttached) return;
+		this.networkDiagnosticsAttached = true;
+		this.page.on("requestfailed", (request: unknown) => {
+			try {
+				const resourceType = request.resourceType?.();
+				if (resourceType !== "image") return;
+				this.recordImageNetworkIssue({
+					url: request.url?.() || "",
+					failure: request.failure?.()?.errorText || "request failed",
+					resourceType,
+				});
+			} catch {}
+		});
+		this.page.on("response", (response: unknown) => {
+			try {
+				const request = response.request?.();
+				const resourceType = request?.resourceType?.();
+				if (resourceType !== "image") return;
+				const status = response.status?.();
+				if (typeof status !== "number" || status < 400) return;
+				this.recordImageNetworkIssue({
+					url: response.url?.() || request?.url?.() || "",
+					status,
+					resourceType,
+				});
+			} catch {}
+		});
+	}
+
+	private summarizeImageNetworkIssues(): string {
+		if (this.imageNetworkIssues.length === 0) return "";
+		const sample = this.imageNetworkIssues
+			.slice(-5)
+			.map((issue) => {
+				const reason = issue.status
+					? `HTTP ${issue.status}`
+					: issue.failure || "failed";
+				return `${reason}: ${issue.url}`;
+			})
+			.join(" | ");
+		return `\nImage network issues: ${this.imageNetworkIssues.length}. ${sample}`;
+	}
+
+	private async summarizeImageElements(): Promise<string> {
+		if (!this.page) return "";
+		if (typeof this.page.evaluate !== "function") return "";
+		const images = await this.page
+			.evaluate(() =>
+				Array.from(document.images).map((img) => ({
+					src: img.currentSrc || img.src,
+					alt: img.alt || "",
+					complete: img.complete,
+					naturalWidth: img.naturalWidth,
+					naturalHeight: img.naturalHeight,
+				})),
+			)
+			.catch(() => []);
+		if (!Array.isArray(images) || images.length === 0)
+			return this.summarizeImageNetworkIssues();
+
+		const loaded = images.filter(
+			(img) => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0,
+		).length;
+		const broken = images.filter(
+			(img) => img.complete && (img.naturalWidth === 0 || img.naturalHeight === 0),
+		);
+		const loading = images.length - loaded - broken.length;
+		const brokenSample = broken
+			.slice(0, 5)
+			.map((img) => img.src)
+			.filter(Boolean);
+		const brokenOutput = brokenSample.length
+			? ` Broken sample: ${brokenSample.join(", ")}`
+			: "";
+		return `\nImages: ${loaded}/${images.length} loaded, ${broken.length} broken, ${loading} still loading.${brokenOutput}${this.summarizeImageNetworkIssues()}`;
 	}
 
 	private getTwoCaptchaProxyConfig(): Record<string, unknown> | null {
@@ -1914,7 +2041,7 @@ export class BrowserTool {
 		url: string,
 		timeoutMs = 30000,
 	): Promise<unknown> {
-		return chromium.connectOverCDP(url, { timeout: timeoutMs });
+		return this.chromiumController().connectOverCDP(url, { timeout: timeoutMs });
 	}
 
 	private isBrightDataEnabled(): boolean {
@@ -2239,20 +2366,41 @@ export class BrowserTool {
 		}
 
 		// Persistent browser profile — cookies, localStorage, IndexedDB all persist automatically
-		const userDataDir = join(
-			homedir(),
-			".octopus",
-			"browser-profile",
-			provider,
-		);
+		const userDataDir = this.config.userDataDir
+			? resolve(this.config.userDataDir)
+			: join(homedir(), ".octopus", "browser-profile", provider);
 		await fs.promises.mkdir(userDataDir, { recursive: true }).catch(() => {});
+		// Clear stale profile locks so Chrome doesn't redirect to a ghost
+		// "existing session" (which makes Playwright lose control and the page
+		// fall back to about:blank on every navigation).
+		for (const lockName of [
+			"lockfile",
+			"SingletonLock",
+			"SingletonSocket",
+			"SingletonCookie",
+		]) {
+			await fs.promises
+				.rm(join(userDataDir, lockName), { force: true })
+				.catch(() => {});
+		}
 
 		const chromiumSandbox = this.resolveChromiumSandboxEnabled();
 		console.log(
-			`[BrowserTool] Launching ${provider === "decodo" ? "Decodo proxied" : "embedded"} persistent browser (profile: ${userDataDir}) with UA: ${fp.userAgent.slice(0, 60)}... viewport: ${fp.viewport.width}x${fp.viewport.height}; chromiumSandbox=${chromiumSandbox}`,
+			`[BrowserTool] Launching ${provider === "decodo" ? "Decodo proxied" : "embedded"} persistent browser (profile: ${userDataDir}) viewport: ${fp.viewport.width}x${fp.viewport.height}; chromiumSandbox=${chromiumSandbox}; nativeFingerprint=${this.config.nativeFingerprint !== false}; stealth=${this.config.stealth === true}`,
 		);
 
 		const contextOptions = this.buildBrowserContextOptions();
+		const launchArgs = this.config.nativeFingerprint !== false
+			? [
+					"--disable-dev-shm-usage",
+					`--window-size=${fp.viewport.width},${fp.viewport.height}`,
+				]
+			: [
+					"--disable-dev-shm-usage",
+					"--disable-infobars",
+					"--disable-extensions",
+					`--window-size=${fp.viewport.width},${fp.viewport.height}`,
+				];
 		const launchOptions = {
 			executablePath: this.config.executablePath,
 			headless: this.config.headless ?? false,
@@ -2267,30 +2415,11 @@ export class BrowserTool {
 						},
 					}
 				: {}),
-			args: [
-				"--disable-dev-shm-usage",
-				"--disable-infobars",
-				"--disable-extensions",
-				`--window-size=${fp.viewport.width},${fp.viewport.height}`,
-			],
+			args: launchArgs,
 			...contextOptions,
-			// Add extra HTTP headers strictly as requested
-			extraHTTPHeaders: {
-				...(contextOptions.extraHTTPHeaders || {}),
-				Accept:
-					"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-				"Accept-Language": "es-PE,es;q=0.9,en-US;q=0.8,en;q=0.7",
-				"Accept-Encoding": "gzip, deflate, br",
-				DNT: "1",
-				"Upgrade-Insecure-Requests": "1",
-				"Sec-Fetch-Dest": "document",
-				"Sec-Fetch-Mode": "navigate",
-				"Sec-Fetch-Site": "none",
-				"Sec-Fetch-User": "?1",
-			},
 		};
 		try {
-			this.context = await chromium.launchPersistentContext(
+			this.context = await this.chromiumController().launchPersistentContext(
 				userDataDir,
 				launchOptions,
 			);
@@ -2300,7 +2429,7 @@ export class BrowserTool {
 			console.warn(
 				`[BrowserTool] Chromium sandbox failed on Linux; retrying without sandbox: ${error instanceof Error ? error.message : String(error)}`,
 			);
-			this.context = await chromium.launchPersistentContext(userDataDir, {
+			this.context = await this.chromiumController().launchPersistentContext(userDataDir, {
 				...launchOptions,
 				chromiumSandbox: false,
 			});
@@ -2314,6 +2443,7 @@ export class BrowserTool {
 		const pages = this.context.pages();
 		this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 		await this.page.setViewportSize(fp.viewport);
+		this.setupNetworkDiagnostics();
 		await this.setupDialogHandlers();
 		this.activeProvider = provider;
 	}
@@ -3066,6 +3196,7 @@ export class BrowserTool {
 					if (!this.page) {
 						this.page = await this.context.newPage();
 					}
+					this.setupNetworkDiagnostics();
 					await this.setupDialogHandlers();
 				}
 			} else if (this.config.executablePath) {
@@ -3245,6 +3376,8 @@ export class BrowserTool {
 			this.page = null;
 			this.activeProvider = null;
 			this.fingerprint = null;
+			this.networkDiagnosticsAttached = false;
+			this.resetImageNetworkIssues();
 		}
 	}
 
@@ -3880,7 +4013,7 @@ export class BrowserTool {
 			{
 				name: "browser_navigate",
 				description:
-					"Navigate the browser to a specific URL. Returns an accessibility tree snapshot of the loaded page. Use direct URLs when possible. After navigation, use the returned UIDs to interact with elements via browser_click_uid and browser_fill_uid.",
+					"Navigate the browser to an http(s) URL. Do not use this for local file paths or file:/// URLs; use browser_open_file instead. Returns an accessibility tree snapshot of the loaded page. If navigation ends at about:blank, treat it as an unloaded or blocked navigation.",
 				uiIcon: BROWSER_SVG,
 				parameters: {
 					url: {
@@ -3891,7 +4024,7 @@ export class BrowserTool {
 					waitUntil: {
 						type: "string",
 						description:
-							"Load state to wait for: domcontentloaded (default), load, or networkidle.",
+							"Load state to wait for: load (default for local previews), domcontentloaded, or networkidle.",
 					},
 				},
 				handler: async (
@@ -3899,7 +4032,6 @@ export class BrowserTool {
 					context: ToolContext,
 				): Promise<ToolResult> => {
 					try {
-						await this.init();
 						const { url, waitUntil } = params;
 						if (typeof url !== "string") {
 							return {
@@ -3908,19 +4040,51 @@ export class BrowserTool {
 								error: "Missing or invalid url parameter",
 							};
 						}
+						try {
+							const parsedUrl = new URL(url);
+							if (parsedUrl.protocol === "file:") {
+								return {
+									success: false,
+									output: "",
+									error:
+										"Local files must be opened with browser_open_file using the file path, not browser_navigate with file://.",
+								};
+							}
+						} catch {
+							// Let Playwright and URL safety produce the actionable error for non-URL input.
+						}
+						await this.init();
 						const loadState = [
 							"domcontentloaded",
 							"load",
 							"networkidle",
 						].includes(waitUntil as string)
 							? (waitUntil as "domcontentloaded" | "load" | "networkidle")
-							: "domcontentloaded";
-						await this.gotoWithSession(url, {
-							waitUntil: loadState,
-							timeout: 30000,
-						}).catch(() => {
-							// Sometimes networkidle times out on heavy pages, that's okay
-						});
+							: "load";
+						const initialUrl = this.page.url();
+						let navigationWarning = "";
+						try {
+							await this.gotoWithSession(url, {
+								waitUntil: loadState,
+								timeout: 30000,
+							});
+						} catch (error) {
+							const currentUrl = this.page.url();
+							if (
+								isNavigationTimeoutError(error) &&
+								currentUrl &&
+								currentUrl !== "about:blank" &&
+								currentUrl !== initialUrl
+							) {
+								navigationWarning = `\nNavigation warning: ${error instanceof Error ? error.message : String(error)}`;
+							} else {
+								return {
+									success: false,
+									output: "",
+									error: error instanceof Error ? error.message : String(error),
+								};
+							}
+						}
 
 						if (this.config.humanBehavior !== false) {
 							await this.randomDelay(800, 2500);
@@ -3933,6 +4097,14 @@ export class BrowserTool {
 							await this.saveSessionForCurrentPage();
 						const title = await this.page.title().catch(() => "(unknown)");
 						const finalUrl = this.page.url();
+						if (!finalUrl || finalUrl === "about:blank") {
+							return {
+								success: false,
+								output: "",
+								error: `Navigation did not load a page; current URL is ${finalUrl || "unknown"}.`,
+							};
+						}
+
 						const blockOutput = blockDetection?.output
 							? `\n\n${blockDetection.output}`
 							: "";
@@ -3941,7 +4113,123 @@ export class BrowserTool {
 							await this.buildSnapshotWithUidMap();
 						return {
 							success: true,
-							output: `Successfully navigated. Page title: "${title}" | Current URL: ${finalUrl}${blockOutput}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
+							output: `Successfully navigated. Page title: "${title}" | Current URL: ${finalUrl}${navigationWarning}${blockOutput}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
+						};
+					} catch (error) {
+						return {
+							success: false,
+							output: "",
+							error: error instanceof Error ? error.message : String(error),
+						};
+					}
+				},
+			},
+			{
+				name: "browser_open_file",
+				description:
+					"Open a host-local file for previewing. Pass an absolute or relative file path as-is, not a file:/// URL. Success requires Current URL to start with file:///. If the result is about:blank or a policy error occurs, report the blocker and do not retry by injecting the HTML with browser_eval.",
+				uiIcon: BROWSER_SVG,
+				parameters: {
+					path: {
+						type: "string",
+						description:
+							"Absolute or relative path to the local file to preview (e.g. D:/folder/page.html or /home/user/page.html)",
+						required: true,
+					},
+					waitUntil: {
+						type: "string",
+						description:
+							"Load state to wait for: load (default for local previews), domcontentloaded, or networkidle.",
+					},
+				},
+				handler: async (
+					params: Record<string, unknown>,
+					_context: ToolContext,
+				): Promise<ToolResult> => {
+					try {
+						const filePath = params.path;
+						if (typeof filePath !== "string" || !filePath.trim()) {
+							return {
+								success: false,
+								output: "",
+								error: "Missing or invalid path parameter",
+							};
+						}
+						if (/^file:\/\//i.test(filePath.trim())) {
+							return {
+								success: false,
+								output: "",
+								error:
+									"Pass the local file path as-is, not a file:/// URL. Example: D:/folder/page.html",
+							};
+						}
+						const resolved = resolve(filePath);
+						if (!fs.existsSync(resolved)) {
+							return {
+								success: false,
+								output: "",
+								error: `File not found: ${resolved}`,
+							};
+						}
+						const fileUrl = pathToFileURL(resolved).href;
+						await this.init();
+						const loadState = [
+							"domcontentloaded",
+							"load",
+							"networkidle",
+						].includes(params.waitUntil as string)
+							? (params.waitUntil as
+									| "domcontentloaded"
+									| "load"
+									| "networkidle")
+							: "load";
+						this.invalidateSnapshotCache();
+						this.resetImageNetworkIssues();
+						let navigationWarning = "";
+						try {
+							await this.page.goto(fileUrl, {
+								waitUntil: loadState,
+								timeout: 30000,
+							});
+						} catch (error) {
+							const currentUrl = this.page.url();
+							if (
+								isNavigationTimeoutError(error) &&
+								currentUrl &&
+								currentUrl.startsWith("file:")
+							) {
+								navigationWarning = `\nNavigation warning: ${error instanceof Error ? error.message : String(error)}`;
+							} else {
+								return {
+									success: false,
+									output: "",
+									error: error instanceof Error ? error.message : String(error),
+								};
+							}
+						}
+						const title = await this.page.title().catch(() => "(unknown)");
+						const finalUrl = this.page.url();
+						if (!finalUrl || finalUrl === "about:blank") {
+							return {
+								success: false,
+								output: "",
+								error: `Local file did not load; current URL is ${finalUrl || "unknown"}.`,
+							};
+						}
+						if (!finalUrl.startsWith("file:")) {
+							return {
+								success: false,
+								output: "",
+								error: `Local file navigation left the file URL and ended at ${finalUrl}.`,
+							};
+						}
+						await this.waitForImageElements();
+						const imageOutput = await this.summarizeImageElements();
+						const { output: snapshotOutput } =
+							await this.buildSnapshotWithUidMap();
+						return {
+							success: true,
+							output: `Opened local file: ${resolved}\nPage title: "${title}" | Current URL: ${finalUrl}${navigationWarning}${imageOutput}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
 						};
 					} catch (error) {
 						return {
@@ -3955,7 +4243,7 @@ export class BrowserTool {
 			{
 				name: "browser_screenshot",
 				description:
-					"Take a screenshot of the current page and save it to the media system. Returns the saved media URL instead of a raw base64 string.",
+					"Take a screenshot of the current page and save it to the media system. Returns the saved media URL instead of a raw base64 string; use browser_read_page, the accessibility tree, or an available vision tool to inspect it.",
 				uiIcon: BROWSER_SVG,
 				parameters: {
 					fullPage: {
@@ -3980,6 +4268,8 @@ export class BrowserTool {
 								output: blockDetection.output,
 							};
 						}
+						await this.waitForImageElements();
+						const imageOutput = await this.summarizeImageElements();
 						const screenshotOutput = await this.captureScreenshotForAnalysis(
 							context,
 							params.fullPage === true
@@ -3995,7 +4285,7 @@ export class BrowserTool {
 							: "";
 						return {
 							success: true,
-							output: `${blockOutput}Successfully took a screenshot. ${screenshotOutput}\n\nAccessibility tree at screenshot:\n${(await this.buildSnapshotWithUidMap()).output}`,
+							output: `${blockOutput}Successfully took a screenshot.${imageOutput} ${screenshotOutput}\n\nAccessibility tree at screenshot:\n${(await this.buildSnapshotWithUidMap()).output}`,
 						};
 					} catch (error) {
 						return {
@@ -4542,7 +4832,8 @@ export class BrowserTool {
 			},
 			{
 				name: "browser_eval",
-				description: "Execute JavaScript code within the context of the page",
+				description:
+					"Execute small JavaScript snippets in the current page for inspection or interaction. Do not use this to load, replace, or manually inject an entire local HTML document; use browser_open_file for local files.",
 				uiIcon: BROWSER_SVG,
 				parameters: {
 					script: {

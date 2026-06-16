@@ -155,7 +155,10 @@ type OptionalProviderConfig = {
 type BrowserRuntimeConfig = {
 	provider?: "auto" | "embedded" | "brightdata" | "decodo" | string;
 	headless?: boolean;
+	userDataDir?: string;
 	chromiumSandbox?: boolean;
+	nativeFingerprint?: boolean;
+	stealth?: boolean;
 	brightDataEnabled?: boolean;
 	brightDataWsUrl?: string;
 	decodoEnabled?: boolean;
@@ -170,7 +173,7 @@ type BrowserRuntimeConfig = {
 	blockFallbackProvider?: string;
 	confirmBlockWithVision?: boolean;
 	blockResources?: string[];
-	blockTrackerDomains?: string[];
+	blockTrackerDomains?: boolean;
 	humanBehavior?: boolean;
 	autoDismissPopups?: boolean;
 };
@@ -1730,7 +1733,10 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		const toolConfig = {
 			executablePath: detectedBrowserPath,
 			headless: browserCfg.headless,
+			userDataDir: browserCfg.userDataDir,
 			chromiumSandbox: browserCfg.chromiumSandbox,
+			nativeFingerprint: browserCfg.nativeFingerprint,
+			stealth: browserCfg.stealth,
 			provider: browserCfg.provider,
 			brightDataEnabled,
 			brightDataWsUrl,
@@ -2054,6 +2060,7 @@ IMPORTANT - Tool Usage Guidelines:
 7. To find previously generated media, use the list_media tool. NEVER use manage_workspace to search for media files — media is stored in a separate library, not the workspace.
 8. If a tool times out but the task is still valid, use manage_tool_timeouts to increase that specific tool timeout before retrying. Prefer per-tool overrides instead of raising every timeout.
 9. API keys, tokens, credentials JSON, private keys, proxy credentials, cookies, and passwords MUST be stored with manage_env using isSecret=true. Never print, summarize, or reveal secret values; report only whether they are configured.
+10. To preview an HTML file (or any local file) you created, use browser_open_file with the absolute file path as-is, not a hand-written file:/// URL. Treat the preview as successful only if the tool result shows Current URL starting with file:/// and the snapshot/read_page reflects the expected content. If the result is about:blank, File not found, or a URL safety error, report that exact blocker; do not infer that the sandbox has no filesystem or internet. Do not use browser_eval to paste or reconstruct the whole HTML document as a fallback.
 
 IMPORTANT - Continuity & Reconnection:
 - Before replying, inspect the injected Task Ledger, Working Memory, and recent conversation context for active or recent work.
@@ -2080,8 +2087,10 @@ IMPORTANT - Autonomy & Delegation:
 - You are the Manager. Workers report back to you. Synthesize their results into a coherent final answer for the user.
 
 IMPORTANT - Browser Automation:
-- You have browser tools: browser_navigate, browser_screenshot, browser_click, browser_type, browser_eval, browser_read_page, browser_extract_images, browser_observe, browser_solve_captchas, browser_etsy_task.
+- You have browser tools: browser_open_file, browser_navigate, browser_screenshot, browser_click, browser_type, browser_eval, browser_read_page, browser_extract_images, browser_observe, browser_solve_captchas, browser_etsy_task.
+- Use browser_navigate for http(s) web URLs. Use browser_open_file for local files. Browser tools are separate from sandbox_execute; Docker sandbox limitations do not imply browser/local-file limitations.
 - Use these to visit websites, fill forms, scrape content, and interact with web applications on behalf of the user.
+- For generated websites, before sending a screenshot, verify image loading through the browser_open_file/browser_screenshot image summary or page inspection. If external images fail in the agent browser but work for the user, report the exact failed URLs/statuses instead of rewriting the design or silently substituting assets.
 - Use the simplest sufficient browser action first. Prefer direct URLs or specialized extract tools before manual click/type loops.
 - Navigate step by step and decide intelligently: before each browser action, evaluate what changed after the previous action and what observable change the next action should produce.
 - Use browser_observe when uncertain about the current page, available buttons/inputs/listings, or whether a previous action made progress.
@@ -2106,7 +2115,7 @@ IMPORTANT - Sandbox Execution:
 
 				IMPORTANT - Z.AI MCP Tools:
 				- When a user shares an image, the message can contain a media URL like ![Image](/api/media/file/uuid.png) plus a runtime-injected local media path, or a file path like [Uploaded image: C:\\Users\\...\\media\\uuid.png].
-				- Use the Z.AI Vision MCP tools listed in Available Tools for image analysis when the active model is Z.ai/Zhipu GLM, or when direct image understanding is unavailable. Tool names may be plain (analyze_image, extract_text_from_screenshot, diagnose_error_screenshot, understand_technical_diagram, analyze_data_visualization, ui_to_artifact, ui_diff_check, analyze_video) or namespaced aliases containing those names.
+				- MANDATORY when the active model is Z.ai/Zhipu GLM (it is NOT reliably multimodal, so it cannot see images embedded in the conversation): if ANY user message, assistant message, or tool result in this conversation references an image — a media URL like ![Image](/api/media/file/<uuid>.png), a tag like [Uploaded image: <local-path>], or an <!-- octopus-local-media-paths: "<local-path>" --> comment — you MUST call the analyze_image Z.AI Vision MCP tool (or its namespaced alias) with that image's local media path, and rely on the tool's result, BEFORE you answer about, describe, regenerate, or act on the image. Never say you cannot see or analyze the image, and never describe it from the filename alone. Resolve the local path from the media URL filename (/api/media/file/<uuid>.png maps to ~/.octopus/media/<uuid>.png, e.g. C:\\Users\\<you>\\.octopus\\media\\<uuid>.png) or take it directly from the [Uploaded image: ...] tag or the octopus-local-media-paths comment. Available tool names may be plain (analyze_image, extract_text_from_screenshot, diagnose_error_screenshot, understand_technical_diagram, analyze_data_visualization, ui_to_artifact, ui_diff_check, analyze_video) or namespaced aliases containing those names.
 				- If the user asks you to analyze an image and a vision tool is available, call it. Do not claim that image analysis is unavailable just because the image was referenced through /api/media/file/...; use the local media path injected by runtime.
 				- If the active provider/model is multimodal and is not Z.ai GLM, inspect image content directly and do not call Z.AI Vision MCP tools solely for screenshots.
 				- Example: if the user asks "what is in this image?" and the message contains or is followed by a local media path, call the available analyze_image tool (or its namespaced alias) with that path using the parameter required by the tool schema.

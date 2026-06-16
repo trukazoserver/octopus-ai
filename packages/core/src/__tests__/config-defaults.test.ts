@@ -33,8 +33,16 @@ describe("Config Defaults", () => {
 		it("should expose browser fallback controls", () => {
 			expect(DEFAULT_CONFIG.browser.brightDataEnabled).toBe(true);
 			expect(DEFAULT_CONFIG.browser.decodoEnabled).toBe(true);
-			expect(DEFAULT_CONFIG.browser.autoFallbackOnBlock).toBe(true);
+			expect(DEFAULT_CONFIG.browser.autoFallbackOnBlock).toBe(false);
 			expect(DEFAULT_CONFIG.browser.blockFallbackProvider).toBe("decodo");
+		});
+
+		it("should default browser previews to native visual rendering", () => {
+			expect(DEFAULT_CONFIG.browser.headless).toBe(false);
+			expect(DEFAULT_CONFIG.browser.nativeFingerprint).toBe(true);
+			expect(DEFAULT_CONFIG.browser.stealth).toBe(false);
+			expect(DEFAULT_CONFIG.browser.blockResources).toEqual([]);
+			expect(DEFAULT_CONFIG.browser.blockTrackerDomains).toBe(false);
 		});
 
 		it("should have channel config with all channels", () => {
