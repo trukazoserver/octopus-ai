@@ -93,7 +93,7 @@ export function createSetupCommand(): Command {
 				const skillsDir = path.join(octopusDir, "skills");
 				const pluginsDir = path.join(octopusDir, "plugins");
 
-				for (const dir of [dataDir, skillsDir, pluginsDir]) {
+				for (const dir of [dataDir, skillsDir, pluginsDir, path.join(octopusDir, "workspace")]) {
 					if (!fs.existsSync(dir)) {
 						fs.mkdirSync(dir, { recursive: true });
 					}

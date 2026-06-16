@@ -379,7 +379,7 @@ async function setupWizard() {
 
 	console.log(`\n${LOG_INFO}  Creando estructura de directorios...${RESET}`);
 	const octopusDir = path.join(homedir(), ".octopus");
-	for (const dir of ["data", "skills", "plugins"].map((d) =>
+	for (const dir of ["data", "skills", "plugins", "workspace"].map((d) =>
 		path.join(octopusDir, d),
 	)) {
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
