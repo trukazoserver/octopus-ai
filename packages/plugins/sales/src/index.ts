@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Plugin } from "@octopus-ai/core";
 
@@ -41,7 +42,7 @@ const STAGES = [
 	"closed-won",
 	"closed-lost",
 ];
-const DATA_DIR = join(process.cwd(), ".sales-data");
+const DATA_DIR = join(homedir(), ".octopus", "plugins-data", "sales");
 
 const contacts: Map<string, Contact> = new Map();
 const deals: Map<string, Deal> = new Map();

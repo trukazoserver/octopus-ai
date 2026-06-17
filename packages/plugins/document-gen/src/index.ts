@@ -1,8 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Plugin } from "@octopus-ai/core";
 
-const DOCS_DIR = join(process.cwd(), ".docs");
+const DOCS_DIR = join(homedir(), ".octopus", "plugins-data", "document-gen");
 
 interface TemplateVar {
 	key: string;

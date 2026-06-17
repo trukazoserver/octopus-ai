@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
-const DOCS_DIR = join(process.cwd(), ".docs");
+const DOCS_DIR = join(homedir(), ".octopus", "plugins-data", "document-gen");
 async function ensureDir() {
     try {
         await mkdir(DOCS_DIR, { recursive: true });

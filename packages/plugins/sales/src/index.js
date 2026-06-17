@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 const STAGES = [
     "lead",
@@ -8,7 +9,7 @@ const STAGES = [
     "closed-won",
     "closed-lost",
 ];
-const DATA_DIR = join(process.cwd(), ".sales-data");
+const DATA_DIR = join(homedir(), ".octopus", "plugins-data", "sales");
 const contacts = new Map();
 const deals = new Map();
 const activities = new Map();

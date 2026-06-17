@@ -1,4 +1,5 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import type { Plugin } from "@octopus-ai/core";
 
@@ -14,7 +15,7 @@ interface DatasetMeta {
 }
 
 const datasets: Map<string, DataRecord[]> = new Map();
-const workspacePath = join(process.cwd(), ".data-workspace");
+const workspacePath = join(homedir(), ".octopus", "plugins-data", "data");
 
 async function ensureWorkspace(): Promise<void> {
 	try {

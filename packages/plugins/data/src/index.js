@@ -1,7 +1,8 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 const datasets = new Map();
-const workspacePath = join(process.cwd(), ".data-workspace");
+const workspacePath = join(homedir(), ".octopus", "plugins-data", "data");
 async function ensureWorkspace() {
     try {
         await mkdir(workspacePath, { recursive: true });
