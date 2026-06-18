@@ -1286,7 +1286,6 @@ export const SettingsPage: React.FC = () => {
 		{},
 	);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
-	const [activeCategory, setActiveCategory] = useState("navegacion");
 
 	const loadConfig = () => {
 		setLoading(true);
@@ -1719,99 +1718,21 @@ export const SettingsPage: React.FC = () => {
 		);
 	};
 
-	const settingCategories = [
-		{ id: "personalizacion", label: "Personalización", icon: "user" },
-		{ id: "inteligencia", label: "Inteligencia", icon: "brain" },
-		{ id: "memoria", label: "Memoria y habilidades", icon: "database" },
-		{ id: "navegacion", label: "Navegación web", icon: "globe" },
-		{ id: "entorno", label: "Entorno y cuenta", icon: "key" },
-		{ id: "sistema", label: "Sistema", icon: "server" },
-	] as const;
-
 	return (
 		<div
 			className="settings-page"
 			style={{
-				padding: "30px 30px 48px",
-				maxWidth: "1320px",
+				padding: "34px 34px 48px",
+				maxWidth: "1120px",
 				margin: "0 auto",
 				overflowY: "auto",
 				height: "100%",
 				width: "100%",
 				boxSizing: "border-box",
-				display: "flex",
-				gap: "26px",
-				alignItems: "flex-start",
 				background:
 					"radial-gradient(circle at 20% 0%, rgba(99,102,241,.09), transparent 34%), #030406",
 			}}
 		>
-			<aside
-				style={{
-					position: "sticky",
-					top: 20,
-					width: "224px",
-					flexShrink: 0,
-					background: "#09090b",
-					border: "1px solid #1f1f23",
-					borderRadius: "16px",
-					padding: "12px",
-					boxShadow: "0 18px 50px rgba(0,0,0,.28)",
-				}}
-			>
-				<div
-					style={{
-						padding: "8px 10px 12px",
-						color: "#71717a",
-						fontSize: "0.72rem",
-						fontWeight: 800,
-						letterSpacing: "0.08em",
-						textTransform: "uppercase",
-					}}
-				>
-					Categorías
-				</div>
-				{settingCategories.map((cat) => {
-					const active = cat.id === activeCategory;
-					return (
-						<button
-							key={cat.id}
-							type="button"
-							onClick={() => setActiveCategory(cat.id)}
-							style={{
-								width: "100%",
-								display: "flex",
-								alignItems: "center",
-								gap: "11px",
-								padding: "11px 12px",
-								marginBottom: "4px",
-								borderRadius: "12px",
-								border: "1px solid transparent",
-								background: active ? "rgba(99,102,241,.12)" : "transparent",
-								color: active ? "#f4f4f5" : "#a1a1aa",
-								cursor: "pointer",
-								fontSize: "0.9rem",
-								fontWeight: active ? 700 : 500,
-								textAlign: "left",
-								boxShadow: active
-									? "inset 0 0 0 1px rgba(99,102,241,.35)"
-									: "none",
-								transition: "background 0.15s ease, color 0.15s ease",
-							}}
-							onMouseEnter={(e) => {
-								if (!active) e.currentTarget.style.background = "#18181b";
-							}}
-							onMouseLeave={(e) => {
-								if (!active) e.currentTarget.style.background = "transparent";
-							}}
-						>
-							<AppIcon name={cat.icon} size={17} />
-							<span style={{ flex: 1 }}>{cat.label}</span>
-						</button>
-					);
-				})}
-			</aside>
-			<div style={{ flex: 1, minWidth: 0 }}>
 			<div
 				style={{
 					display: "flex",
@@ -1902,7 +1823,6 @@ export const SettingsPage: React.FC = () => {
 				title="Variables de entorno"
 				icon={<AppIcon name="key" size={17} />}
 				category="entorno"
-				activeCategory={activeCategory}
 				description="Consulta, crea, edita y elimina variables guardadas. Los secretos se muestran enmascarados; para cambiarlos escribe un nuevo valor."
 				defaultOpen={false}
 			>
@@ -2238,7 +2158,6 @@ export const SettingsPage: React.FC = () => {
 				title="Perfil de usuario"
 				icon={<AppIcon name="user" size={17} />}
 				category="personalizacion"
-				activeCategory={activeCategory}
 				description="Define cómo quieres que Octopus te identifique y adapte sus respuestas. Este nombre también se usa en la pantalla inicial del chat."
 				defaultOpen={true}
 			>
@@ -2284,7 +2203,6 @@ export const SettingsPage: React.FC = () => {
 				title="Mascota"
 				icon={<AppIcon name="octopus" size={17} />}
 				category="personalizacion"
-				activeCategory={activeCategory}
 				description="Elige la mascota y personalidad que acompaña a Octopus en CLI, web y escritorio."
 				defaultOpen={true}
 			>
@@ -2345,7 +2263,6 @@ export const SettingsPage: React.FC = () => {
 				title="Navegador Web"
 				icon={<AppIcon name="globe" size={17} />}
 				category="navegacion"
-				activeCategory={activeCategory}
 				description="Ajustes del motor de navegación y evasión de bloqueos."
 				defaultOpen={true}
 			>
@@ -2518,7 +2435,6 @@ export const SettingsPage: React.FC = () => {
 				title="Herramientas e Iteraciones"
 				icon={<AppIcon name="tools" size={17} />}
 				category="inteligencia"
-				activeCategory={activeCategory}
 				description="Controla el límite global de ciclos en los que Octopus puede pedir herramientas antes de responder."
 				defaultOpen={false}
 			>
@@ -2550,7 +2466,6 @@ export const SettingsPage: React.FC = () => {
 				title="Orquestación multi-agente"
 				icon={<AppIcon name="agent" size={17} />}
 				category="inteligencia"
-				activeCategory={activeCategory}
 				description="Controla workflows durables, brazos paralelos, reintentos y límites de subagentes. Algunos cambios aplican al reiniciar Octopus."
 				defaultOpen={false}
 			>
@@ -2635,7 +2550,6 @@ export const SettingsPage: React.FC = () => {
 				title="Modelos y Proveedores AI"
 				icon={<AppIcon name="brain" size={17} />}
 				category="inteligencia"
-				activeCategory={activeCategory}
 				description="Configura tus claves API y modelos para que Octopus AI pueda pensar."
 				defaultOpen={true}
 			>
@@ -2969,7 +2883,6 @@ export const SettingsPage: React.FC = () => {
 				title="Memoria Autónoma"
 				icon={<AppIcon name="database" size={17} />}
 				category="memoria"
-				activeCategory={activeCategory}
 				description="Configura cómo Octopus recuerda tus conversaciones."
 			>
 				<div
@@ -3330,7 +3243,6 @@ export const SettingsPage: React.FC = () => {
 				title="Skills (Habilidades)"
 				icon={<AppIcon name="spark" size={17} />}
 				category="memoria"
-				activeCategory={activeCategory}
 				description="Las herramientas y capacidades de Octopus."
 			>
 				<div
@@ -3405,7 +3317,6 @@ export const SettingsPage: React.FC = () => {
 					title="Servidor Local"
 					icon={<AppIcon name="server" size={17} />}
 					category="sistema"
-					activeCategory={activeCategory}
 					description="Requiere reiniciar el servidor."
 				>
 					<Field
@@ -3431,7 +3342,6 @@ export const SettingsPage: React.FC = () => {
 					title="Seguridad"
 					icon={<AppIcon name="lock" size={17} />}
 					category="sistema"
-					activeCategory={activeCategory}
 				>
 					<Toggle
 						label="Modo Sandbox"
@@ -3474,7 +3384,6 @@ export const SettingsPage: React.FC = () => {
 
 			<br />
 			<br />
-			</div>
 		</div>
 	);
 };

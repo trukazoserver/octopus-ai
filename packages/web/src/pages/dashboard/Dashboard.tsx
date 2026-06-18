@@ -1,8 +1,12 @@
 import type React from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActivityFeed } from "../../components/dashboard/ActivityFeed.js";
 import { DashboardStatsGrid } from "../../components/dashboard/DashboardStats.js";
 import { QuickActions } from "../../components/dashboard/QuickActions.js";
-import type { DashboardArmSummary, WorkflowRunSummary } from "../../hooks/useDashboard.js";
+import type {
+	DashboardArmSummary,
+	WorkflowRunSummary,
+} from "../../hooks/useDashboard.js";
 import { useDashboard } from "../../hooks/useDashboard.js";
 import { publicAsset } from "../../utils/assets.js";
 
@@ -13,7 +17,19 @@ interface DashboardPageProps {
 }
 
 export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
-	const { stats, activity, recentWorkflows, arms, loading, reload } = useDashboard();
+	const {
+		stats,
+		usage,
+		model,
+		providerDisplayName,
+		uptime,
+		activeAgents,
+		activity,
+		recentWorkflows,
+		arms,
+		loading,
+		reload,
+	} = useDashboard();
 
 	return (
 		<div className="page-shell" style={{ maxWidth: "1220px" }}>
@@ -69,6 +85,136 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 						</p>
 					</div>
 				</div>
+			</div>
+
+			{/* Live metrics */}
+			<div
+				className="animate-fade-in"
+				style={{ marginBottom: "32px", display: "grid", gap: "16px" }}
+			>
+				<div
+					style={{
+						display: "flex",
+						flexWrap: "wrap",
+						gap: "16px",
+						alignItems: "center",
+						justifyContent: "space-between",
+						padding: "18px 22px",
+						borderRadius: "18px",
+						background:
+							"linear-gradient(135deg, rgba(99,102,241,0.16), rgba(24,24,27,0.6))",
+						border: "1px solid rgba(99,102,241,0.25)",
+						boxShadow: "0 18px 50px rgba(0,0,0,.28)",
+					}}
+				>
+					<div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+						<span
+							style={{
+								width: 11,
+								height: 11,
+								borderRadius: 999,
+								background: stats?.status === "online" ? "#10b981" : "#f59e0b",
+								boxShadow: "0 0 0 4px rgba(16,185,129,.14)",
+								animation: "pulse 2s infinite",
+							}}
+						/>
+						<div>
+							<div
+								style={{
+									fontSize: "0.72rem",
+									color: "#a1a1aa",
+									fontWeight: 700,
+									textTransform: "uppercase",
+									letterSpacing: "0.06em",
+								}}
+							>
+								Proveedor · Modelo
+							</div>
+							<div
+								style={{
+									fontSize: "1.3rem",
+									fontWeight: 800,
+									color: "#f4f4f5",
+									letterSpacing: "-0.02em",
+								}}
+							>
+								{providerDisplayName || "—"}
+								{model ? (
+									<span
+										style={{
+											color: "#a1a1aa",
+											fontWeight: 600,
+											fontSize: "0.95rem",
+										}}
+									>
+										{" · "}
+										{model}
+									</span>
+								) : null}
+							</div>
+						</div>
+					</div>
+					<div style={{ display: "flex", gap: "26px", flexWrap: "wrap" }}>
+						<HeroStat
+							label="Estado"
+							value={stats?.status === "online" ? "En línea" : "Degradado"}
+							color={stats?.status === "online" ? "#10b981" : "#f59e0b"}
+						/>
+						<HeroStat label="Uptime" value={formatUptime(uptime)} />
+						<HeroStat
+							label="Agentes activos"
+							value={String(activeAgents.total)}
+							color="#818cf8"
+						/>
+					</div>
+				</div>
+
+				<div
+					style={{
+						display: "grid",
+						gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))",
+						gap: "14px",
+					}}
+				>
+					<MetricCard
+						label="Tokens totales"
+						value={usage.totalTokens}
+						format={formatTokens}
+					/>
+					<MetricCard
+						label="Tokens entrada"
+						value={usage.promptTokens}
+						format={formatTokens}
+						accent="#38bdf8"
+						hint="prompt"
+					/>
+					<MetricCard
+						label="Tokens salida"
+						value={usage.completionTokens}
+						format={formatTokens}
+						accent="#a78bfa"
+						hint="completion"
+					/>
+					<MetricCard
+						label="Costo estimado"
+						value={usage.totalCost}
+						format={formatCost}
+						accent="#10b981"
+					/>
+					<MetricCard label="Llamadas API" value={usage.apiCalls} />
+					<MetricCard
+						label="Tareas activas"
+						value={stats?.runningTasks ?? 0}
+						accent="#f59e0b"
+					/>
+				</div>
+
+				{activeAgents.total > 0 ? (
+					<div style={{ fontSize: "0.78rem", color: "#71717a" }}>
+						Agentes activos: {activeAgents.chat} en chat ·{" "}
+						{activeAgents.workers} workers
+					</div>
+				) : null}
 			</div>
 
 			{/* Quick Actions */}
@@ -181,6 +327,131 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 	);
 };
 
+function useCountUp(value: number, duration = 650): number {
+	const [display, setDisplay] = useState(0);
+	const fromRef = useRef(0);
+	useEffect(() => {
+		const from = fromRef.current;
+		const start = performance.now();
+		let raf = 0;
+		const tick = (now: number) => {
+			const t = Math.min(1, (now - start) / duration);
+			const eased = 1 - (1 - t) ** 3;
+			const next = Math.round(from + (value - from) * eased);
+			setDisplay(next);
+			if (t < 1) {
+				raf = requestAnimationFrame(tick);
+			} else {
+				fromRef.current = value;
+			}
+		};
+		raf = requestAnimationFrame(tick);
+		return () => cancelAnimationFrame(raf);
+	}, [value, duration]);
+	return display;
+}
+
+function formatTokens(n: number): string {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+	return String(n);
+}
+
+function formatCost(n: number): string {
+	if (n <= 0) return "$0.00";
+	if (n < 0.01) return "<$0.01";
+	return `$${n.toFixed(2)}`;
+}
+
+function formatUptime(seconds: number): string {
+	const s = Math.floor(seconds % 60);
+	const m = Math.floor((seconds / 60) % 60);
+	const h = Math.floor(seconds / 3600);
+	if (h > 0) return `${h}h ${m}m`;
+	if (m > 0) return `${m}m ${s}s`;
+	return `${s}s`;
+}
+
+const HeroStat: React.FC<{
+	label: string;
+	value: string;
+	color?: string;
+}> = ({ label, value, color }) => (
+	<div>
+		<div
+			style={{
+				fontSize: "0.68rem",
+				color: "#71717a",
+				fontWeight: 700,
+				textTransform: "uppercase",
+				letterSpacing: "0.06em",
+			}}
+		>
+			{label}
+		</div>
+		<div
+			style={{
+				fontSize: "1.05rem",
+				fontWeight: 800,
+				color: color ?? "#f4f4f5",
+				letterSpacing: "-0.01em",
+			}}
+		>
+			{value}
+		</div>
+	</div>
+);
+
+const MetricCard: React.FC<{
+	label: string;
+	value: number;
+	format?: (n: number) => string;
+	accent?: string;
+	hint?: string;
+}> = ({ label, value, format, accent, hint }) => {
+	const animated = useCountUp(value);
+	return (
+		<div
+			style={{
+				padding: "16px 18px",
+				borderRadius: "16px",
+				background: "linear-gradient(180deg, #18181b 0%, #101013 100%)",
+				border: "1px solid #27272a",
+				boxShadow: "0 10px 24px rgba(0,0,0,.22)",
+			}}
+		>
+			<div
+				style={{
+					fontSize: "0.72rem",
+					color: "#a1a1aa",
+					fontWeight: 700,
+					textTransform: "uppercase",
+					letterSpacing: "0.04em",
+				}}
+			>
+				{label}
+			</div>
+			<div
+				style={{
+					fontSize: "1.7rem",
+					fontWeight: 800,
+					color: accent ?? "#f4f4f5",
+					letterSpacing: "-0.02em",
+					marginTop: 6,
+					fontVariantNumeric: "tabular-nums",
+				}}
+			>
+				{format ? format(animated) : animated.toLocaleString()}
+			</div>
+			{hint ? (
+				<div style={{ fontSize: "0.7rem", color: "#71717a", marginTop: 4 }}>
+					{hint}
+				</div>
+			) : null}
+		</div>
+	);
+};
+
 const RecentWorkflowsCard: React.FC<{
 	workflows: WorkflowRunSummary[];
 	onOpenTasks: () => void;
@@ -201,16 +472,31 @@ const RecentWorkflowsCard: React.FC<{
 			<div style={{ display: "grid", gap: "10px" }}>
 				{workflows.map((workflow) => (
 					<div key={workflow.id} style={workflowItemStyle}>
-						<div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+						<div
+							style={{
+								display: "flex",
+								justifyContent: "space-between",
+								gap: 12,
+							}}
+						>
 							<strong style={{ color: "#f4f4f5", fontSize: "0.88rem" }}>
 								{workflow.goal || workflow.id}
 							</strong>
-							<span style={{ ...statusBadgeStyle, color: workflowColor(workflow.status) }}>
+							<span
+								style={{
+									...statusBadgeStyle,
+									color: workflowColor(workflow.status),
+								}}
+							>
 								{workflow.status}
 							</span>
 						</div>
-						<div style={{ color: "#71717a", fontSize: "0.75rem", marginTop: 6 }}>
-							{workflow.current_phase ? `Fase: ${workflow.current_phase} · ` : ""}
+						<div
+							style={{ color: "#71717a", fontSize: "0.75rem", marginTop: 6 }}
+						>
+							{workflow.current_phase
+								? `Fase: ${workflow.current_phase} · `
+								: ""}
 							{formatDate(workflow.updated_at)}
 						</div>
 					</div>
@@ -225,19 +511,43 @@ const ArmStatusCard: React.FC<{ arms: DashboardArmSummary[] }> = ({ arms }) => (
 		<div style={panelHeaderStyle}>
 			<div>
 				<h2 style={panelTitleStyle}>Brazos Octopus</h2>
-				<p style={panelSubtitleStyle}>Identidades builtin listas para delegación</p>
+				<p style={panelSubtitleStyle}>
+					Identidades builtin listas para delegación
+				</p>
 			</div>
 			<span style={{ color: "#a78bfa", fontWeight: 800 }}>{arms.length}/8</span>
 		</div>
 		{arms.length === 0 ? (
 			<div style={emptyStyle}>Los brazos aparecerán después del bootstrap.</div>
 		) : (
-			<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+			<div
+				style={{
+					display: "grid",
+					gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+					gap: 10,
+				}}
+			>
 				{arms.map((arm) => (
 					<div key={arm.id} style={armItemStyle}>
-						<span style={{ width: 8, height: 8, borderRadius: 999, background: arm.color ?? "#818cf8" }} />
+						<span
+							style={{
+								width: 8,
+								height: 8,
+								borderRadius: 999,
+								background: arm.color ?? "#818cf8",
+							}}
+						/>
 						<div style={{ minWidth: 0 }}>
-							<div style={{ color: "#f4f4f5", fontSize: "0.84rem", fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+							<div
+								style={{
+									color: "#f4f4f5",
+									fontSize: "0.84rem",
+									fontWeight: 700,
+									whiteSpace: "nowrap",
+									overflow: "hidden",
+									textOverflow: "ellipsis",
+								}}
+							>
 								{arm.name}
 							</div>
 							<div style={{ color: "#71717a", fontSize: "0.72rem" }}>
@@ -274,7 +584,12 @@ function formatDate(value?: string): string {
 	if (!value) return "sin fecha";
 	const date = new Date(value);
 	if (Number.isNaN(date.getTime())) return value;
-	return date.toLocaleString(undefined, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+	return date.toLocaleString(undefined, {
+		month: "short",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
 }
 
 const panelStyle: React.CSSProperties = {

@@ -18,6 +18,20 @@ export interface DashboardStats {
 	status: "online" | "degraded";
 }
 
+export interface DashboardUsage {
+	totalTokens: number;
+	promptTokens: number;
+	completionTokens: number;
+	totalCost: number;
+	apiCalls: number;
+}
+
+export interface ActiveAgents {
+	total: number;
+	chat: number;
+	workers: number;
+}
+
 interface AgentSummary {
 	id: string;
 	name?: string;
@@ -51,28 +65,63 @@ export interface ActivityItem {
 	timestamp: number;
 }
 
+interface ProviderUsageEntry {
+	tokens?: number;
+	requests?: number;
+	cost?: number;
+}
+
 export function useDashboard() {
 	const [stats, setStats] = useState<DashboardStats | null>(null);
+	const [usage, setUsage] = useState<DashboardUsage>({
+		totalTokens: 0,
+		promptTokens: 0,
+		completionTokens: 0,
+		totalCost: 0,
+		apiCalls: 0,
+	});
+	const [model, setModel] = useState<string>("");
+	const [providerDisplayName, setProviderDisplayName] = useState<string>("");
+	const [uptime, setUptime] = useState<number>(0);
+	const [activeAgents, setActiveAgents] = useState<ActiveAgents>({
+		total: 0,
+		chat: 0,
+		workers: 0,
+	});
 	const [activity, setActivity] = useState<ActivityItem[]>([]);
-	const [recentWorkflows, setRecentWorkflows] = useState<WorkflowRunSummary[]>([]);
+	const [recentWorkflows, setRecentWorkflows] = useState<WorkflowRunSummary[]>(
+		[],
+	);
 	const [arms, setArms] = useState<DashboardArmSummary[]>([]);
 	const [loading, setLoading] = useState(true);
 
 	const loadStats = useCallback(async () => {
 		try {
-			const [agents, mcp, memoryRaw, convs, statusRaw, toolsRaw, taskStatsRaw, workflows] =
-				await Promise.all([
-					apiGet<AgentSummary[]>("/api/agents").catch(() => []),
-					apiGet<unknown[]>("/api/mcp/servers").catch(() => []),
-					apiGet<Record<string, unknown>>("/api/memory/stats").catch(
-						() => ({}),
-					),
-					apiGet<unknown[]>("/api/conversations").catch(() => []),
-					apiGet<Record<string, unknown>>("/api/status").catch(() => ({})),
-					apiGet<unknown[]>("/api/tools").catch(() => []),
-					apiGet<Record<string, number>>("/api/tasks/stats").catch(() => ({})),
-					apiGet<WorkflowRunSummary[]>("/api/workflows?limit=8").catch(() => []),
-				]);
+			const [
+				agents,
+				mcp,
+				memoryRaw,
+				convs,
+				statusRaw,
+				toolsRaw,
+				taskStatsRaw,
+				workflows,
+				chatExecutions,
+				kanbanWorkers,
+			] = await Promise.all([
+				apiGet<AgentSummary[]>("/api/agents").catch(() => []),
+				apiGet<unknown[]>("/api/mcp/servers").catch(() => []),
+				apiGet<Record<string, unknown>>("/api/memory/stats").catch(() => ({})),
+				apiGet<unknown[]>("/api/conversations").catch(() => []),
+				apiGet<Record<string, unknown>>("/api/status").catch(() => ({})),
+				apiGet<unknown[]>("/api/tools").catch(() => []),
+				apiGet<Record<string, number>>("/api/tasks/stats").catch(() => ({})),
+				apiGet<WorkflowRunSummary[]>("/api/workflows?limit=8").catch(() => []),
+				apiGet<unknown[]>("/api/chat/executions").catch(() => []),
+				apiGet<Record<string, unknown>>("/api/kanban/workers/active").catch(
+					() => ({}),
+				),
+			]);
 
 			const memory = memoryRaw as {
 				longTerm?: { maxItems?: number };
@@ -80,9 +129,19 @@ export function useDashboard() {
 			};
 			const status = statusRaw as {
 				provider?: string;
+				providerDisplayName?: string;
+				model?: string;
 				thinking?: string;
 				channels?: string[];
+				uptime?: number;
 				ok?: boolean;
+				usage?: {
+					totalTokens?: number;
+					promptTokens?: number;
+					completionTokens?: number;
+					totalCost?: number;
+					byProvider?: Record<string, ProviderUsageEntry>;
+				};
 			};
 			const taskStats = taskStatsRaw as {
 				total?: number;
@@ -111,6 +170,43 @@ export function useDashboard() {
 				channels: status.channels ?? [],
 				status: status.ok === false ? "degraded" : "online",
 			});
+
+			const byProvider = status.usage?.byProvider ?? {};
+			const apiCalls = Object.values(byProvider).reduce(
+				(sum, entry) => sum + (entry?.requests ?? 0),
+				0,
+			);
+			setUsage({
+				totalTokens: status.usage?.totalTokens ?? 0,
+				promptTokens: status.usage?.promptTokens ?? 0,
+				completionTokens: status.usage?.completionTokens ?? 0,
+				totalCost: status.usage?.totalCost ?? 0,
+				apiCalls,
+			});
+			setModel(status.model ?? "");
+			setProviderDisplayName(
+				status.providerDisplayName ?? status.provider ?? "",
+			);
+			setUptime(status.uptime ?? 0);
+
+			const chatCount = Array.isArray(chatExecutions)
+				? chatExecutions.length
+				: 0;
+			const workersActive = kanbanWorkers as {
+				activeTasks?: unknown[];
+				active?: unknown[];
+			};
+			const workerCount =
+				(Array.isArray(workersActive.activeTasks)
+					? workersActive.activeTasks.length
+					: 0) ||
+				(Array.isArray(workersActive.active) ? workersActive.active.length : 0);
+			setActiveAgents({
+				chat: chatCount,
+				workers: workerCount,
+				total: chatCount + workerCount,
+			});
+
 			setRecentWorkflows(workflows.slice(0, 6));
 			setArms(
 				agents
@@ -169,9 +265,21 @@ export function useDashboard() {
 
 	useEffect(() => {
 		loadStats();
-		const interval = setInterval(loadStats, 30000);
+		const interval = setInterval(loadStats, 15000);
 		return () => clearInterval(interval);
 	}, [loadStats]);
 
-	return { stats, activity, recentWorkflows, arms, loading, reload: loadStats };
+	return {
+		stats,
+		usage,
+		model,
+		providerDisplayName,
+		uptime,
+		activeAgents,
+		activity,
+		recentWorkflows,
+		arms,
+		loading,
+		reload: loadStats,
+	};
 }

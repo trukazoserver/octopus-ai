@@ -265,10 +265,16 @@
 	outline: none;
 }
 
-.app-nav-item.is-active {
-	background: #111;
+.app-nav-item:hover {
+	background: #18181b;
 	color: #f4f4f5;
-	box-shadow: inset 0 0 0 1px #202020;
+}
+
+.app-nav-item.is-active {
+	background: rgba(99, 102, 241, 0.12);
+	color: #f4f4f5;
+	box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.35), 0 0 18px
+		rgba(99, 102, 241, 0.12);
 }
 
 .app-nav-icon {
