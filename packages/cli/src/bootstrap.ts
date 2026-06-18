@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import * as os from "node:os";
 import { join } from "node:path";
@@ -18,8 +24,9 @@ import {
 	ConnectionManager,
 	ContextAssembler,
 	EmbeddingProvider,
-	EventStream,
 	EnvVarManager,
+	EnvironmentFilter,
+	EventStream,
 	FTSSearchEngine,
 	GlobalDailyMemory,
 	KanbanDispatcher,
@@ -37,6 +44,7 @@ import {
 	PluginRegistry,
 	RequirementResolver,
 	Scheduler,
+	SecretRedactor,
 	ShortTermMemory,
 	SkillForge,
 	SkillImprover,
@@ -46,8 +54,6 @@ import {
 	SkillResearcher,
 	TaskManager,
 	TeamBlackboard,
-	EnvironmentFilter,
-	SecretRedactor,
 	TokenCounter,
 	ToolExecutor,
 	ToolRegistry,
@@ -60,6 +66,7 @@ import {
 	createConfiguredKnowledgeExtractor,
 	createDatabaseAdapter,
 	createFileSystemTools,
+	createKanbanCardTools,
 	createLogger,
 	createMediaTools,
 	createSandboxTools,
@@ -68,7 +75,6 @@ import {
 	createTeamTools,
 	createVectorStore,
 	createWorkflowTools,
-	createKanbanCardTools,
 	expandTildePath,
 	generateEncryptionKey,
 	getZaiMCPConfigs,
@@ -163,9 +169,21 @@ type BrowserRuntimeConfig = {
 	brightDataWsUrl?: string;
 	decodoEnabled?: boolean;
 	decodoProxyUrl?: string;
+	decodoProxyUsername?: string;
+	decodoProxyPassword?: string;
+	decodoProxyCountry?: string;
+	decodoProxyCity?: string;
+	decodoProxyState?: string;
+	decodoProxyZip?: string;
+	decodoProxySession?: string;
+	decodoProxySessionDuration?: string;
+	decodoScraperToken?: string;
+	decodoScraperUsername?: string;
+	decodoScraperPassword?: string;
 	solveCaptchas?: boolean;
 	captchaProvider?: string;
 	captchaTimeoutMs?: number;
+	captchaApiKey?: string;
 	persistCookies?: boolean;
 	sessionStorageDir?: string;
 	sessionTtlHours?: number;
@@ -1761,18 +1779,45 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			decodoEnabled,
 			decodoProxyUrl,
 			decodoProxyUsername:
-				process.env.DECODO_PROXY_USERNAME || process.env.DECODO_PROXY_USER,
+				browserCfg.decodoProxyUsername ||
+				process.env.DECODO_PROXY_USERNAME ||
+				process.env.DECODO_PROXY_USER,
 			decodoProxyPassword:
-				process.env.DECODO_PROXY_PASSWORD || process.env.DECODO_PROXY_PASS,
-			decodoProxyCountry: process.env.DECODO_PROXY_COUNTRY,
-			decodoProxyCity: process.env.DECODO_PROXY_CITY,
-			decodoProxyState: process.env.DECODO_PROXY_STATE,
-			decodoProxyZip: process.env.DECODO_PROXY_ZIP,
-			decodoProxySession: process.env.DECODO_PROXY_SESSION,
-			decodoProxySessionDuration: process.env.DECODO_PROXY_SESSION_DURATION,
+				browserCfg.decodoProxyPassword ||
+				process.env.DECODO_PROXY_PASSWORD ||
+				process.env.DECODO_PROXY_PASS,
+			decodoProxyCountry:
+				browserCfg.decodoProxyCountry || process.env.DECODO_PROXY_COUNTRY,
+			decodoProxyCity:
+				browserCfg.decodoProxyCity || process.env.DECODO_PROXY_CITY,
+			decodoProxyState:
+				browserCfg.decodoProxyState || process.env.DECODO_PROXY_STATE,
+			decodoProxyZip: browserCfg.decodoProxyZip || process.env.DECODO_PROXY_ZIP,
+			decodoProxySession:
+				browserCfg.decodoProxySession || process.env.DECODO_PROXY_SESSION,
+			decodoProxySessionDuration:
+				browserCfg.decodoProxySessionDuration ||
+				process.env.DECODO_PROXY_SESSION_DURATION,
+			decodoScraperToken:
+				browserCfg.decodoScraperToken ||
+				process.env.DECODO_SCRAPER_TOKEN ||
+				process.env.DECODO_API_TOKEN,
+			decodoScraperUsername:
+				browserCfg.decodoScraperUsername ||
+				process.env.DECODO_SCRAPER_USERNAME ||
+				process.env.DECODO_API_USERNAME,
+			decodoScraperPassword:
+				browserCfg.decodoScraperPassword ||
+				process.env.DECODO_SCRAPER_PASSWORD ||
+				process.env.DECODO_API_PASSWORD,
 			solveCaptchas: browserCfg.solveCaptchas,
 			captchaProvider: browserCfg.captchaProvider,
 			captchaTimeoutMs: browserCfg.captchaTimeoutMs,
+			captchaApiKey:
+				browserCfg.captchaApiKey ||
+				process.env.TWOCAPTCHA_API_KEY ||
+				process.env.TWO_CAPTCHA_API_KEY ||
+				process.env.TWOCAPTCHA_TOKEN,
 			persistCookies: browserCfg.persistCookies,
 			sessionStorageDir: browserCfg.sessionStorageDir,
 			sessionTtlHours: browserCfg.sessionTtlHours,

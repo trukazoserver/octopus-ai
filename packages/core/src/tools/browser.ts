@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium as nativeChromium } from "playwright";
+import { chromium as nativeChromium } from "patchright";
 import { chromium as stealthChromium } from "playwright-extra";
 import stealthPlugin from "puppeteer-extra-plugin-stealth";
 
@@ -152,66 +152,98 @@ const POPUP_CLOSE_SELECTORS = [
 
 const LOCALE_TIMEZONE_MAP: Record<
 	string,
-	{ locale: string; timezoneId: string; locales: string[] }
+	{
+		locale: string;
+		timezoneId: string;
+		locales: string[];
+		geo?: { latitude: number; longitude: number };
+	}
 > = {
 	"America/New_York": {
 		locale: "en-US",
 		timezoneId: "America/New_York",
 		locales: ["en-US", "en"],
+		geo: { latitude: 40.71, longitude: -74.01 },
 	},
 	"America/Chicago": {
 		locale: "en-US",
 		timezoneId: "America/Chicago",
 		locales: ["en-US", "en"],
+		geo: { latitude: 41.88, longitude: -87.63 },
 	},
 	"America/Los_Angeles": {
 		locale: "en-US",
 		timezoneId: "America/Los_Angeles",
 		locales: ["en-US", "en"],
+		geo: { latitude: 34.05, longitude: -118.24 },
 	},
 	"America/Lima": {
 		locale: "es-PE",
 		timezoneId: "America/Lima",
 		locales: ["es-PE", "es", "en-US", "en"],
+		geo: { latitude: -12.05, longitude: -77.04 },
 	},
 	"America/Mexico_City": {
 		locale: "es-MX",
 		timezoneId: "America/Mexico_City",
 		locales: ["es-MX", "es", "en-US", "en"],
+		geo: { latitude: 19.43, longitude: -99.13 },
 	},
 	"America/Bogota": {
 		locale: "es-CO",
 		timezoneId: "America/Bogota",
 		locales: ["es-CO", "es", "en-US", "en"],
+		geo: { latitude: 4.71, longitude: -74.07 },
 	},
 	"America/Buenos_Aires": {
 		locale: "es-AR",
 		timezoneId: "America/Buenos_Aires",
 		locales: ["es-AR", "es", "en-US", "en"],
+		geo: { latitude: -34.6, longitude: -58.38 },
 	},
 	"Europe/Madrid": {
 		locale: "es-ES",
 		timezoneId: "Europe/Madrid",
 		locales: ["es-ES", "es", "en-US", "en"],
+		geo: { latitude: 40.42, longitude: -3.7 },
 	},
 	"Europe/Berlin": {
 		locale: "de-DE",
 		timezoneId: "Europe/Berlin",
 		locales: ["de-DE", "de", "en-US", "en"],
+		geo: { latitude: 52.52, longitude: 13.4 },
 	},
 	"Europe/London": {
 		locale: "en-GB",
 		timezoneId: "Europe/London",
 		locales: ["en-GB", "en"],
+		geo: { latitude: 51.51, longitude: -0.13 },
 	},
 	"Europe/Paris": {
 		locale: "fr-FR",
 		timezoneId: "Europe/Paris",
 		locales: ["fr-FR", "fr", "en-US", "en"],
+		geo: { latitude: 48.86, longitude: 2.35 },
 	},
 };
 
 const TIMEZONE_KEYS = Object.keys(LOCALE_TIMEZONE_MAP);
+
+// Maps a lowercased ISO-3166 country code (the format Decodo targets, e.g. "us",
+// "es") to a timezone key in LOCALE_TIMEZONE_MAP so the browser fingerprint
+// (timezone/locale/geolocation) matches the residential IP's country.
+const COUNTRY_TO_TIMEZONE: Record<string, string> = {
+	us: "America/New_York",
+	pe: "America/Lima",
+	mx: "America/Mexico_City",
+	co: "America/Bogota",
+	ar: "America/Buenos_Aires",
+	es: "Europe/Madrid",
+	de: "Europe/Berlin",
+	gb: "Europe/London",
+	uk: "Europe/London",
+	fr: "Europe/Paris",
+};
 
 const STEALTH_INIT_SCRIPT = `
 (() => {
@@ -442,7 +474,7 @@ function pickRandom<T>(arr: T[]): T {
 	return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function generateFingerprint(): {
+function generateFingerprint(country?: string): {
 	userAgent: string;
 	viewport: { width: number; height: number };
 	screen: {
@@ -455,6 +487,7 @@ function generateFingerprint(): {
 	locale: string;
 	timezoneId: string;
 	locales: string[];
+	geo?: { latitude: number; longitude: number };
 } {
 	const ua = pickRandom(REALISTIC_USER_AGENTS);
 	const viewport = pickRandom(REALISTIC_VIEWPORTS);
@@ -469,7 +502,14 @@ function generateFingerprint(): {
 		: ua.includes("Linux")
 			? "Linux x86_64"
 			: "Win32";
-	const tzKey = pickRandom(TIMEZONE_KEYS);
+	// Prefer a timezone that matches the proxy IP's country so the browser's
+	// timezone/locale line up with the residential IP geo. Fall back to a random
+	// timezone only when no country is configured (e.g. running without a proxy,
+	// where the OS/native timezone matches the real IP anyway).
+	const normalizedCountry = country?.trim().toLowerCase();
+	const tzKey =
+		(normalizedCountry && COUNTRY_TO_TIMEZONE[normalizedCountry]) ||
+		pickRandom(TIMEZONE_KEYS);
 	const tzInfo = LOCALE_TIMEZONE_MAP[tzKey];
 	return {
 		userAgent: ua,
@@ -479,6 +519,7 @@ function generateFingerprint(): {
 		locale: tzInfo.locale,
 		timezoneId: tzInfo.timezoneId,
 		locales: tzInfo.locales,
+		geo: tzInfo.geo,
 	};
 }
 
@@ -526,27 +567,6 @@ function getTwoCaptchaApiKey(): string {
 		process.env.TWOCAPTCHA_TOKEN ||
 		""
 	).trim();
-}
-
-function getDecodoScraperToken(): string {
-	return (
-		process.env.DECODO_SCRAPER_TOKEN ||
-		process.env.DECODO_API_TOKEN ||
-		""
-	).trim();
-}
-
-function getDecodoScraperAuthorization(): string {
-	const token = getDecodoScraperToken();
-	if (token) return token.startsWith("Basic ") ? token : `Basic ${token}`;
-	const username =
-		process.env.DECODO_SCRAPER_USERNAME || process.env.DECODO_API_USERNAME;
-	const password =
-		process.env.DECODO_SCRAPER_PASSWORD || process.env.DECODO_API_PASSWORD;
-	if (username && password) {
-		return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
-	}
-	return "";
 }
 
 function safePathSegment(value: string): string {
@@ -712,9 +732,13 @@ export interface BrowserConfig {
 	decodoProxyZip?: string;
 	decodoProxySession?: string;
 	decodoProxySessionDuration?: string;
+	decodoScraperToken?: string;
+	decodoScraperUsername?: string;
+	decodoScraperPassword?: string;
 	solveCaptchas?: boolean;
 	captchaProvider?: "2captcha";
 	captchaTimeoutMs?: number;
+	captchaApiKey?: string;
 	persistCookies?: boolean;
 	sessionStorageDir?: string;
 	sessionTtlHours?: number;
@@ -750,6 +774,7 @@ export class BrowserTool {
 	private page: unknown = null;
 	private activeProvider: BrowserProvider | null = null;
 	private fingerprint: ReturnType<typeof generateFingerprint> | null = null;
+	private liveUserAgent: string | null = null;
 	private humanSim = new HumanBehavior();
 	private urlSafetyPolicy: UrlSafetyPolicy;
 	private lastSnapshot: {
@@ -776,39 +801,111 @@ export class BrowserTool {
 		return this.config.stealth === true ? stealthChromium : nativeChromium;
 	}
 
+	private resolveProxyCountry(): string | undefined {
+		return (
+			this.config.decodoProxyCountry ||
+			process.env.DECODO_PROXY_COUNTRY ||
+			undefined
+		);
+	}
+
 	private ensureFingerprint(): ReturnType<typeof generateFingerprint> {
 		if (!this.fingerprint) {
-			this.fingerprint = generateFingerprint();
+			this.fingerprint = generateFingerprint(this.resolveProxyCountry());
 		}
 		return this.fingerprint;
 	}
 
+	// Real User-Agent of the launched browser, captured at runtime. Under the
+	// default (Patchright + real Chrome) path we intentionally do NOT inject a
+	// fake UA, so the fingerprint's random UA would be wrong — this returns the
+	// value the page actually presents, which is what 2captcha needs.
+	private resolveUserAgent(): string {
+		return this.liveUserAgent ?? this.ensureFingerprint().userAgent;
+	}
+
+	// 2captcha API key: config first, then env vars (fallback for existing users).
+	private resolveCaptchaApiKey(): string {
+		return (this.config.captchaApiKey || getTwoCaptchaApiKey()).trim();
+	}
+
+	// Decodo scraping API token: config first, then env vars.
+	private resolveDecodoScraperToken(): string {
+		return (
+			this.config.decodoScraperToken ||
+			process.env.DECODO_SCRAPER_TOKEN ||
+			process.env.DECODO_API_TOKEN ||
+			""
+		).trim();
+	}
+
+	// Decodo scraping API Authorization header (token preferred, else user/pass).
+	private resolveDecodoScraperAuthorization(): string {
+		const token = this.resolveDecodoScraperToken();
+		if (token) return token.startsWith("Basic ") ? token : `Basic ${token}`;
+		const username =
+			this.config.decodoScraperUsername ||
+			process.env.DECODO_SCRAPER_USERNAME ||
+			process.env.DECODO_API_USERNAME;
+		const password =
+			this.config.decodoScraperPassword ||
+			process.env.DECODO_SCRAPER_PASSWORD ||
+			process.env.DECODO_API_PASSWORD;
+		if (username && password) {
+			return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+		}
+		return "";
+	}
+
 	private buildBrowserContextOptions(): Record<string, unknown> {
 		const fp = this.ensureFingerprint();
+		// Default (Patchright + real Chrome) path: let the browser supply its own
+		// User-Agent/headers (Patchright best practice — overriding them creates
+		// detectable mismatches). Only couple timezone/locale/geolocation to the
+		// proxy IP's country, since IP geo is server-observable and must agree
+		// with the browser's reported timezone/locale. When no country is coupled
+		// (no proxy), keep fully native so the OS timezone matches the real IP.
 		if (this.config.nativeFingerprint !== false) {
-			return {
-				viewport: fp.viewport,
-			};
+			const opts: Record<string, unknown> = { viewport: fp.viewport };
+			if (fp.geo) {
+				opts.timezoneId = fp.timezoneId;
+				opts.locale = fp.locale;
+				opts.geolocation = {
+					latitude: fp.geo.latitude,
+					longitude: fp.geo.longitude,
+				};
+				opts.permissions = ["geolocation"];
+			}
+			return opts;
 		}
+		// Legacy non-native path (nativeFingerprint: false): keeps the injected
+		// fingerprint but fixes the geolocation leak (was hardcoded to 0,0 in the
+		// Gulf of Guinea) and pins deviceScaleFactor instead of a random value.
 		const acceptLangs = fp.locales.join(",");
-		return {
+		const opts: Record<string, unknown> = {
 			viewport: fp.viewport,
 			userAgent: fp.userAgent,
 			locale: fp.locale,
 			platform: fp.platform,
 			colorScheme: "light",
-			deviceScaleFactor: 1 + Math.random() * 0.5,
+			deviceScaleFactor: 1,
 			hasTouch: false,
 			isMobile: false,
 			javaScriptEnabled: true,
 			timezoneId: fp.timezoneId,
-			geolocation: { latitude: 0, longitude: 0 },
-			permissions: ["geolocation"],
 			extraHTTPHeaders: {
 				"Accept-Language": `${acceptLangs};q=0.9`,
 				DNT: "1",
 			},
 		};
+		if (fp.geo) {
+			opts.geolocation = {
+				latitude: fp.geo.latitude,
+				longitude: fp.geo.longitude,
+			};
+			opts.permissions = ["geolocation"];
+		}
+		return opts;
 	}
 
 	private async addBrowserInitScripts(): Promise<void> {
@@ -896,25 +993,68 @@ export class BrowserTool {
 		}
 	}
 
-	private async isCurrentPageBlocked(): Promise<boolean> {
-		if (!this.page) return false;
+	// Detects a REAL block/challenge without matching the anti-bot scripts that
+	// protected sites (e.g. Etsy, Facebook) embed on every normal page. We never
+	// test raw HTML for DataDome — instead we look for definitive challenge
+	// signals (the captcha-delivery host/iframe or challenge text in the VISIBLE
+	// page) and we suppress any weak match when the page clearly has real content.
+	private async analyzeBlockState(): Promise<{
+		blocked: boolean;
+		dataDome: boolean;
+		contentRich: boolean;
+	}> {
+		if (!this.page)
+			return { blocked: false, dataDome: false, contentRich: false };
 		try {
+			const url = this.page.url();
 			const title = await this.page.title().catch(() => "");
-			const text = await this.page
-				.evaluate(() => document.body?.innerText || "")
-				.catch(() => "");
-			const html = await this.page.content().catch(() => "");
+			const probe = await this.page
+				.evaluate(() => ({
+					visible: document.body?.innerText || "",
+					textLen: (document.body?.innerText || "").replace(/\s+/g, "").length,
+					elementCount: document.querySelectorAll("*").length,
+					challengeIframe: !!document.querySelector(
+						'iframe[src*="captcha-delivery.com"]',
+					),
+				}))
+				.catch(() => ({
+					visible: "",
+					textLen: 0,
+					elementCount: 0,
+					challengeIframe: false,
+				}));
 
-			// Only check HTML for highly specific provider tokens to avoid false positives on words like "challenge"
-			const htmlBlock = DATADOME_BLOCK_RE.test(html.slice(0, 20000));
-			const textBlock =
-				DATADOME_BLOCK_RE.test(`${title}\n${text}`) ||
-				GENERIC_BLOCK_RE.test(`${title}\n${text}`);
+			const visibleCombined = `${title}\n${probe.visible}`;
+			const onChallengeHost = /captcha-delivery\.com/i.test(url);
+			const dataDomeVisible = DATADOME_BLOCK_RE.test(visibleCombined);
+			const contentRich = probe.textLen > 800 && probe.elementCount > 80;
+			const dataDome =
+				onChallengeHost ||
+				dataDomeVisible ||
+				(probe.challengeIframe && !contentRich);
 
-			return htmlBlock || textBlock;
+			// Abundant real content + no definitive challenge signal => not blocked.
+			// This is what stops a fully-loaded Etsy page (which always carries
+			// DataDome script tags) from being misread as a DataDome challenge.
+			if (
+				contentRich &&
+				!onChallengeHost &&
+				!dataDomeVisible &&
+				!probe.challengeIframe
+			) {
+				return { blocked: false, dataDome: false, contentRich };
+			}
+
+			const generic = GENERIC_BLOCK_RE.test(visibleCombined);
+			return { blocked: dataDome || generic, dataDome, contentRich };
 		} catch {
-			return false;
+			return { blocked: false, dataDome: false, contentRich: false };
 		}
+	}
+
+	private async isCurrentPageBlocked(): Promise<boolean> {
+		const state = await this.analyzeBlockState();
+		return state.blocked;
 	}
 
 	private async saveSessionForCurrentPage(): Promise<boolean> {
@@ -1050,7 +1190,8 @@ export class BrowserTool {
 			(img) => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0,
 		).length;
 		const broken = images.filter(
-			(img) => img.complete && (img.naturalWidth === 0 || img.naturalHeight === 0),
+			(img) =>
+				img.complete && (img.naturalWidth === 0 || img.naturalHeight === 0),
 		);
 		const loading = images.length - loaded - broken.length;
 		const brokenSample = broken
@@ -1098,7 +1239,7 @@ export class BrowserTool {
 	private async createTwoCaptchaTask(
 		task: Record<string, unknown>,
 	): Promise<Record<string, unknown>> {
-		const clientKey = getTwoCaptchaApiKey();
+		const clientKey = this.resolveCaptchaApiKey();
 		if (!clientKey) {
 			throw new Error(
 				"TWOCAPTCHA_API_KEY is not configured. Set it with manage_env or the process environment.",
@@ -1465,14 +1606,14 @@ export class BrowserTool {
 					websiteURL,
 					websiteKey,
 					isInvisible: Boolean(challenge.isInvisible),
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "recaptcha-v2-enterprise":
 				return withProxy("RecaptchaV2EnterpriseTaskProxyless", {
 					websiteURL,
 					websiteKey,
 					isInvisible: Boolean(challenge.isInvisible),
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 					enterprisePayload: challenge.enterprisePayload,
 				});
 			case "recaptcha-v3":
@@ -1491,7 +1632,7 @@ export class BrowserTool {
 					websiteKey,
 					isInvisible: Boolean(challenge.isInvisible),
 					rqdata: challenge.rqdata,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "turnstile":
 				return withProxy("TurnstileTaskProxyless", {
@@ -1500,7 +1641,7 @@ export class BrowserTool {
 					action: challenge.action,
 					data: challenge.cData,
 					pagedata: challenge.chlPageData,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "funcaptcha":
 				return withProxy("FunCaptchaTaskProxyless", {
@@ -1508,7 +1649,7 @@ export class BrowserTool {
 					websitePublicKey: challenge.publicKey,
 					funcaptchaApiJSSubdomain: challenge.apiSubdomain,
 					data: challenge.data,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "geetest-v3":
 				return withProxy("GeeTestTaskProxyless", {
@@ -1516,33 +1657,33 @@ export class BrowserTool {
 					gt: challenge.gt,
 					challenge: challenge.challenge,
 					geetestApiServerSubdomain: challenge.apiServer,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "geetest-v4":
 				return withProxy("GeeTestTaskProxyless", {
 					websiteURL,
 					version: 4,
 					initParameters: { captcha_id: challenge.captchaId },
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "capy":
 				return withProxy("CapyTaskProxyless", {
 					websiteURL,
 					websiteKey,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "lemin":
 				return withProxy("LeminTaskProxyless", {
 					websiteURL,
 					captchaId: challenge.captchaId,
 					divId: challenge.divId,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "cybersiara":
 				return withProxy("AntiCyberSiAraTaskProxyless", {
 					websiteURL,
 					SlideMasterUrlId: challenge.slideMasterUrlId,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 				});
 			case "amazon-waf":
 				return withProxy("AmazonTaskProxyless", {
@@ -1563,7 +1704,7 @@ export class BrowserTool {
 					type: "DataDomeSliderTask",
 					websiteURL,
 					captchaUrl: challenge.captchaUrl,
-					userAgent: fp.userAgent,
+					userAgent: this.resolveUserAgent(),
 					...proxy,
 				};
 			default:
@@ -2041,7 +2182,9 @@ export class BrowserTool {
 		url: string,
 		timeoutMs = 30000,
 	): Promise<unknown> {
-		return this.chromiumController().connectOverCDP(url, { timeout: timeoutMs });
+		return this.chromiumController().connectOverCDP(url, {
+			timeout: timeoutMs,
+		});
 	}
 
 	private isBrightDataEnabled(): boolean {
@@ -2390,17 +2533,18 @@ export class BrowserTool {
 		);
 
 		const contextOptions = this.buildBrowserContextOptions();
-		const launchArgs = this.config.nativeFingerprint !== false
-			? [
-					"--disable-dev-shm-usage",
-					`--window-size=${fp.viewport.width},${fp.viewport.height}`,
-				]
-			: [
-					"--disable-dev-shm-usage",
-					"--disable-infobars",
-					"--disable-extensions",
-					`--window-size=${fp.viewport.width},${fp.viewport.height}`,
-				];
+		const launchArgs =
+			this.config.nativeFingerprint !== false
+				? [
+						"--disable-dev-shm-usage",
+						`--window-size=${fp.viewport.width},${fp.viewport.height}`,
+					]
+				: [
+						"--disable-dev-shm-usage",
+						"--disable-infobars",
+						"--disable-extensions",
+						`--window-size=${fp.viewport.width},${fp.viewport.height}`,
+					];
 		const launchOptions = {
 			executablePath: this.config.executablePath,
 			headless: this.config.headless ?? false,
@@ -2429,10 +2573,13 @@ export class BrowserTool {
 			console.warn(
 				`[BrowserTool] Chromium sandbox failed on Linux; retrying without sandbox: ${error instanceof Error ? error.message : String(error)}`,
 			);
-			this.context = await this.chromiumController().launchPersistentContext(userDataDir, {
-				...launchOptions,
-				chromiumSandbox: false,
-			});
+			this.context = await this.chromiumController().launchPersistentContext(
+				userDataDir,
+				{
+					...launchOptions,
+					chromiumSandbox: false,
+				},
+			);
 		}
 
 		this.browser = this.context.browser() || null;
@@ -3209,6 +3356,16 @@ export class BrowserTool {
 
 			this.page.setDefaultNavigationTimeout(60000);
 			this.page.setDefaultTimeout(15000);
+			// Capture the browser's real UA once the page exists (used by the
+			// 2captcha solver). On the default Patchright path we don't inject a
+			// UA, so this is the source of truth.
+			try {
+				this.liveUserAgent = await this.page.evaluate(
+					() => navigator.userAgent,
+				);
+			} catch {
+				this.liveUserAgent = null;
+			}
 		} catch (error) {
 			this.browser = null;
 			this.context = null;
@@ -3224,20 +3381,9 @@ export class BrowserTool {
 		if (!this.page) return null;
 
 		try {
-			// Use visible text for generic block detection. Full HTML often contains
-			// hidden anti-abuse script names on normal pages, especially Facebook.
-			const title = await this.page.title().catch(() => "");
-			const html = await this.page.content().catch(() => "");
-			const visibleText = await this.page
-				.evaluate(() => document.body?.innerText || "")
-				.catch(() => "");
-
-			const visibleCombined = `${title}\n${visibleText}`;
-			const isDataDomeBlocked =
-				DATADOME_BLOCK_RE.test(visibleCombined) ||
-				DATADOME_BLOCK_RE.test(html.slice(0, 30000));
-			const isBlocked =
-				isDataDomeBlocked || GENERIC_BLOCK_RE.test(visibleCombined);
+			const blockState = await this.analyzeBlockState();
+			const isDataDomeBlocked = blockState.dataDome;
+			const isBlocked = blockState.blocked;
 
 			if (!isBlocked) return null;
 
@@ -3276,7 +3422,7 @@ export class BrowserTool {
 				console.log("[BrowserTool] Block screenshot saved for analysis.");
 			}
 
-			if ((this.config.solveCaptchas ?? true) && getTwoCaptchaApiKey()) {
+			if ((this.config.solveCaptchas ?? true) && this.resolveCaptchaApiKey()) {
 				console.log(
 					"[BrowserTool] Attempting 2captcha solve for detected challenge...",
 				);
@@ -3514,7 +3660,7 @@ export class BrowserTool {
 					params: Record<string, unknown>,
 				): Promise<ToolResult> => {
 					try {
-						const authorization = getDecodoScraperAuthorization();
+						const authorization = this.resolveDecodoScraperAuthorization();
 						if (!authorization) {
 							return {
 								success: false,

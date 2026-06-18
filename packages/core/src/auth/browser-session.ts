@@ -2,10 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright-extra";
-import stealthPlugin from "puppeteer-extra-plugin-stealth";
-
-chromium.use(stealthPlugin());
+import { chromium } from "patchright";
 
 export interface BrowserAuthConfig {
 	loginUrl: string;
@@ -198,8 +195,6 @@ export async function startBrowserAuth(
 			],
 			ignoreDefaultArgs: ["--enable-automation"],
 			viewport: { width: 800, height: 700 },
-			userAgent:
-				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 		});
 
 		activeAuthBrowser = {
