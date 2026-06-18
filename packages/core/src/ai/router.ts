@@ -1,5 +1,6 @@
 import { createLogger } from "../utils/logger.js";
 import { getModelContextWindow } from "./model-context.js";
+import { estimateCost } from "./pricing.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import type { BaseLLMProvider } from "./providers/base.js";
 import { CohereProvider } from "./providers/cohere.js";
@@ -528,6 +529,8 @@ export class LLMRouter {
 	private config: LLMRouterConfig;
 	private usage: UsageStats = {
 		totalTokens: 0,
+		promptTokens: 0,
+		completionTokens: 0,
 		totalCost: 0,
 		byProvider: {},
 	};
@@ -638,7 +641,13 @@ export class LLMRouter {
 
 	private ensureUsageProvider(provider: string): void {
 		if (!this.usage.byProvider[provider]) {
-			this.usage.byProvider[provider] = { tokens: 0, cost: 0, requests: 0 };
+			this.usage.byProvider[provider] = {
+				tokens: 0,
+				promptTokens: 0,
+				completionTokens: 0,
+				cost: 0,
+				requests: 0,
+			};
 		}
 	}
 
@@ -654,12 +663,24 @@ export class LLMRouter {
 			completionTokens: number;
 			totalTokens?: number;
 		},
+		model?: string,
 	): void {
-		const tokens =
-			usage.totalTokens ?? usage.promptTokens + usage.completionTokens;
+		const prompt = usage.promptTokens ?? 0;
+		const completion = usage.completionTokens ?? 0;
+		const tokens = usage.totalTokens ?? prompt + completion;
 		this.usage.totalTokens += tokens;
+		this.usage.promptTokens += prompt;
+		this.usage.completionTokens += completion;
 		this.ensureUsageProvider(provider);
-		this.usage.byProvider[provider].tokens += tokens;
+		const entry = this.usage.byProvider[provider];
+		entry.tokens += tokens;
+		entry.promptTokens += prompt;
+		entry.completionTokens += completion;
+		const cost = estimateCost(provider, model, prompt, completion);
+		if (cost > 0) {
+			this.usage.totalCost += cost;
+			entry.cost += cost;
+		}
 	}
 
 	private injectReasoning(request: LLMRequest): LLMRequest {
@@ -734,7 +755,7 @@ export class LLMRouter {
 				try {
 					this.trackRequest(providerName);
 					const response = await provider.chat(resolvedRequest);
-					this.trackUsage(providerName, response.usage);
+					this.trackUsage(providerName, response.usage, resolvedRequest.model);
 					return response;
 				} catch (error) {
 					if (
@@ -769,7 +790,11 @@ export class LLMRouter {
 					this.trackRequest(fallbackProviderName);
 					const fallbackResponse =
 						await fallbackProvider.chat(fallbackResolved);
-					this.trackUsage(fallbackProviderName, fallbackResponse.usage);
+					this.trackUsage(
+						fallbackProviderName,
+						fallbackResponse.usage,
+						fallbackResolved.model,
+					);
 					return fallbackResponse;
 				} catch (fallbackError) {
 					logger.warn(
@@ -801,7 +826,8 @@ export class LLMRouter {
 					const stream = provider.chatStream(resolvedRequest);
 					for await (const chunk of stream) {
 						primaryYieldedAnyChunk = true;
-						if (chunk.usage) this.trackUsage(providerName, chunk.usage);
+						if (chunk.usage)
+							this.trackUsage(providerName, chunk.usage, resolvedRequest.model);
 						yield chunk;
 					}
 					return;
@@ -839,7 +865,12 @@ export class LLMRouter {
 					this.trackRequest(fallbackProviderName);
 					const fallbackStream = fallbackProvider.chatStream(fallbackResolved);
 					for await (const chunk of fallbackStream) {
-						if (chunk.usage) this.trackUsage(fallbackProviderName, chunk.usage);
+						if (chunk.usage)
+							this.trackUsage(
+								fallbackProviderName,
+								chunk.usage,
+								fallbackResolved.model,
+							);
 						yield chunk;
 					}
 					return;

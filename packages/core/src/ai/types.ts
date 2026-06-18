@@ -111,11 +111,15 @@ export interface ProviderConfig {
 
 export interface UsageStats {
 	totalTokens: number;
+	promptTokens: number;
+	completionTokens: number;
 	totalCost: number;
 	byProvider: Record<
 		string,
 		{
 			tokens: number;
+			promptTokens: number;
+			completionTokens: number;
 			cost: number;
 			requests: number;
 		}
