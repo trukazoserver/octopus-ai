@@ -1523,6 +1523,51 @@ function getVideoPosterUrl(url: string): string {
 	return url.replace("/api/media/file/", "/api/media/thumbnail/");
 }
 
+function getVideoAspectCacheKey(src: string): string {
+	// Key on the stable media id so normalisation changes to the surrounding URL
+	// (host, leading slash, query params) don't cause an aspect-ratio cache miss.
+	const match = src.match(/\/api\/media\/file\/([^/?#]+)/);
+	if (match?.[1]) return match[1];
+	return src;
+}
+
+// Module-level cache of detected video aspect ratios. Survives component
+// remounts (unlike a useRef) and is persisted to localStorage so it also
+// survives page reloads. Read at markdown-render time so the correct ratio can
+// be embedded directly into the HTML — before paint, without relying on a
+// post-render useEffect that loses the race during agent re-renders.
+const VIDEO_AR_STORAGE_KEY = "octopus-video-aspect-cache-v1";
+const videoAspectRatioCache: Map<
+	string,
+	{ aspectRatio: string; isVertical: boolean }
+> = (() => {
+	try {
+		const raw =
+			typeof localStorage !== "undefined"
+				? localStorage.getItem(VIDEO_AR_STORAGE_KEY)
+				: null;
+		if (raw) {
+			const parsed = JSON.parse(raw) as Array<
+				[string, { aspectRatio: string; isVertical: boolean }]
+			>;
+			return new Map(parsed);
+		}
+	} catch {
+		// ignore corrupt cache
+	}
+	return new Map();
+})();
+function persistVideoAspectRatioCache() {
+	try {
+		localStorage.setItem(
+			VIDEO_AR_STORAGE_KEY,
+			JSON.stringify([...videoAspectRatioCache]),
+		);
+	} catch {
+		// storage full or unavailable; in-memory cache still works
+	}
+}
+
 function getMediaFilename(url: string): string {
 	try {
 		const path = new URL(url, MEDIA_BASE).pathname;
@@ -1613,7 +1658,21 @@ function renderMediaInline(
 		const embedClass = showDownload
 			? "media-embed media-video media-video-agent"
 			: "media-embed media-video";
-		return `<div class="${embedClass}"><div class="media-download-frame media-video-frame"><div class="video-thumbnail" data-video-src="${safeUrl}" role="button" tabindex="0" aria-label="Cargar video">
+		// Embed the detected aspect ratio directly into the HTML so the correct
+		// container shape survives innerHTML regeneration during agent re-renders.
+		// (The post-render useEffect loses the race and its useRef cache is lost on
+		// remount; this module-level cache + an embedded inline style fixes both.)
+		const cached = videoAspectRatioCache.get(getVideoAspectCacheKey(fullUrl));
+		const orientClass = cached
+			? cached.isVertical
+				? " is-vertical-video"
+				: " is-horizontal-video"
+			: "";
+		const ratioAttr = cached
+			? ` style="aspect-ratio:${cached.aspectRatio};"`
+			: "";
+		const frameClass = `media-download-frame media-video-frame${orientClass}`;
+		return `<div class="${embedClass}"><div class="${frameClass}"${ratioAttr}><div class="video-thumbnail" data-video-src="${safeUrl}"${ratioAttr} role="button" tabindex="0" aria-label="Cargar video">
 			<img src="${posterUrl}" alt="Miniatura del video" loading="lazy" />
 			<div class="video-thumbnail-scrim"></div>
 			<div class="video-thumbnail-play">&#9654;</div>
@@ -1878,16 +1937,68 @@ const ChatMessage = memo(function ChatMessage({
 			}
 		};
 
+		const applyVideoAspectRatio = (
+			frame: HTMLElement,
+			thumbnail: HTMLElement | null,
+			aspectRatio: string,
+			isVertical: boolean,
+		) => {
+			frame.classList.toggle("is-vertical-video", isVertical);
+			frame.classList.toggle("is-horizontal-video", !isVertical);
+			frame.style.aspectRatio = aspectRatio;
+			if (thumbnail) thumbnail.style.aspectRatio = aspectRatio;
+		};
+
+		const cacheAndApplyVideoDimensions = (
+			frame: HTMLElement,
+			thumbnail: HTMLElement | null,
+			width: number,
+			height: number,
+			src?: string | null,
+		) => {
+			if (!width || !height) return;
+			const isVertical = width < height;
+			const aspectRatio = `${width} / ${height}`;
+			if (src) {
+				videoAspectRatioCache.set(getVideoAspectCacheKey(src), {
+					aspectRatio,
+					isVertical,
+				});
+				persistVideoAspectRatioCache();
+			}
+			applyVideoAspectRatio(frame, thumbnail, aspectRatio, isVertical);
+		};
+
+		const applyCachedVideoAspectRatio = (thumbnail: HTMLElement) => {
+			const src = thumbnail.getAttribute("data-video-src");
+			if (!src) return false;
+			const cached = videoAspectRatioCache.get(
+				getVideoAspectCacheKey(src),
+			);
+			if (!cached) return false;
+			const frame = thumbnail.closest<HTMLElement>(".media-video-frame");
+			if (!frame) return false;
+			applyVideoAspectRatio(
+				frame,
+				thumbnail,
+				cached.aspectRatio,
+				cached.isVertical,
+			);
+			return true;
+		};
+
 		const classifyVideoPoster = (img: HTMLImageElement) => {
-			if (!img.naturalWidth || !img.naturalHeight) return;
+			if (!img.complete || !img.naturalWidth || !img.naturalHeight) return;
 			const frame = img.closest<HTMLElement>(".media-video-frame");
 			const thumbnail = img.closest<HTMLElement>(".video-thumbnail");
 			if (!frame || !thumbnail) return;
-			const isVertical = img.naturalWidth < img.naturalHeight;
-			frame.classList.toggle("is-vertical-video", isVertical);
-			frame.classList.toggle("is-horizontal-video", !isVertical);
-			frame.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
-			thumbnail.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+			cacheAndApplyVideoDimensions(
+				frame,
+				thumbnail,
+				img.naturalWidth,
+				img.naturalHeight,
+				thumbnail.getAttribute("data-video-src"),
+			);
 		};
 
 		const classifyVideoDimensions = (
@@ -1895,20 +2006,17 @@ const ChatMessage = memo(function ChatMessage({
 			thumbnail: HTMLElement | null,
 			width: number,
 			height: number,
+			src?: string | null,
 		) => {
-			if (!width || !height) return;
-			const isVertical = width < height;
-			const aspectRatio = `${width} / ${height}`;
-			frame.classList.toggle("is-vertical-video", isVertical);
-			frame.classList.toggle("is-horizontal-video", !isVertical);
-			frame.style.aspectRatio = aspectRatio;
-			if (thumbnail) thumbnail.style.aspectRatio = aspectRatio;
+			cacheAndApplyVideoDimensions(frame, thumbnail, width, height, src);
 		};
 
 		const preloadVideoAspectRatio = (thumbnail: HTMLElement) => {
 			const src = thumbnail.getAttribute("data-video-src");
 			const frame = thumbnail.closest<HTMLElement>(".media-video-frame");
-			if (!src || !frame || frame.dataset.videoAspectLoaded === "true") return;
+			if (!src || !frame) return;
+			if (applyCachedVideoAspectRatio(thumbnail)) return;
+			if (frame.dataset.videoAspectLoaded === "true") return;
 			frame.dataset.videoAspectLoaded = "true";
 			const video = document.createElement("video");
 			video.preload = "metadata";
@@ -1922,6 +2030,7 @@ const ChatMessage = memo(function ChatMessage({
 						thumbnail,
 						video.videoWidth,
 						video.videoHeight,
+						src,
 					);
 					video.removeAttribute("src");
 					video.load();
@@ -1931,11 +2040,17 @@ const ChatMessage = memo(function ChatMessage({
 		};
 
 		const syncVideoLayouts = () => {
+			for (const thumbnail of root.querySelectorAll<HTMLElement>(
+				".video-thumbnail[data-video-src]",
+			)) {
+				applyCachedVideoAspectRatio(thumbnail);
+			}
 			for (const img of root.querySelectorAll<HTMLImageElement>(
 				".video-thumbnail img",
 			)) {
-				if (img.naturalWidth && img.naturalHeight) classifyVideoPoster(img);
-				else {
+				if (img.complete && img.naturalWidth && img.naturalHeight) {
+					classifyVideoPoster(img);
+				} else {
 					img.addEventListener("load", () => classifyVideoPoster(img), {
 						once: true,
 					});
@@ -1953,6 +2068,17 @@ const ChatMessage = memo(function ChatMessage({
 		const layoutTimers = [100, 500, 1500].map((delay) =>
 			window.setTimeout(syncVideoLayouts, delay),
 		);
+		// Re-apply cached aspect ratio on any DOM mutation: agent re-renders swap the
+		// video markup faster than the post-render sync can keep up, so a MutationObserver
+		// catches each fresh frame and fixes it synchronously.
+		const aspectObserver = new MutationObserver(() => {
+			for (const thumbnail of root.querySelectorAll<HTMLElement>(
+				".video-thumbnail[data-video-src]",
+			)) {
+				applyCachedVideoAspectRatio(thumbnail);
+			}
+		});
+		aspectObserver.observe(root, { childList: true, subtree: true });
 
 		const loadVideo = (el: HTMLElement) => {
 			const src = el.getAttribute("data-video-src");
@@ -1980,6 +2106,7 @@ const ChatMessage = memo(function ChatMessage({
 							el,
 							video.videoWidth,
 							video.videoHeight,
+							src,
 						);
 					}
 					el.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
@@ -2048,6 +2175,7 @@ const ChatMessage = memo(function ChatMessage({
 		return () => {
 			window.cancelAnimationFrame(animationFrame);
 			for (const timer of layoutTimers) window.clearTimeout(timer);
+			aspectObserver.disconnect();
 			root.removeEventListener("click", handleActivate);
 			root.removeEventListener("keydown", handleKeyDown);
 		};
