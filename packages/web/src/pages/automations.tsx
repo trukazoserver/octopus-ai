@@ -44,7 +44,7 @@ const ACTION_LABELS: Record<string, string> = {
 const BG = "#09090b";
 const PANEL = "#18181b";
 const BORDER = "#27272a";
-const PRIMARY = "#3b82f6";
+const PRIMARY = "#6366f1";
 const TEXT = "#fafafa";
 const MUTED = "#71717a";
 const DANGER = "#ef4444";
@@ -332,24 +332,21 @@ export const AutomationsPage: React.FC = () => {
 			<div className="page-header">
 				<div>
 					<h2
-						style={{
-							margin: 0,
-							fontSize: "1.9rem",
-							display: "flex",
-							alignItems: "center",
-							gap: 10,
-						}}
+						className="ui-page-title"
+						style={{ display: "flex", alignItems: "center", gap: 10 }}
 					>
 						<AppIcon name="automation" size={24} /> Automatizaciones
 					</h2>
-					<p
-						style={{ margin: "8px 0 0", color: "#a1a1aa", fontSize: "0.95rem" }}
-					>
+					<p className="ui-page-subtitle">
 						Programa tareas, webhooks y acciones automáticas conectadas a
 						agentes.
 					</p>
 				</div>
-				<button type="button" style={btnPrimary} onClick={openCreate}>
+				<button
+					type="button"
+					className="ui-btn ui-btn--primary"
+					onClick={openCreate}
+				>
 					Crear automatización
 				</button>
 			</div>

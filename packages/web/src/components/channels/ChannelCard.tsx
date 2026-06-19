@@ -85,6 +85,14 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 	canTest = true,
 }) => {
 	const statusCfg = STATUS_CONFIG[channel.status] ?? STATUS_CONFIG.idle;
+	const statusClass =
+		channel.status === "connected"
+			? "is-done"
+			: channel.status === "error"
+				? "is-failed"
+				: channel.status === "unconfigured"
+					? "is-warning"
+					: "is-neutral";
 	const brand = CHANNEL_BRANDS[channel.type] ?? {
 		name: channel.type,
 		domain: channel.type,
@@ -132,7 +140,7 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 						<div
 							style={{
 								fontSize: "0.75rem",
-								color: "#71717a",
+								color: "#a1a1aa",
 								textTransform: "uppercase",
 								letterSpacing: "0.05em",
 							}}
@@ -141,34 +149,7 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 						</div>
 					</div>
 				</div>
-				<span
-					style={{
-						display: "inline-flex",
-						alignItems: "center",
-						gap: "6px",
-						padding: "4px 10px",
-						borderRadius: "20px",
-						fontSize: "0.75rem",
-						fontWeight: 600,
-						background: statusCfg.bg,
-						color: statusCfg.color,
-						border: `1px solid ${statusCfg.color}30`,
-					}}
-				>
-					<span
-						style={{
-							width: "6px",
-							height: "6px",
-							borderRadius: "50%",
-							background: statusCfg.color,
-							boxShadow:
-								channel.status === "connected"
-									? `0 0 6px ${statusCfg.color}`
-									: "none",
-						}}
-					/>
-					{statusCfg.label}
-				</span>
+				<span className={`ui-status ${statusClass}`}>{statusCfg.label}</span>
 			</div>
 
 			{/* Config section (children) */}
@@ -209,23 +190,8 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 							? undefined
 							: "Prueba automática no disponible para este canal"
 					}
-					style={{
-						flex: 1,
-						padding: "10px",
-						borderRadius: "10px",
-						border: "1px solid #242424",
-						background: "#111",
-						color: testing || !canTest ? "#52525b" : "#e4e4e7",
-						fontSize: "0.85rem",
-						fontWeight: 600,
-						cursor:
-							testing || !channel.enabled || !canTest
-								? "not-allowed"
-								: "pointer",
-						fontFamily: "inherit",
-						opacity: testing || !channel.enabled || !canTest ? 0.5 : 1,
-						transition: "all 0.15s",
-					}}
+					className="ui-btn ui-btn--secondary"
+					style={{ flex: 1, padding: "10px", fontSize: "0.85rem" }}
 				>
 					{testing
 						? "Probando..."
@@ -236,19 +202,8 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
 				<button
 					type="button"
 					onClick={() => onToggle(channel.name)}
-					style={{
-						flex: 1,
-						padding: "10px",
-						borderRadius: "10px",
-						border: "1px solid #2a2a2a",
-						background: channel.enabled ? "#111" : "#f4f4f5",
-						color: channel.enabled ? "#ef4444" : "#050505",
-						fontSize: "0.85rem",
-						fontWeight: 600,
-						cursor: "pointer",
-						fontFamily: "inherit",
-						transition: "all 0.15s",
-					}}
+					className={`ui-btn ${channel.enabled ? "ui-btn--danger" : "ui-btn--primary"}`}
+					style={{ flex: 1, padding: "10px", fontSize: "0.85rem" }}
 				>
 					{channel.enabled ? "Desactivar" : "Activar"}
 				</button>

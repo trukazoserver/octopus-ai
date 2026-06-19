@@ -64,8 +64,20 @@ interface WorkflowTask {
 interface WorkflowSnapshot {
 	run: WorkflowRun;
 	tasks: WorkflowTask[];
-	events: Array<{ id: string; event_type: string; message: string | null; created_at: string; metadata: string | null }>;
-	artifacts: Array<{ id: string; artifact_type: string; url: string | null; path: string | null; description: string | null }>;
+	events: Array<{
+		id: string;
+		event_type: string;
+		message: string | null;
+		created_at: string;
+		metadata: string | null;
+	}>;
+	artifacts: Array<{
+		id: string;
+		artifact_type: string;
+		url: string | null;
+		path: string | null;
+		description: string | null;
+	}>;
 }
 
 type PageTab = "kanban" | "tasks" | "scheduled";
@@ -81,7 +93,7 @@ const STATUS_OPTIONS: StatusFilter[] = [
 
 const STATUS_COLORS: Record<string, string> = {
 	pending: "#f59e0b",
-	running: "#3b82f6",
+	running: "#6366f1",
 	completed: "#10b981",
 	failed: "#ef4444",
 };
@@ -102,9 +114,27 @@ const FILTER_LABELS: Record<StatusFilter, string> = {
 };
 
 const EDITABLE_STATUSES = ["pending", "running", "completed", "failed"];
+
+function taskStatusClass(status: string): string {
+	if (status === "completed") return "is-done";
+	if (status === "running") return "is-running";
+	if (status === "pending") return "is-warning";
+	if (status === "failed") return "is-failed";
+	return "is-neutral";
+}
+
+function workflowStatusClass(status: string): string {
+	if (status === "done") return "is-done";
+	if (["running", "ready", "triage"].includes(status)) return "is-running";
+	if (["waiting_dependency", "partial"].includes(status)) return "is-warning";
+	if (["blocked", "failed", "timed_out"].includes(status)) return "is-failed";
+	return "is-neutral";
+}
 const SELECTED_WORKFLOW_STORAGE_KEY = "octopus-selected-workflow-run";
 
-function parseMetadata(value: string | null | undefined): Record<string, unknown> {
+function parseMetadata(
+	value: string | null | undefined,
+): Record<string, unknown> {
 	if (!value) return {};
 	try {
 		const parsed = JSON.parse(value);
@@ -116,7 +146,10 @@ function parseMetadata(value: string | null | undefined): Record<string, unknown
 	}
 }
 
-function metadataString(metadata: Record<string, unknown>, key: string): string | undefined {
+function metadataString(
+	metadata: Record<string, unknown>,
+	key: string,
+): string | undefined {
 	const value = metadata[key];
 	return typeof value === "string" && value.trim() ? value : undefined;
 }
@@ -134,7 +167,9 @@ export const TasksPage: React.FC = () => {
 	const [workflows, setWorkflows] = useState<WorkflowRun[]>([]);
 	const [selectedWorkflow, setSelectedWorkflow] =
 		useState<WorkflowSnapshot | null>(null);
-	const [workflowActioning, setWorkflowActioning] = useState<string | null>(null);
+	const [workflowActioning, setWorkflowActioning] = useState<string | null>(
+		null,
+	);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 	const [activeFilter, setActiveFilter] = useState<StatusFilter>("all");
@@ -198,7 +233,9 @@ export const TasksPage: React.FC = () => {
 
 	const openWorkflow = useCallback(async (id: string) => {
 		try {
-			setSelectedWorkflow(await apiGet<WorkflowSnapshot>(`/api/workflows/${id}`));
+			setSelectedWorkflow(
+				await apiGet<WorkflowSnapshot>(`/api/workflows/${id}`),
+			);
 		} catch (e) {
 			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
 		}
@@ -228,8 +265,14 @@ export const TasksPage: React.FC = () => {
 	const runWorkflowAction = async (id: string, action: "retry" | "cancel") => {
 		setWorkflowActioning(`${action}:${id}`);
 		try {
-			await apiPost(`/api/workflows/${id}/${action}`, action === "cancel" ? { reason: "Cancelado desde Tasks" } : undefined);
-			setMsg({ text: action === "retry" ? "Workflow reenviado" : "Workflow cancelado", ok: true });
+			await apiPost(
+				`/api/workflows/${id}/${action}`,
+				action === "cancel" ? { reason: "Cancelado desde Tasks" } : undefined,
+			);
+			setMsg({
+				text: action === "retry" ? "Workflow reenviado" : "Workflow cancelado",
+				ok: true,
+			});
 			await Promise.all([loadWorkflows(), openWorkflow(id)]);
 		} catch (e) {
 			setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
@@ -252,9 +295,12 @@ export const TasksPage: React.FC = () => {
 	}, [openWorkflow]);
 
 	useEffect(() => {
-		Promise.all([loadStats(), loadTasks(), loadAgents(), loadWorkflows()]).finally(() =>
-			setLoading(false),
-		);
+		Promise.all([
+			loadStats(),
+			loadTasks(),
+			loadAgents(),
+			loadWorkflows(),
+		]).finally(() => setLoading(false));
 	}, [loadStats, loadTasks, loadAgents, loadWorkflows]);
 
 	useEffect(() => {
@@ -375,7 +421,7 @@ export const TasksPage: React.FC = () => {
 							width: 32,
 							height: 32,
 							borderRadius: "50%",
-							background: "#3b82f6",
+							background: "#6366f1",
 							animation: "pulse 1.4s infinite ease-in-out",
 						}}
 					/>
@@ -429,27 +475,13 @@ export const TasksPage: React.FC = () => {
 		<div className="page-shell page-shell--xl">
 			<div className="page-header">
 				<div>
-					<h2
-						style={{
-							margin: 0,
-							fontSize: "1.9rem",
-							fontWeight: 700,
-							color: "#f4f4f5",
-							letterSpacing: "-0.02em",
-						}}
-					>
-						Tablero de Tareas
-					</h2>
-					<p
-						style={{
-							margin: "8px 0 0",
-							color: "#a1a1aa",
-							fontSize: "0.95rem",
-							maxWidth: 700,
-							lineHeight: 1.6,
-						}}
-					>
-						{pageTab === "kanban" ? "Tablero visual Kanban Swarm — flujos multi-agente con dependencias y artefactos." : pageTab === "tasks" ? "Tareas individuales asignadas a agentes específicos." : "Tareas programadas que se ejecutan automáticamente según un horario o evento."}
+					<h2 className="ui-page-title">Tablero de Tareas</h2>
+					<p className="ui-page-subtitle">
+						{pageTab === "kanban"
+							? "Tablero visual Kanban Swarm — flujos multi-agente con dependencias y artefactos."
+							: pageTab === "tasks"
+								? "Tareas individuales asignadas a agentes específicos."
+								: "Tareas programadas que se ejecutan automáticamente según un horario o evento."}
 					</p>
 				</div>
 				<button
@@ -458,48 +490,39 @@ export const TasksPage: React.FC = () => {
 						setShowCreateForm(!showCreateForm);
 						setEditingTask(null);
 					}}
-					style={{
-						padding: "10px 20px",
-						borderRadius: 10,
-						border: "1px solid #27272a",
-						background: showCreateForm ? "#27272a" : "#3b82f6",
-						color: "#f4f4f5",
-						cursor: "pointer",
-						fontWeight: 600,
-						fontSize: "0.9rem",
-						flexShrink: 0,
-					}}
+					className={`ui-btn ${showCreateForm ? "ui-btn--secondary" : "ui-btn--primary"}`}
+					style={{ flexShrink: 0 }}
 				>
 					{showCreateForm ? "Cancelar" : "+ Crear tarea"}
 				</button>
 			</div>
 
 			{/* Tabs de navegación */}
-			<div style={{ display: "flex", gap: 6, marginBottom: 24, borderBottom: "1px solid #27272a", paddingBottom: 0 }}>
-				{([
-					{ id: "kanban" as PageTab, label: "Tablero Kanban", icon: "📋" },
-					{ id: "tasks" as PageTab, label: "Tareas Individuales", icon: "📝" },
-					{ id: "scheduled" as PageTab, label: "Tareas Programadas", icon: "⏰" },
-				] as Array<{ id: PageTab; label: string; icon: string }>).map((tab) => {
+			<div className="ui-tabs" style={{ marginBottom: 24 }}>
+				{(
+					[
+						{ id: "kanban" as PageTab, label: "Tablero Kanban", icon: "📋" },
+						{
+							id: "tasks" as PageTab,
+							label: "Tareas Individuales",
+							icon: "📝",
+						},
+						{
+							id: "scheduled" as PageTab,
+							label: "Tareas Programadas",
+							icon: "⏰",
+						},
+					] as Array<{ id: PageTab; label: string; icon: string }>
+				).map((tab) => {
 					const isActive = pageTab === tab.id;
 					return (
 						<button
 							key={tab.id}
 							type="button"
 							onClick={() => setPageTab(tab.id)}
-							style={{
-								padding: "10px 18px",
-								border: "none",
-								borderBottom: isActive ? "3px solid #3b82f6" : "3px solid transparent",
-								background: "transparent",
-								color: isActive ? "#f4f4f5" : "#71717a",
-								cursor: "pointer",
-								fontWeight: isActive ? 700 : 500,
-								fontSize: "0.9rem",
-								transition: "all 0.15s ease",
-							}}
+							className={`ui-tab${isActive ? " is-active" : ""}`}
 						>
-							<span style={{ marginRight: 8 }}>{tab.icon}</span>
+							<span aria-hidden="true">{tab.icon}</span>
 							{tab.label}
 						</button>
 					);
@@ -508,920 +531,1057 @@ export const TasksPage: React.FC = () => {
 
 			{msg && (
 				<div
-					style={{
-						padding: "12px 16px",
-						borderRadius: 10,
-						marginBottom: 20,
-						background: msg.ok
-							? "rgba(16, 185, 129, 0.1)"
-							: "rgba(239, 68, 68, 0.1)",
-						color: msg.ok ? "#10b981" : "#ef4444",
-						border: `1px solid ${msg.ok ? "rgba(16, 185, 129, 0.2)" : "rgba(239, 68, 68, 0.2)"}`,
-						fontSize: "0.9rem",
-						fontWeight: 500,
-					}}
+					className={`ui-notice ${msg.ok ? "is-ok" : "is-error"}`}
+					style={{ marginBottom: 20 }}
 				>
 					{msg.text}
 				</div>
 			)}
 
 			{pageTab === "tasks" && (
-			<div className="stats-grid" style={{ marginBottom: 24 }}>
-				<StatCard
-					icon={<AppIcon name="folder" />}
-					label="Total"
-					value={stats.total}
-					color="#e4e4e7"
-				/>
-				<StatCard
-					icon={<AppIcon name="activity" />}
-					label="Pendientes"
-					value={stats.pending}
-					color={STATUS_COLORS.pending}
-				/>
-				<StatCard
-					icon={<AppIcon name="play" />}
-					label="En ejecución"
-					value={stats.running}
-					color={STATUS_COLORS.running}
-				/>
-				<StatCard
-					icon={<AppIcon name="check" />}
-					label="Completadas"
-					value={stats.completed}
-					color={STATUS_COLORS.completed}
-				/>
-				<StatCard
-					icon={<AppIcon name="warning" />}
-					label="Fallidas"
-					value={stats.failed}
-					color={STATUS_COLORS.failed}
-				/>
-			</div>
-
+				<div className="stats-grid" style={{ marginBottom: 24 }}>
+					<StatCard
+						icon={<AppIcon name="folder" />}
+						label="Total"
+						value={stats.total}
+						color="#e4e4e7"
+					/>
+					<StatCard
+						icon={<AppIcon name="activity" />}
+						label="Pendientes"
+						value={stats.pending}
+						color={STATUS_COLORS.pending}
+					/>
+					<StatCard
+						icon={<AppIcon name="play" />}
+						label="En ejecución"
+						value={stats.running}
+						color={STATUS_COLORS.running}
+					/>
+					<StatCard
+						icon={<AppIcon name="check" />}
+						label="Completadas"
+						value={stats.completed}
+						color={STATUS_COLORS.completed}
+					/>
+					<StatCard
+						icon={<AppIcon name="warning" />}
+						label="Fallidas"
+						value={stats.failed}
+						color={STATUS_COLORS.failed}
+					/>
+				</div>
 			)}
 
 			{pageTab === "kanban" && (
-			<div
-				style={{
-					background: "#18181b",
-					borderRadius: 14,
-					border: "1px solid #27272a",
-					padding: 20,
-					marginBottom: 24,
-				}}
-			>
-				<div
-					style={{
-						display: "flex",
-						justifyContent: "space-between",
-						alignItems: "center",
-						gap: 12,
-						marginBottom: 14,
-						flexWrap: "wrap",
-					}}
-				>
-					<div>
-						<h3 style={{ margin: 0, color: "#f4f4f5", fontSize: "1.05rem" }}>
-							Workflows durables de Octopus
-						</h3>
-						<p style={{ margin: "4px 0 0", color: "#71717a", fontSize: "0.82rem" }}>
-							Runs multi-brazo con subtareas, reintentos, eventos y artefactos persistidos.
-						</p>
+				<div className="ui-panel" style={{ marginBottom: 24 }}>
+					<div className="ui-panel-header" style={{ marginBottom: 16 }}>
+						<div>
+							<h3 className="ui-section-title">
+								Workflows durables de Octopus
+							</h3>
+							<p className="ui-section-subtitle">
+								Runs multi-brazo con subtareas, reintentos, eventos y artefactos
+								persistidos.
+							</p>
+						</div>
+						<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+							<button
+								type="button"
+								onClick={loadWorkflows}
+								className="ui-btn ui-btn--secondary"
+								style={{ padding: "8px 14px", fontSize: "0.82rem" }}
+							>
+								Actualizar workflows
+							</button>
+							<button
+								type="button"
+								onClick={recoverWorkflows}
+								disabled={workflowActioning === "recover"}
+								className="ui-btn ui-btn--secondary"
+								style={{
+									padding: "8px 14px",
+									fontSize: "0.82rem",
+									opacity: workflowActioning === "recover" ? 0.6 : 1,
+								}}
+							>
+								{workflowActioning === "recover"
+									? "Recuperando..."
+									: "Recuperar runs"}
+							</button>
+						</div>
 					</div>
-					<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-						<button type="button" onClick={loadWorkflows} style={secondaryBtnStyle}>
-							Actualizar workflows
-						</button>
-						<button
-							type="button"
-							onClick={recoverWorkflows}
-							disabled={workflowActioning === "recover"}
-							style={{ ...secondaryBtnStyle, opacity: workflowActioning === "recover" ? 0.6 : 1 }}
-						>
-							{workflowActioning === "recover" ? "Recuperando..." : "Recuperar runs"}
-						</button>
-					</div>
-				</div>
 
-				{workflows.length === 0 ? (
-					<div style={{ color: "#71717a", fontSize: "0.85rem" }}>
-						Aún no hay workflows durables registrados. Se crearán automáticamente cuando Octopus active sus brazos.
-					</div>
-				) : (
-					<div style={{ display: "grid", gap: 10 }}>
-						{workflows.map((workflow) => {
-							const color = workflowStatusColor(workflow.status);
-							return (
-								<button
-									key={workflow.id}
-									type="button"
-									onClick={() => openWorkflow(workflow.id)}
+					{workflows.length === 0 ? (
+						<div className="ui-empty" style={{ padding: "40px 20px" }}>
+							<div className="ui-empty-icon">
+								<AppIcon name="automation" size={40} strokeWidth={1.6} />
+							</div>
+							<div className="ui-empty-title">
+								Aún no hay workflows durables
+							</div>
+							<div className="ui-empty-desc">
+								Se crearán automáticamente cuando Octopus active sus brazos para
+								una tarea.
+							</div>
+						</div>
+					) : (
+						<div style={{ display: "grid", gap: 10 }}>
+							{workflows.map((workflow) => {
+								return (
+									<button
+										key={workflow.id}
+										type="button"
+										onClick={() => openWorkflow(workflow.id)}
+										className="ui-list-item"
+										style={{
+											display: "block",
+											width: "100%",
+											textAlign: "left",
+											cursor: "pointer",
+											fontFamily: "inherit",
+											border: "1px solid #27272a",
+											background: "#0c0c0f",
+										}}
+									>
+										<div
+											style={{
+												display: "flex",
+												justifyContent: "space-between",
+												gap: 12,
+												flexWrap: "wrap",
+												alignItems: "center",
+											}}
+										>
+											<strong style={{ color: "#f4f4f5", fontSize: "0.92rem" }}>
+												{workflow.goal}
+											</strong>
+											<span
+												className={`ui-status ${workflowStatusClass(workflow.status)}`}
+											>
+												{workflow.status}
+											</span>
+										</div>
+										<div
+											className="ui-meta"
+											style={{ marginTop: 10, flexWrap: "wrap" }}
+										>
+											<span>ID: {workflow.id}</span>
+											{workflow.current_phase && (
+												<>
+													<span className="ui-meta-divider">·</span>
+													<span>Fase: {workflow.current_phase}</span>
+												</>
+											)}
+											<span className="ui-meta-divider">·</span>
+											<span>
+												Actualizado: {formatDate(workflow.updated_at)}
+											</span>
+										</div>
+									</button>
+								);
+							})}
+						</div>
+					)}
+
+					{selectedWorkflow && (
+						<div
+							style={{
+								marginTop: 16,
+								paddingTop: 16,
+								borderTop: "1px solid #27272a",
+							}}
+						>
+							<div
+								style={{
+									display: "flex",
+									justifyContent: "space-between",
+									gap: 12,
+									marginBottom: 12,
+									flexWrap: "wrap",
+								}}
+							>
+								<strong style={{ color: "#f4f4f5" }}>
+									Detalle del workflow
+								</strong>
+								<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+									<button
+										type="button"
+										onClick={() =>
+											runWorkflowAction(selectedWorkflow.run.id, "retry")
+										}
+										disabled={
+											workflowActioning === `retry:${selectedWorkflow.run.id}`
+										}
+										className="ui-btn ui-btn--secondary"
+										style={{ padding: "8px 14px", fontSize: "0.82rem" }}
+									>
+										Reintentar
+									</button>
+									<button
+										type="button"
+										onClick={() =>
+											runWorkflowAction(selectedWorkflow.run.id, "cancel")
+										}
+										disabled={
+											workflowActioning === `cancel:${selectedWorkflow.run.id}`
+										}
+										className="ui-btn ui-btn--danger"
+										style={{ padding: "8px 14px", fontSize: "0.82rem" }}
+									>
+										Cancelar
+									</button>
+									<button
+										type="button"
+										onClick={() => setSelectedWorkflow(null)}
+										className="ui-btn ui-btn--ghost"
+										style={{ padding: "8px 14px", fontSize: "0.82rem" }}
+									>
+										Cerrar
+									</button>
+								</div>
+							</div>
+							<div className="responsive-grid-2" style={{ gap: 12 }}>
+								<div style={workflowPanelStyle}>
+									<div style={workflowPanelTitleStyle}>Subtareas</div>
+									{selectedWorkflow.tasks.length === 0 ? (
+										<div style={mutedSmallStyle}>
+											Sin subtareas registradas.
+										</div>
+									) : (
+										selectedWorkflow.tasks.map((task) => {
+											const metadata = parseMetadata(task.metadata);
+											const agentName = metadataString(metadata, "agentName");
+											const avatar = metadataString(metadata, "avatar");
+											const color =
+												metadataString(metadata, "color") ??
+												workflowStatusColor(task.status);
+											return (
+												<div
+													key={task.id}
+													style={{
+														...workflowItemStyle,
+														borderColor: `${color}44`,
+													}}
+												>
+													<div
+														style={{
+															display: "flex",
+															justifyContent: "space-between",
+															gap: 8,
+														}}
+													>
+														<span
+															style={{
+																color: "#e4e4e7",
+																display: "flex",
+																alignItems: "center",
+																gap: 8,
+															}}
+														>
+															{avatar?.startsWith("/") ||
+															avatar?.startsWith("http") ? (
+																<img
+																	src={avatar}
+																	alt=""
+																	style={{
+																		width: 24,
+																		height: 24,
+																		borderRadius: 999,
+																		objectFit: "cover",
+																	}}
+																/>
+															) : avatar ? (
+																<span>{avatar}</span>
+															) : null}
+															<span>{task.title}</span>
+														</span>
+														<span
+															className={`ui-status ${workflowStatusClass(task.status)}`}
+														>
+															{task.status}
+														</span>
+													</div>
+													<div style={mutedSmallStyle}>
+														Brazo: {agentName ?? task.arm_key ?? "-"} ·
+														Intentos: {task.attempt_count}/
+														{task.max_stagnant_attempts} · Sin avance:{" "}
+														{task.stagnant_attempt_count}
+													</div>
+												</div>
+											);
+										})
+									)}
+								</div>
+								<div style={workflowPanelStyle}>
+									<div style={workflowPanelTitleStyle}>Eventos recientes</div>
+									{selectedWorkflow.events.slice(-8).map((event) => (
+										<div key={event.id} style={workflowItemStyle}>
+											<div style={{ color: "#e4e4e7", fontSize: "0.8rem" }}>
+												{event.event_type}
+											</div>
+											<div style={mutedSmallStyle}>
+												{event.message ?? "Sin mensaje"}
+											</div>
+										</div>
+									))}
+									{selectedWorkflow.artifacts.length > 0 && (
+										<div style={{ marginTop: 12 }}>
+											<div style={workflowPanelTitleStyle}>Artefactos</div>
+											{selectedWorkflow.artifacts.map((artifact) => (
+												<div key={artifact.id} style={workflowItemStyle}>
+													<div style={{ color: "#e4e4e7", fontSize: "0.8rem" }}>
+														{artifact.artifact_type}
+													</div>
+													<div style={mutedSmallStyle}>
+														{artifact.url ??
+															artifact.path ??
+															artifact.description ??
+															"Artefacto registrado"}
+													</div>
+												</div>
+											))}
+										</div>
+									)}
+								</div>
+							</div>
+						</div>
+					)}
+				</div>
+			)}
+
+			{pageTab === "tasks" && (
+				<>
+					{showCreateForm && (
+						<div
+							style={{
+								background: "#18181b",
+								borderRadius: 14,
+								border: "1px solid #27272a",
+								padding: 20,
+								marginBottom: 24,
+							}}
+						>
+							<h3
+								style={{
+									margin: "0 0 16px",
+									fontSize: "1.1rem",
+									fontWeight: 700,
+									color: "#f4f4f5",
+								}}
+							>
+								Crear nueva tarea
+							</h3>
+							<div
+								style={{ display: "flex", flexDirection: "column", gap: 14 }}
+							>
+								<div>
+									<label
+										htmlFor="task-new-title"
+										style={{
+											display: "block",
+											fontSize: "0.8rem",
+											color: "#a1a1aa",
+											marginBottom: 6,
+											fontWeight: 600,
+											textTransform: "uppercase",
+											letterSpacing: "0.04em",
+										}}
+									>
+										Título *
+									</label>
+									<input
+										id="task-new-title"
+										name="title"
+										type="text"
+										value={newTitle}
+										onChange={(e) => setNewTitle(e.target.value)}
+										placeholder="Título de la tarea"
+										style={inputStyle}
+									/>
+								</div>
+								<div>
+									<label
+										htmlFor="task-new-description"
+										style={{
+											display: "block",
+											fontSize: "0.8rem",
+											color: "#a1a1aa",
+											marginBottom: 6,
+											fontWeight: 600,
+											textTransform: "uppercase",
+											letterSpacing: "0.04em",
+										}}
+									>
+										Descripción
+									</label>
+									<textarea
+										id="task-new-description"
+										name="description"
+										value={newDescription}
+										onChange={(e) => setNewDescription(e.target.value)}
+										placeholder="Descripción opcional"
+										rows={3}
+										style={{
+											...inputStyle,
+											resize: "vertical",
+											fontFamily: "inherit",
+										}}
+									/>
+								</div>
+								<div className="responsive-grid-2" style={{ gap: 14 }}>
+									<div>
+										<label
+											htmlFor="task-new-priority"
+											style={{
+												display: "block",
+												fontSize: "0.8rem",
+												color: "#a1a1aa",
+												marginBottom: 6,
+												fontWeight: 600,
+												textTransform: "uppercase",
+												letterSpacing: "0.04em",
+											}}
+										>
+											Prioridad: {newPriority}
+										</label>
+										<input
+											id="task-new-priority"
+											name="priority"
+											type="range"
+											min={1}
+											max={10}
+											value={newPriority}
+											onChange={(e) => setNewPriority(Number(e.target.value))}
+											style={{ width: "100%", accentColor: "#6366f1" }}
+										/>
+										<div
+											style={{
+												display: "flex",
+												justifyContent: "space-between",
+												fontSize: "0.7rem",
+												color: "#71717a",
+											}}
+										>
+											<span>1 (baja)</span>
+											<span>10 (crítica)</span>
+										</div>
+									</div>
+									<div>
+										<label
+											htmlFor="task-new-agent"
+											style={{
+												display: "block",
+												fontSize: "0.8rem",
+												color: "#a1a1aa",
+												marginBottom: 6,
+												fontWeight: 600,
+												textTransform: "uppercase",
+												letterSpacing: "0.04em",
+											}}
+										>
+											Asignar agente
+										</label>
+										<select
+											id="task-new-agent"
+											name="assignedAgentId"
+											value={newAgentId}
+											onChange={(e) => setNewAgentId(e.target.value)}
+											style={selectStyle}
+										>
+											<option value="">Sin asignar</option>
+											{agents.map((a) => (
+												<option key={a.id} value={a.id}>
+													{a.name || a.id}
+												</option>
+											))}
+										</select>
+									</div>
+								</div>
+								<div
 									style={{
-										textAlign: "left",
-										background: "#09090b",
-										border: "1px solid #27272a",
-										borderRadius: 12,
-										padding: 14,
-										cursor: "pointer",
-										fontFamily: "inherit",
+										display: "flex",
+										justifyContent: "flex-end",
+										gap: 10,
 									}}
 								>
-									<div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-										<strong style={{ color: "#f4f4f5", fontSize: "0.92rem" }}>
-											{workflow.goal}
-										</strong>
-										<span style={{ color, fontSize: "0.75rem", fontWeight: 800, textTransform: "uppercase" }}>
-											{workflow.status}
+									<button
+										type="button"
+										onClick={() => setShowCreateForm(false)}
+										style={cancelBtnStyle}
+									>
+										Cancelar
+									</button>
+									<button
+										type="button"
+										onClick={handleCreate}
+										disabled={creating || !newTitle.trim()}
+										style={{
+											...primaryBtnStyle,
+											opacity: creating || !newTitle.trim() ? 0.5 : 1,
+											cursor:
+												creating || !newTitle.trim()
+													? "not-allowed"
+													: "pointer",
+										}}
+									>
+										{creating ? "Creando..." : "Crear tarea"}
+									</button>
+								</div>
+							</div>
+						</div>
+					)}
+
+					{editingTask && (
+						<div
+							style={{
+								background: "#18181b",
+								borderRadius: 14,
+								border: "1px solid #27272a",
+								padding: 20,
+								marginBottom: 24,
+							}}
+						>
+							<h3
+								style={{
+									margin: "0 0 16px",
+									fontSize: "1.1rem",
+									fontWeight: 700,
+									color: "#f4f4f5",
+								}}
+							>
+								Editar tarea
+							</h3>
+							<div
+								style={{ display: "flex", flexDirection: "column", gap: 14 }}
+							>
+								<div>
+									<label
+										htmlFor="task-edit-title"
+										style={{
+											display: "block",
+											fontSize: "0.8rem",
+											color: "#a1a1aa",
+											marginBottom: 6,
+											fontWeight: 600,
+											textTransform: "uppercase",
+											letterSpacing: "0.04em",
+										}}
+									>
+										Título
+									</label>
+									<input
+										id="task-edit-title"
+										name="title"
+										type="text"
+										value={editTitle}
+										onChange={(e) => setEditTitle(e.target.value)}
+										style={inputStyle}
+									/>
+								</div>
+								<div>
+									<label
+										htmlFor="task-edit-description"
+										style={{
+											display: "block",
+											fontSize: "0.8rem",
+											color: "#a1a1aa",
+											marginBottom: 6,
+											fontWeight: 600,
+											textTransform: "uppercase",
+											letterSpacing: "0.04em",
+										}}
+									>
+										Descripción
+									</label>
+									<textarea
+										id="task-edit-description"
+										name="description"
+										value={editDescription}
+										onChange={(e) => setEditDescription(e.target.value)}
+										rows={3}
+										style={{
+											...inputStyle,
+											resize: "vertical",
+											fontFamily: "inherit",
+										}}
+									/>
+								</div>
+								<div className="responsive-grid-2" style={{ gap: 14 }}>
+									<div>
+										<label
+											htmlFor="task-edit-status"
+											style={{
+												display: "block",
+												fontSize: "0.8rem",
+												color: "#a1a1aa",
+												marginBottom: 6,
+												fontWeight: 600,
+												textTransform: "uppercase",
+												letterSpacing: "0.04em",
+											}}
+										>
+											Estado
+										</label>
+										<select
+											id="task-edit-status"
+											name="status"
+											value={editStatus}
+											onChange={(e) => setEditStatus(e.target.value)}
+											style={selectStyle}
+										>
+											{EDITABLE_STATUSES.map((s) => (
+												<option key={s} value={s}>
+													{STATUS_LABELS[s] ?? s}
+												</option>
+											))}
+										</select>
+									</div>
+									<div>
+										<label
+											htmlFor="task-edit-agent"
+											style={{
+												display: "block",
+												fontSize: "0.8rem",
+												color: "#a1a1aa",
+												marginBottom: 6,
+												fontWeight: 600,
+												textTransform: "uppercase",
+												letterSpacing: "0.04em",
+											}}
+										>
+											Asignar agente
+										</label>
+										<select
+											id="task-edit-agent"
+											name="assignedAgentId"
+											value={editAgentId}
+											onChange={(e) => setEditAgentId(e.target.value)}
+											style={selectStyle}
+										>
+											<option value="">Sin asignar</option>
+											{agents.map((a) => (
+												<option key={a.id} value={a.id}>
+													{a.name || a.id}
+												</option>
+											))}
+										</select>
+									</div>
+								</div>
+								<div
+									style={{
+										display: "flex",
+										justifyContent: "flex-end",
+										gap: 10,
+									}}
+								>
+									<button
+										type="button"
+										onClick={() => setEditingTask(null)}
+										style={cancelBtnStyle}
+									>
+										Cancelar
+									</button>
+									<button
+										type="button"
+										onClick={handleSaveEdit}
+										disabled={saving}
+										style={{
+											...primaryBtnStyle,
+											opacity: saving ? 0.5 : 1,
+											cursor: saving ? "not-allowed" : "pointer",
+										}}
+									>
+										{saving ? "Guardando..." : "Guardar cambios"}
+									</button>
+								</div>
+							</div>
+						</div>
+					)}
+
+					<div
+						className="ui-tabs"
+						style={{ marginBottom: 20, flexWrap: "wrap" }}
+					>
+						{STATUS_OPTIONS.map((s) => {
+							const isActive = activeFilter === s;
+							return (
+								<button
+									key={s}
+									type="button"
+									onClick={() => setActiveFilter(s)}
+									className={`ui-tab${isActive ? " is-active" : ""}`}
+								>
+									{FILTER_LABELS[s] ?? STATUS_LABELS[s] ?? s}
+									{s === "all" && stats.total > 0 && (
+										<span style={{ opacity: 0.6 }}>({stats.total})</span>
+									)}
+									{s !== "all" && stats[s as keyof TaskStats] > 0 && (
+										<span style={{ opacity: 0.6 }}>
+											({stats[s as keyof TaskStats]})
 										</span>
-									</div>
-									<div style={{ marginTop: 8, display: "flex", gap: 14, color: "#71717a", fontSize: "0.75rem", flexWrap: "wrap" }}>
-										<span>ID: {workflow.id}</span>
-										{workflow.current_phase && <span>Fase: {workflow.current_phase}</span>}
-										<span>Actualizado: {formatDate(workflow.updated_at)}</span>
-									</div>
+									)}
 								</button>
 							);
 						})}
 					</div>
-				)}
 
-				{selectedWorkflow && (
-					<div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid #27272a" }}>
-						<div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-							<strong style={{ color: "#f4f4f5" }}>Detalle del workflow</strong>
-							<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-								<button
-									type="button"
-									onClick={() => runWorkflowAction(selectedWorkflow.run.id, "retry")}
-									disabled={workflowActioning === `retry:${selectedWorkflow.run.id}`}
-									style={secondaryBtnStyle}
-								>
-									Reintentar
-								</button>
-								<button
-									type="button"
-									onClick={() => runWorkflowAction(selectedWorkflow.run.id, "cancel")}
-									disabled={workflowActioning === `cancel:${selectedWorkflow.run.id}`}
-									style={{ ...secondaryBtnStyle, color: "#f87171" }}
-								>
-									Cancelar
-								</button>
-								<button type="button" onClick={() => setSelectedWorkflow(null)} style={secondaryBtnStyle}>Cerrar</button>
+					{tasks.length === 0 ? (
+						<div className="ui-empty">
+							<div className="ui-empty-icon">
+								<AppIcon name="folder" size={42} strokeWidth={1.6} />
 							</div>
+							<div className="ui-empty-title">No hay tareas</div>
+							<div className="ui-empty-desc">
+								{activeFilter !== "all" ? "Cambia el filtro o " : ""}
+								crea una tarea para empezar.
+							</div>
+							<button
+								type="button"
+								onClick={() => setShowCreateForm(true)}
+								className="ui-btn ui-btn--primary"
+								style={{ marginTop: 18 }}
+							>
+								Crear tarea
+							</button>
 						</div>
-						<div className="responsive-grid-2" style={{ gap: 12 }}>
-							<div style={workflowPanelStyle}>
-								<div style={workflowPanelTitleStyle}>Subtareas</div>
-								{selectedWorkflow.tasks.length === 0 ? (
-									<div style={mutedSmallStyle}>Sin subtareas registradas.</div>
-								) : selectedWorkflow.tasks.map((task) => {
-									const metadata = parseMetadata(task.metadata);
-									const agentName = metadataString(metadata, "agentName");
-									const avatar = metadataString(metadata, "avatar");
-									const color = metadataString(metadata, "color") ?? workflowStatusColor(task.status);
-									return (
-										<div key={task.id} style={{ ...workflowItemStyle, borderColor: `${color}44` }}>
-											<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-												<span style={{ color: "#e4e4e7", display: "flex", alignItems: "center", gap: 8 }}>
-													{avatar?.startsWith("/") || avatar?.startsWith("http") ? (
-														<img src={avatar} alt="" style={{ width: 24, height: 24, borderRadius: 999, objectFit: "cover" }} />
-													) : avatar ? (
-														<span>{avatar}</span>
-													) : null}
-													<span>{task.title}</span>
-												</span>
-												<span style={{ color: workflowStatusColor(task.status), fontWeight: 800 }}>{task.status}</span>
+					) : (
+						<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+							{tasks.map((task) => {
+								const isConfirming = confirmDeleteId === task.id;
+								const isDeleting = deletingId === task.id;
+								return (
+									<div
+										key={task.id}
+										style={{
+											background: "#18181b",
+											borderRadius: 12,
+											border: "1px solid #27272a",
+											padding: 16,
+											transition: "border-color 0.2s ease",
+										}}
+										onMouseEnter={(e) => {
+											e.currentTarget.style.borderColor = "#3f3f46";
+										}}
+										onMouseLeave={(e) => {
+											e.currentTarget.style.borderColor = "#27272a";
+										}}
+									>
+										<div
+											style={{
+												display: "flex",
+												justifyContent: "space-between",
+												alignItems: "flex-start",
+												gap: 12,
+												flexWrap: "wrap",
+											}}
+										>
+											<div style={{ flex: 1, minWidth: 0 }}>
+												<div
+													style={{
+														display: "flex",
+														alignItems: "center",
+														gap: 10,
+														marginBottom: 6,
+														flexWrap: "wrap",
+													}}
+												>
+													<span
+														style={{
+															fontSize: "1rem",
+															fontWeight: 700,
+															color: "#f4f4f5",
+														}}
+													>
+														{task.title}
+													</span>
+													<span
+														className={`ui-status ${taskStatusClass(task.status)}`}
+													>
+														{STATUS_LABELS[task.status] ?? task.status}
+													</span>
+													<span
+														style={{
+															padding: "2px 8px",
+															borderRadius: 6,
+															fontSize: "0.7rem",
+															fontWeight: 700,
+															background:
+																task.priority >= 8
+																	? "rgba(239, 68, 68, 0.15)"
+																	: task.priority >= 5
+																		? "rgba(245, 158, 11, 0.15)"
+																		: "rgba(99, 102, 241, 0.1)",
+															color:
+																task.priority >= 8
+																	? "#ef4444"
+																	: task.priority >= 5
+																		? "#f59e0b"
+																		: "#818cf8",
+															border: `1px solid ${task.priority >= 8 ? "rgba(239, 68, 68, 0.25)" : task.priority >= 5 ? "rgba(245, 158, 11, 0.25)" : "rgba(99, 102, 241, 0.2)"}`,
+														}}
+													>
+														P{task.priority}
+													</span>
+												</div>
+												{task.description && (
+													<div
+														style={{
+															fontSize: "0.85rem",
+															color: "#a1a1aa",
+															marginBottom: 8,
+															lineHeight: 1.5,
+														}}
+													>
+														{task.description}
+													</div>
+												)}
+												<div
+													className="ui-meta"
+													style={{ gap: 10, flexWrap: "wrap" }}
+												>
+													{task.assigned_agent_id && (
+														<span>
+															Agente:{" "}
+															<span style={{ color: "#d4d4d8" }}>
+																{agents.find(
+																	(a) => a.id === task.assigned_agent_id,
+																)?.name ?? task.assigned_agent_id}
+															</span>
+														</span>
+													)}
+													{task.assigned_agent_id && (
+														<span className="ui-meta-divider">·</span>
+													)}
+													<span>Creada: {formatDate(task.created_at)}</span>
+													{task.started_at && (
+														<>
+															<span className="ui-meta-divider">·</span>
+															<span>
+																Iniciada: {formatDate(task.started_at)}
+															</span>
+														</>
+													)}
+													{task.completed_at && (
+														<>
+															<span className="ui-meta-divider">·</span>
+															<span>
+																Completada: {formatDate(task.completed_at)}
+															</span>
+														</>
+													)}
+												</div>
+												{task.error && (
+													<div
+														style={{
+															marginTop: 8,
+															padding: "8px 12px",
+															borderRadius: 8,
+															background: "rgba(239, 68, 68, 0.08)",
+															border: "1px solid rgba(239, 68, 68, 0.15)",
+															fontSize: "0.8rem",
+															color: "#f87171",
+														}}
+													>
+														{task.error}
+													</div>
+												)}
+												{task.result && (
+													<div
+														style={{
+															marginTop: 8,
+															padding: "8px 12px",
+															borderRadius: 8,
+															background: "rgba(16, 185, 129, 0.08)",
+															border: "1px solid rgba(16, 185, 129, 0.15)",
+															fontSize: "0.8rem",
+															color: "#34d399",
+														}}
+													>
+														{task.result}
+													</div>
+												)}
 											</div>
-											<div style={mutedSmallStyle}>
-												Brazo: {agentName ?? task.arm_key ?? "-"} · Intentos: {task.attempt_count}/{task.max_stagnant_attempts} · Sin avance: {task.stagnant_attempt_count}
+											<div
+												style={{
+													display: "flex",
+													gap: 6,
+													flexShrink: 0,
+													alignItems: "center",
+												}}
+											>
+												{!isConfirming ? (
+													<>
+														<button
+															type="button"
+															onClick={() => startEdit(task)}
+															style={actionBtnStyle}
+															data-tooltip="Editar"
+															aria-label={`Editar tarea ${task.title}`}
+														>
+															<AppIcon name="edit" size={15} />
+														</button>
+														<button
+															type="button"
+															onClick={() => setConfirmDeleteId(task.id)}
+															style={actionBtnStyle}
+															data-tooltip="Eliminar"
+															aria-label={`Eliminar tarea ${task.title}`}
+														>
+															<AppIcon name="trash" size={15} />
+														</button>
+													</>
+												) : (
+													<>
+														<span
+															style={{
+																fontSize: "0.8rem",
+																color: "#f87171",
+																fontWeight: 600,
+															}}
+														>
+															¿Eliminar?
+														</span>
+														<button
+															type="button"
+															onClick={() => handleDelete(task.id)}
+															disabled={isDeleting}
+															style={{
+																padding: "6px 12px",
+																borderRadius: 6,
+																border: "1px solid rgba(239, 68, 68, 0.3)",
+																background: "rgba(239, 68, 68, 0.15)",
+																color: "#f87171",
+																cursor: isDeleting ? "not-allowed" : "pointer",
+																fontSize: "0.8rem",
+																fontWeight: 600,
+															}}
+														>
+															{isDeleting ? "..." : "Sí"}
+														</button>
+														<button
+															type="button"
+															onClick={() => setConfirmDeleteId(null)}
+															style={{
+																padding: "6px 12px",
+																borderRadius: 6,
+																border: "1px solid #27272a",
+																background: "#27272a",
+																color: "#a1a1aa",
+																cursor: "pointer",
+																fontSize: "0.8rem",
+																fontWeight: 600,
+															}}
+														>
+															No
+														</button>
+													</>
+												)}
 											</div>
 										</div>
-									);
-								})}
-							</div>
-							<div style={workflowPanelStyle}>
-								<div style={workflowPanelTitleStyle}>Eventos recientes</div>
-								{selectedWorkflow.events.slice(-8).map((event) => (
-									<div key={event.id} style={workflowItemStyle}>
-										<div style={{ color: "#e4e4e7", fontSize: "0.8rem" }}>{event.event_type}</div>
-										<div style={mutedSmallStyle}>{event.message ?? "Sin mensaje"}</div>
 									</div>
-								))}
-								{selectedWorkflow.artifacts.length > 0 && (
-									<div style={{ marginTop: 12 }}>
-										<div style={workflowPanelTitleStyle}>Artefactos</div>
-										{selectedWorkflow.artifacts.map((artifact) => (
-											<div key={artifact.id} style={workflowItemStyle}>
-												<div style={{ color: "#e4e4e7", fontSize: "0.8rem" }}>{artifact.artifact_type}</div>
-												<div style={mutedSmallStyle}>{artifact.url ?? artifact.path ?? artifact.description ?? "Artefacto registrado"}</div>
-											</div>
-										))}
-									</div>
-								)}
-							</div>
+								);
+							})}
 						</div>
-					</div>
-				)}
-			</div>
-
+					)}
+				</>
 			)}
 
-			{pageTab === "tasks" && (
-			<>
-
-			{showCreateForm && (
+			{pageTab === "scheduled" && (
 				<div
-					style={{
-						background: "#18181b",
-						borderRadius: 14,
-						border: "1px solid #27272a",
-						padding: 20,
-						marginBottom: 24,
-					}}
+					className="ui-panel"
+					style={{ textAlign: "center", maxWidth: 640, margin: "0 auto" }}
 				>
-					<h3
-						style={{
-							margin: "0 0 16px",
-							fontSize: "1.1rem",
-							fontWeight: 700,
-							color: "#f4f4f5",
-						}}
+					<div className="ui-empty-icon" style={{ marginBottom: 16 }}>
+						<AppIcon name="automation" size={40} strokeWidth={1.6} />
+					</div>
+					<div className="ui-section-title" style={{ fontSize: "1.15rem" }}>
+						Tareas Programadas
+					</div>
+					<div
+						className="ui-section-subtitle"
+						style={{ margin: "8px auto 20px", maxWidth: 480 }}
 					>
-						Crear nueva tarea
-					</h3>
-					<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-						<div>
-							<label
-								htmlFor="task-new-title"
-								style={{
-									display: "block",
-									fontSize: "0.8rem",
-									color: "#a1a1aa",
-									marginBottom: 6,
-									fontWeight: 600,
-									textTransform: "uppercase",
-									letterSpacing: "0.04em",
-								}}
-							>
-								Título *
-							</label>
-							<input
-								id="task-new-title"
-								name="title"
-								type="text"
-								value={newTitle}
-								onChange={(e) => setNewTitle(e.target.value)}
-								placeholder="Título de la tarea"
-								style={inputStyle}
-							/>
-						</div>
-						<div>
-							<label
-								htmlFor="task-new-description"
-								style={{
-									display: "block",
-									fontSize: "0.8rem",
-									color: "#a1a1aa",
-									marginBottom: 6,
-									fontWeight: 600,
-									textTransform: "uppercase",
-									letterSpacing: "0.04em",
-								}}
-							>
-								Descripción
-							</label>
-							<textarea
-								id="task-new-description"
-								name="description"
-								value={newDescription}
-								onChange={(e) => setNewDescription(e.target.value)}
-								placeholder="Descripción opcional"
-								rows={3}
-								style={{
-									...inputStyle,
-									resize: "vertical",
-									fontFamily: "inherit",
-								}}
-							/>
-						</div>
-						<div className="responsive-grid-2" style={{ gap: 14 }}>
-							<div>
-								<label
-									htmlFor="task-new-priority"
-									style={{
-										display: "block",
-										fontSize: "0.8rem",
-										color: "#a1a1aa",
-										marginBottom: 6,
-										fontWeight: 600,
-										textTransform: "uppercase",
-										letterSpacing: "0.04em",
-									}}
-								>
-									Prioridad: {newPriority}
-								</label>
-								<input
-									id="task-new-priority"
-									name="priority"
-									type="range"
-									min={1}
-									max={10}
-									value={newPriority}
-									onChange={(e) => setNewPriority(Number(e.target.value))}
-									style={{ width: "100%", accentColor: "#3b82f6" }}
-								/>
-								<div
-									style={{
-										display: "flex",
-										justifyContent: "space-between",
-										fontSize: "0.7rem",
-										color: "#71717a",
-									}}
-								>
-									<span>1 (baja)</span>
-									<span>10 (crítica)</span>
-								</div>
-							</div>
-							<div>
-								<label
-									htmlFor="task-new-agent"
-									style={{
-										display: "block",
-										fontSize: "0.8rem",
-										color: "#a1a1aa",
-										marginBottom: 6,
-										fontWeight: 600,
-										textTransform: "uppercase",
-										letterSpacing: "0.04em",
-									}}
-								>
-									Asignar agente
-								</label>
-								<select
-									id="task-new-agent"
-									name="assignedAgentId"
-									value={newAgentId}
-									onChange={(e) => setNewAgentId(e.target.value)}
-									style={selectStyle}
-								>
-									<option value="">Sin asignar</option>
-									{agents.map((a) => (
-										<option key={a.id} value={a.id}>
-											{a.name || a.id}
-										</option>
-									))}
-								</select>
-							</div>
-						</div>
-						<div
-							style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}
-						>
-							<button
-								type="button"
-								onClick={() => setShowCreateForm(false)}
-								style={cancelBtnStyle}
-							>
-								Cancelar
-							</button>
-							<button
-								type="button"
-								onClick={handleCreate}
-								disabled={creating || !newTitle.trim()}
-								style={{
-									...primaryBtnStyle,
-									opacity: creating || !newTitle.trim() ? 0.5 : 1,
-									cursor:
-										creating || !newTitle.trim() ? "not-allowed" : "pointer",
-								}}
-							>
-								{creating ? "Creando..." : "Crear tarea"}
-							</button>
-						</div>
+						Las tareas programadas te permiten definir acciones que se ejecutan
+						automáticamente según un horario (cron), un evento o un webhook.
+						Cada tarea puede ser asignada a un agente específico.
 					</div>
-				</div>
-			)}
-
-			{editingTask && (
-				<div
-					style={{
-						background: "#18181b",
-						borderRadius: 14,
-						border: "1px solid #27272a",
-						padding: 20,
-						marginBottom: 24,
-					}}
-				>
-					<h3
-						style={{
-							margin: "0 0 16px",
-							fontSize: "1.1rem",
-							fontWeight: 700,
-							color: "#f4f4f5",
-						}}
-					>
-						Editar tarea
-					</h3>
-					<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-						<div>
-							<label
-								htmlFor="task-edit-title"
-								style={{
-									display: "block",
-									fontSize: "0.8rem",
-									color: "#a1a1aa",
-									marginBottom: 6,
-									fontWeight: 600,
-									textTransform: "uppercase",
-									letterSpacing: "0.04em",
-								}}
-							>
-								Título
-							</label>
-							<input
-								id="task-edit-title"
-								name="title"
-								type="text"
-								value={editTitle}
-								onChange={(e) => setEditTitle(e.target.value)}
-								style={inputStyle}
-							/>
-						</div>
-						<div>
-							<label
-								htmlFor="task-edit-description"
-								style={{
-									display: "block",
-									fontSize: "0.8rem",
-									color: "#a1a1aa",
-									marginBottom: 6,
-									fontWeight: 600,
-									textTransform: "uppercase",
-									letterSpacing: "0.04em",
-								}}
-							>
-								Descripción
-							</label>
-							<textarea
-								id="task-edit-description"
-								name="description"
-								value={editDescription}
-								onChange={(e) => setEditDescription(e.target.value)}
-								rows={3}
-								style={{
-									...inputStyle,
-									resize: "vertical",
-									fontFamily: "inherit",
-								}}
-							/>
-						</div>
-						<div className="responsive-grid-2" style={{ gap: 14 }}>
-							<div>
-								<label
-									htmlFor="task-edit-status"
-									style={{
-										display: "block",
-										fontSize: "0.8rem",
-										color: "#a1a1aa",
-										marginBottom: 6,
-										fontWeight: 600,
-										textTransform: "uppercase",
-										letterSpacing: "0.04em",
-									}}
-								>
-									Estado
-								</label>
-								<select
-									id="task-edit-status"
-									name="status"
-									value={editStatus}
-									onChange={(e) => setEditStatus(e.target.value)}
-									style={selectStyle}
-								>
-									{EDITABLE_STATUSES.map((s) => (
-										<option key={s} value={s}>
-											{STATUS_LABELS[s] ?? s}
-										</option>
-									))}
-								</select>
-							</div>
-							<div>
-								<label
-									htmlFor="task-edit-agent"
-									style={{
-										display: "block",
-										fontSize: "0.8rem",
-										color: "#a1a1aa",
-										marginBottom: 6,
-										fontWeight: 600,
-										textTransform: "uppercase",
-										letterSpacing: "0.04em",
-									}}
-								>
-									Asignar agente
-								</label>
-								<select
-									id="task-edit-agent"
-									name="assignedAgentId"
-									value={editAgentId}
-									onChange={(e) => setEditAgentId(e.target.value)}
-									style={selectStyle}
-								>
-									<option value="">Sin asignar</option>
-									{agents.map((a) => (
-										<option key={a.id} value={a.id}>
-											{a.name || a.id}
-										</option>
-									))}
-								</select>
-							</div>
-						</div>
-						<div
-							style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}
-						>
-							<button
-								type="button"
-								onClick={() => setEditingTask(null)}
-								style={cancelBtnStyle}
-							>
-								Cancelar
-							</button>
-							<button
-								type="button"
-								onClick={handleSaveEdit}
-								disabled={saving}
-								style={{
-									...primaryBtnStyle,
-									opacity: saving ? 0.5 : 1,
-									cursor: saving ? "not-allowed" : "pointer",
-								}}
-							>
-								{saving ? "Guardando..." : "Guardar cambios"}
-							</button>
-						</div>
-					</div>
-				</div>
-			)}
-
-			<div
-				style={{
-					display: "flex",
-					gap: 8,
-					marginBottom: 20,
-					flexWrap: "wrap",
-					borderBottom: "1px solid #27272a",
-					paddingBottom: 12,
-				}}
-			>
-				{STATUS_OPTIONS.map((s) => {
-					const isActive = activeFilter === s;
-					return (
-						<button
-							key={s}
-							type="button"
-							onClick={() => setActiveFilter(s)}
-							style={{
-								padding: "8px 16px",
-								borderRadius: 8,
-								border: `1px solid ${isActive ? "#3b82f6" : "#27272a"}`,
-								background: isActive ? "rgba(59, 130, 246, 0.15)" : "#09090b",
-								color: isActive ? "#3b82f6" : "#a1a1aa",
-								cursor: "pointer",
-								fontWeight: 600,
-								fontSize: "0.85rem",
-								transition: "all 0.15s ease",
-							}}
-						>
-							{FILTER_LABELS[s] ?? STATUS_LABELS[s] ?? s}
-							{s === "all" && stats.total > 0 && (
-								<span style={{ marginLeft: 6, opacity: 0.7 }}>
-									({stats.total})
-								</span>
-							)}
-							{s !== "all" && stats[s as keyof TaskStats] > 0 && (
-								<span style={{ marginLeft: 6, opacity: 0.7 }}>
-									({stats[s as keyof TaskStats]})
-								</span>
-							)}
-						</button>
-					);
-				})}
-			</div>
-
-			{tasks.length === 0 ? (
-				<div
-					style={{
-						textAlign: "center",
-						padding: "48px 20px",
-						color: "#71717a",
-						background: "#18181b",
-						borderRadius: 14,
-						border: "1px solid #27272a",
-					}}
-				>
 					<div
 						style={{
-							display: "flex",
-							justifyContent: "center",
-							marginBottom: 12,
+							display: "grid",
+							gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+							gap: 12,
+							maxWidth: 560,
+							margin: "0 auto 24px",
 						}}
 					>
-						<AppIcon name="folder" size={32} strokeWidth={1.5} />
-					</div>
-					<div style={{ fontSize: "1rem", fontWeight: 600, marginBottom: 6 }}>
-						No hay tareas
-					</div>
-					<div style={{ fontSize: "0.85rem" }}>
-						{activeFilter !== "all" ? "Cambia el filtro o " : ""}
-						crea una tarea para empezar.
+						{[
+							{
+								icon: "📅",
+								title: "Cron",
+								desc: "Ejecución periódica programada",
+							},
+							{
+								icon: "🔗",
+								title: "Evento",
+								desc: "Se activa al ocurrir un evento",
+							},
+							{
+								icon: "🌐",
+								title: "Webhook",
+								desc: "Responde a llamadas externas",
+							},
+						].map((item) => (
+							<div
+								key={item.title}
+								style={{
+									background: "#0c0c0f",
+									border: "1px solid #27272a",
+									borderRadius: 12,
+									padding: "16px 12px",
+									textAlign: "center",
+								}}
+							>
+								<div style={{ fontSize: "1.6rem", marginBottom: 6 }}>
+									{item.icon}
+								</div>
+								<div
+									style={{
+										color: "#f4f4f5",
+										fontWeight: 700,
+										fontSize: "0.85rem",
+									}}
+								>
+									{item.title}
+								</div>
+								<div
+									style={{
+										color: "#a1a1aa",
+										fontSize: "0.75rem",
+										marginTop: 4,
+									}}
+								>
+									{item.desc}
+								</div>
+							</div>
+						))}
 					</div>
 					<button
 						type="button"
-						onClick={() => setShowCreateForm(true)}
-						style={{
-							marginTop: 16,
-							padding: "10px 18px",
-							borderRadius: 10,
-							border: "none",
-							background: "#3b82f6",
-							color: "#fff",
-							fontWeight: 700,
-							cursor: "pointer",
+						onClick={() => {
+							try {
+								localStorage.setItem("octopus-active-tab", "automations");
+							} catch {
+								// ignore storage errors
+							}
+							window.location.reload();
 						}}
+						className="ui-btn ui-btn--primary"
 					>
-						Crear tarea
+						Ir a Automatizaciones
 					</button>
 				</div>
-			) : (
-				<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-					{tasks.map((task) => {
-						const isConfirming = confirmDeleteId === task.id;
-						const isDeleting = deletingId === task.id;
-						return (
-							<div
-								key={task.id}
-								style={{
-									background: "#18181b",
-									borderRadius: 12,
-									border: "1px solid #27272a",
-									padding: 16,
-									transition: "border-color 0.2s ease",
-								}}
-								onMouseEnter={(e) => {
-									e.currentTarget.style.borderColor = "#3f3f46";
-								}}
-								onMouseLeave={(e) => {
-									e.currentTarget.style.borderColor = "#27272a";
-								}}
-							>
-								<div
-									style={{
-										display: "flex",
-										justifyContent: "space-between",
-										alignItems: "flex-start",
-										gap: 12,
-										flexWrap: "wrap",
-									}}
-								>
-									<div style={{ flex: 1, minWidth: 0 }}>
-										<div
-											style={{
-												display: "flex",
-												alignItems: "center",
-												gap: 10,
-												marginBottom: 6,
-												flexWrap: "wrap",
-											}}
-										>
-											<span
-												style={{
-													fontSize: "1rem",
-													fontWeight: 700,
-													color: "#f4f4f5",
-												}}
-											>
-												{task.title}
-											</span>
-											<span
-												style={{
-													padding: "2px 8px",
-													borderRadius: 999,
-													fontSize: "0.7rem",
-													fontWeight: 700,
-													textTransform: "uppercase",
-													letterSpacing: "0.04em",
-													background: `${STATUS_COLORS[task.status] ?? "#71717a"}20`,
-													color: STATUS_COLORS[task.status] ?? "#71717a",
-													border: `1px solid ${STATUS_COLORS[task.status] ?? "#71717a"}40`,
-												}}
-											>
-												{STATUS_LABELS[task.status] ?? task.status}
-											</span>
-											<span
-												style={{
-													padding: "2px 8px",
-													borderRadius: 6,
-													fontSize: "0.7rem",
-													fontWeight: 700,
-													background:
-														task.priority >= 8
-															? "rgba(239, 68, 68, 0.15)"
-															: task.priority >= 5
-																? "rgba(245, 158, 11, 0.15)"
-																: "rgba(99, 102, 241, 0.1)",
-													color:
-														task.priority >= 8
-															? "#ef4444"
-															: task.priority >= 5
-																? "#f59e0b"
-																: "#818cf8",
-													border: `1px solid ${task.priority >= 8 ? "rgba(239, 68, 68, 0.25)" : task.priority >= 5 ? "rgba(245, 158, 11, 0.25)" : "rgba(99, 102, 241, 0.2)"}`,
-												}}
-											>
-												P{task.priority}
-											</span>
-										</div>
-										{task.description && (
-											<div
-												style={{
-													fontSize: "0.85rem",
-													color: "#a1a1aa",
-													marginBottom: 8,
-													lineHeight: 1.5,
-												}}
-											>
-												{task.description}
-											</div>
-										)}
-										<div
-											style={{
-												display: "flex",
-												gap: 16,
-												fontSize: "0.75rem",
-												color: "#71717a",
-												flexWrap: "wrap",
-											}}
-										>
-											{task.assigned_agent_id && (
-												<span>
-													Agente:{" "}
-													<span style={{ color: "#a1a1aa" }}>
-														{agents.find((a) => a.id === task.assigned_agent_id)
-															?.name ?? task.assigned_agent_id}
-													</span>
-												</span>
-											)}
-											<span>Creada: {formatDate(task.created_at)}</span>
-											{task.started_at && (
-												<span>Iniciada: {formatDate(task.started_at)}</span>
-											)}
-											{task.completed_at && (
-												<span>Completada: {formatDate(task.completed_at)}</span>
-											)}
-										</div>
-										{task.error && (
-											<div
-												style={{
-													marginTop: 8,
-													padding: "8px 12px",
-													borderRadius: 8,
-													background: "rgba(239, 68, 68, 0.08)",
-													border: "1px solid rgba(239, 68, 68, 0.15)",
-													fontSize: "0.8rem",
-													color: "#f87171",
-												}}
-											>
-												{task.error}
-											</div>
-										)}
-										{task.result && (
-											<div
-												style={{
-													marginTop: 8,
-													padding: "8px 12px",
-													borderRadius: 8,
-													background: "rgba(16, 185, 129, 0.08)",
-													border: "1px solid rgba(16, 185, 129, 0.15)",
-													fontSize: "0.8rem",
-													color: "#34d399",
-												}}
-											>
-												{task.result}
-											</div>
-										)}
-									</div>
-									<div
-										style={{
-											display: "flex",
-											gap: 6,
-											flexShrink: 0,
-											alignItems: "center",
-										}}
-									>
-										{!isConfirming ? (
-											<>
-												<button
-													type="button"
-													onClick={() => startEdit(task)}
-													style={actionBtnStyle}
-													data-tooltip="Editar"
-													aria-label={`Editar tarea ${task.title}`}
-												>
-													<AppIcon name="edit" size={15} />
-												</button>
-												<button
-													type="button"
-													onClick={() => setConfirmDeleteId(task.id)}
-													style={actionBtnStyle}
-													data-tooltip="Eliminar"
-													aria-label={`Eliminar tarea ${task.title}`}
-												>
-													<AppIcon name="trash" size={15} />
-												</button>
-											</>
-										) : (
-											<>
-												<span
-													style={{
-														fontSize: "0.8rem",
-														color: "#f87171",
-														fontWeight: 600,
-													}}
-												>
-													¿Eliminar?
-												</span>
-												<button
-													type="button"
-													onClick={() => handleDelete(task.id)}
-													disabled={isDeleting}
-													style={{
-														padding: "6px 12px",
-														borderRadius: 6,
-														border: "1px solid rgba(239, 68, 68, 0.3)",
-														background: "rgba(239, 68, 68, 0.15)",
-														color: "#f87171",
-														cursor: isDeleting ? "not-allowed" : "pointer",
-														fontSize: "0.8rem",
-														fontWeight: 600,
-													}}
-												>
-													{isDeleting ? "..." : "Sí"}
-												</button>
-												<button
-													type="button"
-													onClick={() => setConfirmDeleteId(null)}
-													style={{
-														padding: "6px 12px",
-														borderRadius: 6,
-														border: "1px solid #27272a",
-														background: "#27272a",
-														color: "#a1a1aa",
-														cursor: "pointer",
-														fontSize: "0.8rem",
-														fontWeight: 600,
-													}}
-												>
-													No
-												</button>
-											</>
-										)}
-									</div>
-								</div>
-							</div>
-						);
-					})}
-				</div>
 			)}
-					</>
-				)}
-
-				{pageTab === "scheduled" && (
-					<div style={{ textAlign: "center", padding: "48px 24px", color: "#a1a1aa", background: "#18181b", borderRadius: 14, border: "1px solid #27272a", maxWidth: 640, margin: "0 auto" }}>
-						<div style={{ fontSize: "2.5rem", marginBottom: 16 }}>⏰</div>
-						<div style={{ fontSize: "1.15rem", fontWeight: 700, color: "#f4f4f5", marginBottom: 8 }}>Tareas Programadas</div>
-						<div style={{ fontSize: "0.92rem", lineHeight: 1.6, marginBottom: 20, maxWidth: 480, margin: "0 auto 20px" }}>
-							Las tareas programadas te permiten definir acciones que se ejecutan
-							automáticamente según un horario (cron), un evento o un webhook.
-							Cada tarea puede ser asignada a un agente específico.
-						</div>
-						<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, maxWidth: 560, margin: "0 auto 24px" }}>
-							{[
-								{ icon: "📅", title: "Cron", desc: "Ejecución periódica programada" },
-								{ icon: "🔗", title: "Evento", desc: "Se activa al ocurrir un evento" },
-								{ icon: "🌐", title: "Webhook", desc: "Responde a llamadas externas" },
-							].map((item) => (
-								<div key={item.title} style={{ background: "#09090b", border: "1px solid #27272a", borderRadius: 10, padding: "14px 12px", textAlign: "center" }}>
-									<div style={{ fontSize: "1.5rem", marginBottom: 6 }}>{item.icon}</div>
-									<div style={{ color: "#f4f4f5", fontWeight: 700, fontSize: "0.85rem" }}>{item.title}</div>
-									<div style={{ color: "#71717a", fontSize: "0.75rem", marginTop: 4 }}>{item.desc}</div>
-								</div>
-							))}
-						</div>
-						<a href="#automations" onClick={(e) => { e.preventDefault(); try { localStorage.setItem("octopus-active-tab", "automations"); } catch {} window.location.reload(); }} style={{ display: "inline-block", padding: "12px 24px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: "0.95rem", cursor: "pointer", textDecoration: "none" }}>
-							Ir a Automatizaciones
-						</a>
-					</div>
-				)}
 		</div>
 	);
 };
@@ -1440,7 +1600,7 @@ function workflowStatusColor(status: string): string {
 		{
 			ready: "#38bdf8",
 			triage: "#a78bfa",
-			running: "#3b82f6",
+			running: "#6366f1",
 			waiting_dependency: "#f59e0b",
 			blocked: "#fb7185",
 			partial: "#f59e0b",
@@ -1459,7 +1619,10 @@ const StatCard: React.FC<{
 	value: number;
 	color: string;
 }> = ({ icon, label, value, color }) => (
-	<div className="settings-summary-card">
+	<div
+		className="settings-summary-card"
+		style={{ "--stat-accent": color } as React.CSSProperties}
+	>
 		<div className="settings-summary-label">
 			<span
 				style={{
@@ -1472,52 +1635,54 @@ const StatCard: React.FC<{
 			</span>
 			{label}
 		</div>
-		<div className="settings-summary-value" style={{ color }}>
-			{value}
-		</div>
+		<div className="settings-summary-value">{value}</div>
 	</div>
 );
 
 const inputStyle: React.CSSProperties = {
 	width: "100%",
 	padding: "10px 12px",
-	borderRadius: 8,
-	border: "1px solid #27272a",
-	background: "#09090b",
+	borderRadius: 9,
+	border: "1px solid #3f3f46",
+	background: "#0c0c0f",
 	color: "#f4f4f5",
 	fontSize: "0.9rem",
 	outline: "none",
 	boxSizing: "border-box",
+	transition: "border-color 0.18s ease",
 };
 
 const selectStyle: React.CSSProperties = {
 	width: "100%",
 	padding: "10px 12px",
-	borderRadius: 8,
-	border: "1px solid #27272a",
-	background: "#09090b",
+	borderRadius: 9,
+	border: "1px solid #3f3f46",
+	background: "#0c0c0f",
 	color: "#f4f4f5",
 	fontSize: "0.9rem",
 	outline: "none",
 	boxSizing: "border-box",
+	transition: "border-color 0.18s ease",
 };
 
 const primaryBtnStyle: React.CSSProperties = {
 	padding: "10px 20px",
-	borderRadius: 8,
-	border: "none",
-	background: "#3b82f6",
+	borderRadius: 10,
+	border: "1px solid rgba(99, 102, 241, 0.4)",
+	background: "linear-gradient(180deg, #6366f1, #4f46e5)",
 	color: "#fff",
-	fontWeight: 600,
+	fontWeight: 700,
 	fontSize: "0.9rem",
+	cursor: "pointer",
+	boxShadow: "0 6px 18px rgba(79, 70, 229, 0.28)",
 };
 
 const cancelBtnStyle: React.CSSProperties = {
 	padding: "10px 20px",
-	borderRadius: 8,
-	border: "1px solid #27272a",
-	background: "transparent",
-	color: "#a1a1aa",
+	borderRadius: 10,
+	border: "1px solid #3f3f46",
+	background: "#18181b",
+	color: "#d4d4d8",
 	cursor: "pointer",
 	fontWeight: 600,
 	fontSize: "0.9rem",
@@ -1525,9 +1690,9 @@ const cancelBtnStyle: React.CSSProperties = {
 
 const secondaryBtnStyle: React.CSSProperties = {
 	padding: "8px 12px",
-	borderRadius: 8,
-	border: "1px solid #27272a",
-	background: "#09090b",
+	borderRadius: 9,
+	border: "1px solid #3f3f46",
+	background: "#18181b",
 	color: "#d4d4d8",
 	cursor: "pointer",
 	fontWeight: 700,
@@ -1535,30 +1700,30 @@ const secondaryBtnStyle: React.CSSProperties = {
 };
 
 const workflowPanelStyle: React.CSSProperties = {
-	background: "#09090b",
+	background: "#0c0c0f",
 	border: "1px solid #27272a",
 	borderRadius: 12,
-	padding: 12,
+	padding: 14,
 	minWidth: 0,
 };
 
 const workflowPanelTitleStyle: React.CSSProperties = {
 	color: "#f4f4f5",
-	fontSize: "0.8rem",
+	fontSize: "0.78rem",
 	fontWeight: 800,
 	marginBottom: 10,
 	textTransform: "uppercase",
-	letterSpacing: "0.04em",
+	letterSpacing: "0.05em",
 };
 
 const workflowItemStyle: React.CSSProperties = {
-	borderTop: "1px solid #18181b",
-	padding: "10px 0",
+	borderTop: "1px solid #1f1f23",
+	padding: "12px 0",
 };
 
 const mutedSmallStyle: React.CSSProperties = {
-	color: "#71717a",
-	fontSize: "0.75rem",
+	color: "#a1a1aa",
+	fontSize: "0.76rem",
 	lineHeight: 1.45,
 	marginTop: 4,
 };
@@ -1566,12 +1731,14 @@ const mutedSmallStyle: React.CSSProperties = {
 const actionBtnStyle: React.CSSProperties = {
 	width: 34,
 	height: 34,
-	borderRadius: 8,
-	border: "1px solid #27272a",
+	borderRadius: 9,
+	border: "1px solid #3f3f46",
 	background: "transparent",
 	cursor: "pointer",
+	color: "#a1a1aa",
 	fontSize: "0.9rem",
 	display: "flex",
 	alignItems: "center",
 	justifyContent: "center",
+	transition: "all 0.18s ease",
 };

@@ -456,7 +456,10 @@ export const MemoryPage: React.FC = () => {
 			).catch(() => []);
 			setKnowledgeCollections(collections);
 			const selected =
-				collectionId || selectedKnowledgeCollectionId || collections[0]?.id || "";
+				collectionId ||
+				selectedKnowledgeCollectionId ||
+				collections[0]?.id ||
+				"";
 			setSelectedKnowledgeCollectionId(selected);
 			if (selected) {
 				setKnowledgeItems(
@@ -874,25 +877,10 @@ export const MemoryPage: React.FC = () => {
 						/>
 						{stats?.enabled ? "Memoria activa" : "Memoria inactiva"}
 					</div>
-					<h1
-						style={{
-							margin: "12px 0 6px",
-							fontSize: "clamp(1.65rem, 3vw, 2.4rem)",
-							fontWeight: 850,
-							letterSpacing: "-0.04em",
-							color: "#f4f4f5",
-						}}
-					>
+					<h1 className="ui-page-title" style={{ margin: "12px 0 6px" }}>
 						Centro de Memoria
 					</h1>
-					<p
-						style={{
-							margin: 0,
-							maxWidth: 680,
-							color: "#a1a1aa",
-							lineHeight: 1.55,
-						}}
-					>
+					<p className="ui-page-subtitle" style={{ maxWidth: 680 }}>
 						Explora, conecta y gestiona lo que Octopus recuerda: memoria de
 						trabajo, largo plazo, perfil del usuario y aprendizajes operativos.
 					</p>
@@ -1175,7 +1163,7 @@ export const MemoryPage: React.FC = () => {
 										borderRadius: 999,
 										border: "1px solid #27272a",
 										background:
-											learningFilter === filter ? "#3b82f6" : "#0f1117",
+											learningFilter === filter ? "#6366f1" : "#0f1117",
 										color: learningFilter === filter ? "#fff" : "#a1a1aa",
 										cursor: "pointer",
 										fontSize: "0.75rem",
@@ -1378,7 +1366,7 @@ export const MemoryPage: React.FC = () => {
 														padding: "7px 9px",
 														borderRadius: 7,
 														background: "rgba(59,130,246,0.08)",
-														border: "1px solid #3b82f633",
+														border: "1px solid #6366f133",
 														color: "#bfdbfe",
 														fontSize: "0.72rem",
 													}}
@@ -1595,7 +1583,7 @@ export const MemoryPage: React.FC = () => {
 									borderRadius: 6,
 									background: "#0f1117",
 									marginBottom: 6,
-									borderLeft: `3px solid ${t.role === "user" ? "#3b82f6" : "#22c55e"}`,
+									borderLeft: `3px solid ${t.role === "user" ? "#6366f1" : "#22c55e"}`,
 								}}
 							>
 								<div
@@ -1789,7 +1777,14 @@ export const MemoryPage: React.FC = () => {
 							<button
 								type="button"
 								onClick={handleCreateKnowledgeCollection}
-								style={{ padding: "10px 16px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700 }}
+								style={{
+									padding: "10px 16px",
+									borderRadius: 8,
+									border: "none",
+									background: "#6366f1",
+									color: "#fff",
+									fontWeight: 700,
+								}}
 							>
 								Crear colección
 							</button>
@@ -1825,13 +1820,32 @@ export const MemoryPage: React.FC = () => {
 							onChange={(e) => setKnowledgeItemContent(e.target.value)}
 							placeholder="Texto, notas, transcripción, descripción de imagen/video/audio..."
 							rows={5}
-							style={{ ...S.input, width: "100%", resize: "vertical", fontFamily: "inherit" }}
+							style={{
+								...S.input,
+								width: "100%",
+								resize: "vertical",
+								fontFamily: "inherit",
+							}}
 						/>
 						<button
 							type="button"
 							onClick={handleCreateKnowledgeTextItem}
-							disabled={!selectedKnowledgeCollectionId || !knowledgeItemContent.trim()}
-							style={{ marginTop: 10, padding: "10px 16px", borderRadius: 8, border: "none", background: "#10b981", color: "#fff", fontWeight: 700, opacity: !selectedKnowledgeCollectionId || !knowledgeItemContent.trim() ? 0.5 : 1 }}
+							disabled={
+								!selectedKnowledgeCollectionId || !knowledgeItemContent.trim()
+							}
+							style={{
+								marginTop: 10,
+								padding: "10px 16px",
+								borderRadius: 8,
+								border: "none",
+								background: "#10b981",
+								color: "#fff",
+								fontWeight: 700,
+								opacity:
+									!selectedKnowledgeCollectionId || !knowledgeItemContent.trim()
+										? 0.5
+										: 1,
+							}}
 						>
 							Indexar conocimiento
 						</button>
@@ -1841,8 +1855,19 @@ export const MemoryPage: React.FC = () => {
 						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
 							Indexar archivo multimodal
 						</h3>
-						<p style={{ margin: "0 0 12px", color: "#a1a1aa", fontSize: "0.85rem", lineHeight: 1.5 }}>
-							Acepta texto, documentos, imágenes, audio y video desde rutas locales permitidas. Para OCR/transcripción/captions usa sidecars junto al archivo: <code>.ocr.txt</code>, <code>.transcript.txt</code>, <code>.captions.vtt</code>, <code>.captions.srt</code> o <code>.keyframes.json</code>.
+						<p
+							style={{
+								margin: "0 0 12px",
+								color: "#a1a1aa",
+								fontSize: "0.85rem",
+								lineHeight: 1.5,
+							}}
+						>
+							Acepta texto, documentos, imágenes, audio y video desde rutas
+							locales permitidas. Para OCR/transcripción/captions usa sidecars
+							junto al archivo: <code>.ocr.txt</code>,{" "}
+							<code>.transcript.txt</code>, <code>.captions.vtt</code>,{" "}
+							<code>.captions.srt</code> o <code>.keyframes.json</code>.
 						</p>
 						<input
 							type="text"
@@ -1861,8 +1886,22 @@ export const MemoryPage: React.FC = () => {
 						<button
 							type="button"
 							onClick={handleCreateKnowledgeFileItem}
-							disabled={!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()}
-							style={{ marginTop: 10, padding: "10px 16px", borderRadius: 8, border: "none", background: "#0ea5e9", color: "#fff", fontWeight: 700, opacity: !selectedKnowledgeCollectionId || !knowledgeFilePath.trim() ? 0.5 : 1 }}
+							disabled={
+								!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()
+							}
+							style={{
+								marginTop: 10,
+								padding: "10px 16px",
+								borderRadius: 8,
+								border: "none",
+								background: "#6366f1",
+								color: "#fff",
+								fontWeight: 700,
+								opacity:
+									!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()
+										? 0.5
+										: 1,
+							}}
 						>
 							Indexar archivo
 						</button>
@@ -1884,17 +1923,41 @@ export const MemoryPage: React.FC = () => {
 							<button
 								type="button"
 								onClick={handleKnowledgeSearch}
-								style={{ padding: "10px 16px", borderRadius: 8, border: "none", background: "#7c3aed", color: "#fff", fontWeight: 700 }}
+								style={{
+									padding: "10px 16px",
+									borderRadius: 8,
+									border: "none",
+									background: "#7c3aed",
+									color: "#fff",
+									fontWeight: 700,
+								}}
 							>
 								Buscar
 							</button>
 						</div>
 						{knowledgeResults.map((result) => (
-							<div key={result.id} style={{ padding: 10, borderRadius: 6, background: "#0f1117", marginTop: 8, borderLeft: "3px solid #7c3aed" }}>
-								<div style={{ fontSize: "0.75rem", color: "#71717a", marginBottom: 4 }}>
+							<div
+								key={result.id}
+								style={{
+									padding: 10,
+									borderRadius: 6,
+									background: "#0f1117",
+									marginTop: 8,
+									borderLeft: "3px solid #7c3aed",
+								}}
+							>
+								<div
+									style={{
+										fontSize: "0.75rem",
+										color: "#71717a",
+										marginBottom: 4,
+									}}
+								>
 									{result.item_title ?? result.item_id} · {result.modality}
 								</div>
-								<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>{result.content}</div>
+								<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>
+									{result.content}
+								</div>
 							</div>
 						))}
 					</div>
@@ -1909,10 +1972,27 @@ export const MemoryPage: React.FC = () => {
 							</div>
 						) : (
 							knowledgeItems.map((item) => (
-								<div key={item.id} style={{ padding: 10, borderRadius: 6, background: "#0f1117", marginBottom: 6 }}>
-									<div style={{ color: "#e4e4e7", fontWeight: 700 }}>{item.title ?? item.id}</div>
-									<div style={{ color: "#71717a", fontSize: "0.76rem", marginTop: 4 }}>
-										{item.source_type} · {item.status} · {item.source_uri ?? "sin URI"}
+								<div
+									key={item.id}
+									style={{
+										padding: 10,
+										borderRadius: 6,
+										background: "#0f1117",
+										marginBottom: 6,
+									}}
+								>
+									<div style={{ color: "#e4e4e7", fontWeight: 700 }}>
+										{item.title ?? item.id}
+									</div>
+									<div
+										style={{
+											color: "#71717a",
+											fontSize: "0.76rem",
+											marginTop: 4,
+										}}
+									>
+										{item.source_type} · {item.status} ·{" "}
+										{item.source_uri ?? "sin URI"}
 									</div>
 								</div>
 							))
@@ -2043,7 +2123,7 @@ export const MemoryPage: React.FC = () => {
 													padding: 12,
 													borderRadius: 8,
 													background: "#0f1117",
-													borderLeft: `3px solid ${msg.role === "user" ? "#3b82f6" : msg.role === "system" ? "#8b5cf6" : "#22c55e"}`,
+													borderLeft: `3px solid ${msg.role === "user" ? "#6366f1" : msg.role === "system" ? "#8b5cf6" : "#22c55e"}`,
 												}}
 											>
 												<div
@@ -2151,7 +2231,7 @@ export const MemoryPage: React.FC = () => {
 									width: 56,
 									height: 56,
 									borderRadius: "50%",
-									background: "linear-gradient(135deg, #7c3aed, #3b82f6)",
+									background: "linear-gradient(135deg, #7c3aed, #6366f1)",
 									display: "flex",
 									alignItems: "center",
 									justifyContent: "center",
@@ -2274,14 +2354,14 @@ export const MemoryPage: React.FC = () => {
 															? "#22c55e22"
 															: conf >= 0.4
 																? "#f59e0b22"
-																: "#3b82f622",
+																: "#6366f122",
 													color:
 														conf >= 0.7
 															? "#22c55e"
 															: conf >= 0.4
 																? "#f59e0b"
-																: "#3b82f6",
-													border: `1px solid ${conf >= 0.7 ? "#22c55e44" : conf >= 0.4 ? "#f59e0b44" : "#3b82f644"}`,
+																: "#6366f1",
+													border: `1px solid ${conf >= 0.7 ? "#22c55e44" : conf >= 0.4 ? "#f59e0b44" : "#6366f144"}`,
 												}}
 											>
 												{area} · {Math.round(conf * 100)}%
@@ -2481,7 +2561,7 @@ const MemoryOverviewDashboard: React.FC<{
 					detail={
 						ltmMaxItems ? `capacidad ${formatNumber(ltmMaxItems)}` : "LTM"
 					}
-					color="#3b82f6"
+					color="#6366f1"
 				/>
 				<MemoryMetricCard
 					icon="chat"
@@ -2593,7 +2673,7 @@ const MemoryOverviewDashboard: React.FC<{
 							<ProgressMetric
 								label="Capacidad LTM"
 								value={ltmMaxItems ? ltmCount / ltmMaxItems : 0}
-								color="#3b82f6"
+								color="#6366f1"
 							/>
 							<ProgressMetric
 								label="Importancia promedio"
@@ -2890,7 +2970,7 @@ const MemoryNetworkMap: React.FC<{
 							if (!from || !to) return null;
 							const selected =
 								selectedNodeId === edge.from || selectedNodeId === edge.to;
-							const color = selected ? "#67e8f9" : "#2563eb";
+							const color = selected ? "#67e8f9" : "#4f46e5";
 							return (
 								<path
 									key={`${edge.from}-${edge.to}-${index}`}
@@ -3311,7 +3391,7 @@ const MemoryMiniMap: React.FC<{
 						y1={from.y}
 						x2={to.x}
 						y2={to.y}
-						stroke={selected ? "#67e8f9" : "#1d4ed8"}
+						stroke={selected ? "#67e8f9" : "#4f46e5"}
 						strokeOpacity={selected ? 0.8 : 0.2}
 						strokeWidth={selected ? 0.9 : 0.35}
 					/>
@@ -3976,7 +4056,7 @@ function getLearningFilterLabel(filter: LearningInsightFilter): string {
 function getInsightColor(type: string): string {
 	if (type === "what_failed" || type === "anti_pattern") return "#ef4444";
 	if (type === "what_worked" || type === "procedure") return "#22c55e";
-	if (type === "tool_strategy") return "#3b82f6";
+	if (type === "tool_strategy") return "#6366f1";
 	if (type === "skill_candidate") return "#a78bfa";
 	return "#f59e0b";
 }
@@ -3991,7 +4071,7 @@ function getExperienceColor(status: LearningExperience["status"]): string {
 function getExperienceStatusFilterColor(
 	status: LearningExperienceStatusFilter,
 ): string {
-	return status === "all" ? "#3b82f6" : getExperienceColor(status);
+	return status === "all" ? "#6366f1" : getExperienceColor(status);
 }
 
 function getExperienceStatusFilterLabel(
@@ -4069,7 +4149,7 @@ function formatNumber(value: number): string {
 
 function getSourceColor(source: GraphNode["source"]): string {
 	const colors: Record<GraphNode["source"], string> = {
-		memory: "#3b82f6",
+		memory: "#6366f1",
 		learning: "#a855f7",
 		profile: "#10b981",
 		daily: "#f59e0b",

@@ -634,26 +634,8 @@ export const AgentsPage: React.FC = () => {
 		<div className="page-shell page-shell--xl">
 			<div className="page-header">
 				<div>
-					<h2
-						style={{
-							margin: 0,
-							fontSize: "1.9rem",
-							fontWeight: 700,
-							color: "#f4f4f5",
-							letterSpacing: "-0.02em",
-						}}
-					>
-						Agentes
-					</h2>
-					<p
-						style={{
-							margin: "8px 0 0",
-							color: "#a1a1aa",
-							fontSize: "0.95rem",
-							maxWidth: "700px",
-							lineHeight: 1.6,
-						}}
-					>
+					<h2 className="ui-page-title">Agentes</h2>
+					<p className="ui-page-subtitle">
 						Gestiona tus agentes IA, sus roles, personalidad y prompts del
 						sistema.
 					</p>
@@ -661,21 +643,8 @@ export const AgentsPage: React.FC = () => {
 				<button
 					type="button"
 					onClick={openCreate}
-					style={{
-						padding: "10px 20px",
-						borderRadius: "10px",
-						border: "1px solid rgba(59, 130, 246, 0.3)",
-						background: "rgba(59, 130, 246, 0.12)",
-						color: "#3b82f6",
-						fontSize: "0.9rem",
-						fontWeight: 600,
-						cursor: "pointer",
-						transition: "all 0.2s ease",
-						display: "flex",
-						alignItems: "center",
-						gap: "8px",
-						flexShrink: 0,
-					}}
+					className="ui-btn ui-btn--primary"
+					style={{ flexShrink: 0 }}
 				>
 					<span style={{ fontSize: "1.1rem", lineHeight: 1 }}>+</span>
 					Crear agente
@@ -684,18 +653,8 @@ export const AgentsPage: React.FC = () => {
 
 			{msg && (
 				<div
-					style={{
-						padding: "12px 16px",
-						borderRadius: "10px",
-						marginBottom: "20px",
-						background: msg.ok
-							? "rgba(34, 197, 94, 0.1)"
-							: "rgba(239, 68, 68, 0.1)",
-						color: msg.ok ? "#22c55e" : "#ef4444",
-						border: `1px solid ${msg.ok ? "rgba(34, 197, 94, 0.2)" : "rgba(239, 68, 68, 0.2)"}`,
-						fontSize: "0.9rem",
-						fontWeight: 500,
-					}}
+					className={`ui-notice ${msg.ok ? "is-ok" : "is-error"}`}
+					style={{ marginBottom: "20px" }}
 				>
 					{msg.text}
 				</div>
@@ -927,7 +886,18 @@ export const AgentsPage: React.FC = () => {
 							{messagesLoading ? (
 								<div style={emptyMessageStyle}>Cargando mensajes...</div>
 							) : agentMessages.length === 0 ? (
-								<div style={emptyMessageStyle}>
+								<div
+									style={{
+										...emptyMessageStyle,
+										display: "flex",
+										flexDirection: "column",
+										alignItems: "center",
+										gap: "10px",
+									}}
+								>
+									<span style={{ color: "#6366f1", opacity: 0.7 }}>
+										<AppIcon name="message" size={28} strokeWidth={1.6} />
+									</span>
 									Sin mensajes para esta bandeja.
 								</div>
 							) : (
@@ -1319,41 +1289,20 @@ export const AgentsPage: React.FC = () => {
 			)}
 
 			{agents.length === 0 ? (
-				<div
-					style={{
-						padding: "60px 20px",
-						textAlign: "center",
-						color: "#71717a",
-						borderRadius: "14px",
-						border: "1px dashed #27272a",
-						background: "rgba(24, 24, 27, 0.5)",
-					}}
-				>
-					<div style={{ color: "#818cf8", marginBottom: "16px" }}>
-						<AppIcon name="agent" size={48} strokeWidth={1.5} />
+				<div className="ui-empty">
+					<div className="ui-empty-icon">
+						<AppIcon name="agent" size={44} strokeWidth={1.6} />
 					</div>
-					<div
-						style={{ fontSize: "1.1rem", fontWeight: 600, color: "#a1a1aa" }}
-					>
-						Aún no hay agentes
-					</div>
-					<div style={{ fontSize: "0.85rem", marginTop: "8px" }}>
+					<div className="ui-empty-title">Aún no hay agentes</div>
+					<div className="ui-empty-desc">
 						Crea tu primer agente o conecta una plantilla especializada para
 						empezar.
 					</div>
 					<button
 						type="button"
 						onClick={openCreate}
-						style={{
-							marginTop: "18px",
-							padding: "10px 18px",
-							borderRadius: 10,
-							border: "1px solid #3b82f6",
-							background: "#3b82f6",
-							color: "#fff",
-							fontWeight: 700,
-							cursor: "pointer",
-						}}
+						className="ui-btn ui-btn--primary"
+						style={{ marginTop: "20px" }}
 					>
 						Crear agente
 					</button>
@@ -1652,11 +1601,12 @@ const StatCard: React.FC<{
 	value: number;
 	accent: string;
 }> = ({ label, value, accent }) => (
-	<div className="settings-summary-card">
+	<div
+		className="settings-summary-card"
+		style={{ "--stat-accent": accent } as React.CSSProperties}
+	>
 		<div className="settings-summary-label">{label}</div>
-		<div className="settings-summary-value" style={{ color: accent }}>
-			{value}
-		</div>
+		<div className="settings-summary-value">{value}</div>
 	</div>
 );
 
@@ -1823,7 +1773,7 @@ const FormInput: React.FC<{
 						: {}),
 				}}
 				onFocus={(e) => {
-					e.currentTarget.style.borderColor = "#3b82f6";
+					e.currentTarget.style.borderColor = "#6366f1";
 				}}
 				onBlur={(e) => {
 					e.currentTarget.style.borderColor = "#3f3f46";
@@ -1899,7 +1849,7 @@ const FormTextarea: React.FC<{
 					lineHeight: 1.5,
 				}}
 				onFocus={(e) => {
-					e.currentTarget.style.borderColor = "#3b82f6";
+					e.currentTarget.style.borderColor = "#6366f1";
 				}}
 				onBlur={(e) => {
 					e.currentTarget.style.borderColor = "#3f3f46";
@@ -1910,15 +1860,15 @@ const FormTextarea: React.FC<{
 };
 
 const actionBtnStyle: React.CSSProperties = {
-	padding: "6px 14px",
-	borderRadius: "8px",
-	border: "1px solid #27272a",
+	padding: "7px 14px",
+	borderRadius: "9px",
+	border: "1px solid #3f3f46",
 	background: "#18181b",
-	color: "#a1a1aa",
+	color: "#d4d4d8",
 	fontSize: "0.8rem",
 	fontWeight: 600,
 	cursor: "pointer",
-	transition: "all 0.2s ease",
+	transition: "all 0.18s ease",
 };
 
 const emptyMessageStyle: React.CSSProperties = {
@@ -1960,37 +1910,38 @@ const broadcastBadgeStyle: React.CSSProperties = {
 };
 
 const dangerBtnStyle: React.CSSProperties = {
-	padding: "6px 14px",
-	borderRadius: "8px",
-	border: "1px solid rgba(239, 68, 68, 0.3)",
-	background: "rgba(239, 68, 68, 0.08)",
-	color: "#ef4444",
+	padding: "7px 14px",
+	borderRadius: "9px",
+	border: "1px solid rgba(248, 113, 113, 0.3)",
+	background: "rgba(248, 113, 113, 0.1)",
+	color: "#f87171",
 	fontSize: "0.8rem",
 	fontWeight: 600,
 	cursor: "pointer",
-	transition: "all 0.2s ease",
+	transition: "all 0.18s ease",
 };
 
 const cancelBtnStyle: React.CSSProperties = {
 	padding: "10px 20px",
 	borderRadius: "10px",
-	border: "1px solid #27272a",
+	border: "1px solid #3f3f46",
 	background: "#18181b",
-	color: "#a1a1aa",
+	color: "#d4d4d8",
 	fontSize: "0.9rem",
 	fontWeight: 600,
 	cursor: "pointer",
-	transition: "all 0.2s ease",
+	transition: "all 0.18s ease",
 };
 
 const saveBtnStyle: React.CSSProperties = {
 	padding: "10px 20px",
 	borderRadius: "10px",
-	border: "1px solid rgba(59, 130, 246, 0.3)",
-	background: "rgba(59, 130, 246, 0.12)",
-	color: "#3b82f6",
+	border: "1px solid rgba(99, 102, 241, 0.4)",
+	background: "linear-gradient(180deg, #6366f1, #4f46e5)",
+	color: "#fff",
 	fontSize: "0.9rem",
-	fontWeight: 600,
+	fontWeight: 700,
 	cursor: "pointer",
-	transition: "all 0.2s ease",
+	transition: "all 0.18s ease",
+	boxShadow: "0 6px 18px rgba(79, 70, 229, 0.28)",
 };

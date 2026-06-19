@@ -195,18 +195,8 @@ export const VariablesPage: React.FC = () => {
 	return (
 		<div className="page-shell">
 			<div className="animate-fade-in" style={{ marginBottom: "28px" }}>
-				<h1
-					style={{
-						fontSize: "1.6rem",
-						fontWeight: 700,
-						color: "#f4f4f5",
-						margin: "0 0 6px",
-						letterSpacing: "-0.02em",
-					}}
-				>
-					Variables de Entorno
-				</h1>
-				<p style={{ fontSize: "0.95rem", color: "#a1a1aa", margin: 0 }}>
+				<h1 className="ui-page-title">Variables de Entorno</h1>
+				<p className="ui-page-subtitle" style={{ marginTop: 6 }}>
 					Gestiona API keys y variables seguras para el agente. Los valores se
 					almacenan encriptados.
 				</p>

@@ -232,11 +232,9 @@ export const App: React.FC = () => {
 				Math.max(80, window.innerWidth * 0.4),
 			);
 			const minX = viewportPadding + estimatedTooltipHalfWidth;
-			const maxX = window.innerWidth - viewportPadding - estimatedTooltipHalfWidth;
-			const x = Math.max(
-				minX,
-				Math.min(maxX, rect.left + rect.width / 2),
-			);
+			const maxX =
+				window.innerWidth - viewportPadding - estimatedTooltipHalfWidth;
+			const x = Math.max(minX, Math.min(maxX, rect.left + rect.width / 2));
 			const placeBelow = rect.top < 48;
 			const y = placeBelow ? rect.bottom : rect.top;
 

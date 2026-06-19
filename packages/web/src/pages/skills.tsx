@@ -267,18 +267,12 @@ export const SkillsPage: React.FC = () => {
 			>
 				<div>
 					<h2
-						style={{
-							margin: "0 0 4px 0",
-							fontSize: "20px",
-							fontWeight: 700,
-							display: "flex",
-							alignItems: "center",
-							gap: 8,
-						}}
+						className="ui-page-title"
+						style={{ display: "flex", alignItems: "center", gap: 10 }}
 					>
-						<AppIcon name="spark" size={22} /> Habilidades
+						<AppIcon name="spark" size={24} /> Habilidades
 					</h2>
-					<p style={{ color: "#71717a", margin: 0, fontSize: "13px" }}>
+					<p className="ui-page-subtitle" style={{ marginTop: 6 }}>
 						{skills?.builtinSkills?.length ?? 0} incluidas ·{" "}
 						{skills?.dbSkills?.length ?? 0} personalizadas
 						{skills?.enabled ? " · Activas" : " · Desactivadas"}
@@ -297,7 +291,7 @@ export const SkillsPage: React.FC = () => {
 								cursor: "pointer",
 								fontSize: "13px",
 								fontWeight: 500,
-								backgroundColor: activeTab === t.id ? "#3b82f6" : "#27272a",
+								backgroundColor: activeTab === t.id ? "#6366f1" : "#27272a",
 								color: activeTab === t.id ? "#fff" : "#a1a1aa",
 							}}
 						>
@@ -730,9 +724,9 @@ export const SkillsPage: React.FC = () => {
 											style={{
 												padding: "5px 12px",
 												borderRadius: 6,
-												border: "1px solid #3b82f644",
+												border: "1px solid #6366f144",
 												background: "transparent",
-												color: "#3b82f6",
+												color: "#6366f1",
 												cursor: "pointer",
 												fontSize: "12px",
 											}}

@@ -95,44 +95,28 @@ export const ChannelsPage: React.FC = () => {
 			<div className="animate-fade-in" style={{ marginBottom: "28px" }}>
 				<div
 					style={{
-						color: "#737373",
-						fontSize: "0.82rem",
-						fontWeight: 850,
-						letterSpacing: "0.08em",
+						color: "#818cf8",
+						fontSize: "0.74rem",
+						fontWeight: 800,
+						letterSpacing: "0.12em",
 						textTransform: "uppercase",
-						marginBottom: "8px",
+						marginBottom: "10px",
 					}}
 				>
 					Octopus
 				</div>
-				<h1
-					style={{
-						fontSize: "2.1rem",
-						fontWeight: 850,
-						color: "#f4f4f5",
-						margin: "0 0 6px",
-						letterSpacing: "-0.04em",
-					}}
-				>
+				<h1 className="ui-page-title" style={{ fontSize: "2.1rem" }}>
 					Canales
 				</h1>
-				<p style={{ fontSize: "0.95rem", color: "#a1a1aa", margin: 0 }}>
+				<p className="ui-page-subtitle" style={{ marginTop: 6 }}>
 					Configura y gestiona tus canales de comunicación
 				</p>
 			</div>
 
 			{error && (
 				<div
-					className="animate-fade-in"
-					style={{
-						padding: "12px 16px",
-						borderRadius: "12px",
-						background: "rgba(239, 68, 68, 0.1)",
-						border: "1px solid rgba(239, 68, 68, 0.3)",
-						color: "#ef4444",
-						fontSize: "0.85rem",
-						marginBottom: "20px",
-					}}
+					className="animate-fade-in ui-notice is-error"
+					style={{ marginBottom: "20px" }}
 				>
 					{error}
 				</div>
@@ -155,52 +139,19 @@ export const ChannelsPage: React.FC = () => {
 			) : (
 				<>
 					{channels.length === 0 && (
-						<div
-							style={{
-								padding: "48px 20px",
-								borderRadius: "16px",
-								border: "1px dashed #242424",
-								background: "#050505",
-								textAlign: "center",
-								color: "#a1a1aa",
-							}}
-						>
-							<div
-								style={{
-									width: 42,
-									height: 42,
-									borderRadius: 14,
-									border: "1px solid #242424",
-									background: "#111",
-									display: "inline-flex",
-									alignItems: "center",
-									justifyContent: "center",
-									marginBottom: 12,
-								}}
-							>
-								<AppIcon name="message" size={19} />
+						<div className="ui-empty">
+							<div className="ui-empty-icon">
+								<AppIcon name="message" size={42} strokeWidth={1.6} />
 							</div>
-							<div
-								style={{ fontWeight: 700, color: "#f4f4f5", marginBottom: 6 }}
-							>
-								No hay canales registrados
-							</div>
-							<div style={{ fontSize: "0.85rem" }}>
+							<div className="ui-empty-title">No hay canales registrados</div>
+							<div className="ui-empty-desc">
 								Recarga o revisa la configuración del servidor de canales.
 							</div>
 							<button
 								type="button"
 								onClick={reload}
-								style={{
-									marginTop: 16,
-									padding: "8px 14px",
-									borderRadius: 10,
-									border: "1px solid #2a2a2a",
-									background: "#f4f4f5",
-									color: "#050505",
-									fontWeight: 800,
-									cursor: "pointer",
-								}}
+								className="ui-btn ui-btn--primary"
+								style={{ marginTop: 18 }}
 							>
 								Recargar canales
 							</button>
@@ -209,18 +160,7 @@ export const ChannelsPage: React.FC = () => {
 					{/* Active channels */}
 					{activeChannels.length > 0 && (
 						<div style={{ marginBottom: "32px" }}>
-							<h2
-								style={{
-									fontSize: "0.9rem",
-									fontWeight: 700,
-									color: "#71717a",
-									margin: "0 0 12px",
-									textTransform: "uppercase",
-									letterSpacing: "0.05em",
-								}}
-							>
-								Canales activos
-							</h2>
+							<h2 className="ui-group-label">Canales activos</h2>
 							<div style={channelGridStyle}>
 								{activeChannels.map((channel) => (
 									<ChannelCard
@@ -246,18 +186,7 @@ export const ChannelsPage: React.FC = () => {
 					{/* Inactive channels */}
 					{inactiveChannels.length > 0 && (
 						<div>
-							<h2
-								style={{
-									fontSize: "0.9rem",
-									fontWeight: 700,
-									color: "#71717a",
-									margin: "0 0 12px",
-									textTransform: "uppercase",
-									letterSpacing: "0.05em",
-								}}
-							>
-								Canales disponibles
-							</h2>
+							<h2 className="ui-group-label">Canales disponibles</h2>
 							<div style={channelGridStyle}>
 								{inactiveChannels.map((channel) => (
 									<ChannelCard

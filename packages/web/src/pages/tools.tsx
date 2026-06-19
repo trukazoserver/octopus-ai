@@ -511,18 +511,12 @@ export const ToolsPage: React.FC = () => {
 			>
 				<div>
 					<h2
-						style={{
-							margin: "0 0 4px 0",
-							fontSize: "20px",
-							fontWeight: 700,
-							display: "flex",
-							alignItems: "center",
-							gap: 8,
-						}}
+						className="ui-page-title"
+						style={{ display: "flex", alignItems: "center", gap: 10 }}
 					>
-						<AppIcon name="tools" size={22} /> Herramientas
+						<AppIcon name="tools" size={24} /> Herramientas
 					</h2>
-					<p style={{ color: "#71717a", margin: 0, fontSize: "13px" }}>
+					<p className="ui-page-subtitle" style={{ marginTop: 6 }}>
 						{summary.system || 0} sistema · {summary.dynamic || 0} dinámicas ·{" "}
 						{summary.mcpServers || 0} MCP servers ({summary.mcpTools || 0}{" "}
 						tools)
@@ -730,9 +724,9 @@ export const ToolsPage: React.FC = () => {
 									onClick={() => setSourceFilter(source)}
 									style={{
 										...S.btn,
-										background: sourceFilter === source ? "#3b82f6" : "#27272a",
+										background: sourceFilter === source ? "#6366f1" : "#27272a",
 										borderColor:
-											sourceFilter === source ? "#3b82f6" : "#3f3f46",
+											sourceFilter === source ? "#6366f1" : "#3f3f46",
 									}}
 								>
 									{source === "all"
@@ -1006,8 +1000,8 @@ export const ToolsPage: React.FC = () => {
 								onClick={() => setCatalogFilter("all")}
 								style={{
 									...S.btn,
-									background: catalogFilter === "all" ? "#3b82f6" : "#27272a",
-									borderColor: catalogFilter === "all" ? "#3b82f6" : "#3f3f46",
+									background: catalogFilter === "all" ? "#6366f1" : "#27272a",
+									borderColor: catalogFilter === "all" ? "#6366f1" : "#3f3f46",
 								}}
 							>
 								Todas
@@ -1020,9 +1014,9 @@ export const ToolsPage: React.FC = () => {
 									style={{
 										...S.btn,
 										background:
-											catalogFilter === category ? "#3b82f6" : "#27272a",
+											catalogFilter === category ? "#6366f1" : "#27272a",
 										borderColor:
-											catalogFilter === category ? "#3b82f6" : "#3f3f46",
+											catalogFilter === category ? "#6366f1" : "#3f3f46",
 									}}
 								>
 									{category}
@@ -1401,7 +1395,7 @@ export const ToolsPage: React.FC = () => {
 									fontSize: "12px",
 									cursor: "pointer",
 									backgroundColor:
-										language === lang ? "#3b82f6" : "transparent",
+										language === lang ? "#6366f1" : "transparent",
 									color: language === lang ? "#fff" : "#71717a",
 								}}
 							>

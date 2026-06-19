@@ -940,7 +940,8 @@ function getActivityActionKind(activity: AgentActivity): AgentActionKind {
 	const tool = (activity.toolName ?? "").toLowerCase();
 	const detail = (activity.detail ?? "").toLowerCase();
 
-	if (tool.includes("delegate") || tool.includes("agent_spawn")) return "delegate";
+	if (tool.includes("delegate") || tool.includes("agent_spawn"))
+		return "delegate";
 	if (
 		tool.includes("send_message") ||
 		tool.includes("broadcast") ||
@@ -965,7 +966,11 @@ function getActivityActionKind(activity: AgentActivity): AgentActionKind {
 			(detail.includes("imagen") || detail.includes("image")))
 	)
 		return "image-generation";
-	if (tool.includes("veo") || detail.includes("video") || detail.includes("reel"))
+	if (
+		tool.includes("veo") ||
+		detail.includes("video") ||
+		detail.includes("reel")
+	)
 		return "video";
 	if (
 		tool.includes("extract_images") ||
@@ -1972,9 +1977,7 @@ const ChatMessage = memo(function ChatMessage({
 		const applyCachedVideoAspectRatio = (thumbnail: HTMLElement) => {
 			const src = thumbnail.getAttribute("data-video-src");
 			if (!src) return false;
-			const cached = videoAspectRatioCache.get(
-				getVideoAspectCacheKey(src),
-			);
+			const cached = videoAspectRatioCache.get(getVideoAspectCacheKey(src));
 			if (!cached) return false;
 			const frame = thumbnail.closest<HTMLElement>(".media-video-frame");
 			if (!frame) return false;
@@ -2514,7 +2517,10 @@ export const ChatPage: React.FC<{
 	});
 	const [tenacidad, setTenacidad] = useState<"normal" | "tenaz">(() => {
 		try {
-			return (localStorage.getItem("octopus-tenacidad") as "normal" | "tenaz") ?? "normal";
+			return (
+				(localStorage.getItem("octopus-tenacidad") as "normal" | "tenaz") ??
+				"normal"
+			);
 		} catch {
 			return "normal";
 		}
@@ -4812,39 +4818,44 @@ export const ChatPage: React.FC<{
 							</button>
 
 							<button
-							type="button"
-							onClick={() => {
-								const next = tenacidad === "tenaz" ? "normal" : "tenaz";
-								setTenacidad(next);
-								try { localStorage.setItem("octopus-tenacidad", next); } catch {}
-								apiPut("/api/config/tenacidad.level", next).catch(() => {});
-							}}
-							data-tooltip={
-								tenacidad === "tenaz"
-									? "Modo Tenaz: el agente no se detiene hasta completar la tarea"
-									: "Modo Normal: el agente puede detenerse por l\u00edmites de iteraci\u00f3n"
-							}
-							style={{
-								marginLeft: "8px",
-								padding: "6px 12px",
-								borderRadius: "8px",
-								border: `1px solid ${tenacidad === "tenaz" ? "rgba(245, 158, 11, 0.4)" : "#3f3f46"}`,
-								background: tenacidad === "tenaz" ? "rgba(245, 158, 11, 0.1)" : "#18181b",
-								color: tenacidad === "tenaz" ? "#f59e0b" : "#71717a",
-								fontSize: "0.8rem",
-								cursor: "pointer",
-								display: "flex",
-								alignItems: "center",
-								gap: "6px",
-								fontWeight: 500,
-								transition: "all 0.2s",
-								fontFamily: "inherit",
-							}}
-						>
-							{tenacidad === "tenaz" ? "🔥" : "⚡"}
-							{tenacidad === "tenaz" ? "Tenaz" : "Normal"}
-						</button>
-						<div style={{ flex: 1 }} />
+								type="button"
+								onClick={() => {
+									const next = tenacidad === "tenaz" ? "normal" : "tenaz";
+									setTenacidad(next);
+									try {
+										localStorage.setItem("octopus-tenacidad", next);
+									} catch {}
+									apiPut("/api/config/tenacidad.level", next).catch(() => {});
+								}}
+								data-tooltip={
+									tenacidad === "tenaz"
+										? "Modo Tenaz: el agente no se detiene hasta completar la tarea"
+										: "Modo Normal: el agente puede detenerse por l\u00edmites de iteraci\u00f3n"
+								}
+								style={{
+									marginLeft: "8px",
+									padding: "6px 12px",
+									borderRadius: "8px",
+									border: `1px solid ${tenacidad === "tenaz" ? "rgba(245, 158, 11, 0.4)" : "#3f3f46"}`,
+									background:
+										tenacidad === "tenaz"
+											? "rgba(245, 158, 11, 0.1)"
+											: "#18181b",
+									color: tenacidad === "tenaz" ? "#f59e0b" : "#71717a",
+									fontSize: "0.8rem",
+									cursor: "pointer",
+									display: "flex",
+									alignItems: "center",
+									gap: "6px",
+									fontWeight: 500,
+									transition: "all 0.2s",
+									fontFamily: "inherit",
+								}}
+							>
+								{tenacidad === "tenaz" ? "🔥" : "⚡"}
+								{tenacidad === "tenaz" ? "Tenaz" : "Normal"}
+							</button>
+							<div style={{ flex: 1 }} />
 							{status?.provider && (
 								<div
 									className="chat-status-meta"
