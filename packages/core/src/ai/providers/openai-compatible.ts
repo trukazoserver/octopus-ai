@@ -366,6 +366,16 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 	}
 
 	async isAvailable(): Promise<boolean> {
+		// OpenAI Codex/browser login: available whenever an accessToken exists,
+		// even without an API key (checked before the generic credential gate).
+		if (
+			this.prefix === "openai" &&
+			(this.config.authMode === "codex" ||
+				this.config.authMode === "browser") &&
+			Boolean(this.config.accessToken)
+		) {
+			return true;
+		}
 		if (!this.hasAuthCredential() && this.prefix !== "local") return false;
 		if (
 			this.prefix === "openai" &&

@@ -209,7 +209,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 		}
 
 		const data = (await response.json()) as {
-			content: Array<{
+			content?: Array<{
 				type: string;
 				text?: string;
 				thinking?: string;
@@ -218,10 +218,21 @@ export class AnthropicProvider extends BaseLLMProvider {
 				name?: string;
 				input?: Record<string, unknown>;
 			}>;
-			model: string;
-			usage: { input_tokens: number; output_tokens: number };
-			stop_reason: string;
+			model?: string;
+			usage?: { input_tokens: number; output_tokens: number };
+			stop_reason?: string;
+			error?: unknown;
 		};
+
+		// Some gateways/proxies return HTTP 200 with a non-standard error body
+		// (no `content` array). Surface the actual response instead of a cryptic
+		// "data.content is not iterable" TypeError.
+		if (!Array.isArray(data.content)) {
+			const raw = JSON.stringify(data).slice(0, 400);
+			throw new Error(
+				`Anthropic API returned an unexpected response (status ${response.status}, no content array): ${raw}`,
+			);
+		}
 
 		let textContent = "";
 		const toolCalls: LLMToolCall[] = [];
@@ -248,13 +259,15 @@ export class AnthropicProvider extends BaseLLMProvider {
 			}
 		}
 
+		const inputTokens = data.usage?.input_tokens ?? 0;
+		const outputTokens = data.usage?.output_tokens ?? 0;
 		return {
 			content: textContent,
-			model: data.model,
+			model: data.model ?? request.model,
 			usage: {
-				promptTokens: data.usage.input_tokens,
-				completionTokens: data.usage.output_tokens,
-				totalTokens: data.usage.input_tokens + data.usage.output_tokens,
+				promptTokens: inputTokens,
+				completionTokens: outputTokens,
+				totalTokens: inputTokens + outputTokens,
 			},
 			...(toolCalls.length ? { toolCalls } : {}),
 			...(thinkingBlocks.length ? { thinking: thinkingBlocks } : {}),

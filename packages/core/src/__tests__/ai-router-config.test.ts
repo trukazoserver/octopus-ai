@@ -104,18 +104,16 @@ describe("resolveProviderConfig", () => {
 		expect(config.accessToken).toBe("codex-token");
 	});
 
-	it("uses Vertex-specific base URL env only in Google Vertex mode", () => {
-		process.env.VERTEXAI = "true";
-		process.env.GEMINI_BASE_URL = "https://gemini.example/v1";
+	it("uses Vertex-specific base URL env for the Vertex provider", () => {
 		process.env.GOOGLE_VERTEX_BASE_URL = "https://vertex.example/v1";
 
-		const config = resolveProviderConfig("google", {
-			apiKey: "",
-			authMode: "api-key",
+		const config = resolveProviderConfig("vertex", {
+			projectId: "vertex-project",
 		});
 
 		expect(config.authMode).toBe("vertex");
 		expect(config.baseUrl).toBe("https://vertex.example/v1");
+		expect(config.projectId).toBe("vertex-project");
 	});
 
 	it("accepts inline Google Vertex service account JSON", async () => {

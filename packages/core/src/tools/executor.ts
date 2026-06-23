@@ -10,6 +10,7 @@ import { ToolRateLimiter } from "./rate-limiter.js";
 import type { ToolRateLimitConfig } from "./rate-limiter.js";
 import type { ToolContext, ToolDefinition, ToolResult } from "./registry.js";
 import type { ToolRegistry } from "./registry.js";
+import type { ToolHealthManager } from "./tool-health-manager.js";
 
 const DEFAULT_TOOL_TIMEOUT_MS = 45_000;
 const LONG_RUNNING_TOOL_TIMEOUT_MS = 90_000;
@@ -65,6 +66,7 @@ export class ToolExecutor {
 	private rateLimiter: ToolRateLimiter;
 	private commandApproval: CommandApprovalService;
 	private redactor: SecretRedactor;
+	private health?: ToolHealthManager;
 
 	constructor(
 		registry: ToolRegistry,
@@ -89,6 +91,16 @@ export class ToolExecutor {
 			...config.commandApproval,
 		});
 		this.redactor = config.redactor ?? new SecretRedactor();
+	}
+
+	/** Attach the tool-health/quota registry (enables short-circuit + breaker). */
+	setHealth(health: ToolHealthManager): void {
+		this.health = health;
+	}
+
+	/** Tool-health registry, if attached (runtimes read the summary from here). */
+	getHealth(): ToolHealthManager | undefined {
+		return this.health;
 	}
 
 	updateConfig(config: {
@@ -560,6 +572,35 @@ export class ToolExecutor {
 			}
 		}
 
+		// Tool health / quota steering: skip the handler entirely when the
+		// backing provider is known to be out of quota, and trip the circuit
+		// breaker on repeated failures. This prevents the multi-turn discovery
+		// loop where the model only learns a tool is unavailable by trying it.
+		if (this.health) {
+			const health = await this.health.getStatus(toolName);
+			if (health?.status === "no_quota") {
+				const alt = this.health.alternativeFor(toolName);
+				const when = health.checkedAt
+					? new Date(health.checkedAt).toLocaleTimeString()
+					: "recientemente";
+				return {
+					success: false,
+					output: "",
+					error: `${toolName} no está disponible (sin saldo de API, verificado ${when}).${
+						alt ? ` Usa ${alt} en su lugar.` : ""
+					}`,
+				};
+			}
+			const circuit = this.health.isCircuitOpen(toolName);
+			if (circuit?.open) {
+				return {
+					success: false,
+					output: "",
+					error: `${toolName} tiene el cortacircuitos abierto tras ${circuit.failures} fallos consecutivos. Última causa: ${circuit.lastError || "desconocida"}. Usa una alternativa.`,
+				};
+			}
+		}
+
 		try {
 			const scopedMediaContext = {
 				...mediaContext,
@@ -593,9 +634,12 @@ export class ToolExecutor {
 						executionContext?.abortSignal,
 					),
 			);
-			return await this.normalizeMediaOutput(toolName, result);
+			const normalized = await this.normalizeMediaOutput(toolName, result);
+			this.health?.recordOutcome(toolName, normalized.success, normalized.error);
+			return normalized;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			this.health?.recordOutcome(toolName, false, message);
 			return {
 				success: false,
 				output: "",

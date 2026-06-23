@@ -92,6 +92,8 @@ export interface ProviderConfig {
 	authMode?: string;
 	accessToken?: string;
 	accessTokenEnv?: string;
+	// ChatGPT account id (Codex login) — required by the Codex backend.
+	accountId?: string;
 	credentialsFile?: string;
 	credentialsJson?: string;
 	projectId?: string;

@@ -23,6 +23,9 @@ export class ConfigLoader {
 
 		const raw = readFileSync(this.configPath, "utf-8").replace(/^\uFEFF/, "");
 		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		if (this.migrateGoogleProvider(parsed)) {
+			writeFileSync(this.configPath, JSON.stringify(parsed, null, 2), "utf-8");
+		}
 		const resolved = this.resolveEnvVars(parsed);
 		const merged = this.deepMerge(
 			defaults,
@@ -51,6 +54,63 @@ export class ConfigLoader {
 		}
 
 		writeFileSync(this.configPath, JSON.stringify(config, null, 2), "utf-8");
+	}
+
+	/**
+	 * Migrate the legacy `ai.providers.google` entry into the split `gemini`
+	 * (API key) and `vertex` (service account) providers. Idempotent: no-op when
+	 * no `google` entry is present. Returns true if the config was changed (so
+	 * the caller persists it).
+	 */
+	private migrateGoogleProvider(parsed: Record<string, unknown>): boolean {
+		const ai = parsed.ai as Record<string, unknown> | undefined;
+		const providers = ai?.providers as
+			| Record<string, Record<string, unknown>>
+			| undefined;
+		if (!providers || !providers.google) return false;
+		const g = providers.google;
+		const pick = (obj: Record<string, unknown>, keys: string[]) => {
+			const out: Record<string, unknown> = {};
+			for (const k of keys) if (obj[k] != null) out[k] = obj[k];
+			return out;
+		};
+
+		const isVertex =
+			g.authMode === "vertex" ||
+			g.credentialsFile ||
+			g.projectId ||
+			g.credentialsJson ||
+			g.accessToken ||
+			g.oauthAccessToken;
+
+		// API-key (Gemini) fields.
+		const geminiFields = pick(g, ["apiKey", "apiKeyEnv", "baseUrl", "models"]);
+		if (Object.keys(geminiFields).length > 0 && (g.apiKey || !isVertex)) {
+			providers.gemini = { ...(providers.gemini ?? {}), ...geminiFields };
+		}
+
+		// Vertex fields.
+		if (isVertex) {
+			const vertexFields = pick(g, [
+				"projectId",
+				"location",
+				"credentialsFile",
+				"credentialsJson",
+				"accessToken",
+				"accessTokenEnv",
+				"baseUrl",
+				"oauthAccessToken",
+				"oauthRefreshToken",
+				"oauthClientId",
+				"oauthClientSecret",
+				"oauthExpiresAt",
+				"models",
+			]);
+			providers.vertex = { ...(providers.vertex ?? {}), ...vertexFields };
+		}
+
+		delete providers.google;
+		return true;
 	}
 
 	private resolveEnvVars(obj: unknown): unknown {

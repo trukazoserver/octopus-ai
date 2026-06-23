@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { EventEmitter } from "eventemitter3";
 import WebSocket, { WebSocketServer, type WebSocket as WSWebSocket } from "ws";
 import { type LLMRouter, getProviderRegistry } from "../ai/router.js";
+import { listCodexModels } from "../ai/providers/codex.js";
 import type { UsageStats } from "../ai/types.js";
 import {
 	closeBrowserAuth,
@@ -31,6 +32,11 @@ import {
 	startBrowserAuth,
 } from "../auth/browser-session.js";
 import { prepareVertexProject } from "../auth/google-cloud.js";
+import {
+	getCodexResult,
+	getCodexStatus,
+	startCodexLogin,
+} from "../auth/codex-oauth.js";
 import {
 	createAuthorizationUrl,
 	exchangeCodeForToken,
@@ -1667,28 +1673,54 @@ export class TransportServer {
 		}
 	}
 
-	private handleGetModels(res: ServerResponse): void {
+	private async handleGetModels(res: ServerResponse): Promise<void> {
 		try {
 			const config = this.loadConfig();
 			const router = this.system?.router;
 			const registry = getProviderRegistry();
 			const availableProviders = new Set(router?.getAvailableProviders() ?? []);
-			const providers = Object.entries(config.ai.providers)
-				.filter(([provider]) => availableProviders.has(provider))
-				.map(([provider, providerConfig]) => {
-					const configuredModels =
-						"models" in providerConfig && Array.isArray(providerConfig.models)
-							? providerConfig.models
-							: [];
+			const entries: Array<{
+				provider: string;
+				providerDisplayName: string;
+				models: string[];
+			}> = [];
+			for (const [provider, providerConfig] of Object.entries(
+				config.ai.providers,
+			)) {
+				if (!availableProviders.has(provider)) continue;
+				const pc = providerConfig as Record<string, unknown>;
+				const configuredModels =
+					"models" in providerConfig && Array.isArray(providerConfig.models)
+						? (providerConfig.models as string[])
+						: [];
+				let models: string[];
+				// Codex (ChatGPT account): fetch the live model list from the backend
+				// (= `codex models`) instead of the static api-key defaults.
+				if (
+					provider === "openai" &&
+					pc.authMode === "codex" &&
+					typeof pc.accessToken === "string" &&
+					pc.accessToken
+				) {
+					const live = await listCodexModels(pc.accessToken);
+					models = [...new Set([...configuredModels, ...live])];
+					// Fallback to the registry defaults if the live fetch failed.
+					if (models.length === 0) {
+						models = [...(registry[provider]?.defaultModels ?? [])];
+					}
+				} else {
 					const defaultModels = registry[provider]?.defaultModels ?? [];
-					return {
+					models = [...new Set([...configuredModels, ...defaultModels])];
+				}
+				if (models.length > 0) {
+					entries.push({
 						provider,
 						providerDisplayName: registry[provider]?.displayName ?? provider,
-						models: [...new Set([...configuredModels, ...defaultModels])],
-					};
-				})
-				.filter((entry) => entry.models.length > 0);
-			jsonRes(res, 200, { providers });
+						models,
+					});
+				}
+			}
+			jsonRes(res, 200, { providers: entries });
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -1916,7 +1948,7 @@ export class TransportServer {
 			const configObj = config as unknown as Record<string, unknown>;
 			const providerConfig = (configObj.ai as Record<string, unknown>)
 				.providers as Record<string, unknown>;
-			const prov = (providerConfig.google as Record<string, unknown>) ?? {};
+			const prov = (providerConfig.vertex as Record<string, unknown>) ?? {};
 
 			let accessToken =
 				typeof prov.oauthAccessToken === "string"
@@ -1962,18 +1994,43 @@ export class TransportServer {
 				billingAccountName: parsed.billingAccountName,
 			});
 
-			prov.authMode = "vertex";
 			prov.projectId = result.projectId;
 			prov.location = parsed.location?.trim() || prov.location || "us-central1";
-			prov.oauthAccessToken = accessToken;
-			providerConfig.google = prov;
+
+			// Prefer a self-contained service-account JSON key (stable, no
+			// dependency on the user's OAuth token refresh) when one was created.
+			// Save it under ~/.octopus/credentials and point the provider at it.
+			let credentialsFilePath: string | undefined;
+			if (result.serviceAccountKey) {
+				const credsDir = join(homedir(), ".octopus", "credentials");
+				if (!existsSync(credsDir)) mkdirSync(credsDir, { recursive: true });
+				credentialsFilePath = join(credsDir, "google-service-account.json");
+				writeFileSync(credentialsFilePath, result.serviceAccountKey, {
+					encoding: "utf-8",
+					mode: 0o600,
+				});
+				prov.credentialsFile = credentialsFilePath;
+				prov.credentialsJson = undefined;
+				// Drop the user OAuth token so the provider uses the SA JWT path.
+				prov.oauthAccessToken = undefined;
+				prov.accessToken = undefined;
+			} else {
+				// Fallback: no service account key — use the user OAuth token.
+				prov.oauthAccessToken = accessToken;
+			}
+			providerConfig.vertex = prov;
 			loader.save(config);
 
 			if (this.system?.router) {
 				await this.system.router.reconfigure(config.ai);
 			}
 
-			jsonRes(res, 200, result);
+			// Never echo the raw key JSON back to the client.
+			const { serviceAccountKey: _omitted, ...safeResult } = result;
+			jsonRes(res, 200, {
+				...safeResult,
+				credentialsFile: credentialsFilePath,
+			});
 		} catch (err) {
 			jsonRes(res, 500, {
 				error:
@@ -1988,6 +2045,13 @@ export class TransportServer {
 		provider: string,
 	): Promise<void> {
 		try {
+			// OpenAI uses the Codex OAuth loopback flow (opens the user's default
+			// browser) instead of the controlled-Chromium interception flow.
+			if (provider === "openai") {
+				const result = await startCodexLogin();
+				jsonRes(res, result.ok ? 200 : 400, result);
+				return;
+			}
 			const result = await startBrowserAuth(provider);
 			jsonRes(res, result.ok ? 200 : 400, result);
 		} catch (err) {
@@ -2002,6 +2066,10 @@ export class TransportServer {
 		res: ServerResponse,
 		provider: string,
 	): void {
+		if (provider === "openai") {
+			jsonRes(res, 200, getCodexStatus());
+			return;
+		}
 		const status = getAuthStatus(provider);
 		jsonRes(res, 200, status);
 	}
@@ -2012,6 +2080,46 @@ export class TransportServer {
 		provider: string,
 	): Promise<void> {
 		try {
+			// OpenAI Codex OAuth loopback result. Prefer the API key from the
+			// token-exchange (works against api.openai.com/v1); fall back to the
+			// OAuth access_token for accounts where the exchange fails (e.g. no
+			// organization).
+			if (provider === "openai") {
+				const codex = getCodexResult();
+				if (!codex || (!codex.apiKey && !codex.accessToken)) {
+					jsonRes(res, 400, { error: "No auth result available" });
+					return;
+				}
+				const loader = new ConfigLoader();
+				const config = loader.load();
+				const configObj = config as unknown as Record<string, unknown>;
+				const providerConfig = (configObj.ai as Record<string, unknown>)
+					.providers as Record<string, unknown>;
+				const prov = (providerConfig.openai as Record<string, unknown>) ?? {};
+				if (codex.apiKey) {
+					prov.apiKey = codex.apiKey;
+					prov.authMode = "api-key";
+					prov.accessToken = undefined;
+				} else {
+					prov.accessToken = codex.accessToken;
+					prov.authMode = "codex";
+					prov.apiKey = ""; // apiKey is a required string in the schema
+					if (codex.refreshToken) prov.oauthRefreshToken = codex.refreshToken;
+				}
+				// chatgpt_account_id needed by the Codex backend (Responses/images).
+				if (codex.accountId) prov.accountId = codex.accountId;
+				// Clear stale credentials from the old browser-interception flow.
+				prov.browserCookies = undefined;
+				prov.browserUserAgent = undefined;
+				providerConfig.openai = prov;
+				loader.save(config);
+				if (this.system?.router) {
+					await this.system.router.reconfigure(config.ai);
+				}
+				jsonRes(res, 200, { success: true, hasToken: true });
+				return;
+			}
+
 			const result = getAuthResult(provider);
 			if (!result || !result.success) {
 				jsonRes(res, 400, {

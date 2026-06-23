@@ -227,7 +227,7 @@ const PROVIDERS: ProviderOption[] = [
 	{
 		key: "zhipu",
 		name: "Z.ai / ZhipuAI",
-		url: "https://open.bigmodel.cn/",
+		url: "https://z.ai/",
 		logoDomain: "chat.z.ai",
 		fallbackLabel: "Z.ai",
 		hasMode: true,
@@ -242,9 +242,10 @@ const PROVIDERS: ProviderOption[] = [
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
 		authModes: [
 			{ value: "api-key", label: "API key" },
-			{ value: "codex", label: "Codex" },
-			{ value: "oauth", label: "OAuth (Login)" },
-			{ value: "browser", label: "Browser (Login)" },
+			{
+				value: "codex",
+				label: "Codex (iniciar sesión con cuenta OpenAI/ChatGPT)",
+			},
 		],
 		defaultAuthMode: "api-key",
 		apiKeyEnvPlaceholder: "OPENAI_API_KEY",
@@ -266,20 +267,25 @@ const PROVIDERS: ProviderOption[] = [
 		apiKeyEnvPlaceholder: "ANTHROPIC_API_KEY",
 	},
 	{
-		key: "google",
-		name: "Google (Gemini)",
+		key: "gemini",
+		name: "Google Gemini",
 		url: "https://aistudio.google.com/",
 		logoDomain: "google.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/google.svg",
-		authModes: [
-			{ value: "api-key", label: "API key" },
-			{ value: "vertex", label: "Vertex AI" },
-			{ value: "oauth", label: "OAuth (Login)" },
-			{ value: "browser", label: "Browser (Login)" },
-		],
+		authModes: [{ value: "api-key", label: "API key" }],
 		defaultAuthMode: "api-key",
 		apiKeyEnvPlaceholder: "GEMINI_API_KEY",
+	},
+	{
+		key: "vertex",
+		name: "Google Vertex AI",
+		url: "https://console.cloud.google.com/",
+		logoDomain: "google.com",
+		logoSrc:
+			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/googlecloud.svg",
+		authModes: [{ value: "vertex", label: "Service account / gcloud" }],
+		defaultAuthMode: "vertex",
 	},
 	{
 		key: "deepseek",
@@ -536,7 +542,7 @@ function isProviderConfigured(
 	if (provider.authMode === "oauth") {
 		return hasText(provider.oauthAccessToken);
 	}
-	if (providerInfo?.key === "google" && provider.authMode === "vertex") {
+	if (providerInfo?.key === "vertex") {
 		const vertexProjectId =
 			provider.projectId ||
 			readServiceAccountProjectId(provider.credentialsJson);
@@ -2565,10 +2571,6 @@ export const SettingsPage: React.FC = () => {
 						const prov = providers[p.key] ?? {};
 						const currentAuthMode =
 							prov.authMode ?? p.defaultAuthMode ?? "api-key";
-						const apiKeyEnvPlaceholder =
-							p.key === "openai" && currentAuthMode === "codex"
-								? "CODEX_API_KEY"
-								: p.apiKeyEnvPlaceholder;
 						const configured = isProviderConfigured(prov, p);
 						const apiKeyConfigured = [
 							prov.apiKey,
@@ -2649,7 +2651,7 @@ export const SettingsPage: React.FC = () => {
 												}
 											/>
 										)}
-										{p.key === "google" && currentAuthMode === "vertex" ? (
+										{p.key === "vertex" ? (
 											<>
 												<VertexSetupSection
 													providerConfig={prov}
@@ -2689,7 +2691,9 @@ export const SettingsPage: React.FC = () => {
 												}
 												onTokenSaved={() => refreshConfig()}
 											/>
-										) : currentAuthMode === "browser" ? (
+										) : currentAuthMode === "browser" ||
+										  (p.key === "openai" &&
+												currentAuthMode === "codex") ? (
 											<BrowserLoginSection
 												provider={p.key}
 												providerName={p.name}
@@ -2711,14 +2715,6 @@ export const SettingsPage: React.FC = () => {
 																? "Nueva API Key"
 																: "Introduce tu API Key",
 												})}
-												<Field
-													label="Variable API key"
-													value={prov.apiKeyEnv ?? ""}
-													placeholder={apiKeyEnvPlaceholder}
-													onChange={(v) =>
-														save(`ai.providers.${p.key}.apiKeyEnv`, v)
-													}
-												/>
 												{p.key === "openai" && currentAuthMode === "codex" && (
 													<>
 														{renderSecretEditor({
@@ -2729,14 +2725,6 @@ export const SettingsPage: React.FC = () => {
 																? "Nuevo access token"
 																: "Access token Codex",
 														})}
-														<Field
-															label="Variable access token"
-															value={prov.accessTokenEnv ?? ""}
-															placeholder="CODEX_ACCESS_TOKEN"
-															onChange={(v) =>
-																save(`ai.providers.${p.key}.accessTokenEnv`, v)
-															}
-														/>
 													</>
 												)}
 											</>
@@ -2747,13 +2735,12 @@ export const SettingsPage: React.FC = () => {
 									<div style={{ marginTop: 8 }}>
 										<Select
 											label="Modo de Operación"
-											value={prov.mode ?? "coding-plan"}
-											options={[
-												"api",
-												"coding-plan",
-												"coding-global",
-												"global",
-											]}
+											value={prov.mode ?? "coding-global"}
+											options={["coding-global", "global"]}
+											optionLabels={{
+												"coding-global": "Coding Plan",
+												global: "Global",
+											}}
 											onChange={(v) => save(`ai.providers.${p.key}.mode`, v)}
 										/>
 									</div>

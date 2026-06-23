@@ -11,6 +11,7 @@ import {
 	OpenAICompatibleProvider,
 } from "./providers/openai-compatible.js";
 import { OpenAIProvider } from "./providers/openai.js";
+import { CodexProvider } from "./providers/codex.js";
 import { ZhipuProvider } from "./providers/zhipu.js";
 import type {
 	LLMChunk,
@@ -86,7 +87,7 @@ function resolveZhipuMode(config: ProviderConfig): string {
 	if (process.env.ZHIPU_CODING_API_KEY) return "coding-plan";
 	if (process.env.ZAI_API_KEY) return "global";
 	if (process.env.ZHIPU_API_KEY) return "api";
-	return configuredMode ?? "coding-plan";
+	return configuredMode ?? "coding-global";
 }
 
 export function resolveProviderConfig(
@@ -139,16 +140,10 @@ export function resolveProviderConfig(
 					process.env.ANTHROPIC_BASE_URL,
 				),
 			};
-		case "google": {
-			const authMode = envOverridesDefault(
-				withConfiguredEnv.authMode,
-				"api-key",
-				process.env.GOOGLE_AUTH_MODE,
-				process.env.VERTEXAI === "true" ? "vertex" : undefined,
-			);
+		case "gemini": {
 			return {
 				...withConfiguredEnv,
-				authMode,
+				authMode: "api-key" as const,
 				apiKey: firstNonEmpty(
 					withConfiguredEnv.apiKey,
 					process.env.GEMINI_API_KEY,
@@ -156,10 +151,14 @@ export function resolveProviderConfig(
 				),
 				baseUrl: firstNonEmpty(
 					withConfiguredEnv.baseUrl,
-					authMode === "vertex"
-						? process.env.GOOGLE_VERTEX_BASE_URL
-						: firstEnv("GOOGLE_BASE_URL", "GEMINI_BASE_URL"),
+					firstEnv("GOOGLE_BASE_URL", "GEMINI_BASE_URL"),
 				),
+			};
+		}
+		case "vertex": {
+			return {
+				...withConfiguredEnv,
+				authMode: "vertex" as const,
 				projectId: firstNonEmpty(
 					withConfiguredEnv.projectId,
 					process.env.GOOGLE_CLOUD_PROJECT,
@@ -169,6 +168,11 @@ export function resolveProviderConfig(
 					withConfiguredEnv.location,
 					process.env.GOOGLE_CLOUD_LOCATION,
 					process.env.GOOGLE_CLOUD_REGION,
+					"us-central1",
+				),
+				baseUrl: firstNonEmpty(
+					withConfiguredEnv.baseUrl,
+					process.env.GOOGLE_VERTEX_BASE_URL,
 				),
 				accessToken: firstNonEmpty(
 					withConfiguredEnv.accessToken,
@@ -336,16 +340,28 @@ const PROVIDER_REGISTRY: Record<
 > = {
 	openai: {
 		displayName: "OpenAI",
-		factory: (c) => new OpenAIProvider(c),
+		// When authenticated via Codex (ChatGPT account), route to the Codex
+		// backend (Responses API) instead of api.openai.com/v1.
+		factory: (c) =>
+			c.authMode === "codex" && c.accessToken
+				? new CodexProvider(c)
+				: new OpenAIProvider(c),
 		defaultBaseUrl: "https://api.openai.com/v1",
 		openAICompatible: true,
 		supportsTools: true,
 		supportsVision: true,
 		supportsReasoning: true,
 		hasOAuth: true,
-		hasCodingPlan: false,
+		hasCodingPlan: true,
 		hasFreeTier: false,
-		defaultModels: ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
+		defaultModels: [
+			"gpt-5.5",
+			"gpt-5.4",
+			"gpt-5.4-mini",
+			"gpt-4.1",
+			"gpt-4o",
+			"gpt-4o-mini",
+		],
 	},
 	anthropic: {
 		displayName: "Anthropic",
@@ -360,23 +376,38 @@ const PROVIDER_REGISTRY: Record<
 		hasFreeTier: false,
 		defaultModels: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
 	},
-	google: {
+	gemini: {
 		displayName: "Google Gemini",
-		factory: (c) => new GoogleProvider(c),
+		factory: (c) => new GoogleProvider({ ...c, authMode: "api-key" }),
 		defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
 		openAICompatible: true,
 		supportsTools: true,
 		supportsVision: true,
 		supportsReasoning: true,
-		hasOAuth: true,
+		hasOAuth: false,
 		hasCodingPlan: false,
 		hasFreeTier: true,
+		defaultModels: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+	},
+	vertex: {
+		displayName: "Google Vertex AI",
+		factory: (c) => new GoogleProvider({ ...c, authMode: "vertex" }),
+		defaultBaseUrl: "https://us-central1-aiplatform.googleapis.com/v1",
+		openAICompatible: true,
+		supportsTools: true,
+		supportsVision: true,
+		supportsReasoning: true,
+		hasOAuth: false,
+		hasCodingPlan: false,
+		hasFreeTier: false,
 		defaultModels: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
 	},
 	zhipu: {
 		displayName: "Z.ai / ZhipuAI (GLM)",
 		factory: (c) => new ZhipuProvider(c),
-		defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+		// Metadata only (not consumed at runtime — the endpoint is derived from
+		// `mode` in ZhipuProvider). Matches the default mode (coding-global).
+		defaultBaseUrl: "https://api.z.ai/api/coding/paas/v4",
 		openAICompatible: true,
 		supportsTools: true,
 		supportsVision: true,

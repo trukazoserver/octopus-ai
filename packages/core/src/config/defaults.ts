@@ -47,14 +47,18 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 				authMode: "api-key",
 				models: ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
 			},
-			google: {
+			gemini: {
 				apiKey: "",
-				authMode: "api-key",
-				models: ["gemini-2.5-pro", "gemini-2.5-flash"],
+				models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+			},
+			vertex: {
+				projectId: "",
+				location: "us-central1",
+				models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
 			},
 			zhipu: {
 				apiKey: "",
-				mode: "coding-plan",
+				mode: "coding-global",
 				models: [
 					"glm-5.2",
 					"glm-5.1",
@@ -334,6 +338,13 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			},
 			byTool: {},
 		},
+	},
+	webToolsHealth: {
+		enabled: true,
+		probeOnStartup: true,
+		probeCron: "17 3 * * *",
+		cacheTtlMinutes: 360,
+		breaker: { consecutiveFailures: 4, windowMinutes: 10 },
 	},
 	orchestration: {
 		enabled: true,

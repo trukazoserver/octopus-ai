@@ -1057,6 +1057,162 @@ export class BrowserTool {
 		return state.blocked;
 	}
 
+	/**
+	 * Web search via the real browser, used as a fallback when the web_search
+	 * API (Z.ai) is out of quota. Tries Google, then Bing, then DuckDuckGo. On a
+	 * block (CAPTCHA/challenge), it clears the host session and retries once
+	 * before moving to the next engine. Reuses the stealth browser, session
+	 * persistence, proxy/fallback provider and block detection already in place.
+	 */
+	private async searchViaBrowser(
+		query: string,
+		engines: string[],
+		maxResults: number,
+	): Promise<{
+		engine: string | null;
+		results: Array<{ title: string; url: string }>;
+		blocked: boolean;
+		retried: boolean;
+		error?: string;
+	}> {
+		const engineBuilders: Array<{
+			name: string;
+			url: (q: string) => string;
+		}> = [
+			{
+				name: "google",
+				url: (q) =>
+					`https://www.google.com/search?q=${encodeURIComponent(q)}&hl=es&num=20`,
+			},
+			{
+				name: "bing",
+				url: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
+			},
+			{
+				name: "duckduckgo",
+				url: (q) => `https://duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
+			},
+		];
+		const wanted = engines.length > 0 ? engines : ["google", "bing", "duckduckgo"];
+		const ordered = engineBuilders.filter((e) => wanted.includes(e.name));
+		let lastError = "";
+
+		for (const engine of ordered) {
+			const target = engine.url(query);
+			let blocked = false;
+			let retried = false;
+			try {
+				await this.gotoWithSession(target, {
+					waitUntil: "domcontentloaded",
+					timeout: 30000,
+				});
+				await this.randomDelay(800, 2200);
+				blocked = await this.isCurrentPageBlocked();
+				if (blocked) {
+					// Clear the host session and retry once on a clean session.
+					retried = true;
+					await this.clearCookiesForCurrentHost();
+					await this.gotoWithSession(target, {
+						waitUntil: "domcontentloaded",
+						timeout: 30000,
+					});
+					await this.randomDelay(800, 2200);
+					blocked = await this.isCurrentPageBlocked();
+					if (blocked) {
+						lastError = `${engine.name} returned a block/challenge after retry`;
+						continue;
+					}
+				}
+				const results = await this.extractSerpResults(maxResults);
+				if (results.length > 0) {
+					return { engine: engine.name, results, blocked, retried };
+				}
+				lastError = `${engine.name} returned no parseable results`;
+			} catch (err) {
+				lastError = err instanceof Error ? err.message : String(err);
+			}
+		}
+		return {
+			engine: null,
+			results: [],
+			blocked: false,
+			retried: false,
+			error: lastError,
+		};
+	}
+
+	private async clearCookiesForCurrentHost(): Promise<void> {
+		if (!this.context || !this.page) return;
+		try {
+			const host = hostnameFromUrl(this.page.url());
+			if (!host) return;
+			// clearCookies accepts a URL filter (domain/path) in Playwright.
+			await (this.context as {
+				clearCookies: (filter?: { domain?: string }) => Promise<void>;
+			}).clearCookies({ domain: host });
+		} catch {
+			// Best-effort; not all contexts support filtered clearing.
+		}
+	}
+
+	/** Extract {title, url} search-result links from a SERP page. */
+	private async extractSerpResults(
+		maxResults: number,
+	): Promise<Array<{ title: string; url: string }>> {
+		if (!this.page) return [];
+		const raw = await this.page
+			.evaluate(() => {
+				const internalHints = [
+					"google.",
+					"bing.",
+					"duckduckgo",
+					"youtube.com",
+					"googleapis.",
+					"gstatic.",
+					"msn.",
+				];
+				const out: Array<{ title: string; url: string }> = [];
+				const seen = new Set<string>();
+				const anchors = Array.from(document.querySelectorAll("a[href]"));
+				for (const a of anchors) {
+					let href = (a as HTMLAnchorElement).href;
+					if (!href) continue;
+					const heading =
+						a.querySelector("h3, h2") as HTMLElement | null;
+					const text = (
+						heading?.innerText ||
+						(a as HTMLElement).innerText ||
+						a.getAttribute("aria-label") ||
+						""
+					)
+						.replace(/\s+/g, " ")
+						.trim();
+					if (!text || text.length < 5) continue;
+					const rect = (a as HTMLElement).getBoundingClientRect();
+					if (rect.width === 0 || rect.height === 0) continue;
+					try {
+						const u = new URL(href);
+						// Google wraps results as /url?q=<real>; unwrap to the target.
+						if (u.pathname === "/url") {
+							const q = u.searchParams.get("q");
+							if (q) href = new URL(q).href;
+						}
+						const finalHost = new URL(href).hostname;
+						if (internalHints.some((h) => finalHost.includes(h))) continue;
+					} catch {
+						continue;
+					}
+					if (seen.has(href)) continue;
+					seen.add(href);
+					out.push({ title: text.slice(0, 160), url: href });
+					if (out.length >= Math.max(maxResults * 2, 20)) break;
+				}
+				return out;
+			})
+			.catch(() => []);
+		return raw.slice(0, maxResults);
+	}
+
 	private async saveSessionForCurrentPage(): Promise<boolean> {
 		const session = this.getSessionConfig();
 		if (!session.enabled || !this.context || !this.page) return false;
@@ -4251,6 +4407,23 @@ export class BrowserTool {
 							};
 						}
 
+						// PDF: Chromium's PDF viewer renders the file but exposes no
+						// text in the DOM, so a snapshot would be empty. Steer the agent
+						// to pdf_read, which extracts text (+ OCR) directly from the file.
+						const contentType = await this.page
+							.evaluate(() => document.contentType)
+							.catch(() => "");
+						const isPdf =
+							contentType === "application/pdf" ||
+							/\.pdf(\?|#|$)/i.test(finalUrl);
+						if (isPdf) {
+							return {
+								success: true,
+								output: `Navigated to ${finalUrl}, which is a PDF. The browser cannot extract PDF text. Use the \`pdf_read\` tool with source="${finalUrl}" to read its content (it also OCRs scanned pages).`,
+								metadata: { pdf: true, url: finalUrl, title },
+							};
+						}
+
 						const blockOutput = blockDetection?.output
 							? `\n\n${blockDetection.output}`
 							: "";
@@ -4260,6 +4433,83 @@ export class BrowserTool {
 						return {
 							success: true,
 							output: `Successfully navigated. Page title: "${title}" | Current URL: ${finalUrl}${navigationWarning}${blockOutput}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
+						};
+					} catch (error) {
+						return {
+							success: false,
+							output: "",
+							error: error instanceof Error ? error.message : String(error),
+						};
+					}
+				},
+			},
+			{
+				name: "browser_search",
+				description:
+					"Search the web using the real browser (Google -> Bing -> DuckDuckGo). Use as the fallback when the web_search API tool is out of quota or unavailable. Returns a list of {title,url} results. On a CAPTCHA/block it clears the session, retries once, then falls to the next engine. After getting results, use browser_navigate (or webReader/pdf_read) to read the pages.",
+				uiIcon: BROWSER_SVG,
+				parameters: {
+					query: {
+						type: "string",
+						description: "The search query.",
+						required: true,
+					},
+					maxResults: {
+						type: "number",
+						description: "Maximum number of results to return (default 8).",
+						required: false,
+					},
+					engines: {
+						type: "array",
+						description:
+							"Ordered engine names to try. Any of 'google','bing','duckduckgo'. Default: ['google','bing','duckduckgo'].",
+						required: false,
+					},
+				},
+				handler: async (
+					params: Record<string, unknown>,
+				): Promise<ToolResult> => {
+					try {
+						const query = String(params.query ?? "").trim();
+						if (!query) {
+							return {
+								success: false,
+								output: "",
+								error: "Missing 'query' parameter.",
+							};
+						}
+						const maxResults = Number(params.maxResults) || 8;
+						const engines = Array.isArray(params.engines)
+							? (params.engines.filter((e) => typeof e === "string") as string[])
+							: [];
+						await this.init();
+						const outcome = await this.searchViaBrowser(
+							query,
+							engines,
+							maxResults,
+						);
+						const lines = outcome.results.map(
+							(r, i) => `${i + 1}. ${r.title}\n   ${r.url}`,
+						);
+						const header = outcome.engine
+							? `Search via ${outcome.engine}${
+									outcome.retried ? " (after retry on a clean session)" : ""
+								}; ${outcome.results.length} result(s).${
+									outcome.blocked ? " (page still showed block signals)" : ""
+								}`
+							: `Search produced no results on any engine. Last issue: ${
+									outcome.error || "unknown"
+								}`;
+						return {
+							success: true,
+							output: `${header}\n\n${lines.join("\n\n")}`,
+							metadata: {
+								engine: outcome.engine,
+								count: outcome.results.length,
+								blocked: outcome.blocked,
+								retried: outcome.retried,
+								query,
+							},
 						};
 					} catch (error) {
 						return {

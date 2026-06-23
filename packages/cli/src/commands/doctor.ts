@@ -126,7 +126,7 @@ async function runChecks(): Promise<CheckResult[]> {
 		apiKeyConfig = {
 			hasAnthropic: config.ai.providers.anthropic.apiKey.length > 0,
 			hasOpenai: config.ai.providers.openai.apiKey.length > 0,
-			hasGoogle: config.ai.providers.google.apiKey.length > 0,
+			hasGoogle: config.ai.providers.gemini.apiKey.length > 0,
 			hasZhipu: config.ai.providers.zhipu.apiKey.length > 0,
 			hasDeepseek: config.ai.providers.deepseek.apiKey.length > 0,
 			hasMistral: config.ai.providers.mistral.apiKey.length > 0,

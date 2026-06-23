@@ -1,6 +1,16 @@
 export { ToolRegistry } from "./registry.js";
 export { ToolExecutor } from "./executor.js";
 export type { ToolDefinition, ToolResult } from "./registry.js";
+export { ToolHealthManager } from "./tool-health-manager.js";
+export type {
+	ToolHealthStatus,
+	ToolHealthRecord,
+	ToolHealthConfig,
+	ToolHealthMcpCaller,
+	ToolCircuitState,
+} from "./tool-health-manager.js";
+export { PdfReader } from "./pdf-reader.js";
+export type { PdfReaderConfig, PdfExtractionResult } from "./pdf-reader.js";
 export { createFileSystemTools } from "./filesystem.js";
 export { createShellTool } from "./shell.js";
 export { DockerSandbox } from "./sandbox.js";
@@ -20,6 +30,7 @@ export { createTeamCommTools } from "./team-comm.js";
 export { createAgentCommsTools } from "./agent-comms.js";
 export { createAgentSpawnTools } from "./agent-spawn.js";
 export { createKanbanCardTools } from "./kanban-cards.js";
+export { createCodexImageTools } from "./codex-image.js";
 
 // Stealth browsing
 export { ProxyManager } from "./proxy-manager.js";

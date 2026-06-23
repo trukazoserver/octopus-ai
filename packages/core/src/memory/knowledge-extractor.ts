@@ -143,7 +143,9 @@ function selectOpenAIVisionModel(aiConfig: LLMRouterConfig): string {
 }
 
 function selectGoogleVisionModel(aiConfig: LLMRouterConfig): string {
-	const configured = aiConfig.providers.google?.models?.[0];
+	const configured =
+		aiConfig.providers.gemini?.models?.[0] ??
+		aiConfig.providers.vertex?.models?.[0];
 	if (!configured) return "google/gemini-2.5-flash";
 	return configured.startsWith("google/") ? configured : `google/${configured}`;
 }
@@ -168,7 +170,13 @@ function selectExtractorCandidates(aiConfig: LLMRouterConfig): Array<"openai" | 
 function providerFromModel(model?: string): "openai" | "google" | null {
 	if (!model) return null;
 	if (model.startsWith("openai/")) return "openai";
-	if (model.startsWith("google/")) return "google";
+	if (
+		model.startsWith("google/") ||
+		model.startsWith("gemini/") ||
+		model.startsWith("vertex/")
+	) {
+		return "google";
+	}
 	return null;
 }
 
@@ -186,15 +194,15 @@ function hasOpenAICredentials(aiConfig: LLMRouterConfig): boolean {
 }
 
 function hasGoogleCredentials(aiConfig: LLMRouterConfig): boolean {
-	const google = aiConfig.providers.google;
+	const gemini = aiConfig.providers.gemini;
+	const vertex = aiConfig.providers.vertex;
 	return Boolean(
-		google?.apiKey ||
-			readConfiguredEnv(google?.apiKeyEnv) ||
-			google?.accessToken ||
-			readConfiguredEnv(google?.accessTokenEnv) ||
-			google?.credentialsJson ||
-			google?.credentialsFile ||
-			google?.oauthAccessToken ||
+		gemini?.apiKey ||
+			readConfiguredEnv(gemini?.apiKeyEnv) ||
+			vertex?.accessToken ||
+			readConfiguredEnv(vertex?.accessTokenEnv) ||
+			vertex?.credentialsJson ||
+			vertex?.credentialsFile ||
 			process.env.GEMINI_API_KEY ||
 			process.env.GOOGLE_API_KEY ||
 			process.env.GOOGLE_VERTEX_ACCESS_TOKEN ||

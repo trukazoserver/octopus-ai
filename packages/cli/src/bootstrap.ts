@@ -57,6 +57,8 @@ import {
 	TokenCounter,
 	ToolExecutor,
 	ToolRegistry,
+	ToolHealthManager,
+	PdfReader,
 	UserProfileManager,
 	WorkflowManager,
 	WorkflowScheduler,
@@ -68,6 +70,7 @@ import {
 	createFileSystemTools,
 	createKanbanCardTools,
 	createLogger,
+	createCodexImageTools,
 	createMediaTools,
 	createSandboxTools,
 	createShellTool,
@@ -115,6 +118,7 @@ export interface OctopusSystem {
 	pluginMarketplace: PluginMarketplace;
 	toolRegistry: ToolRegistry;
 	toolExecutor: ToolExecutor;
+	toolHealth: ToolHealthManager;
 	codeExecutor: CodeExecutor;
 	chatManager: ChatManager;
 	agentManager: AgentManager;
@@ -454,7 +458,28 @@ export function createEmbeddingProvider(
 	const zhipuMode = providers.zhipu?.mode;
 	const zhipuSupportsAutoEmbeddings =
 		zhipuMode !== "coding-plan" && zhipuMode !== "coding-global";
-	const googleProvider = optionalProviders.google ?? {};
+	const geminiProvider = optionalProviders.gemini ?? {};
+	const vertexProviderCfg = optionalProviders.vertex ?? {};
+	// Merged view: api-key fields come from the `gemini` provider, Vertex
+	// fields from the `vertex` provider (they used to live under `google`).
+	const googleProvider = {
+		apiKey: geminiProvider.apiKey,
+		apiKeyEnv: geminiProvider.apiKeyEnv,
+		baseUrl: geminiProvider.baseUrl ?? vertexProviderCfg.baseUrl,
+		authMode:
+			vertexProviderCfg.projectId ||
+			vertexProviderCfg.credentialsFile ||
+			vertexProviderCfg.credentialsJson ||
+			vertexProviderCfg.accessToken
+				? "vertex"
+				: "api-key",
+		accessToken: vertexProviderCfg.accessToken,
+		accessTokenEnv: vertexProviderCfg.accessTokenEnv,
+		credentialsFile: vertexProviderCfg.credentialsFile,
+		credentialsJson: vertexProviderCfg.credentialsJson,
+		projectId: vertexProviderCfg.projectId,
+		location: vertexProviderCfg.location,
+	};
 	const googleAuthMode: AuthMode =
 		embeddingConfig.authMode === "vertex" ||
 		googleProvider.authMode === "vertex"
@@ -539,7 +564,7 @@ export function createEmbeddingProvider(
 		if (authMode === "api-key") {
 			if (!googleApiKey) {
 				throw new Error(
-					"Google Gemini embeddings are enabled but no API key was found. Set memory.embeddings.apiKeyEnv to GEMINI_API_KEY, set ai.providers.google.apiKey, or export GEMINI_API_KEY/GOOGLE_API_KEY.",
+					"Google Gemini embeddings are enabled but no API key was found. Set memory.embeddings.apiKeyEnv to GEMINI_API_KEY, set ai.providers.gemini.apiKey, or export GEMINI_API_KEY/GOOGLE_API_KEY.",
 				);
 			}
 			apiKey = googleApiKey;
@@ -584,7 +609,7 @@ export function createEmbeddingProvider(
 			);
 			if (!projectId) {
 				throw new Error(
-					"Google Vertex embeddings are enabled but no project ID was found. Set memory.embeddings.projectId, ai.providers.google.projectId, or GOOGLE_CLOUD_PROJECT.",
+					"Google Vertex embeddings are enabled but no project ID was found. Set memory.embeddings.projectId, ai.providers.vertex.projectId, or GOOGLE_CLOUD_PROJECT.",
 				);
 			}
 			if (
@@ -594,7 +619,7 @@ export function createEmbeddingProvider(
 				!credentialsJson
 			) {
 				throw new Error(
-					"Google Vertex embeddings are enabled but no credentials were found. Set memory.embeddings.accessTokenEnv, ai.providers.google.accessTokenEnv, GOOGLE_VERTEX_ACCESS_TOKEN, GOOGLE_ACCESS_TOKEN, or GOOGLE_APPLICATION_CREDENTIALS.",
+					"Google Vertex embeddings are enabled but no credentials were found. Set memory.embeddings.accessTokenEnv, ai.providers.vertex.accessTokenEnv, GOOGLE_VERTEX_ACCESS_TOKEN, GOOGLE_ACCESS_TOKEN, or GOOGLE_APPLICATION_CREDENTIALS.",
 				);
 			}
 		}
@@ -1207,6 +1232,17 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		redactor,
 	});
 
+	// PDF reader: extract text from PDFs (the browser can open but not read
+	// them). OCR fallback for scanned PDFs runs when the native canvas module is
+	// available. Registered unconditionally; no browser required.
+	const pdfReader = new PdfReader({
+		urlPolicy: config.security.urlPolicy,
+		allowedLocalRoots: allowedPaths,
+	});
+	for (const tool of pdfReader.createTools()) {
+		registerSystemTool(tool);
+	}
+
 	// Skill researcher (Context7 → web → browser) for fresh-info-grounded skills.
 	// Wired after the tool executor exists; forge/improver are already shared with
 	// the LearningEngine by reference, so setDeps propagates to skill creation.
@@ -1240,6 +1276,11 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 
 	const mediaTools = createMediaTools(allowedPaths);
 	for (const tool of mediaTools) {
+		registerSystemTool(tool);
+	}
+
+	// Codex image generation (uses the ChatGPT-account token from Codex login).
+	for (const tool of createCodexImageTools()) {
 		registerSystemTool(tool);
 	}
 
@@ -1679,6 +1720,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			commandApproval,
 			redactor,
 		});
+		workerToolExecutor.setHealth(toolHealth);
 		workerRuntime.setToolSystem(workerToolRegistry, workerToolExecutor);
 		workerRuntime.setLearningEngine(learningEngine);
 		workerRuntime.setMemoryOrchestrator(memoryOrchestrator);
@@ -2044,22 +2086,47 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		}
 	}
 
-	const zhipuApiKey = (
-		config.ai.providers as Record<string, { apiKey?: string }>
-	)?.zhipu?.apiKey;
+	// Resolve the Z.ai/Zhipu API key from any of the configured sources: the
+	// coding-plan key, the normal API key, its env-var name, or the well-known
+	// env vars. This makes all four Z.ai MCP servers activate automatically
+	// regardless of whether the user configured the normal key or the coding
+	// plan key.
+	const zhipuProvider = (
+		config.ai.providers as Record<string, Record<string, unknown>>
+	)?.zhipu as
+		| {
+				apiKey?: string;
+				codingApiKey?: string;
+				apiKeyEnv?: string;
+				mode?: string;
+		  }
+		| undefined;
+	const isZhipuCodingMode =
+		zhipuProvider?.mode === "coding-plan" ||
+		zhipuProvider?.mode === "coding-global";
+	const zhipuApiKey = firstNonEmpty(
+		isZhipuCodingMode ? zhipuProvider?.codingApiKey : zhipuProvider?.apiKey,
+		zhipuProvider?.codingApiKey,
+		zhipuProvider?.apiKey,
+		readConfiguredEnv(zhipuProvider?.apiKeyEnv),
+		process.env.ZHIPU_API_KEY,
+		process.env.Z_AI_API_KEY,
+		process.env.ZAI_API_KEY,
+	);
 	const mcpAutoDisabled = (config.mcp?.autoDisabled || []) as string[];
 	if (zhipuApiKey) {
 		const officialZaiConfigs = getZaiMCPConfigs(zhipuApiKey);
 		config.mcp = config.mcp ?? { servers: {}, autoDisabled: [] };
 		config.mcp.servers = config.mcp.servers ?? {};
+		// Force-enable every official Z.ai server each boot so "all MCPs
+		// activate" holds; users disable via the mcp.autoDisabled list.
 		for (const [serverName, officialConfig] of Object.entries(
 			officialZaiConfigs,
 		)) {
 			if (mcpAutoDisabled.includes(serverName)) continue;
-			const previousEnabled = config.mcp.servers[serverName]?.enabled;
 			config.mcp.servers[serverName] = {
 				...officialConfig,
-				enabled: previousEnabled ?? true,
+				enabled: true,
 			};
 		}
 		try {
@@ -2090,6 +2157,26 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 				);
 			}
 		}
+	}
+
+	// Web tool health/quota: probe the Z.ai search + reader servers (startup +
+	// daily cron) so the agent steers straight to a fallback (browser_search /
+	// pdf_read) instead of discovering an out-of-quota failure at call time.
+	const toolHealth = new ToolHealthManager(db, mcpManager, {
+		enabled: config.webToolsHealth?.enabled ?? true,
+		cacheTtlMinutes: config.webToolsHealth?.cacheTtlMinutes ?? 360,
+		breaker: config.webToolsHealth?.breaker ?? {
+			consecutiveFailures: 4,
+			windowMinutes: 10,
+		},
+	});
+	toolExecutor.setHealth(toolHealth);
+	if (config.webToolsHealth?.probeOnStartup !== false) {
+		await toolHealth
+			.runProbe()
+			.catch((e: unknown) =>
+				console.error("[ToolHealth] startup probe failed:", e),
+			);
 	}
 
 	const agentConfig: AgentConfig = {
@@ -2599,6 +2686,20 @@ Always be concise, helpful, and thorough.`,
 	);
 	memoryRetentionScheduler.start();
 
+	// Re-probe web tool quota on a schedule (default daily ~03:17) so the
+	// cached health stays fresh and the agent keeps steering correctly.
+	systemScheduler.schedule(
+		"web-tools-health",
+		config.webToolsHealth?.probeCron ?? "17 3 * * *",
+		async () => {
+			try {
+				await toolHealth.runProbe();
+			} catch (e) {
+				bootstrapLogger.error(`Tool health scheduled probe failed: ${e}`);
+			}
+		},
+	);
+
 	systemScheduler.schedule("daily-memory-dump", "0 0 * * *", async () => {
 		try {
 			bootstrapLogger.info("Executing End-of-Day Global Memory Flush...");
@@ -2666,6 +2767,7 @@ Always be concise, helpful, and thorough.`,
 		pluginRegistry,
 		pluginMarketplace,
 		codeExecutor,
+		toolHealth,
 		toolRegistry,
 		chatManager,
 		agentManager,
@@ -2692,6 +2794,7 @@ Always be concise, helpful, and thorough.`,
 			memoryRetentionScheduler.stop();
 			systemScheduler.cancel("workflow-resume");
 			systemScheduler.cancel("daily-memory-dump");
+			systemScheduler.cancel("web-tools-health");
 			await mcpManager.shutdown();
 			connectionManager.shutdown();
 			await db.close();

@@ -116,7 +116,7 @@ export function createSetupCommand(): Command {
 					config.ai.providers.zhipu.apiKey = zhipuKey;
 				}
 				if (googleKey) {
-					config.ai.providers.google.apiKey = googleKey;
+					config.ai.providers.gemini.apiKey = googleKey;
 				}
 				if (openrouterKey) {
 					config.ai.providers.openrouter.apiKey = openrouterKey;

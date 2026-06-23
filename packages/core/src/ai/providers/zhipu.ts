@@ -62,7 +62,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 
 	constructor(config: ProviderConfig & { mode?: string }) {
 		super(config);
-		this.mode = isZhipuApiMode(config.mode) ? config.mode : "coding-plan";
+		this.mode = isZhipuApiMode(config.mode) ? config.mode : "coding-global";
 		this.baseUrl = (config.baseUrl ?? ZHIPU_ENDPOINTS[this.mode]).replace(
 			/\/+$/,
 			"",

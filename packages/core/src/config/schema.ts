@@ -108,6 +108,9 @@ const OpenAIProviderSchema = Type.Object({
 	),
 	accessToken: Type.Optional(Type.String()),
 	accessTokenEnv: Type.Optional(Type.String()),
+	// ChatGPT account id (from the Codex login id_token) — required by the Codex
+	// backend (Responses API + image generation) when authMode is "codex".
+	accountId: Type.Optional(Type.String()),
 	oauthClientId: Type.Optional(Type.String()),
 	oauthClientSecret: Type.Optional(Type.String()),
 	oauthAccessToken: Type.Optional(Type.String()),
@@ -120,35 +123,59 @@ const OpenAIProviderSchema = Type.Object({
 	}),
 });
 
-const GoogleProviderSchema = Type.Object({
+// Google Gemini — API key only (separate from Vertex AI).
+const GeminiProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
 	apiKeyEnv: Type.Optional(Type.String()),
 	baseUrl: Type.Optional(Type.String()),
-	authMode: Type.Optional(
-		Type.Union([
-			Type.Literal("api-key"),
-			Type.Literal("vertex"),
-			Type.Literal("oauth"),
-			Type.Literal("browser"),
-		]),
-	),
+	models: Type.Array(Type.String(), {
+		default: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+	}),
+});
+
+// Google Vertex AI — service account / gcloud credentials.
+const VertexProviderSchema = Type.Object({
+	projectId: Type.Optional(Type.String()),
+	location: Type.Optional(Type.String()),
+	credentialsFile: Type.Optional(Type.String()),
+	credentialsJson: Type.Optional(Type.String()),
+	accessToken: Type.Optional(Type.String()),
+	accessTokenEnv: Type.Optional(Type.String()),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.Optional(Type.String()),
+	// Transient OAuth fields used during auto-provisioning (replaced by the
+	// service-account key once created).
+	oauthAccessToken: Type.Optional(Type.String()),
+	oauthRefreshToken: Type.Optional(Type.String()),
+	oauthClientId: Type.Optional(Type.String()),
+	oauthClientSecret: Type.Optional(Type.String()),
+	oauthExpiresAt: Type.Optional(Type.Number()),
+	models: Type.Array(Type.String(), {
+		default: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+	}),
+});
+
+// Legacy shape kept only so the config loader can read & migrate old
+// `ai.providers.google` entries into `gemini` / `vertex`.
+const GoogleProviderSchema = Type.Object({
+	apiKey: Type.Optional(Type.String()),
+	apiKeyEnv: Type.Optional(Type.String()),
+	baseUrl: Type.Optional(Type.String()),
+	authMode: Type.Optional(Type.String()),
 	accessToken: Type.Optional(Type.String()),
 	accessTokenEnv: Type.Optional(Type.String()),
 	credentialsFile: Type.Optional(Type.String()),
 	credentialsJson: Type.Optional(Type.String()),
 	projectId: Type.Optional(Type.String()),
 	location: Type.Optional(Type.String()),
-	oauthClientId: Type.Optional(Type.String()),
-	oauthClientSecret: Type.Optional(Type.String()),
 	oauthAccessToken: Type.Optional(Type.String()),
 	oauthRefreshToken: Type.Optional(Type.String()),
+	oauthClientId: Type.Optional(Type.String()),
+	oauthClientSecret: Type.Optional(Type.String()),
 	oauthExpiresAt: Type.Optional(Type.Number()),
-	browserCookies: Type.Optional(Type.String()),
-	browserUserAgent: Type.Optional(Type.String()),
-	models: Type.Array(Type.String(), {
-		default: ["gemini-2.5-pro", "gemini-2.5-flash"],
-	}),
+	models: Type.Optional(Type.Array(Type.String())),
 });
+
 
 const ZhipuProviderSchema = Type.Object({
 	apiKey: Type.String({ default: "" }),
@@ -163,7 +190,7 @@ const ZhipuProviderSchema = Type.Object({
 			Type.Literal("coding-global"),
 			Type.Literal("global"),
 		],
-		{ default: "coding-plan" },
+		{ default: "coding-global" },
 	),
 	models: Type.Array(Type.String(), {
 		default: [
@@ -249,7 +276,8 @@ const LocalProviderSchema = Type.Object({
 const ProvidersSchema = Type.Object({
 	anthropic: AnthropicProviderSchema,
 	openai: OpenAIProviderSchema,
-	google: GoogleProviderSchema,
+	gemini: GeminiProviderSchema,
+	vertex: VertexProviderSchema,
 	zhipu: ZhipuProviderSchema,
 	openrouter: OpenRouterProviderSchema,
 	deepseek: DeepSeekProviderSchema,
@@ -680,6 +708,23 @@ const TenacidadSchema = Type.Object({
 	emptyResponseRetries: Type.Integer({ default: 3, minimum: 0, maximum: 10 }),
 });
 
+// Health/quota probing for external web tools (search + reader MCP servers).
+// The agent consults this before calling a tool so it can steer directly to a
+// fallback (browser_search / pdf_read) instead of wasting turns discovering an
+// out-of-quota failure at call time.
+const WebToolsHealthBreakerSchema = Type.Object({
+	consecutiveFailures: Type.Integer({ default: 4, minimum: 1 }),
+	windowMinutes: Type.Integer({ default: 10, minimum: 1 }),
+});
+
+const WebToolsHealthSchema = Type.Object({
+	enabled: Type.Boolean({ default: false }),
+	probeOnStartup: Type.Boolean({ default: true }),
+	probeCron: Type.String({ default: "17 3 * * *" }),
+	cacheTtlMinutes: Type.Integer({ default: 360, minimum: 5 }),
+	breaker: WebToolsHealthBreakerSchema,
+});
+
 export const ConfigSchema = Type.Object({
 	version: Type.Number({ default: 1 }),
 	server: ServerSchema,
@@ -699,6 +744,7 @@ export const ConfigSchema = Type.Object({
 	continuityGuard: Type.Optional(ContinuityGuardSchema),
 	tenacidad: Type.Optional(TenacidadSchema),
 	mcp: Type.Optional(MCPchema),
+	webToolsHealth: Type.Optional(WebToolsHealthSchema),
 });
 
 export type OctopusConfig = Static<typeof ConfigSchema>;

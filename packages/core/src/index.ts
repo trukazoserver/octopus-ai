@@ -319,6 +319,7 @@ export {
 	BrowserTool,
 	CodeExecutor,
 	createCodeTools,
+	createCodexImageTools,
 	createMediaTools,
 	mediaContext,
 	createWorkflowTools,
@@ -331,10 +332,16 @@ export {
 	createKanbanCardTools,
 	ProxyManager,
 	HumanBehavior,
+	ToolHealthManager,
+	PdfReader,
 } from "./tools/index.js";
 export type {
 	ToolDefinition,
 	ToolResult,
+	ToolHealthStatus,
+	ToolHealthRecord,
+	ToolHealthConfig,
+	ToolCircuitState,
 	CodeExecutionResult,
 	CodeExecutorConfig,
 	CodeExecutorHooks,
@@ -369,6 +376,15 @@ export type {
 	UrlSafetyDecision,
 	UrlSafetyPolicyConfig,
 } from "./security/index.js";
+
+export { prepareVertexProject } from "./auth/google-cloud.js";
+export type {
+	VertexProjectSetupOptions,
+	VertexProjectSetupResult,
+	GoogleBillingAccount,
+} from "./auth/google-cloud.js";
+export { refreshAccessToken } from "./auth/oauth.js";
+export type { OAuthTokenResponse } from "./auth/oauth.js";
 
 export {
 	TransportServer,

@@ -20,10 +20,12 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.ai.providers).toBeDefined();
 			expect(DEFAULT_CONFIG.ai.providers.anthropic).toBeDefined();
 			expect(DEFAULT_CONFIG.ai.providers.openai).toBeDefined();
-			expect(DEFAULT_CONFIG.ai.providers.google).toBeDefined();
-			expect(DEFAULT_CONFIG.ai.providers.zhipu.mode).toBe("coding-plan");
+			expect(DEFAULT_CONFIG.ai.providers.gemini).toBeDefined();
+			expect(DEFAULT_CONFIG.ai.providers.vertex).toBeDefined();
+			expect(DEFAULT_CONFIG.ai.providers.zhipu.mode).toBe("coding-global");
 			expect(DEFAULT_CONFIG.ai.providers.openai.authMode).toBe("api-key");
-			expect(DEFAULT_CONFIG.ai.providers.google.authMode).toBe("api-key");
+			expect(DEFAULT_CONFIG.ai.providers.gemini.apiKey).toBe("");
+			expect(DEFAULT_CONFIG.ai.providers.vertex.location).toBe("us-central1");
 			expect(DEFAULT_CONFIG.ai.providers.openrouter.baseUrl).toBe(
 				"https://openrouter.ai/api/v1",
 			);

@@ -10,6 +10,10 @@ export interface VertexProjectSetupOptions {
 	projectName?: string;
 	billingAccountName?: string;
 	enableServices?: string[];
+	/** Create a service account + JSON key for Vertex auth (default: true). */
+	createServiceAccountKey?: boolean;
+	/** Service account ID (default: "octopus"). */
+	serviceAccountId?: string;
 }
 
 export interface VertexProjectSetupResult {
@@ -21,6 +25,9 @@ export interface VertexProjectSetupResult {
 	enabledServices: string[];
 	iamRolesGranted: string[];
 	principalEmail?: string;
+	serviceAccountEmail?: string;
+	/** Raw service-account JSON key (UTF-8). Only present right after creation. */
+	serviceAccountKey?: string;
 	warnings: string[];
 }
 
@@ -238,6 +245,141 @@ async function grantProjectRoles(
 	return granted;
 }
 
+const VERTEX_SERVICE_ACCOUNT_ROLES = ["roles/aiplatform.user"];
+
+/**
+ * Grant IAM roles on the project to an arbitrary member (e.g. a service
+ * account). Returns the roles actually added (empty if already present).
+ */
+async function grantMemberIamRoles(
+	projectId: string,
+	member: string,
+	roles: string[],
+	accessToken: string,
+): Promise<string[]> {
+	const resource = `https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`;
+	const policy = await googleJson<{
+		bindings?: Array<{ role: string; members?: string[] }>;
+		etag?: string;
+	}>(`${resource}:getIamPolicy`, accessToken, {
+		method: "POST",
+		body: JSON.stringify({}),
+	});
+
+	const bindings = policy.bindings ?? [];
+	const granted: string[] = [];
+	for (const role of roles) {
+		let binding = bindings.find((item) => item.role === role);
+		if (!binding) {
+			binding = { role, members: [] };
+			bindings.push(binding);
+		}
+		binding.members ??= [];
+		if (!binding.members.includes(member)) {
+			binding.members.push(member);
+			granted.push(role);
+		}
+	}
+	if (granted.length === 0) return [];
+	await googleJson(`${resource}:setIamPolicy`, accessToken, {
+		method: "POST",
+		body: JSON.stringify({ policy: { bindings, etag: policy.etag } }),
+	});
+	return granted;
+}
+
+/** Create a service account; returns its email (idempotent on 409/exists). */
+async function createServiceAccount(
+	projectId: string,
+	accountId: string,
+	displayName: string,
+	accessToken: string,
+	warnings: string[],
+): Promise<string> {
+	const email = `${accountId}@${projectId}.iam.gserviceaccount.com`;
+	try {
+		await googleJson(
+			`https://iam.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/serviceAccounts`,
+			accessToken,
+			{
+				method: "POST",
+				body: JSON.stringify({
+					accountId,
+					serviceAccount: { displayName },
+				}),
+			},
+		);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (!/409|already exists|alreadyexists/i.test(msg)) {
+			warnings.push(`No se pudo crear la service account '${accountId}': ${msg}`);
+		}
+	}
+	return email;
+}
+
+/** Create a JSON key for a service account; returns the raw key file JSON. */
+async function createServiceAccountKey(
+	projectId: string,
+	saEmail: string,
+	accessToken: string,
+): Promise<string> {
+	const result = await googleJson<{ privateKeyData?: string }>(
+		`https://iam.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/serviceAccounts/${encodeURIComponent(saEmail)}/keys`,
+		accessToken,
+		{ method: "POST", body: JSON.stringify({}) },
+	);
+	if (!result.privateKeyData) {
+		throw new Error("Google no devolvió privateKeyData para la clave.");
+	}
+	return Buffer.from(result.privateKeyData, "base64").toString("utf8");
+}
+
+/**
+ * Create a Vertex service account + grant aiplatform.user + create a JSON key.
+ * Returns { email, keyJson }, or null if the key could not be created.
+ */
+async function createVertexServiceAccount(
+	projectId: string,
+	accountId: string,
+	displayName: string,
+	accessToken: string,
+	warnings: string[],
+): Promise<{ email: string; keyJson: string } | null> {
+	const email = await createServiceAccount(
+		projectId,
+		accountId,
+		displayName,
+		accessToken,
+		warnings,
+	);
+	try {
+		await grantMemberIamRoles(
+			projectId,
+			`serviceAccount:${email}`,
+			VERTEX_SERVICE_ACCOUNT_ROLES,
+			accessToken,
+		);
+	} catch (err) {
+		warnings.push(
+			`No se pudo asignar rol a la service account: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+	try {
+		const keyJson = await createServiceAccountKey(
+			projectId,
+			email,
+			accessToken,
+		);
+		return { email, keyJson };
+	} catch (err) {
+		warnings.push(
+			`No se pudo crear la clave JSON de la service account: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return null;
+	}
+}
+
 export async function prepareVertexProject(
 	options: VertexProjectSetupOptions,
 ): Promise<VertexProjectSetupResult> {
@@ -328,6 +470,30 @@ export async function prepareVertexProject(
 		);
 	}
 
+	// Create a service account + JSON key so Vertex can authenticate with a
+	// stable, self-contained credential (no dependency on the user's OAuth
+	// token refresh). The key JSON is only returned at creation time.
+	let serviceAccountEmail: string | undefined;
+	let serviceAccountKey: string | undefined;
+	if (options.createServiceAccountKey !== false) {
+		const sa = await createVertexServiceAccount(
+			projectId,
+			options.serviceAccountId?.trim() || "octopus",
+			"Octopus Service Account",
+			accessToken,
+			warnings,
+		).catch((err) => {
+			warnings.push(
+				`No se pudo provisionar la service account de Vertex: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return null;
+		});
+		if (sa) {
+			serviceAccountEmail = sa.email;
+			serviceAccountKey = sa.keyJson;
+		}
+	}
+
 	return {
 		projectId,
 		projectNumber: project.projectNumber,
@@ -337,6 +503,8 @@ export async function prepareVertexProject(
 		enabledServices,
 		iamRolesGranted,
 		principalEmail,
+		serviceAccountEmail,
+		serviceAccountKey,
 		warnings,
 	};
 }

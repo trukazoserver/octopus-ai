@@ -37,6 +37,7 @@ import { SkillResearcher } from "../skills/researcher.js";
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
+import type { ToolHealthManager } from "../tools/tool-health-manager.js";
 import { getOctopusArmProfile } from "./arm-profiles.js";
 import { ContinuityGuard } from "./continuity-guard.js";
 import {
@@ -207,6 +208,7 @@ export class AgentRuntime {
 	private skillLoader: SkillLoader;
 	private toolRegistry?: ToolRegistry;
 	private toolExecutor?: ToolExecutor;
+	private toolHealth?: ToolHealthManager;
 	private researcher?: SkillResearcher;
 	private dailyMemory?: GlobalDailyMemory;
 	private userProfileManager?: UserProfileManager;
@@ -292,6 +294,10 @@ export class AgentRuntime {
 	setToolSystem(registry: ToolRegistry, executor: ToolExecutor): void {
 		this.toolRegistry = registry;
 		this.toolExecutor = executor;
+	}
+
+	setToolHealthManager(manager: ToolHealthManager): void {
+		this.toolHealth = manager;
 	}
 
 	/**
@@ -3914,6 +3920,24 @@ export class AgentRuntime {
 				})
 				.join("\n");
 			systemContent += `\n\n# Learned Operating Guidance\nUse these prior operational learnings when they are relevant. Prefer higher-confidence procedures and avoid listed anti-patterns.\n${guidance}`;
+		}
+
+		// Web tool health: if a web search/reader provider is currently out of
+		// quota (or repeatedly failing), tell the model up front so it goes
+		// straight to the fallback (browser_search / pdf_read) instead of
+		// discovering the failure by trying the tool and burning turns.
+		const toolHealth =
+			this.toolHealth ??
+			(this.toolExecutor && "getHealth" in this.toolExecutor
+				? this.toolExecutor.getHealth()
+				: undefined);
+		if (toolHealth) {
+			try {
+				const healthSummary = await toolHealth.getHealthSummary();
+				if (healthSummary) systemContent += `\n\n${healthSummary}`;
+			} catch {
+				// Health summary is advisory; never block the turn on it.
+			}
 		}
 
 		// Fresh research before codegen: for technical/code-writing requests, fetch
