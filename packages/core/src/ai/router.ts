@@ -1,6 +1,7 @@
 import { createLogger } from "../utils/logger.js";
 import { getModelContextWindow } from "./model-context.js";
 import { estimateCost } from "./pricing.js";
+import type { UsageSink } from "./usage-store.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import type { BaseLLMProvider } from "./providers/base.js";
 import { CohereProvider } from "./providers/cohere.js";
@@ -16,6 +17,7 @@ import { ZhipuProvider } from "./providers/zhipu.js";
 import type {
 	LLMChunk,
 	LLMRequest,
+	LLMRequestMetadata,
 	LLMResponse,
 	LLMRouterConfig,
 	ProviderConfig,
@@ -573,9 +575,30 @@ export class LLMRouter {
 		"OCTOPUS_PROVIDER_RETRY_BASE_DELAY_MS",
 		DEFAULT_PROVIDER_RETRY_BASE_DELAY_MS,
 	);
+	private usageSink?: UsageSink;
+	private quotaHeaderHandler?: (provider: string, headers: Headers) => void;
 
 	constructor(config: LLMRouterConfig) {
 		this.config = config;
+	}
+
+	/** Attach a durable usage sink so token/cost events survive restarts. */
+	setUsageSink(sink: UsageSink | undefined): void {
+		this.usageSink = sink;
+	}
+
+	/**
+	 * Attach a handler that receives raw response headers from every provider
+	 * call. Used to capture rate-limit / quota headers (e.g. Codex `x-codex-*`)
+	 * into a quota cache for the dashboard.
+	 */
+	setQuotaHeaderHandler(
+		handler: ((provider: string, headers: Headers) => void) | undefined,
+	): void {
+		this.quotaHeaderHandler = handler;
+		for (const [name, provider] of this.providers) {
+			provider.onResponseHeaders = (h) => this.quotaHeaderHandler?.(name, h);
+		}
 	}
 
 	async reconfigure(config: LLMRouterConfig): Promise<void> {
@@ -594,6 +617,8 @@ export class LLMRouter {
 					);
 					const available = await provider.isAvailable();
 					if (available) {
+						provider.onResponseHeaders = (h) =>
+							this.quotaHeaderHandler?.(name, h);
 						this.providers.set(name, provider);
 						logger.info(
 							`Provider '${name}' (${registryEntry.displayName}) initialized`,
@@ -693,11 +718,14 @@ export class LLMRouter {
 			promptTokens: number;
 			completionTokens: number;
 			totalTokens?: number;
+			reasoningTokens?: number;
 		},
 		model?: string,
+		metadata?: LLMRequestMetadata,
 	): void {
 		const prompt = usage.promptTokens ?? 0;
 		const completion = usage.completionTokens ?? 0;
+		const reasoning = usage.reasoningTokens ?? 0;
 		const tokens = usage.totalTokens ?? prompt + completion;
 		this.usage.totalTokens += tokens;
 		this.usage.promptTokens += prompt;
@@ -712,6 +740,18 @@ export class LLMRouter {
 			this.usage.totalCost += cost;
 			entry.cost += cost;
 		}
+		this.usageSink?.record({
+			provider,
+			model,
+			agentId: metadata?.agentId,
+			conversationId: metadata?.conversationId,
+			requestId: metadata?.requestId,
+			promptTokens: prompt,
+			completionTokens: completion,
+			reasoningTokens: reasoning,
+			totalTokens: tokens,
+			estimatedCost: cost,
+		});
 	}
 
 	private injectReasoning(request: LLMRequest): LLMRequest {
@@ -786,7 +826,12 @@ export class LLMRouter {
 				try {
 					this.trackRequest(providerName);
 					const response = await provider.chat(resolvedRequest);
-					this.trackUsage(providerName, response.usage, resolvedRequest.model);
+					this.trackUsage(
+						providerName,
+						response.usage,
+						resolvedRequest.model,
+						resolvedRequest.metadata,
+					);
 					return response;
 				} catch (error) {
 					if (
@@ -825,6 +870,7 @@ export class LLMRouter {
 						fallbackProviderName,
 						fallbackResponse.usage,
 						fallbackResolved.model,
+						fallbackResolved.metadata,
 					);
 					return fallbackResponse;
 				} catch (fallbackError) {
@@ -858,7 +904,12 @@ export class LLMRouter {
 					for await (const chunk of stream) {
 						primaryYieldedAnyChunk = true;
 						if (chunk.usage)
-							this.trackUsage(providerName, chunk.usage, resolvedRequest.model);
+							this.trackUsage(
+								providerName,
+								chunk.usage,
+								resolvedRequest.model,
+								resolvedRequest.metadata,
+							);
 						yield chunk;
 					}
 					return;
@@ -901,6 +952,7 @@ export class LLMRouter {
 								fallbackProviderName,
 								chunk.usage,
 								fallbackResolved.model,
+								fallbackResolved.metadata,
 							);
 						yield chunk;
 					}

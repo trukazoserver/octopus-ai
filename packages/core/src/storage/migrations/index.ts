@@ -16,6 +16,8 @@ import * as migration014 from "./014_subtask_verification.js";
 import * as migration015 from "./015_kanban_swarm_dependencies.js";
 import * as migration016 from "./016_task_model_column.js";
 import * as migration017 from "./017_tool_health.js";
+import * as migration018 from "./018_ai_usage_and_agent_model_profiles.js";
+import * as migration019 from "./019_provider_quota_cache.js";
 
 export interface Migration {
 	version: number;
@@ -41,4 +43,6 @@ export const migrations: Migration[] = [
 	{ version: 15, up: migration015.up, down: migration015.down },
 	{ version: 16, up: migration016.up, down: migration016.down },
 	{ version: 17, up: migration017.up, down: migration017.down },
+	{ version: 18, up: migration018.up, down: migration018.down },
+	{ version: 19, up: migration019.up, down: migration019.down },
 ];

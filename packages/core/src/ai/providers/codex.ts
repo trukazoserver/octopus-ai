@@ -201,7 +201,15 @@ export class CodexProvider extends BaseLLMProvider {
 			};
 			body.include = ["reasoning.encrypted_content"];
 		}
-		if (request.temperature != null) body.temperature = request.temperature;
+		// Reasoning models (gpt-5.x with reasoning enabled) reject `temperature`
+		// — the Responses API returns 400 "Unsupported parameter: temperature".
+		// Only send it for non-reasoning calls.
+		const reasoningOn = !!(
+			request.reasoning && request.reasoning.effort !== "none"
+		);
+		if (request.temperature != null && !reasoningOn) {
+			body.temperature = request.temperature;
+		}
 		return body;
 	}
 
@@ -254,15 +262,24 @@ export class CodexProvider extends BaseLLMProvider {
 			case "response.output_item.done": {
 				const item = data.item as Record<string, unknown> | undefined;
 				if (item?.type === "function_call") {
-					const callId = (item.call_id as string) ?? (item.id as string) ?? "";
-					state.toolCalls.push({
+					const itemId = (item.id as string) ?? "";
+					const callId = (item.call_id as string) ?? itemId;
+					// Prefer arguments accumulated from the delta stream; fall back to
+					// the final value on the done item.
+					const accumulated = itemId
+						? state.argsByItem.get(itemId)
+						: undefined;
+					const name = (item.name as string) || accumulated?.name || "";
+					const args = (item.arguments as string) ?? accumulated?.args ?? "";
+					const toolCall: LLMToolCall = {
 						id: callId,
 						type: "function",
-						function: {
-							name: (item.name as string) ?? "",
-							arguments: (item.arguments as string) ?? "",
-						},
-					});
+						function: { name, arguments: args },
+					};
+					state.toolCalls.push(toolCall);
+					// Yield the completed tool call so streaming consumers receive it
+					// (the runtime drives tool execution from stream chunks).
+					return { toolCalls: toolCall };
 				}
 				return null;
 			}
@@ -309,11 +326,20 @@ export class CodexProvider extends BaseLLMProvider {
 			throw new Error(`Codex backend error (${response.status}): ${text.slice(0, 400)}`);
 		}
 
+		// Capture rate-limit / quota headers (x-codex-*) from every successful
+		// response so the quota dashboard reflects real usage without extra calls.
+		try {
+			this.onResponseHeaders?.(response.headers);
+		} catch {
+			/* quota capture must never affect the stream */
+		}
+
 		const state = {
 			text: "",
 			thinking: "",
 			toolCalls: [] as LLMToolCall[],
 			argsByItem: new Map<string, { callId: string; name: string; args: string }>(),
+			finishReason: undefined as string | undefined,
 		};
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder();
@@ -360,6 +386,7 @@ export class CodexProvider extends BaseLLMProvider {
 			if (chunk.thinking) state.thinking += chunk.thinking;
 			if (chunk.usage) state.usage = chunk.usage;
 			if (chunk.finishReason) state.finishReason = chunk.finishReason;
+			if (chunk.toolCalls) state.toolCalls.push(chunk.toolCalls as LLMToolCall);
 		}
 		return {
 			content: state.text,

@@ -1,5 +1,6 @@
 export type {
 	AgentConfig,
+	AgentReasoningEffort,
 	ToolIterationLimitConfig,
 	TaskState,
 	ConversationTurn,

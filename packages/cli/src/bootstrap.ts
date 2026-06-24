@@ -81,9 +81,15 @@ import {
 	expandTildePath,
 	generateEncryptionKey,
 	getZaiMCPConfigs,
+	UsageStore,
+	getModelCapabilitiesFromRef,
+	coerceReasoningEffort,
+	handleProviderResponseHeaders,
+	getCachedQuota,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
+	AgentReasoningEffort,
 	AgentRecord,
 	DatabaseAdapter,
 	EmbeddingFunction,
@@ -97,6 +103,7 @@ export interface OctopusSystem {
 	config: OctopusConfig;
 	db: DatabaseAdapter;
 	router: LLMRouter;
+	usageStore: UsageStore;
 	stm: ShortTermMemory;
 	ltm: LongTermMemory;
 	dailyMemory: GlobalDailyMemory;
@@ -780,6 +787,7 @@ function parseJsonStringArray(value?: string | null): string[] {
 function buildAgentRuntimeConfig(
 	agent: AgentRecord,
 	fallbackConfig: AgentConfig,
+	reasoningEffort?: import("@octopus-ai/core").AgentReasoningEffort,
 ): AgentConfig {
 	const config = parseJsonRecord(agent.config);
 	const defaultSkills = Array.isArray(config.defaultSkills)
@@ -819,11 +827,37 @@ function buildAgentRuntimeConfig(
 		description: agent.description ?? fallbackConfig.description,
 		systemPrompt: `${identityParts}\n\n${agent.system_prompt || fallbackConfig.systemPrompt}`,
 		model: agent.model ?? fallbackConfig.model,
+		reasoningEffort: reasoningEffort ?? fallbackConfig.reasoningEffort,
 		maxTokens: fallbackConfig.maxTokens,
 		toolIterationLimit: fallbackConfig.toolIterationLimit,
 		continuityGuard: fallbackConfig.continuityGuard,
 		tenacidad: fallbackConfig.tenacidad,
 	};
+}
+
+/**
+ * Resolve an agent's initial reasoning effort for its effective model. Uses the
+ * persisted per-(agent,model) profile when present, otherwise seeds from the
+ * global `ai.thinking` setting (coerced against model capabilities) and persists
+ * nothing here — persistence happens when the user explicitly changes it.
+ */
+async function resolveInitialReasoning(
+	agentManager: {
+		resolveReasoningForModel: (
+			id: string,
+			model: string,
+			fallback: AgentReasoningEffort,
+		) => Promise<AgentReasoningEffort>;
+	},
+	config: OctopusConfig,
+	agentId: string,
+	effectiveModel: string,
+): Promise<AgentReasoningEffort> {
+	const caps = getModelCapabilitiesFromRef(config, effectiveModel);
+	const globalThinking =
+		(config.ai.thinking as AgentReasoningEffort | undefined) ?? "none";
+	const seeded = caps ? coerceReasoningEffort(caps, globalThinking) : "none";
+	return agentManager.resolveReasoningForModel(agentId, effectiveModel, seeded);
 }
 
 export async function bootstrap(options?: {
@@ -956,6 +990,17 @@ export async function bootstrap(options?: {
 		thinking: config.ai.thinking,
 	});
 	await router.initialize();
+
+	// Durable usage ledger — persists token/cost events across restarts.
+	const usageStore = new UsageStore(db);
+	router.setUsageSink(usageStore);
+	// Capture real quota headers (Codex x-codex-*) from provider responses and
+	// persist the snapshot so it survives restarts.
+	router.setQuotaHeaderHandler((provider, headers) => {
+		handleProviderResponseHeaders(provider, headers);
+		const snap = getCachedQuota(provider);
+		if (snap) void usageStore.saveQuotaSnapshot(snap);
+	});
 
 	// Wire STM condensation callback — uses LLM to summarize before evicting
 	stm.setCondensationCallback(async (turns) => {
@@ -2297,6 +2342,14 @@ Always be concise, helpful, and thorough.`,
 		tenacidad: config.tenacidad,
 	};
 
+	// Octavio's persisted `agents.model` is the source of truth. Apply it to the
+	// runtime config so the main agent respects the model chosen by the user
+	// instead of always falling back to `config.ai.default`.
+	const existingMainAgent = await agentManager.getMainAgent();
+	if (existingMainAgent?.model) {
+		agentConfig.model = existingMainAgent.model;
+	}
+
 	const agentRuntime = new AgentRuntime(
 		agentConfig,
 		router,
@@ -2396,10 +2449,38 @@ Always be concise, helpful, and thorough.`,
 	}
 	await agentManager.ensureBuiltinArmAgents(config.ai.default);
 	agentManager.registerRuntime(agentConfig.id, agentRuntime);
+
+	// Seed Octavio's per-model reasoning profile so the main agent starts with a
+	// sensible thinking level (from the global setting, validated vs capabilities).
+	try {
+		const octavioModel = agentConfig.model ?? config.ai.default;
+		const octavioReasoning = await resolveInitialReasoning(
+			agentManager,
+			config,
+			agentConfig.id,
+			octavioModel,
+		);
+		agentConfig.reasoningEffort = octavioReasoning;
+		agentRuntime.updateConfig({ reasoningEffort: octavioReasoning });
+	} catch (err) {
+		console.error("[bootstrap] failed to seed Octavio reasoning profile:", err);
+	}
+
 	const persistedAgents = await agentManager.listAgents();
 	for (const agent of persistedAgents) {
 		if (agent.id === agentConfig.id) continue;
-		const runtimeConfig = buildAgentRuntimeConfig(agent, agentConfig);
+		const armEffectiveModel = agent.model ?? config.ai.default;
+		const armReasoning = await resolveInitialReasoning(
+			agentManager,
+			config,
+			agent.id,
+			armEffectiveModel,
+		);
+		const runtimeConfig = buildAgentRuntimeConfig(
+			agent,
+			agentConfig,
+			armReasoning,
+		);
 		const runtimeStm = new ShortTermMemory({
 			maxTokens: config.memory.shortTerm.maxTokens,
 			scratchPadSize: config.memory.shortTerm.scratchPadSize,
@@ -2747,6 +2828,7 @@ Always be concise, helpful, and thorough.`,
 		config,
 		db,
 		router,
+		usageStore,
 		stm,
 		ltm,
 		dailyMemory,

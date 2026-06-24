@@ -32,13 +32,23 @@ export interface ActiveAgents {
 	workers: number;
 }
 
+interface AgentCapabilities {
+	provider?: string;
+	providerDisplayName?: string;
+	model?: string;
+	supportsReasoning?: boolean;
+}
 interface AgentSummary {
 	id: string;
 	name?: string;
 	role?: string;
 	color?: string | null;
 	is_builtin_arm?: number;
+	is_main?: number;
 	arm_key?: string | null;
+	effectiveModel?: string;
+	reasoningEffort?: string;
+	capabilities?: AgentCapabilities | null;
 }
 
 export interface WorkflowRunSummary {
@@ -55,6 +65,9 @@ export interface DashboardArmSummary {
 	role: string;
 	armKey: string | null;
 	color: string | null;
+	effectiveModel?: string;
+	reasoningEffort?: string;
+	providerDisplayName?: string;
 }
 
 export interface ActivityItem {
@@ -93,6 +106,7 @@ export function useDashboard() {
 		[],
 	);
 	const [arms, setArms] = useState<DashboardArmSummary[]>([]);
+	const [mainAgent, setMainAgent] = useState<DashboardArmSummary | null>(null);
 	const [loading, setLoading] = useState(true);
 
 	const loadStats = useCallback(async () => {
@@ -208,17 +222,23 @@ export function useDashboard() {
 			});
 
 			setRecentWorkflows(workflows.slice(0, 6));
+			const toSummary = (agent: AgentSummary): DashboardArmSummary => ({
+				id: agent.id,
+				name: agent.name ?? agent.id,
+				role: agent.role ?? "arm",
+				armKey: agent.arm_key ?? null,
+				color: agent.color ?? null,
+				effectiveModel: agent.effectiveModel,
+				reasoningEffort: agent.reasoningEffort,
+				providerDisplayName:
+					agent.capabilities?.providerDisplayName ??
+					agent.capabilities?.provider,
+			});
 			setArms(
-				agents
-					.filter((agent) => agent.is_builtin_arm === 1)
-					.map((agent) => ({
-						id: agent.id,
-						name: agent.name ?? agent.id,
-						role: agent.role ?? "arm",
-						armKey: agent.arm_key ?? null,
-						color: agent.color ?? null,
-					})),
+				agents.filter((agent) => agent.is_builtin_arm === 1).map(toSummary),
 			);
+			const main = agents.find((agent) => agent.is_main === 1);
+			setMainAgent(main ? toSummary(main) : null);
 
 			const items: ActivityItem[] = [];
 			if (Array.isArray(convs)) {
@@ -279,6 +299,7 @@ export function useDashboard() {
 		activity,
 		recentWorkflows,
 		arms,
+		mainAgent,
 		loading,
 		reload: loadStats,
 	};

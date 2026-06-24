@@ -47,11 +47,44 @@ Si expones el dashboard o API fuera de tu red de confianza, usa además reverse 
 | `GET` | `/health` | Healthcheck simple |
 | `GET` | `/api/health` | Alias del healthcheck |
 | `GET` | `/api/status` | Estado general del sistema |
+| `GET` | `/api/models` | Modelos disponibles por proveedor + capacidades de razonamiento |
+| `GET` | `/api/usage` | Uso persistido de tokens/costo (totales, por proveedor y por agente) |
+| `GET` | `/api/quotas` | Cuotas de plan (Codex 5h/semanal y Zhipu/Z.ai Coding Plan) |
+
+`GET /api/status` ahora incluye un campo `agent` con el modelo, proveedor y nivel de razonamiento **efectivo** del agente principal (Octavio), ademas de los alias de compatibilidad `provider`, `model` y `thinking`:
+
+```json
+{
+  "agent": {
+    "id": "default-agent",
+    "name": "Octavio",
+    "model": "gpt-5.5",
+    "provider": "openai",
+    "providerDisplayName": "OpenAI",
+    "reasoningEffort": "high"
+  },
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "thinking": "high",
+  "usage": { "totalTokens": 12345, "totalCost": 0.42, "byProvider": { ... } }
+}
+```
+
+`GET /api/models` devuelve `providers` (lista de modelos por proveedor, sin romper compatibilidad) y `modelCapabilities` con `supportsReasoning`, `allowedReasoningEfforts` y `defaultReasoningEffort` por modelo, para que los selectores de la UI muestren u oculten el control de razonamiento segun el modelo elegido.
+
+`GET /api/usage` lee del ledger persistente `ai_usage_events` (sobrevive reinicios). Acepta filtros opcionales `from`, `to`, `agentId`, `provider` y devuelve `total` (agregado), `byProvider` y `byAgent`.
+
+`GET /api/quotas` devuelve solo los proveedores con cuota configurable:
+
+- **Codex (OpenAI en modo `authMode: codex`)**: ventanas de 5 horas y semanal con `% usado` y fecha de reset, capturadas de las cabeceras `x-codex-*` de cada llamada real a `/responses` (no hay endpoint de uso dedicado). El ultimo valor se persiste en `provider_quota_cache` para sobrevivir reinicios.
+- **Zhipu / Z.ai (modo `coding-*`)**: ventanas MCP mensual y de 5 horas, consultadas en vivo del endpoint monitor `api.z.ai/api/monitor/usage/quota/limit` (mismo metodo que los plugins de OpenCode). `Authorization: {key}` sin prefijo `Bearer`.
 
 Ejemplo:
 
 ```bash
 curl http://localhost:18789/health
+curl "http://localhost:18789/api/usage?provider=openai"
+curl http://localhost:18789/api/quotas
 ```
 
 ---
@@ -207,14 +240,16 @@ curl -X DELETE http://localhost:18789/api/learning/insights/learn_123
 | `GET` | `/api/conversations/{id}` | Recupera una conversacion |
 | `PATCH` | `/api/conversations/{id}` | Actualiza metadatos |
 | `DELETE` | `/api/conversations/{id}` | Elimina conversacion |
-| `GET` | `/api/agents` | Lista agentes |
+| `GET` | `/api/agents` | Lista agentes (con `effectiveModel`, `reasoningEffort` y `capabilities`) |
 | `POST` | `/api/agents` | Crea agente |
-| `GET` | `/api/agents/{id}` | Consulta un agente |
-| `PUT` | `/api/agents/{id}` | Actualiza un agente |
+| `GET` | `/api/agents/{id}` | Consulta un agente (enriquecido) |
+| `PUT` | `/api/agents/{id}` | Actualiza un agente (`model`, `reasoningEffort`, ...) y refresca el runtime en vivo |
 | `DELETE` | `/api/agents/{id}` | Elimina un agente |
 | `POST` | `/api/agents/messages` | Envía mensaje directo, broadcast o coordinación entre agentes |
 | `GET` | `/api/agents/{id}/messages` | Lista inbox/mensajes de un agente |
 | `POST` | `/api/agents/{id}/messages/read` | Marca mensajes como leídos |
+
+Cada agente es ahora la **fuente de verdad** de su modelo y nivel de razonamiento. `PUT /api/agents/{id}` acepta `model` y `reasoningEffort` (validado contra las capacidades del modelo), persiste el perfil de razonamiento por `(agent, model)` en `agent_model_profiles`, reconfigura el runtime en vivo con `AgentRuntime.updateConfig(...)` y devuelve el agente actualizado junto con `effectiveModel` y `effectiveReasoning`. Si el agente es el principal (Octavio), el cambio tambien se refleja en `config.ai.default` / `config.ai.thinking` por compatibilidad. Cambiar modelo o razonamiento desde el chat, la pagina de agentes o los ajustes queda sincronizado en los tres.
 
 ---
 

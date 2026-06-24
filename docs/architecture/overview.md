@@ -41,8 +41,8 @@ octopus-ai/
 
 | Módulo | Archivos principales | Descripción |
 |---|---|---|
-| `ai` | `router.ts`, `providers/*.ts` | Router con múltiples proveedores, razonamiento y cambio dinámico de provider/modelo |
-| `agent` | `runtime.ts`, `orchestrator.ts`, `manager.ts`, `workflow-manager.ts`, `workflow-scheduler.ts`, `agent-coordination-bus.ts` | Ejecución conversacional, coordinación multi-agente, workflows persistentes, recovery, autoevaluación y operación continua |
+| `ai` | `router.ts`, `providers/*.ts`, `model-capabilities.ts`, `usage-store.ts`, `quota-service.ts` | Router con múltiples proveedores, razonamiento, capacidades por modelo, ledger de uso persistente y captura de cuotas |
+| `agent` | `runtime.ts`, `orchestrator.ts`, `manager.ts`, `workflow-manager.ts`, `workflow-scheduler.ts`, `agent-coordination-bus.ts` | Ejecución conversacional, coordinación multi-agente, workflows persistentes, recovery, autoevaluación, reconfiguración en vivo de modelo/razonamiento y operación continua |
 | `auth` | `oauth.ts`, `browser-auth.ts`, `jwt.ts`, `google-vertex.ts` | Autenticación de proveedores con API key, bearer, OAuth, sesiones de navegador y Google Vertex |
 | `memory` | `stm.ts`, `ltm.ts`, `orchestrator.ts`, `integrity.ts`, `context-assembler.ts`, `daily.ts`, `user-profile.ts` | Contexto activo, memoria persistente, validación, evidencia, scopes, recuperación híbrida, resumen diario y perfil del usuario |
 | `learning` | `engine.ts`, `types.ts` | Registra experiencias, extrae aprendizajes reutilizables y los reinyecta como guia operacional |
@@ -129,6 +129,16 @@ El servidor de transporte expone la API usada por el dashboard y por integracion
 - variables de entorno, MCP, canales y biblioteca multimedia
 
 Referencia completa: [API HTTP y WebSocket](../api/http.md)
+
+## Modelo, Razonamiento, Uso y Cuotas
+
+El agente es la **fuente de verdad** de su modelo y nivel de razonamiento (no la configuración global):
+
+- `ChatExecutionManager` ejecuta el runtime del agente seleccionado (`getRuntime(agentId) ?? agentRuntime`), con fallback al agente principal (Octavio).
+- Al arrancar, el runtime de Octavio toma su modelo de la fila `agents.model`; cada agente carga su perfil de razonamiento por modelo desde `agent_model_profiles` (migración 018).
+- `AgentRuntime.updateConfig()` reconfigura modelo/razonamiento en vivo sin reconstruir el runtime; `PUT /api/agents/{id}` lo invoca y persiste el perfil, validando el esfuerzo contra `model-capabilities.ts` (`supportsReasoning`, `allowedReasoningEfforts`). El cambio queda sincronizado entre chat, página de agentes y centro de control.
+- El uso de tokens/costo se persiste en `ai_usage_events` (migración 018) vía `UsageStore`, conectado al router como `UsageSink`; cada `LLMRequest` lleva `metadata` (`agentId`, `conversationId`, `requestId`) para atribución. `/api/usage` sirve totales y desglose por proveedor/agente.
+- `quota-service.ts` expone cuotas reales: Codex captura las cabeceras `x-codex-*` de cada `/responses` (`onResponseHeaders` en `BaseLLMProvider`) y las persiste en `provider_quota_cache` (migración 019); Zhipu/Z.ai se consulta en vivo del endpoint monitor. `/api/quotas` devuelve solo proveedores configurados, saneando errores y sin exponer secretos.
 
 ## Memoria y Contexto Avanzado
 

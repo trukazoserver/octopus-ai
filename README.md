@@ -45,6 +45,8 @@ Octopus AI es un ecosistema avanzado de inteligencia artificial diseñado para c
 - 🌐 **Multi-Canal:** Integra el mismo agente con Telegram, Discord, Slack, Teams, webchat y otros canales manteniendo memoria compartida.
 - 💻 **Interfaces Flexibles:** CLI, API HTTP/WebSocket, dashboard web servido por el backend compilado, modo desarrollo React/Vite y aplicación de escritorio con la misma base de runtime.
 - 🔒 **Privacidad y Seguridad:** Compatibilidad con modelos locales, ejecución aislada para tareas sensibles, API key para endpoints sensibles fuera de loopback y control fino del entorno de trabajo.
+- 🎛️ **Modelo y razonamiento por agente:** Cada agente recuerda su propio modelo y nivel de pensamiento (por modelo), seleccionable y editable desde el chat, la página de agentes o los ajustes; el cambio se aplica en vivo y se sincroniza en todas las vistas.
+- 📊 **Uso y consumo persistente:** Tokens y costo estimado se registran en un ledger que sobrevive reinicios, con totales y desglose por proveedor y por agente, más cuotas de plan (Codex y Z.ai/Zhipu) con fecha de restablecimiento.
 
 ### Novedades de memoria avanzada
 
@@ -204,15 +206,18 @@ Octopus AI es agnóstico al modelo. Puedes usar y combinar:
 
 | Proveedor | Modelos Destacados | Soporte de Razonamiento |
 |-----------|--------------------|-------------------------|
-| **Z.ai (ZhipuAI)** | GLM-5.1, GLM-5-Turbo | Sí (`thinking: {type}`) |
-| **OpenAI** | GPT-4o, o3, o4-mini | Sí (`reasoning: {effort}`) |
+| **Z.ai (ZhipuAI)** | GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.6 | Sí (`thinking: {type}`) |
+| **OpenAI** | GPT-5.5, GPT-5.4, GPT-5.4-mini | Sí (`reasoning: {effort}`) |
+| **Codex (cuenta ChatGPT)** | gpt-5.5, gpt-5.4 vía backend de Codex (login OAuth) | Sí (`reasoning: {effort}`) |
 | **Anthropic** | Claude Opus 4, Sonnet 4 | Sí (`thinking: {budget_tokens}`) |
 | **Google** | Gemini 2.5 Pro/Flash | Sí (`thinkingConfig: {budget}`) |
 | **DeepSeek** | DeepSeek Reasoner, Chat | Automático (Full CoT) |
 | **Mistral / xAI** | Mistral Large 3, Grok 4 | Sí |
 | **Ollama (Local)** | Llama 3.x, Qwen, Mistral | Ejecución 100% privada sin conexión |
 
-> **Proveedor por defecto:** Z.ai/ZhipuAI con modo `coding-plan`. Puedes cambiarlo en cualquier momento desde la configuración.
+> **Proveedor por defecto:** Z.ai/ZhipuAI con modo `coding-plan`/`coding-global`. Puedes cambiar el modelo y el nivel de razonamiento **por agente** desde el chat, la página de agentes o los ajustes; el cambio se aplica en vivo y se refleja en el centro de control y en `/api/status`.
+
+> **Notas de compatibilidad:** El backend de Codex requiere `stream: true` y **rechaza `temperature` cuando el razonamiento está activo** (los modelos reasoning no lo aceptan); el proveedor lo omite automaticamente en ese caso. Los modelos y sus capacidades de razonamiento se sirven en `/api/models` para que la UI muestre u oculte el control de pensamiento segun el modelo elegido.
 
 ## 📂 Estructura del Proyecto (Monorepo)
 

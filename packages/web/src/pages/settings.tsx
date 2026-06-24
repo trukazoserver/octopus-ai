@@ -14,6 +14,7 @@ import {
 } from "../components/ConfigSection.js";
 import { AppIcon } from "../components/ui/AppIcon.js";
 import { BrandLogo } from "../components/ui/BrandLogo.js";
+import { UsageSection } from "../components/settings/UsageSection.js";
 import {
 	apiDelete,
 	apiGet,
@@ -1824,6 +1825,8 @@ export const SettingsPage: React.FC = () => {
 				</span>
 				{savingKey && <strong>Guardando {savingKey}...</strong>}
 			</div>
+
+			<UsageSection />
 
 			<ConfigSection
 				title="Variables de entorno"

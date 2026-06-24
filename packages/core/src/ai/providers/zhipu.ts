@@ -119,6 +119,14 @@ export class ZhipuProvider extends BaseLLMProvider {
 			);
 		}
 
+		// Best-effort quota header capture (Z.ai coding plan currently exposes no
+		// quota headers, but capture them if/when they appear).
+		try {
+			this.onResponseHeaders?.(response.headers);
+		} catch {
+			/* ignore */
+		}
+
 		const data = (await response.json()) as {
 			choices: Array<{
 				message: {
@@ -213,6 +221,14 @@ export class ZhipuProvider extends BaseLLMProvider {
 			throw new Error(
 				`Z.ai API error (${this.mode}): ${response.status} ${errorText}`,
 			);
+		}
+
+		// Best-effort quota header capture (Z.ai coding plan currently exposes no
+		// quota headers, but capture them if/when they appear).
+		try {
+			this.onResponseHeaders?.(response.headers);
+		} catch {
+			/* ignore */
 		}
 
 		const bodyStream = response.body;

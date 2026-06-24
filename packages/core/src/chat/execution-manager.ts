@@ -184,7 +184,7 @@ export class ChatExecutionManager {
 		controller: AbortController,
 	): Promise<void> {
 		const conversationId = execution.conversation_id;
-		const targetAgent = this.opts.getAgentRuntime();
+		const targetAgent = this.opts.getAgentRuntime(input.agentId);
 		const selectedAgentContext = this.opts.getSelectedAgentContext
 			? await this.opts.getSelectedAgentContext(input.agentId)
 			: null;

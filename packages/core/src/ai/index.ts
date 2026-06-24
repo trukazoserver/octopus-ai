@@ -1,6 +1,7 @@
 export type {
 	LLMProvider,
 	LLMRequest,
+	LLMRequestMetadata,
 	LLMMessage,
 	LLMResponse,
 	LLMChunk,
@@ -15,6 +16,23 @@ export type {
 	ThinkingBlock,
 } from "./types.js";
 export { LLMRouter, getProviderRegistry } from "./router.js";
+export { UsageStore } from "./usage-store.js";
+export type {
+	UsageSink,
+	UsageEvent,
+	UsageAggregate,
+	UsageQueryFilters,
+	ProviderUsageSlice,
+} from "./usage-store.js";
+export { handleProviderResponseHeaders, getCachedQuota } from "./quota-service.js";
+export type { ProviderQuota, QuotaWindow, CachedQuota } from "./quota-service.js";
+export {
+	getModelCapabilities,
+	getModelCapabilitiesFromRef,
+	resolveProviderForModel,
+	coerceReasoningEffort,
+} from "./model-capabilities.js";
+export type { ModelCapabilityInfo } from "./model-capabilities.js";
 export { TokenCounter } from "./tokenizer.js";
 export { BaseLLMProvider } from "./providers/base.js";
 export { OpenAIProvider } from "./providers/openai.js";

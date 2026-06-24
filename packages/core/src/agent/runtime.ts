@@ -6,9 +6,11 @@ import type {
 	ContentPart,
 	LLMMessage,
 	LLMRequest,
+	LLMRequestMetadata,
 	LLMResponse,
 	LLMTool,
 	LLMToolCall,
+	ReasoningConfig,
 } from "../ai/types.js";
 import type { ChatManager, ChatTaskLedgerEntry } from "../chat/manager.js";
 import type { LearningEngine, LearningInsight } from "../learning/index.js";
@@ -47,7 +49,12 @@ import {
 } from "./orchestrator.js";
 import { RollingContextManager } from "./rolling-context.js";
 import { routeTaskToArm } from "./arm-router.js";
-import type { AgentConfig, ConversationTurn, TaskState } from "./types.js";
+import type {
+	AgentConfig,
+	AgentReasoningEffort,
+	ConversationTurn,
+	TaskState,
+} from "./types.js";
 import type { WorkflowManager } from "./workflow-manager.js";
 import type { KanbanPlanner } from "./kanban-planner.js";
 import type { RequirementResolver } from "./requirement-resolver.js";
@@ -589,6 +596,57 @@ export class AgentRuntime {
 		toolIterationLimit: AgentConfig["toolIterationLimit"],
 	): void {
 		this.config = { ...this.config, toolIterationLimit };
+	}
+
+	/** Read-only view of the effective runtime config (model, reasoning, etc.). */
+	getConfig(): Readonly<AgentConfig> {
+		return this.config;
+	}
+
+	/**
+	 * Live reconfiguration of model / reasoning / sampling without rebuilding the
+	 * runtime. Preserves all wired subsystems (tools, memory, orchestrator, ...).
+	 * Called when an agent's model or reasoning is changed from the UI.
+	 */
+	updateConfig(patch: {
+		model?: string;
+		reasoningEffort?: AgentReasoningEffort;
+		maxTokens?: number;
+		temperature?: number;
+	}): void {
+		this.config = {
+			...this.config,
+			...(patch.model !== undefined ? { model: patch.model } : {}),
+			...(patch.reasoningEffort !== undefined
+				? { reasoningEffort: patch.reasoningEffort }
+				: {}),
+			...(patch.maxTokens !== undefined ? { maxTokens: patch.maxTokens } : {}),
+			...(patch.temperature !== undefined
+				? { temperature: patch.temperature }
+				: {}),
+		};
+	}
+
+	/**
+	 * Per-agent reasoning config derived from this runtime's profile. Always
+	 * returns a defined object so the router's global `thinking` never silently
+	 * overrides an agent that explicitly wants "none".
+	 */
+	private buildReasoning(): ReasoningConfig {
+		const effort: AgentReasoningEffort =
+			this.config.reasoningEffort ?? "none";
+		return {
+			effort,
+			includeThinking: effort !== "none",
+		};
+	}
+
+	/** Metadata attached to every LLM request this runtime issues (usage attribution). */
+	private requestMetadata(extra?: Partial<LLMRequestMetadata>): LLMRequestMetadata {
+		return {
+			agentId: this.config.id,
+			...extra,
+		};
 	}
 
 	private toSkillTrace(skills: LoadedSkill[]): ExperienceSkillTrace[] {
@@ -1216,6 +1274,8 @@ export class AgentRuntime {
 					{ role: "user", content: prompt },
 				],
 				maxTokens: 500,
+				reasoning: this.buildReasoning(),
+				metadata: this.requestMetadata(),
 			});
 			return response.content || "Sin respuesta.";
 		} catch (err) {
@@ -2029,6 +2089,8 @@ export class AgentRuntime {
 				maxTokens: this.config.maxTokens,
 				temperature: this.config.temperature,
 				stream: true,
+				reasoning: this.buildReasoning(),
+				metadata: this.requestMetadata(),
 			};
 			for await (const chunk of this.llmRouter.chatStream(request)) {
 				if (!chunk.content) continue;
@@ -2068,6 +2130,8 @@ export class AgentRuntime {
 				messages: this.buildFinalizationMessages(messages, ledger, reason),
 				maxTokens: this.config.maxTokens,
 				temperature: this.config.temperature,
+				reasoning: this.buildReasoning(),
+				metadata: this.requestMetadata(),
 			});
 			const content = this.sanitizeAssistantOutput(response.content);
 			if (content.trim()) return content;
@@ -2138,6 +2202,8 @@ export class AgentRuntime {
 						DELEGATE_SYNTHESIS_MAX_TOKENS,
 					),
 					temperature: this.config.temperature ?? 0.3,
+					reasoning: this.buildReasoning(),
+					metadata: this.requestMetadata(),
 				}),
 				DELEGATE_SYNTHESIS_TIMEOUT_MS,
 			);
@@ -2572,6 +2638,8 @@ export class AgentRuntime {
 					temperature: this.config.temperature,
 					stream: true,
 					tools: tools.length > 0 ? tools : undefined,
+					reasoning: this.buildReasoning(),
+					metadata: this.requestMetadata({ conversationId: channelId }),
 				};
 
 				let chunkContent = "";
@@ -3441,6 +3509,8 @@ export class AgentRuntime {
 				maxTokens: this.config.maxTokens,
 				temperature: this.config.temperature,
 				tools: tools.length > 0 ? tools : undefined,
+				reasoning: this.buildReasoning(),
+				metadata: this.requestMetadata({ conversationId: channelId }),
 			};
 
 			const response = await this.llmRouter.chat(request);

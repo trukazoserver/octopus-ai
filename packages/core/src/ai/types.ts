@@ -53,6 +53,15 @@ export interface ThinkingBlock {
 	signature?: string;
 }
 
+export interface LLMRequestMetadata {
+	/** Agent that originated the request (for usage attribution). */
+	agentId?: string;
+	/** Conversation the request belongs to (for usage attribution). */
+	conversationId?: string;
+	/** Correlation id for the originating execution (dedupe + tracing). */
+	requestId?: string;
+}
+
 export interface LLMRequest {
 	model: string;
 	messages: LLMMessage[];
@@ -61,6 +70,8 @@ export interface LLMRequest {
 	stream?: boolean;
 	tools?: LLMTool[];
 	reasoning?: ReasoningConfig;
+	/** Attribution metadata used by the usage sink to persist token/cost events. */
+	metadata?: LLMRequestMetadata;
 }
 
 export interface LLMResponse {

@@ -33,10 +33,18 @@ export {
 	GoogleProvider,
 	ZhipuProvider,
 	CohereProvider,
+	UsageStore,
+	getModelCapabilities,
+	getModelCapabilitiesFromRef,
+	resolveProviderForModel,
+	coerceReasoningEffort,
+	handleProviderResponseHeaders,
+	getCachedQuota,
 } from "./ai/index.js";
 export type {
 	LLMProvider,
 	LLMRequest,
+	LLMRequestMetadata,
 	LLMMessage,
 	LLMResponse,
 	LLMChunk,
@@ -46,6 +54,12 @@ export type {
 	UsageStats,
 	LLMRouterConfig,
 	ProviderInfo,
+	UsageSink,
+	UsageEvent,
+	UsageAggregate,
+	UsageQueryFilters,
+	ProviderUsageSlice,
+	ModelCapabilityInfo,
 } from "./ai/index.js";
 
 export {
@@ -77,6 +91,7 @@ export {
 } from "./agent/index.js";
 export type {
 	AgentConfig,
+	AgentReasoningEffort,
 	ToolIterationLimitConfig,
 	TaskState,
 	ConversationTurn,

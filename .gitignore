@@ -47,3 +47,5 @@ packages/plugins/*/dist/
 $null
 -p/
 .playwright-mcp/
+.claude/skills/
+.playwright/

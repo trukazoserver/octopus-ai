@@ -2,6 +2,7 @@ import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { ActivityFeed } from "../../components/dashboard/ActivityFeed.js";
 import { DashboardStatsGrid } from "../../components/dashboard/DashboardStats.js";
+import { OctopusGraph } from "../../components/dashboard/OctopusGraph.js";
 import { QuickActions } from "../../components/dashboard/QuickActions.js";
 import type {
 	DashboardArmSummary,
@@ -27,6 +28,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 		activity,
 		recentWorkflows,
 		arms,
+		mainAgent,
 		loading,
 		reload,
 	} = useDashboard();
@@ -281,6 +283,48 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 					</button>
 				</div>
 				<DashboardStatsGrid stats={stats} loading={loading} />
+			</div>
+
+			{/* Octopus control-center: Octavio + 8 arms, each with provider/model */}
+			<div
+				style={{
+					background: "rgba(24, 24, 27, 0.4)",
+					border: "1px solid #27272a",
+					borderRadius: "18px",
+					padding: "20px",
+					marginBottom: "32px",
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						marginBottom: "8px",
+						flexWrap: "wrap",
+						gap: "8px",
+					}}
+				>
+					<h2
+						style={{
+							fontSize: "1.1rem",
+							fontWeight: 700,
+							color: "#f4f4f5",
+							margin: 0,
+						}}
+					>
+						🐙 Centro de Octavio
+					</h2>
+					<span style={{ fontSize: "0.8rem", color: "#a1a1aa" }}>
+						{arms.length}/8 brazos activos · cada brazo muestra su proveedor y modelo
+					</span>
+				</div>
+				<OctopusGraph
+					mainAgent={mainAgent}
+					arms={arms}
+					fallbackProvider={providerDisplayName}
+					fallbackModel={model}
+				/>
 			</div>
 
 			<div

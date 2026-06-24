@@ -56,6 +56,24 @@ export function buildTransportSystemContext(
 		config: system.config,
 		db: system.db,
 		router: system.router,
+		usageStore: system.usageStore,
+		/**
+		 * When the main agent (Octavio) model/reasoning changes from the UI, mirror
+		 * it onto the legacy `config.ai.default` / `config.ai.thinking` aliases and
+		 * persist them, so compatibility consumers and restarts stay consistent.
+		 * The router is intentionally NOT reconfigured here — agent runtimes now
+		 * send explicit model + reasoning on every request, so the global defaults
+		 * are no longer authoritative.
+		 */
+		onMainAgentModelChange: (model: string, reasoning: string) => {
+			try {
+				system.config.ai.default = model;
+				system.config.ai.thinking = reasoning as typeof system.config.ai.thinking;
+				new ConfigLoader().save(system.config);
+			} catch (err) {
+				console.error("[start] failed to sync main agent config:", err);
+			}
+		},
 		ltm: system.ltm,
 		memoryOrchestrator: system.memoryOrchestrator,
 		contextAssembler: system.contextAssembler,
@@ -1030,7 +1048,13 @@ export async function runStart(options: StartOptions): Promise<void> {
 			streamCheckpointIntervalMs: STREAM_CHECKPOINT_INTERVAL_MS,
 			getAgentRuntime: (agentId?: string) => {
 				if (!system) throw new Error("System not initialized");
-				void agentId;
+				// Execute the selected agent's runtime when available; fall back to
+				// the main Octavio runtime otherwise. This is what makes per-agent
+				// model/reasoning selection actually take effect at run time.
+				if (agentId && system.agentManager) {
+					const runtime = system.agentManager.getRuntime(agentId);
+					if (runtime) return runtime;
+				}
 				return system.agentRuntime;
 			},
 			getSelectedAgentContext: async (agentId?: string) => {

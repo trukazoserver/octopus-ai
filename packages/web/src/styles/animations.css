@@ -311,3 +311,41 @@
 	background-size: 200% 100%;
 	animation: shimmer 1.5s infinite;
 }
+
+/* Octopus control-center visualization */
+@keyframes octopus-sway {
+	0%,
+	100% {
+		stroke-opacity: 0.45;
+	}
+	50% {
+		stroke-opacity: 0.75;
+	}
+}
+
+@keyframes octopus-arm-pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.82;
+	}
+}
+
+.octopus-tentacle {
+	animation: octopus-sway 3.4s ease-in-out infinite;
+	transform-origin: center;
+}
+
+.octopus-arm-node {
+	animation: octopus-arm-pulse 2.8s ease-in-out infinite;
+	cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.octopus-tentacle,
+	.octopus-arm-node {
+		animation: none;
+	}
+}

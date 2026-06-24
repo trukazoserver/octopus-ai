@@ -7,6 +7,12 @@ import type {
 
 export abstract class BaseLLMProvider {
 	protected config: ProviderConfig;
+	/**
+	 * Optional hook invoked with the raw response headers after a successful
+	 * provider call. Used to capture rate-limit / quota headers (e.g. Codex
+	 * `x-codex-*`) for the quota dashboard without making extra API calls.
+	 */
+	onResponseHeaders?: (headers: Headers) => void;
 
 	constructor(config: ProviderConfig) {
 		this.config = config;

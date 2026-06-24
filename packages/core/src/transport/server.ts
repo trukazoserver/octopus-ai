@@ -23,6 +23,13 @@ import { fileURLToPath } from "node:url";
 import { EventEmitter } from "eventemitter3";
 import WebSocket, { WebSocketServer, type WebSocket as WSWebSocket } from "ws";
 import { type LLMRouter, getProviderRegistry } from "../ai/router.js";
+import {
+	getModelCapabilities,
+	getModelCapabilitiesFromRef,
+	coerceReasoningEffort,
+} from "../ai/model-capabilities.js";
+import type { AgentReasoningEffort } from "../agent/types.js";
+import { resolveProviderQuotas } from "../ai/quota-service.js";
 import { listCodexModels } from "../ai/providers/codex.js";
 import type { UsageStats } from "../ai/types.js";
 import {
@@ -528,6 +535,18 @@ function timingSafeTokenEquals(actual: string, expected: string): boolean {
 	return crypto.timingSafeEqual(actualHash, expectedHash);
 }
 
+function emptyUsageAggregate() {
+	return {
+		totalTokens: 0,
+		promptTokens: 0,
+		completionTokens: 0,
+		reasoningTokens: 0,
+		totalCost: 0,
+		requests: 0,
+		byProvider: {} as Record<string, unknown>,
+	};
+}
+
 function describeModelRef(
 	config: OctopusConfig,
 	router: LLMRouter | undefined,
@@ -652,6 +671,16 @@ export class TransportServer {
 
 				if (req.method === "GET" && pathname === "/api/models") {
 					this.handleGetModels(res);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/usage") {
+					void this.handleGetUsage(res, url);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/quotas") {
+					void this.handleGetQuotas(res);
 					return;
 				}
 
@@ -1637,22 +1666,39 @@ export class TransportServer {
 		try {
 			const config = this.loadConfig();
 			const router = this.system?.router;
-			const active = describeModelRef(config, router, config.ai.default);
+			const mainRuntime = this.system?.agentRuntime;
+			// Effective model/reasoning come from the main agent's runtime config
+			// (the source of truth), not the raw `config.ai.default` alias.
+			const effectiveModel =
+				mainRuntime?.getConfig().model ?? config.ai.default;
+			const active = describeModelRef(config, router, effectiveModel);
 			const fallback = describeModelRef(config, router, config.ai.fallback);
 			const usage: UsageStats | undefined = router?.getUsage();
 			const enabledChannels: string[] = [];
 			for (const [name, ch] of Object.entries(config.channels)) {
 				if (ch.enabled) enabledChannels.push(name);
 			}
+			const agent = mainRuntime
+				? {
+						id: mainRuntime.getConfig().id,
+						name: mainRuntime.getConfig().name,
+						model: active.model ?? effectiveModel,
+						provider: active.provider,
+						providerDisplayName: active.providerDisplayName,
+						reasoningEffort: mainRuntime.getConfig().reasoningEffort ?? "none",
+					}
+				: undefined;
 			jsonRes(res, 200, {
 				status: "running",
 				provider: active.provider,
 				providerDisplayName: active.providerDisplayName,
-				model: active.model ?? config.ai.default,
+				model: active.model ?? effectiveModel,
+				agent,
 				fallback: config.ai.fallback,
 				fallbackProvider: fallback.provider,
 				fallbackModel: fallback.model,
-				thinking: config.ai.thinking,
+				// Compatibility alias — mirrors the effective agent reasoning now.
+				thinking: mainRuntime?.getConfig().reasoningEffort ?? config.ai.thinking,
 				maxTokens: config.ai.maxTokens,
 				availableProviders: router?.getAvailableProviders() ?? [],
 				usage,
@@ -1720,7 +1766,69 @@ export class TransportServer {
 					});
 				}
 			}
-			jsonRes(res, 200, { providers: entries });
+			// Rich per-model metadata (reasoning capabilities) for the UI selectors.
+			// Kept as a separate field so existing `providers` consumers are unaffected.
+			const modelCapabilities = entries.flatMap((entry) =>
+				entry.models.map((model) =>
+					getModelCapabilities(entry.provider, model),
+				),
+			);
+			jsonRes(res, 200, { providers: entries, modelCapabilities });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetUsage(
+		res: ServerResponse,
+		url: URL,
+	): Promise<void> {
+		try {
+			const usageStore = this.system?.usageStore;
+			if (!usageStore) {
+				jsonRes(res, 200, {
+					total: emptyUsageAggregate(),
+					byProvider: [],
+					byAgent: [],
+					persisted: false,
+				});
+				return;
+			}
+			const filters = {
+				from: url.searchParams.get("from") ?? undefined,
+				to: url.searchParams.get("to") ?? undefined,
+				agentId: url.searchParams.get("agentId") ?? undefined,
+				provider: url.searchParams.get("provider") ?? undefined,
+			};
+			const [total, byProvider, byAgent] = await Promise.all([
+				usageStore.aggregate(filters),
+				usageStore.byProvider(filters),
+				usageStore.byAgent(filters),
+			]);
+			jsonRes(res, 200, {
+				total,
+				byProvider,
+				byAgent,
+				filters,
+				persisted: true,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetQuotas(res: ServerResponse): Promise<void> {
+		try {
+			const quotas = await resolveProviderQuotas(
+				this.loadConfig(),
+				this.system?.router,
+				this.system?.usageStore,
+			);
+			jsonRes(res, 200, { providers: quotas, updatedAt: new Date().toISOString() });
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -5001,10 +5109,52 @@ export class TransportServer {
 				jsonRes(res, 200, []);
 				return;
 			}
-			jsonRes(res, 200, await this.system.agentManager.listAgents());
+			const agents = await this.system.agentManager.listAgents();
+			const enriched = await Promise.all(
+				agents.map((a: { id: string; model: string | null }) =>
+					this.enrichAgentRecord(a),
+				),
+			);
+			jsonRes(res, 200, enriched);
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
+	}
+
+	/**
+	 * Attach the effective model, resolved reasoning effort (from the live runtime
+	 * or the persisted profile), and model capabilities to an agent record so the
+	 * chat / agents / dashboard UIs can render and edit them consistently.
+	 */
+	private async enrichAgentRecord<T extends { id: string; model: string | null }>(
+		agent: T,
+	): Promise<
+		T & {
+			effectiveModel: string;
+			reasoningEffort: AgentReasoningEffort;
+			capabilities: ReturnType<typeof getModelCapabilitiesFromRef>;
+		}
+	> {
+		const config = this.loadConfig();
+		const effectiveModel = agent.model ?? config.ai.default;
+		const caps = getModelCapabilitiesFromRef(config, effectiveModel);
+		const runtime = this.system?.agentManager?.getRuntime(agent.id);
+		const fallback: AgentReasoningEffort = caps ? caps.defaultReasoningEffort : "none";
+		let reasoning: AgentReasoningEffort = fallback;
+		if (runtime?.getConfig().reasoningEffort) {
+			reasoning = coerceReasoningEffort(caps, runtime.getConfig().reasoningEffort);
+		} else if (this.system?.agentManager) {
+			try {
+				reasoning = await this.system.agentManager.resolveReasoningForModel(
+					agent.id,
+					effectiveModel,
+					fallback,
+				);
+			} catch {
+				/* keep fallback */
+			}
+		}
+		return { ...agent, effectiveModel, reasoningEffort: reasoning, capabilities: caps };
 	}
 
 	private async handleCreateAgent(
@@ -5035,7 +5185,7 @@ export class TransportServer {
 				jsonRes(res, 404, { error: "Agent not found" });
 				return;
 			}
-			jsonRes(res, 200, agent);
+			jsonRes(res, 200, await this.enrichAgentRecord(agent));
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
@@ -5147,13 +5297,74 @@ export class TransportServer {
 		id: string,
 	): Promise<void> {
 		try {
-			if (!this.system?.agentManager) {
+			const agentManager = this.system?.agentManager;
+			if (!agentManager) {
 				jsonRes(res, 503, { error: "Agent manager not available" });
 				return;
 			}
-			const body = JSON.parse(await readBody(req));
-			const ok = await this.system.agentManager.updateAgent(id, body);
-			jsonRes(res, ok ? 200 : 404, { ok });
+			const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+			const existing = await agentManager.getAgent(id);
+			if (!existing) {
+				jsonRes(res, 404, { ok: false });
+				return;
+			}
+			const ok = await agentManager.updateAgent(id, body);
+			if (!ok) {
+				jsonRes(res, 404, { ok: false });
+				return;
+			}
+
+			// Live runtime refresh when model and/or reasoning changed. Keeps the
+			// change effective immediately without a restart and persists the
+			// per-(agent,model) reasoning profile.
+			let effectiveModel: string | undefined;
+			let effectiveReasoning: AgentReasoningEffort | undefined;
+			const newModel =
+				typeof body.model === "string" && body.model.trim()
+					? body.model.trim()
+					: undefined;
+			const wantsReasoning = typeof body.reasoningEffort === "string";
+			const runtime = agentManager.getRuntime(id);
+			if (runtime && (newModel || wantsReasoning)) {
+				const config = this.loadConfig();
+				const updatedRecord = await agentManager.getAgent(id);
+				effectiveModel =
+					updatedRecord?.model ?? newModel ?? existing.model ?? config.ai.default;
+				if (wantsReasoning) {
+					const caps = getModelCapabilitiesFromRef(config, effectiveModel);
+					const desired = body.reasoningEffort as AgentReasoningEffort;
+					effectiveReasoning = coerceReasoningEffort(caps, desired);
+					await agentManager.upsertModelProfile(id, effectiveModel, effectiveReasoning);
+				} else {
+					const caps = getModelCapabilitiesFromRef(config, effectiveModel);
+					const fallback = caps ? caps.defaultReasoningEffort : "none";
+					effectiveReasoning = await agentManager.resolveReasoningForModel(
+						id,
+						effectiveModel,
+						fallback,
+					);
+				}
+				runtime.updateConfig({
+					model: newModel,
+					reasoningEffort: effectiveReasoning,
+				});
+				// Mirror Octavio's change onto the legacy config aliases for compatibility.
+				if (existing.is_main === 1 && effectiveModel && effectiveReasoning) {
+					const onMain = this.system?.onMainAgentModelChange as
+						| ((model: string, reasoning: string) => void)
+						| undefined;
+					onMain?.(effectiveModel, effectiveReasoning);
+				}
+			}
+
+			const updated = await agentManager.getAgent(id);
+			jsonRes(res, 200, {
+				ok: true,
+				agent: updated,
+				effectiveModel: effectiveModel ?? updated?.model ?? undefined,
+				effectiveReasoning:
+					effectiveReasoning ?? runtime?.getConfig().reasoningEffort ?? undefined,
+			});
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}

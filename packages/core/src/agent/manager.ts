@@ -4,6 +4,7 @@ import { OCTOPUS_ARM_PROFILES } from "./arm-profiles.js";
 import type { AgentRuntime } from "./runtime.js";
 import type {
 	AgentConfig,
+	AgentReasoningEffort,
 	AgentRecord,
 	AgentStoredMessage,
 	CreateAgentInput,
@@ -479,6 +480,50 @@ export class AgentManager {
 
 	getRuntime(agentId: string): AgentRuntime | undefined {
 		return this.runtimes.get(agentId);
+	}
+
+	// --- Per-agent, per-model reasoning profiles ---
+
+	/** Read the persisted reasoning effort for an (agent, model) pair, if any. */
+	async getModelProfile(
+		agentId: string,
+		model: string,
+	): Promise<AgentReasoningEffort | undefined> {
+		const row = await this.db.get<{ reasoning_effort: string }>(
+			"SELECT reasoning_effort FROM agent_model_profiles WHERE agent_id = ? AND model = ?",
+			[agentId, model],
+		);
+		if (!row) return undefined;
+		const effort = row.reasoning_effort as AgentReasoningEffort;
+		return ["none", "low", "medium", "high"].includes(effort) ? effort : undefined;
+	}
+
+	/** Persist (or update) the reasoning effort for an (agent, model) pair. */
+	async upsertModelProfile(
+		agentId: string,
+		model: string,
+		effort: AgentReasoningEffort,
+	): Promise<void> {
+		await this.db.run(
+			`INSERT INTO agent_model_profiles (agent_id, model, reasoning_effort, created_at, updated_at)
+			 VALUES (?, ?, ?, datetime('now'), datetime('now'))
+			 ON CONFLICT(agent_id, model) DO UPDATE SET reasoning_effort = excluded.reasoning_effort, updated_at = datetime('now')`,
+			[agentId, model, effort],
+		);
+	}
+
+	/**
+	 * Resolve the effective reasoning effort for an agent's model: the stored
+	 * profile if present, otherwise the provided default (typically the model's
+	 * capability default, or the global thinking setting during seeding).
+	 */
+	async resolveReasoningForModel(
+		agentId: string,
+		model: string,
+		fallback: AgentReasoningEffort,
+	): Promise<AgentReasoningEffort> {
+		const stored = await this.getModelProfile(agentId, model);
+		return stored ?? fallback;
 	}
 
 	toAgentConfig(record: AgentRecord): AgentConfig {

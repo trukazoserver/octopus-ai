@@ -29,6 +29,8 @@ interface AgentRecord {
 	fallback_model?: string | null;
 	can_spawn_subagents?: number;
 	max_spawn_depth?: number;
+	effectiveModel?: string;
+	reasoningEffort?: string;
 }
 
 interface AgentFormData {
@@ -38,6 +40,7 @@ interface AgentFormData {
 	description: string;
 	systemPrompt: string;
 	model: string;
+	reasoningEffort: string;
 	fallbackModel: string;
 	avatar: string;
 	color: string;
@@ -81,6 +84,13 @@ interface ModelsResponse {
 		providerDisplayName: string;
 		models: string[];
 	}>;
+	modelCapabilities?: Array<{
+		provider: string;
+		model: string;
+		supportsReasoning: boolean;
+		allowedReasoningEfforts: string[];
+		defaultReasoningEffort: string;
+	}>;
 }
 
 const ROLE_OPTIONS = [
@@ -91,6 +101,13 @@ const ROLE_OPTIONS = [
 	"analyst",
 	"coordinator",
 ];
+
+const REASONING_LABELS: Record<string, string> = {
+	none: "Sin razonamiento",
+	low: "Bajo",
+	medium: "Medio",
+	high: "Alto",
+};
 
 const MESSAGE_TYPE_OPTIONS = [
 	"message",
@@ -117,6 +134,7 @@ const EMPTY_FORM: AgentFormData = {
 	description: "",
 	systemPrompt: "",
 	model: "",
+	reasoningEffort: "none",
 	fallbackModel: "",
 	avatar: "🤖",
 	color: "#3b82f6",
@@ -250,6 +268,16 @@ export const AgentsPage: React.FC = () => {
 		KnowledgeCollection[]
 	>([]);
 	const [modelGroups, setModelGroups] = useState<ModelOptionGroup[]>([]);
+	const [modelCapabilities, setModelCapabilities] = useState<
+		Record<
+			string,
+			{
+				supportsReasoning: boolean;
+				allowedReasoningEfforts: string[];
+				defaultReasoningEffort: string;
+			}
+		>
+	>({});
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -288,6 +316,22 @@ export const AgentsPage: React.FC = () => {
 			setAgents(data);
 			setKnowledgeCollections(collections);
 			setModelGroups(buildModelGroups(models));
+			const capsMap: Record<
+				string,
+				{
+					supportsReasoning: boolean;
+					allowedReasoningEfforts: string[];
+					defaultReasoningEffort: string;
+				}
+			> = {};
+			for (const c of models.modelCapabilities ?? []) {
+				capsMap[`${c.provider}/${c.model}`] = {
+					supportsReasoning: c.supportsReasoning,
+					allowedReasoningEfforts: c.allowedReasoningEfforts,
+					defaultReasoningEffort: c.defaultReasoningEffort,
+				};
+			}
+			setModelCapabilities(capsMap);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
 		} finally {
@@ -353,6 +397,7 @@ export const AgentsPage: React.FC = () => {
 			description: agent.description ?? "",
 			systemPrompt: agent.system_prompt,
 			model: normalizeModelValue(agent.model ?? "", modelGroups),
+			reasoningEffort: agent.reasoningEffort ?? "none",
 			fallbackModel: normalizeModelValue(
 				agent.fallback_model ?? "",
 				modelGroups,
@@ -447,6 +492,7 @@ export const AgentsPage: React.FC = () => {
 				description: form.description.trim(),
 				systemPrompt: form.systemPrompt.trim(),
 				model: normalizeModelValue(form.model.trim(), modelGroups),
+				reasoningEffort: form.reasoningEffort || "none",
 				fallbackModel: normalizeModelValue(
 					form.fallbackModel.trim(),
 					modelGroups,
@@ -1036,10 +1082,71 @@ export const AgentsPage: React.FC = () => {
 						<ModelSelect
 							label="Modelo"
 							value={form.model}
-							onChange={(v) => setForm((f) => ({ ...f, model: v }))}
+							onChange={(v) =>
+								setForm((f) => {
+									const caps = modelCapabilities[v];
+									const allowed = caps ? caps.allowedReasoningEfforts : ["none"];
+									const coerced = caps
+										? allowed.includes(f.reasoningEffort)
+											? f.reasoningEffort
+											: caps.defaultReasoningEffort
+										: "none";
+									return { ...f, model: v, reasoningEffort: coerced };
+								})
+							}
 							groups={modelGroups}
 							placeholder="Selecciona un modelo"
 						/>
+						<div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+							<label
+								style={{
+									fontSize: "0.8rem",
+									color: "#a1a1aa",
+									fontWeight: 500,
+								}}
+							>
+								Nivel de razonamiento
+							</label>
+							{(() => {
+								const caps = form.model ? modelCapabilities[form.model] : undefined;
+								const allowed = caps
+									? caps.allowedReasoningEfforts
+									: ["none"];
+								const supports = caps ? caps.supportsReasoning : false;
+								return (
+									<>
+										<select
+											value={caps && !supports ? "none" : form.reasoningEffort}
+											disabled={!supports}
+											onChange={(e) =>
+												setForm((f) => ({ ...f, reasoningEffort: e.target.value }))
+											}
+											style={{
+												padding: "8px 10px",
+												borderRadius: "8px",
+												border: "1px solid #3f3f46",
+												background: "#0b0b10",
+												color: "#f4f4f5",
+												fontSize: "0.88rem",
+												cursor: supports ? "pointer" : "not-allowed",
+												opacity: supports ? 1 : 0.6,
+											}}
+										>
+											{allowed.map((effort) => (
+												<option key={effort} value={effort}>
+													{REASONING_LABELS[effort] ?? effort}
+												</option>
+											))}
+										</select>
+										{!supports && (
+											<span style={{ fontSize: "0.72rem", color: "#71717a" }}>
+												Este modelo no admite razonamiento ajustable.
+											</span>
+										)}
+									</>
+								);
+							})()}
+						</div>
 						<FormInput
 							label="Avatar (emoji o texto)"
 							value={form.avatar}

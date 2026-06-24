@@ -3,6 +3,13 @@ export interface ToolIterationLimitConfig {
 	maxIterations?: number;
 }
 
+/**
+ * Per-agent reasoning (thinking) level. Mirrors the LLM ReasoningEffort so an
+ * agent can carry its own thinking level independent of the global config, and so
+ * it can be changed live from the chat / agents UI without a restart.
+ */
+export type AgentReasoningEffort = "none" | "low" | "medium" | "high";
+
 export interface ContinuityGuardRuntimeConfig {
 	enabled?: boolean;
 	maxAutoContinuations?: number;
@@ -34,6 +41,7 @@ export interface AgentConfig {
 	description: string;
 	systemPrompt: string;
 	model?: string;
+	reasoningEffort?: AgentReasoningEffort;
 	tools?: string[];
 	channels?: string[];
 	maxTokens?: number;

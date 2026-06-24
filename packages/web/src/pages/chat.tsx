@@ -20,6 +20,7 @@ import {
 	apiPatch,
 	apiPost,
 	apiPut,
+	apiPutJson,
 } from "../hooks/useApi.js";
 import { publicAsset } from "../utils/assets.js";
 
@@ -117,6 +118,16 @@ const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
 
 interface StatusData {
 	provider?: string;
+	providerDisplayName?: string;
+	model?: string;
+	agent?: {
+		id: string;
+		name: string;
+		model: string;
+		provider?: string;
+		providerDisplayName?: string;
+		reasoningEffort?: string;
+	};
 	fallback?: string;
 	thinking?: string;
 	maxTokens?: number;
@@ -124,6 +135,30 @@ interface StatusData {
 	memoryEnabled?: boolean;
 	skillsEnabled?: boolean;
 }
+
+interface ModelCapabilities {
+	provider: string;
+	providerDisplayName: string;
+	model: string;
+	supportsReasoning: boolean;
+	allowedReasoningEfforts: string[];
+	defaultReasoningEffort: string;
+}
+
+interface ModelGroup {
+	providerKey: string;
+	providerName: string;
+	models: Array<{ value: string; label: string }>;
+}
+
+type ReasoningEffort = "none" | "low" | "medium" | "high";
+
+const REASONING_LABELS: Record<ReasoningEffort, string> = {
+	none: "Sin razonamiento",
+	low: "Bajo",
+	medium: "Medio",
+	high: "Alto",
+};
 
 interface Message {
 	id: string;
@@ -307,6 +342,13 @@ interface Agent {
 	description?: string;
 	avatar?: string | null;
 	color?: string | null;
+	role?: string | null;
+	armKey?: string | null;
+	is_main?: number | boolean;
+	is_builtin_arm?: number | boolean;
+	effectiveModel?: string;
+	reasoningEffort?: ReasoningEffort;
+	capabilities?: ModelCapabilities | null;
 }
 
 function resolveAgentAvatarImage(avatar?: string | null): string | null {
@@ -2506,6 +2548,10 @@ export const ChatPage: React.FC<{
 	});
 	const activeConvRef = useRef<string | null>(null);
 	const [agents, setAgents] = useState<Agent[]>([]);
+	const [modelGroups, setModelGroups] = useState<ModelGroup[]>([]);
+	const [modelCapabilities, setModelCapabilities] = useState<
+	 Record<string, ModelCapabilities>
+	>({});
 	const [userDisplayName, setUserDisplayName] = useState("Usuario");
 	const [selectedAgentId, setSelectedAgentId] = useState<string>("");
 	const [streamEnabled, setStreamEnabled] = useState<boolean>(() => {
@@ -2864,6 +2910,71 @@ export const ChatPage: React.FC<{
 			.catch(() => {});
 	}, []);
 
+	// Fetch available models (grouped by provider) + per-model capabilities for the
+	// chat model/reasoning selectors.
+	useEffect(() => {
+		apiGet<{
+			providers?: Array<{
+				provider: string;
+				providerDisplayName: string;
+				models: string[];
+			}>;
+			modelCapabilities?: ModelCapabilities[];
+		}>("/api/models")
+			.then((data) => {
+				const groups: ModelGroup[] = (data.providers ?? []).map((p) => ({
+					providerKey: p.provider,
+					providerName: p.providerDisplayName,
+					models: p.models.map((m) => ({ value: `${p.provider}/${m}`, label: m })),
+				}));
+				setModelGroups(groups);
+				const capsMap: Record<string, ModelCapabilities> = {};
+				for (const c of data.modelCapabilities ?? []) {
+					capsMap[`${c.provider}/${c.model}`] = c;
+				}
+				setModelCapabilities(capsMap);
+			})
+			.catch(() => {});
+	}, []);
+
+	// Persist a model or reasoning change for the active agent and update local
+	// state from the server response so chat, agents page and dashboard stay in
+	// sync.
+	const updateAgentConfig = useCallback(
+		async (agentId: string, patch: { model?: string; reasoningEffort?: string }) => {
+			try {
+				const res = (await apiPutJson(`/api/agents/${agentId}`, patch)) as {
+					agent?: Partial<Agent>;
+					effectiveModel?: string;
+					effectiveReasoning?: string;
+				};
+				if (res.agent || res.effectiveModel || res.effectiveReasoning) {
+					setAgents((prev) =>
+						prev.map((a) =>
+							a.id === agentId
+								? {
+										...a,
+										...(res.agent as Partial<Agent>),
+										effectiveModel: res.effectiveModel ?? a.effectiveModel,
+										reasoningEffort:
+											(res.effectiveReasoning as ReasoningEffort | undefined) ??
+											a.reasoningEffort,
+									}
+								: a,
+						),
+					);
+				}
+				// Refresh status so the global header reflects Octavio's change.
+				apiGet<StatusData>("/api/status")
+					.then(setStatus)
+					.catch(() => {});
+			} catch (err) {
+				console.error("Failed to update agent config:", err);
+			}
+		},
+		[],
+	);
+
 	useEffect(() => {
 		apiGet<UserProfileResponse>("/api/memory/profile")
 			.then((response) => {
@@ -2877,6 +2988,26 @@ export const ChatPage: React.FC<{
 		() => agents.find((agent) => agent.id === selectedAgentId) ?? null,
 		[agents, selectedAgentId],
 	);
+
+	// Agent whose model/reasoning the chat controls act on: the selected agent,
+	// or Octavio (main) when none is explicitly selected.
+	const agentForControls = useMemo<Agent | null>(() => {
+		if (selectedAgent) return selectedAgent;
+		return agents.find((a) => a.is_main) ?? null;
+	}, [selectedAgent, agents]);
+
+	const activeCapabilities = useMemo<ModelCapabilities | null>(() => {
+		const model = agentForControls?.effectiveModel;
+		if (model && modelCapabilities[model]) return modelCapabilities[model];
+		return agentForControls?.capabilities ?? null;
+	}, [agentForControls, modelCapabilities]);
+
+	const activeModelValue = agentForControls?.effectiveModel ?? "";
+	const activeReasoning = (agentForControls?.reasoningEffort ?? "none") as ReasoningEffort;
+	const allowedEfforts: ReasoningEffort[] = activeCapabilities?.supportsReasoning
+		? (activeCapabilities.allowedReasoningEfforts as ReasoningEffort[])
+		: ["none"];
+	const canEditAgent = Boolean(agentForControls?.id);
 
 	const visibleConversations = useMemo(() => {
 		const query = conversationSearch.trim().toLowerCase();
@@ -4768,6 +4899,84 @@ export const ChatPage: React.FC<{
 								))}
 							</select>
 
+							{/* Model selector — reflects/edits the active agent's model */}
+							<select
+								aria-label="Modelo del agente"
+								value={activeModelValue}
+								disabled={!canEditAgent || modelGroups.length === 0}
+								onChange={(e) => {
+									if (agentForControls?.id) {
+										void updateAgentConfig(agentForControls.id, {
+											model: e.target.value,
+										});
+									}
+								}}
+								data-tooltip="Modelo del agente activo"
+								style={{
+									marginLeft: "8px",
+									padding: "6px 12px",
+									borderRadius: "8px",
+									border: "1px solid #3f3f46",
+									background: "#18181b",
+									color: "#f4f4f5",
+									fontSize: "0.8rem",
+									outline: "none",
+									cursor: canEditAgent ? "pointer" : "not-allowed",
+									fontFamily: "inherit",
+									maxWidth: "220px",
+								}}
+							>
+								{!activeModelValue && <option value="">Modelo…</option>}
+								{modelGroups.map((group) => (
+									<optgroup key={group.providerKey} label={group.providerName}>
+										{group.models.map((m) => (
+											<option key={m.value} value={m.value}>
+												{m.label}
+											</option>
+										))}
+									</optgroup>
+								))}
+							</select>
+
+							{/* Reasoning selector — options scoped to the active model */}
+							<select
+								aria-label="Nivel de razonamiento"
+								value={activeReasoning}
+								disabled={!canEditAgent || !activeCapabilities?.supportsReasoning}
+								onChange={(e) => {
+									if (agentForControls?.id) {
+										void updateAgentConfig(agentForControls.id, {
+											reasoningEffort: e.target.value,
+										});
+									}
+								}}
+								data-tooltip={
+									activeCapabilities?.supportsReasoning
+										? "Nivel de pensamiento del modelo"
+										: "Este modelo no admite razonamiento ajustable"
+								}
+								style={{
+									marginLeft: "8px",
+									padding: "6px 12px",
+									borderRadius: "8px",
+									border: "1px solid #3f3f46",
+									background: "#18181b",
+									color: "#f4f4f5",
+									fontSize: "0.8rem",
+									outline: "none",
+									cursor: canEditAgent && activeCapabilities?.supportsReasoning
+										? "pointer"
+										: "not-allowed",
+									fontFamily: "inherit",
+								}}
+							>
+								{allowedEfforts.map((effort) => (
+									<option key={effort} value={effort}>
+										{REASONING_LABELS[effort]}
+									</option>
+								))}
+							</select>
+
 							<button
 								type="button"
 								onClick={() => {
@@ -4856,41 +5065,73 @@ export const ChatPage: React.FC<{
 								{tenacidad === "tenaz" ? "Tenaz" : "Normal"}
 							</button>
 							<div style={{ flex: 1 }} />
-							{status?.provider && (
-								<div
-									className="chat-status-meta"
-									style={{ display: "flex", alignItems: "center", gap: "8px" }}
-								>
-									{status.thinking && status.thinking !== "none" && (
+							{(() => {
+								const providerName =
+									activeCapabilities?.providerDisplayName ??
+									status?.agent?.providerDisplayName ??
+									status?.providerDisplayName ??
+									status?.provider;
+								const modelName =
+									agentForControls?.effectiveModel ??
+									status?.agent?.model ??
+									status?.model ??
+									status?.provider;
+								const modelShort = modelName?.includes("/")
+									? modelName.slice(modelName.indexOf("/") + 1)
+									: modelName;
+								if (!providerName && !modelName) return null;
+								return (
+									<div
+										className="chat-status-meta"
+										style={{ display: "flex", alignItems: "center", gap: "8px" }}
+									>
+										{agentForControls?.name && (
+											<span
+												style={{
+													fontSize: "0.7rem",
+													padding: "4px 10px",
+													borderRadius: "20px",
+													background: "rgba(244, 114, 182, 0.1)",
+													color: "#f472b6",
+													border: "1px solid rgba(244, 114, 182, 0.2)",
+													fontWeight: 500,
+												}}
+											>
+												{agentForControls.name}
+											</span>
+										)}
+										{activeReasoning && activeReasoning !== "none" && (
+											<span
+												style={{
+													fontSize: "0.75rem",
+													padding: "4px 10px",
+													borderRadius: "20px",
+													background: "rgba(16, 185, 129, 0.1)",
+													color: "#10b981",
+													border: "1px solid rgba(16, 185, 129, 0.2)",
+													fontWeight: 500,
+												}}
+											>
+												Razonamiento: {REASONING_LABELS[activeReasoning]}
+											</span>
+										)}
 										<span
 											style={{
 												fontSize: "0.75rem",
 												padding: "4px 10px",
 												borderRadius: "20px",
-												background: "rgba(16, 185, 129, 0.1)",
-												color: "#10b981",
-												border: "1px solid rgba(16, 185, 129, 0.2)",
+												background: "rgba(99, 102, 241, 0.1)",
+												color: "#818cf8",
+												border: "1px solid rgba(99, 102, 241, 0.2)",
 												fontWeight: 500,
 											}}
 										>
-											Razonamiento: {status.thinking}
+											{providerName ? `${providerName} · ` : ""}Modelo:{" "}
+											{modelShort || "—"}
 										</span>
-									)}
-									<span
-										style={{
-											fontSize: "0.75rem",
-											padding: "4px 10px",
-											borderRadius: "20px",
-											background: "rgba(99, 102, 241, 0.1)",
-											color: "#818cf8",
-											border: "1px solid rgba(99, 102, 241, 0.2)",
-											fontWeight: 500,
-										}}
-									>
-										Modelo: {status.provider}
-									</span>
-								</div>
-							)}
+									</div>
+								);
+							})()}
 						</div>
 
 						{/* Messages */}
