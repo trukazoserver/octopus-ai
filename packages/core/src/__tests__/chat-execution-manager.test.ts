@@ -85,7 +85,11 @@ describe("ChatExecutionManager", () => {
 		});
 	});
 
-	it("keeps selected agent as context while executing the root runtime", async () => {
+	it("executes the selected agent's runtime and passes its context to processMessageStream", async () => {
+		// Per-agent model/reasoning: when an agentId is selected, the execution
+		// runs on THAT agent's own runtime (getAgentRuntime(agentId)) so its
+		// model/reasoning profile takes effect, while its persona is still
+		// injected as selectedAgentContext.
 		let resolveDone!: () => void;
 		const done = new Promise<void>((resolve) => {
 			resolveDone = resolve;
@@ -120,10 +124,14 @@ describe("ChatExecutionManager", () => {
 			},
 		});
 
-		await manager.start({ message: "coordina", agentId: "arm-bibi", stream: true });
+		await manager.start({
+			message: "coordina",
+			agentId: "arm-bibi",
+			stream: true,
+		});
 		await done;
 
-		expect(getAgentRuntime).toHaveBeenCalledWith();
+		expect(getAgentRuntime).toHaveBeenCalledWith("arm-bibi");
 		expect(processMessageStream).toHaveBeenCalledWith(
 			"coordina",
 			expect.any(String),

@@ -110,31 +110,38 @@ export class ToolRegistry {
 		return this.tools.has(name);
 	}
 
-	toLLMTools(): LLMTool[] {
-		return this.list().map((tool) => ({
-			type: "function" as const,
-			function: {
-				name: tool.name,
-				description: tool.description,
-				parameters: {
-					type: "object",
-					properties: Object.fromEntries(
-						Object.entries(tool.parameters).map(([key, param]) => [
-							key,
-							{
-								type: normalizeSchemaType(param.type),
-								description:
-									typeof param.description === "string"
-										? param.description
-										: "",
-							},
-						]),
-					),
-					required: Object.entries(tool.parameters)
-						.filter(([, param]) => param.required)
-						.map(([key]) => key),
+	toLLMTools(options?: { excludeServerNames?: string[] }): LLMTool[] {
+		const exclude = options?.excludeServerNames;
+		return this.list()
+			.filter((tool) => {
+				if (!exclude || exclude.length === 0) return true;
+				const serverName = String(tool.metadata?.serverName ?? "");
+				return !exclude.includes(serverName);
+			})
+			.map((tool) => ({
+				type: "function" as const,
+				function: {
+					name: tool.name,
+					description: tool.description,
+					parameters: {
+						type: "object",
+						properties: Object.fromEntries(
+							Object.entries(tool.parameters).map(([key, param]) => [
+								key,
+								{
+									type: normalizeSchemaType(param.type),
+									description:
+										typeof param.description === "string"
+											? param.description
+											: "",
+								},
+							]),
+						),
+						required: Object.entries(tool.parameters)
+							.filter(([, param]) => param.required)
+							.map(([key]) => key),
+					},
 				},
-			},
-		}));
+			}));
 	}
 }

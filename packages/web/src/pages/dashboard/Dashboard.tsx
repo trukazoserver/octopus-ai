@@ -1,3 +1,4 @@
+import { OCTOPUS_ARM_PROFILES } from "@octopus-ai/core/agent/arm-profiles";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { ActivityFeed } from "../../components/dashboard/ActivityFeed.js";
@@ -12,6 +13,18 @@ import { useDashboard } from "../../hooks/useDashboard.js";
 import { publicAsset } from "../../utils/assets.js";
 
 const LOGO_SRC = publicAsset("mascotas/Pulpo_octavio.png");
+
+/** armKey → real mascot avatar (single source of truth). */
+const ARM_AVATAR = new Map<string, string>(
+	OCTOPUS_ARM_PROFILES.map((profile) => [
+		profile.key,
+		publicAsset(profile.avatar),
+	]),
+);
+
+function armAvatar(armKey: string | null): string {
+	return (armKey ? ARM_AVATAR.get(armKey) : undefined) ?? LOGO_SRC;
+}
 
 interface DashboardPageProps {
 	onNavigate?: (tab: string) => void;
@@ -33,151 +46,70 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 		reload,
 	} = useDashboard();
 
+	const online = stats?.status === "online";
+
 	return (
-		<div className="page-shell" style={{ maxWidth: "1220px" }}>
+		<div className="page-shell">
 			{/* Header */}
-			<div className="animate-fade-in" style={{ marginBottom: "32px" }}>
-				<div
-					style={{
-						display: "flex",
-						alignItems: "center",
-						gap: "16px",
-						marginBottom: "8px",
-					}}
-				>
-					<div
-						style={{
-							width: "58px",
-							height: "58px",
-							borderRadius: "18px",
-							background: "#050505",
-							border: "1px solid #202020",
-							display: "grid",
-							placeItems: "center",
-							filter: "drop-shadow(0 0 20px rgba(99,102,241,0.3))",
-							animation: "float 3s ease-in-out infinite",
-						}}
-					>
-						<img
-							src={LOGO_SRC}
-							alt="Octopus AI"
-							style={{ width: "46px", height: "46px", objectFit: "contain" }}
-						/>
+			<header className="cc-header animate-fade-in">
+				<div className="cc-header-brand">
+					<div className="cc-hero-logo">
+						<img src={LOGO_SRC} alt="Octopus AI" />
 					</div>
 					<div>
-						<h1
-							style={{
-								fontSize: "1.8rem",
-								fontWeight: 700,
-								color: "#f4f4f5",
-								margin: 0,
-								letterSpacing: "-0.02em",
-							}}
-						>
-							Centro de Control
-						</h1>
-						<p
-							style={{
-								fontSize: "0.95rem",
-								color: "#a1a1aa",
-								margin: "4px 0 0",
-							}}
-						>
+						<h1 className="ui-page-title">Centro de Control</h1>
+						<p className="ui-page-subtitle">
 							Bienvenido a Octopus AI — tu workspace multi-agente
 						</p>
 					</div>
 				</div>
-			</div>
+				<div className="cc-status-pills">
+					<StatusPill tone={online ? "ok" : "warn"} dot>
+						{online ? "En línea" : "Degradado"}
+					</StatusPill>
+					<StatusPill tone="neutral">
+						<span className="cc-pill-label">Uptime</span>
+						<span className="cc-pill-value">{formatUptime(uptime)}</span>
+					</StatusPill>
+					<StatusPill tone="neutral">
+						<span className="cc-pill-label">Agentes activos</span>
+						<span className="cc-pill-value">{activeAgents.total}</span>
+					</StatusPill>
+				</div>
+			</header>
+
+			{/* Octopus panel: constellation + arm legend (provider/model per arm) */}
+			<section className="cc-octopus-panel ui-panel cc-section">
+				<div className="cc-octopus-head">
+					<div>
+						<h2 className="ui-section-title">🐙 Centro de Octavio</h2>
+						<p className="ui-section-subtitle">
+							Cada brazo con su proveedor y modelo configurados
+						</p>
+					</div>
+					<span className="cc-constellation-count">{arms.length}/8 brazos</span>
+				</div>
+				<div className="cc-octopus-body">
+					<div className="cc-octopus-constellation">
+						<OctopusGraph
+							mainAgent={mainAgent}
+							arms={arms}
+							fallbackProvider={providerDisplayName}
+							fallbackModel={model}
+						/>
+					</div>
+					<ArmLegend
+						mainAgent={mainAgent}
+						arms={arms}
+						fallbackProvider={providerDisplayName}
+						fallbackModel={model}
+					/>
+				</div>
+			</section>
 
 			{/* Live metrics */}
-			<div
-				className="animate-fade-in"
-				style={{ marginBottom: "32px", display: "grid", gap: "16px" }}
-			>
-				<div
-					style={{
-						display: "flex",
-						flexWrap: "wrap",
-						gap: "16px",
-						alignItems: "center",
-						justifyContent: "space-between",
-						padding: "18px 22px",
-						borderRadius: "18px",
-						background:
-							"linear-gradient(135deg, rgba(99,102,241,0.16), rgba(24,24,27,0.6))",
-						border: "1px solid rgba(99,102,241,0.25)",
-						boxShadow: "0 18px 50px rgba(0,0,0,.28)",
-					}}
-				>
-					<div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-						<span
-							style={{
-								width: 11,
-								height: 11,
-								borderRadius: 999,
-								background: stats?.status === "online" ? "#10b981" : "#f59e0b",
-								boxShadow: "0 0 0 4px rgba(16,185,129,.14)",
-								animation: "pulse 2s infinite",
-							}}
-						/>
-						<div>
-							<div
-								style={{
-									fontSize: "0.72rem",
-									color: "#a1a1aa",
-									fontWeight: 700,
-									textTransform: "uppercase",
-									letterSpacing: "0.06em",
-								}}
-							>
-								Proveedor · Modelo
-							</div>
-							<div
-								style={{
-									fontSize: "1.3rem",
-									fontWeight: 800,
-									color: "#f4f4f5",
-									letterSpacing: "-0.02em",
-								}}
-							>
-								{providerDisplayName || "—"}
-								{model ? (
-									<span
-										style={{
-											color: "#a1a1aa",
-											fontWeight: 600,
-											fontSize: "0.95rem",
-										}}
-									>
-										{" · "}
-										{model}
-									</span>
-								) : null}
-							</div>
-						</div>
-					</div>
-					<div style={{ display: "flex", gap: "26px", flexWrap: "wrap" }}>
-						<HeroStat
-							label="Estado"
-							value={stats?.status === "online" ? "En línea" : "Degradado"}
-							color={stats?.status === "online" ? "#10b981" : "#f59e0b"}
-						/>
-						<HeroStat label="Uptime" value={formatUptime(uptime)} />
-						<HeroStat
-							label="Agentes activos"
-							value={String(activeAgents.total)}
-							color="#818cf8"
-						/>
-					</div>
-				</div>
-
-				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))",
-						gap: "14px",
-					}}
-				>
+			<section className="cc-section">
+				<div className="cc-metrics-grid">
 					<MetricCard
 						label="Tokens totales"
 						value={usage.totalTokens}
@@ -210,17 +142,15 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 						accent="#f59e0b"
 					/>
 				</div>
-
 				{activeAgents.total > 0 ? (
-					<div style={{ fontSize: "0.78rem", color: "#71717a" }}>
-						Agentes activos: {activeAgents.chat} en chat ·{" "}
-						{activeAgents.workers} workers
+					<div className="cc-active-note">
+						{activeAgents.chat} en chat · {activeAgents.workers} workers
 					</div>
 				) : null}
-			</div>
+			</section>
 
 			{/* Quick Actions */}
-			<div style={{ marginBottom: "32px" }}>
+			<section className="cc-section">
 				<QuickActions
 					onNewChat={() => onNavigate?.("chat")}
 					onViewAgents={() => onNavigate?.("agents")}
@@ -234,139 +164,40 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate }) => {
 					onViewSkills={() => onNavigate?.("skills")}
 					onViewMedia={() => onNavigate?.("media")}
 				/>
-			</div>
+			</section>
 
 			{/* Stats */}
-			<div style={{ marginBottom: "32px" }}>
-				<div
-					style={{
-						display: "flex",
-						justifyContent: "space-between",
-						alignItems: "center",
-						marginBottom: "16px",
-					}}
-				>
-					<h2
-						style={{
-							fontSize: "1.1rem",
-							fontWeight: 700,
-							color: "#f4f4f5",
-							margin: 0,
-						}}
-					>
-						Estadísticas
-					</h2>
+			<section className="cc-section">
+				<div className="cc-section-head">
+					<h2 className="ui-section-title">Estadísticas</h2>
 					<button
 						type="button"
 						onClick={reload}
-						style={{
-							background: "none",
-							border: "1px solid #27272a",
-							borderRadius: "8px",
-							color: "#a1a1aa",
-							padding: "6px 12px",
-							fontSize: "0.8rem",
-							cursor: "pointer",
-							fontFamily: "inherit",
-							transition: "all 0.15s",
-						}}
-						onMouseEnter={(e) => {
-							e.currentTarget.style.borderColor = "#6366f1";
-							e.currentTarget.style.color = "#818cf8";
-						}}
-						onMouseLeave={(e) => {
-							e.currentTarget.style.borderColor = "#27272a";
-							e.currentTarget.style.color = "#a1a1aa";
-						}}
+						className="ui-btn ui-btn--ghost"
 					>
 						↻ Actualizar
 					</button>
 				</div>
 				<DashboardStatsGrid stats={stats} loading={loading} />
-			</div>
+			</section>
 
-			{/* Octopus control-center: Octavio + 8 arms, each with provider/model */}
-			<div
-				style={{
-					background: "rgba(24, 24, 27, 0.4)",
-					border: "1px solid #27272a",
-					borderRadius: "18px",
-					padding: "20px",
-					marginBottom: "32px",
-				}}
-			>
-				<div
-					style={{
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						marginBottom: "8px",
-						flexWrap: "wrap",
-						gap: "8px",
-					}}
-				>
-					<h2
-						style={{
-							fontSize: "1.1rem",
-							fontWeight: 700,
-							color: "#f4f4f5",
-							margin: 0,
-						}}
-					>
-						🐙 Centro de Octavio
-					</h2>
-					<span style={{ fontSize: "0.8rem", color: "#a1a1aa" }}>
-						{arms.length}/8 brazos activos · cada brazo muestra su proveedor y modelo
-					</span>
-				</div>
-				<OctopusGraph
-					mainAgent={mainAgent}
-					arms={arms}
-					fallbackProvider={providerDisplayName}
-					fallbackModel={model}
-				/>
-			</div>
-
-			<div
-				style={{
-					display: "grid",
-					gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-					gap: "18px",
-					marginBottom: "32px",
-				}}
-			>
+			{/* Workflows */}
+			<section className="cc-section">
 				<RecentWorkflowsCard
 					workflows={recentWorkflows}
 					onOpenTasks={() => onNavigate?.("tasks")}
 				/>
-				<ArmStatusCard arms={arms} />
-			</div>
+			</section>
 
 			{/* Activity Feed */}
-			<div>
-				<h2
-					style={{
-						fontSize: "1.1rem",
-						fontWeight: 700,
-						color: "#f4f4f5",
-						marginBottom: "16px",
-					}}
-				>
-					Actividad Reciente
-				</h2>
-				<div
-					style={{
-						background: "rgba(24, 24, 27, 0.4)",
-						border: "1px solid #27272a",
-						borderRadius: "16px",
-						overflow: "hidden",
-						maxHeight: "400px",
-						overflowY: "auto",
-					}}
-				>
+			<section>
+				<div className="cc-section-head">
+					<h2 className="ui-section-title">Actividad Reciente</h2>
+				</div>
+				<div className="cc-activity-shell">
 					<ActivityFeed items={activity} />
 				</div>
-			</div>
+			</section>
 		</div>
 	);
 };
@@ -416,35 +247,29 @@ function formatUptime(seconds: number): string {
 	return `${s}s`;
 }
 
-const HeroStat: React.FC<{
-	label: string;
-	value: string;
-	color?: string;
-}> = ({ label, value, color }) => (
-	<div>
-		<div
-			style={{
-				fontSize: "0.68rem",
-				color: "#71717a",
-				fontWeight: 700,
-				textTransform: "uppercase",
-				letterSpacing: "0.06em",
-			}}
+const PILL_TONES: Record<string, string> = {
+	ok: "#34d399",
+	warn: "#fbbf24",
+	accent: "#a5b4fc",
+	neutral: "#a1a1aa",
+};
+
+const StatusPill: React.FC<{
+	tone?: keyof typeof PILL_TONES | string;
+	dot?: boolean;
+	children: React.ReactNode;
+}> = ({ tone = "neutral", dot, children }) => {
+	const color = PILL_TONES[tone] ?? "#a1a1aa";
+	return (
+		<span
+			className="cc-status-pill"
+			style={{ "--pill-color": color } as React.CSSProperties}
 		>
-			{label}
-		</div>
-		<div
-			style={{
-				fontSize: "1.05rem",
-				fontWeight: 800,
-				color: color ?? "#f4f4f5",
-				letterSpacing: "-0.01em",
-			}}
-		>
-			{value}
-		</div>
-	</div>
-);
+			{dot ? <span className="cc-status-pill__dot" /> : null}
+			{children}
+		</span>
+	);
+};
 
 const MetricCard: React.FC<{
 	label: string;
@@ -455,43 +280,96 @@ const MetricCard: React.FC<{
 }> = ({ label, value, format, accent, hint }) => {
 	const animated = useCountUp(value);
 	return (
-		<div
-			style={{
-				padding: "16px 18px",
-				borderRadius: "16px",
-				background: "linear-gradient(180deg, #18181b 0%, #101013 100%)",
-				border: "1px solid #27272a",
-				boxShadow: "0 10px 24px rgba(0,0,0,.22)",
-			}}
-		>
+		<div className="cc-metric-card">
+			<div className="cc-metric-label">{label}</div>
 			<div
-				style={{
-					fontSize: "0.72rem",
-					color: "#a1a1aa",
-					fontWeight: 700,
-					textTransform: "uppercase",
-					letterSpacing: "0.04em",
-				}}
-			>
-				{label}
-			</div>
-			<div
-				style={{
-					fontSize: "1.7rem",
-					fontWeight: 800,
-					color: accent ?? "#f4f4f5",
-					letterSpacing: "-0.02em",
-					marginTop: 6,
-					fontVariantNumeric: "tabular-nums",
-				}}
+				className="cc-metric-value"
+				style={accent ? { color: accent } : undefined}
 			>
 				{format ? format(animated) : animated.toLocaleString()}
 			</div>
-			{hint ? (
-				<div style={{ fontSize: "0.7rem", color: "#71717a", marginTop: 4 }}>
-					{hint}
+			{hint ? <div className="cc-metric-hint">{hint}</div> : null}
+		</div>
+	);
+};
+
+interface LegendRow {
+	key: string;
+	arm: DashboardArmSummary;
+	isMain: boolean;
+	provider?: string;
+	model?: string;
+}
+
+const ArmLegend: React.FC<{
+	mainAgent: DashboardArmSummary | null;
+	arms: DashboardArmSummary[];
+	fallbackProvider?: string;
+	fallbackModel?: string;
+}> = ({ mainAgent, arms, fallbackProvider, fallbackModel }) => {
+	const rows: LegendRow[] = [];
+	if (mainAgent) {
+		rows.push({
+			key: `main-${mainAgent.id}`,
+			arm: mainAgent,
+			isMain: true,
+			provider: mainAgent.providerDisplayName ?? fallbackProvider,
+			model: mainAgent.effectiveModel ?? fallbackModel,
+		});
+	}
+	for (const arm of arms) {
+		rows.push({
+			key: arm.id,
+			arm,
+			isMain: false,
+			provider: arm.providerDisplayName,
+			model: arm.effectiveModel,
+		});
+	}
+
+	if (rows.length === 0) {
+		return (
+			<div className="ui-empty" style={{ padding: "28px 16px" }}>
+				<div className="ui-empty-title">Sin brazos todavía</div>
+				<div className="ui-empty-desc">
+					Los brazos aparecerán después del bootstrap del sistema.
 				</div>
-			) : null}
+			</div>
+		);
+	}
+
+	return (
+		<div className="cc-arm-legend">
+			{rows.map(({ key, arm, isMain, provider, model }) => {
+				const color = arm.color ?? (isMain ? "#6366f1" : "#818cf8");
+				const modelTag = model ? model.split("/").pop() : undefined;
+				return (
+					<div
+						key={key}
+						className="arm-card"
+						style={{ "--arm-color": color } as React.CSSProperties}
+					>
+						<img
+							className="arm-card__img"
+							src={armAvatar(arm.armKey)}
+							alt={arm.name}
+							loading="lazy"
+						/>
+						<div className="arm-card__meta">
+							<div className="arm-card__name">
+								{arm.name}
+								{isMain ? (
+									<span className="arm-card__tag">orquestador</span>
+								) : null}
+							</div>
+							<div className="arm-card__sub">
+								{provider || "Proveedor —"}
+								{modelTag ? ` · ${modelTag}` : " · —"}
+							</div>
+						</div>
+					</div>
+				);
+			})}
 		</div>
 	);
 };
@@ -500,22 +378,33 @@ const RecentWorkflowsCard: React.FC<{
 	workflows: WorkflowRunSummary[];
 	onOpenTasks: () => void;
 }> = ({ workflows, onOpenTasks }) => (
-	<section style={panelStyle}>
-		<div style={panelHeaderStyle}>
+	<section className="ui-panel cc-panel">
+		<div className="cc-panel-head">
 			<div>
-				<h2 style={panelTitleStyle}>Workflows recientes</h2>
-				<p style={panelSubtitleStyle}>Ejecuciones durables y recuperables</p>
+				<h2 className="ui-section-title">Workflows recientes</h2>
+				<p className="ui-section-subtitle">
+					Ejecuciones durables y recuperables
+				</p>
 			</div>
-			<button type="button" onClick={onOpenTasks} style={panelButtonStyle}>
+			<button
+				type="button"
+				onClick={onOpenTasks}
+				className="ui-btn ui-btn--accent"
+			>
 				Ver tareas
 			</button>
 		</div>
 		{workflows.length === 0 ? (
-			<div style={emptyStyle}>Aún no hay workflows registrados.</div>
+			<div className="ui-empty" style={{ padding: "28px 16px" }}>
+				<div className="ui-empty-title">Aún no hay workflows</div>
+				<div className="ui-empty-desc">
+					Las ejecuciones aparecerán aquí cuando inicies un workflow.
+				</div>
+			</div>
 		) : (
 			<div style={{ display: "grid", gap: "10px" }}>
 				{workflows.map((workflow) => (
-					<div key={workflow.id} style={workflowItemStyle}>
+					<div key={workflow.id} className="ui-list-item">
 						<div
 							style={{
 								display: "flex",
@@ -527,10 +416,7 @@ const RecentWorkflowsCard: React.FC<{
 								{workflow.goal || workflow.id}
 							</strong>
 							<span
-								style={{
-									...statusBadgeStyle,
-									color: workflowColor(workflow.status),
-								}}
+								className={`ui-status ${workflowStatusClass(workflow.status)}`}
 							>
 								{workflow.status}
 							</span>
@@ -550,77 +436,22 @@ const RecentWorkflowsCard: React.FC<{
 	</section>
 );
 
-const ArmStatusCard: React.FC<{ arms: DashboardArmSummary[] }> = ({ arms }) => (
-	<section style={panelStyle}>
-		<div style={panelHeaderStyle}>
-			<div>
-				<h2 style={panelTitleStyle}>Brazos Octopus</h2>
-				<p style={panelSubtitleStyle}>
-					Identidades builtin listas para delegación
-				</p>
-			</div>
-			<span style={{ color: "#a78bfa", fontWeight: 800 }}>{arms.length}/8</span>
-		</div>
-		{arms.length === 0 ? (
-			<div style={emptyStyle}>Los brazos aparecerán después del bootstrap.</div>
-		) : (
-			<div
-				style={{
-					display: "grid",
-					gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-					gap: 10,
-				}}
-			>
-				{arms.map((arm) => (
-					<div key={arm.id} style={armItemStyle}>
-						<span
-							style={{
-								width: 8,
-								height: 8,
-								borderRadius: 999,
-								background: arm.color ?? "#818cf8",
-							}}
-						/>
-						<div style={{ minWidth: 0 }}>
-							<div
-								style={{
-									color: "#f4f4f5",
-									fontSize: "0.84rem",
-									fontWeight: 700,
-									whiteSpace: "nowrap",
-									overflow: "hidden",
-									textOverflow: "ellipsis",
-								}}
-							>
-								{arm.name}
-							</div>
-							<div style={{ color: "#71717a", fontSize: "0.72rem" }}>
-								{arm.armKey ?? arm.role}
-							</div>
-						</div>
-					</div>
-				))}
-			</div>
-		)}
-	</section>
-);
-
-function workflowColor(status: string): string {
+function workflowStatusClass(status: string): string {
 	switch (status) {
 		case "done":
-			return "#22c55e";
+			return "is-success";
 		case "running":
 		case "ready":
-			return "#38bdf8";
+			return "is-info";
 		case "interrupted":
 		case "partial":
-			return "#f59e0b";
+			return "is-warning";
 		case "failed":
 		case "blocked":
 		case "cancelled":
-			return "#ef4444";
+			return "is-error";
 		default:
-			return "#a1a1aa";
+			return "is-neutral";
 	}
 }
 
@@ -635,75 +466,3 @@ function formatDate(value?: string): string {
 		minute: "2-digit",
 	});
 }
-
-const panelStyle: React.CSSProperties = {
-	background: "rgba(24, 24, 27, 0.45)",
-	border: "1px solid #27272a",
-	borderRadius: "16px",
-	padding: "18px",
-};
-
-const panelHeaderStyle: React.CSSProperties = {
-	display: "flex",
-	justifyContent: "space-between",
-	alignItems: "flex-start",
-	gap: "14px",
-	marginBottom: "14px",
-};
-
-const panelTitleStyle: React.CSSProperties = {
-	fontSize: "1rem",
-	fontWeight: 800,
-	color: "#f4f4f5",
-	margin: 0,
-};
-
-const panelSubtitleStyle: React.CSSProperties = {
-	fontSize: "0.78rem",
-	color: "#71717a",
-	margin: "4px 0 0",
-};
-
-const panelButtonStyle: React.CSSProperties = {
-	border: "1px solid rgba(167, 139, 250, 0.35)",
-	background: "rgba(167, 139, 250, 0.1)",
-	color: "#c4b5fd",
-	borderRadius: "9px",
-	padding: "7px 10px",
-	fontSize: "0.78rem",
-	fontWeight: 700,
-	cursor: "pointer",
-};
-
-const emptyStyle: React.CSSProperties = {
-	padding: "22px",
-	borderRadius: "12px",
-	background: "rgba(9, 9, 11, 0.35)",
-	color: "#71717a",
-	fontSize: "0.84rem",
-	textAlign: "center",
-};
-
-const workflowItemStyle: React.CSSProperties = {
-	padding: "12px",
-	borderRadius: "12px",
-	background: "rgba(9, 9, 11, 0.45)",
-	border: "1px solid rgba(255,255,255,0.04)",
-};
-
-const statusBadgeStyle: React.CSSProperties = {
-	fontSize: "0.72rem",
-	fontWeight: 800,
-	textTransform: "uppercase",
-	letterSpacing: "0.04em",
-};
-
-const armItemStyle: React.CSSProperties = {
-	display: "flex",
-	alignItems: "center",
-	gap: "8px",
-	padding: "10px",
-	borderRadius: "10px",
-	background: "rgba(9, 9, 11, 0.45)",
-	border: "1px solid rgba(255,255,255,0.04)",
-};

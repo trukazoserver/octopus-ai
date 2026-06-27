@@ -66,7 +66,8 @@ export function createCodexImageTools(): ToolDefinition[] {
 					return {
 						success: false,
 						output: "",
-						error: "Codex login is required. Sign in with your OpenAI account first.",
+						error:
+							"Codex login is required. Sign in with your OpenAI account first.",
 					};
 				}
 
@@ -75,7 +76,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 					"content-type": "application/json",
 					originator: "codex_cli_rs",
 				};
-				if (accountId) headers["chatgpt_account_id"] = accountId;
+				if (accountId) headers.chatgpt_account_id = accountId;
 
 				let response: Response;
 				try {
@@ -83,12 +84,21 @@ export function createCodexImageTools(): ToolDefinition[] {
 						method: "POST",
 						headers,
 						body: JSON.stringify({ prompt, model, n, size, quality }),
+						// Image generation can take a while (high-quality gpt-image
+						// runs reach ~60-120s), but a hung request must not pin the
+						// agent turn forever. 180s is generous; an abort surfaces as
+						// a normal tool error the model can retry by calling again.
+						signal: AbortSignal.timeout(180000),
 					});
 				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					const aborted = /aborted|timeout|timed out|TimeoutError/i.test(msg);
 					return {
 						success: false,
 						output: "",
-						error: `Codex image request failed: ${err instanceof Error ? err.message : String(err)}`,
+						error: aborted
+							? "Codex image request timed out (no response in 180s). The service may be overloaded — retry shortly."
+							: `Codex image request failed: ${msg}`,
 					};
 				}
 				if (!response.ok) {

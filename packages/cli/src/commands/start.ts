@@ -78,6 +78,7 @@ export function buildTransportSystemContext(
 		memoryOrchestrator: system.memoryOrchestrator,
 		contextAssembler: system.contextAssembler,
 		memoryConsolidator: system.memoryConsolidator,
+		knowledgeManager: system.knowledgeManager,
 		skillRegistry: system.skillRegistry,
 		pluginRegistry: system.pluginRegistry,
 		codeExecutor: system.codeExecutor,

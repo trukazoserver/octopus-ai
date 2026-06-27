@@ -651,6 +651,20 @@ export class LLMRouter {
 		return Array.from(this.providers.keys());
 	}
 
+	/**
+	 * Whether the provider backing `model` can accept image content natively
+	 * (multimodal). Used by the agent runtime to decide between embedding images
+	 * directly and routing them through an external vision tool.
+	 */
+	supportsVisionForModel(model: string): boolean {
+		try {
+			const { providerName } = this.resolveProvider(model);
+			return PROVIDER_REGISTRY[providerName]?.supportsVision ?? false;
+		} catch {
+			return false;
+		}
+	}
+
 	private resolveProvider(model: string): {
 		provider: BaseLLMProvider;
 		modelName: string;

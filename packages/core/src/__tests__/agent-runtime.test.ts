@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentRuntime } from "../agent/runtime.js";
+import {
+	AgentRuntime,
+	requiresExternalVisionToolForModel,
+	requiresZaiVisionToolForModel,
+} from "../agent/runtime.js";
 import type {
 	AgentConfig,
 	ConversationTurn,
@@ -31,6 +35,7 @@ function createMockLLMRouter(responseOverrides?: Partial<LLMResponse>) {
 			yield chunk;
 		}),
 		getAvailableProviders: vi.fn().mockReturnValue(["test-provider"]),
+		supportsVisionForModel: vi.fn().mockReturnValue(true),
 	};
 }
 
@@ -1834,5 +1839,35 @@ describe("AgentRuntime", () => {
 			expect(result).toHaveProperty("forgotten");
 			expect(result).toHaveProperty("associations");
 		});
+	});
+});
+
+describe("image routing classification", () => {
+	it("flags Z.ai GLM models as needing the external vision tool", () => {
+		expect(requiresZaiVisionToolForModel("zhipu/glm-4.6")).toBe(true);
+		expect(requiresZaiVisionToolForModel("zai/glm-4.5-air")).toBe(true);
+		expect(requiresZaiVisionToolForModel("glm-4.6")).toBe(true);
+		expect(requiresZaiVisionToolForModel("openai/gpt-5.5")).toBe(false);
+	});
+
+	it("routes GLM and text-only providers to the vision tool", () => {
+		const visionCapable = (_model: string) => true;
+		const textOnly = (_model: string) => false;
+		// GLM always needs the tool regardless of provider capability flag.
+		expect(
+			requiresExternalVisionToolForModel("zhipu/glm-4.6", visionCapable),
+		).toBe(true);
+		// Native multimodal provider: no tool needed.
+		expect(
+			requiresExternalVisionToolForModel("openai/gpt-5.5", visionCapable),
+		).toBe(false);
+		// Text-only provider (e.g. DeepSeek): needs the tool.
+		expect(
+			requiresExternalVisionToolForModel("deepseek/deepseek-chat", textOnly),
+		).toBe(true);
+		// Native multimodal must not be flagged even if the function is misused.
+		expect(
+			requiresExternalVisionToolForModel("deepseek/deepseek-chat", visionCapable),
+		).toBe(false);
 	});
 });

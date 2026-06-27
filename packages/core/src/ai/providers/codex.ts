@@ -12,7 +12,6 @@
  * Format details verified against the Codex CLI source (github.com/openai/codex).
  */
 import { randomUUID } from "node:crypto";
-import { BaseLLMProvider } from "./base.js";
 import type {
 	LLMChunk,
 	LLMMessage,
@@ -22,6 +21,7 @@ import type {
 	LLMToolCall,
 	ProviderConfig,
 } from "../types.js";
+import { BaseLLMProvider } from "./base.js";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const ORIGINATOR = "codex_cli_rs";
@@ -37,7 +37,10 @@ let codexModelsCache: { models: string[]; fetchedAt: number } | null = null;
  * (or []) on error so the UI never blocks on a model fetch.
  */
 export async function listCodexModels(accessToken: string): Promise<string[]> {
-	if (codexModelsCache && Date.now() - codexModelsCache.fetchedAt < CODEX_MODELS_TTL_MS) {
+	if (
+		codexModelsCache &&
+		Date.now() - codexModelsCache.fetchedAt < CODEX_MODELS_TTL_MS
+	) {
 		return codexModelsCache.models;
 	}
 	try {
@@ -97,7 +100,7 @@ export class CodexProvider extends BaseLLMProvider {
 			originator: ORIGINATOR,
 			"session-id": randomUUID(),
 		};
-		if (this.accountId) headers["chatgpt_account_id"] = this.accountId;
+		if (this.accountId) headers.chatgpt_account_id = this.accountId;
 		return headers;
 	}
 
@@ -121,7 +124,9 @@ export class CodexProvider extends BaseLLMProvider {
 			if (msg.role === "tool") {
 				// Tool result → function_call_output.
 				const output =
-					typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+					typeof msg.content === "string"
+						? msg.content
+						: JSON.stringify(msg.content);
 				input.push({
 					type: "function_call_output",
 					call_id: msg.toolCallId ?? "",
@@ -159,7 +164,10 @@ export class CodexProvider extends BaseLLMProvider {
 					if (part.type === "text") {
 						content.push({ type: "input_text", text: part.text });
 					} else if (part.type === "image_url") {
-						content.push({ type: "input_image", image_url: part.image_url.url });
+						content.push({
+							type: "input_image",
+							image_url: part.image_url.url,
+						});
 					}
 				}
 			}
@@ -171,7 +179,9 @@ export class CodexProvider extends BaseLLMProvider {
 		};
 	}
 
-	private buildResponsesTools(tools?: LLMTool[]): Array<Record<string, unknown>> {
+	private buildResponsesTools(
+		tools?: LLMTool[],
+	): Array<Record<string, unknown>> {
 		if (!tools?.length) return [];
 		return tools.map((t) => ({
 			type: "function",
@@ -182,7 +192,10 @@ export class CodexProvider extends BaseLLMProvider {
 		}));
 	}
 
-	private buildBody(request: LLMRequest, stream: boolean): Record<string, unknown> {
+	private buildBody(
+		request: LLMRequest,
+		stream: boolean,
+	): Record<string, unknown> {
 		const { instructions, input } = this.buildResponsesInput(request.messages);
 		const body: Record<string, unknown> = {
 			model: this.mapModel(request.model),
@@ -266,9 +279,7 @@ export class CodexProvider extends BaseLLMProvider {
 					const callId = (item.call_id as string) ?? itemId;
 					// Prefer arguments accumulated from the delta stream; fall back to
 					// the final value on the done item.
-					const accumulated = itemId
-						? state.argsByItem.get(itemId)
-						: undefined;
+					const accumulated = itemId ? state.argsByItem.get(itemId) : undefined;
 					const name = (item.name as string) || accumulated?.name || "";
 					const args = (item.arguments as string) ?? accumulated?.args ?? "";
 					const toolCall: LLMToolCall = {
@@ -292,11 +303,25 @@ export class CodexProvider extends BaseLLMProvider {
 					Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0;
 				const outputTokens =
 					Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
+				// Reasoning tokens: the Responses API nests them under
+				// output_tokens_details.reasoning_tokens. output_tokens already
+				// includes them, so total stays input+output — reasoningTokens is a
+				// breakdown metric, not additive. Also accept the Chat Completions
+				// completion_tokens_details.reasoning_tokens shape as a fallback.
+				const outputDetails = (usage.output_tokens_details ??
+					usage.completion_tokens_details) as
+					| { reasoning_tokens?: unknown }
+					| undefined;
+				const reasoningTokens =
+					Number(
+						outputDetails?.reasoning_tokens ?? usage.reasoning_tokens ?? 0,
+					) || 0;
 				if (inputTokens || outputTokens) {
 					state.usage = {
 						promptTokens: inputTokens,
 						completionTokens: outputTokens,
 						totalTokens: inputTokens + outputTokens,
+						...(reasoningTokens ? { reasoningTokens } : {}),
 					};
 				}
 				return {
@@ -309,7 +334,6 @@ export class CodexProvider extends BaseLLMProvider {
 				state.finishReason = type === "response.failed" ? "error" : "length";
 				return { finishReason: state.finishReason };
 			}
-			case "response.created":
 			default:
 				return null;
 		}
@@ -320,10 +344,16 @@ export class CodexProvider extends BaseLLMProvider {
 			method: "POST",
 			headers: this.getHeaders(),
 			body: JSON.stringify(this.buildBody(request, true)),
+			// Bound the whole call so a stalled handshake or a hung upstream
+			// can't pin the agent turn forever. Matches the anthropic / openai
+			// providers; Codex was the only streaming provider missing this.
+			signal: AbortSignal.timeout(600000),
 		});
 		if (!response.ok || !response.body) {
 			const text = await response.text().catch(() => response.statusText);
-			throw new Error(`Codex backend error (${response.status}): ${text.slice(0, 400)}`);
+			throw new Error(
+				`Codex backend error (${response.status}): ${text.slice(0, 400)}`,
+			);
 		}
 
 		// Capture rate-limit / quota headers (x-codex-*) from every successful
@@ -338,15 +368,52 @@ export class CodexProvider extends BaseLLMProvider {
 			text: "",
 			thinking: "",
 			toolCalls: [] as LLMToolCall[],
-			argsByItem: new Map<string, { callId: string; name: string; args: string }>(),
+			argsByItem: new Map<
+				string,
+				{ callId: string; name: string; args: string }
+			>(),
 			finishReason: undefined as string | undefined,
 		};
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+
+		// Per-read timeout. If the backend (or an intermediary proxy / load
+		// balancer) holds the socket open without sending bytes — a frequent
+		// failure mode for long Codex generations — the raw reader.read() would
+		// hang indefinitely and freeze the whole turn. The timed-out read throws
+		// a retryable error so the runtime's stream-error retry path can recover
+		// instead of the user having to pause and manually resume.
+		const STREAM_READ_TIMEOUT_MS = 120_000;
+		const readNext = async (): Promise<
+			Readonly<{ done: boolean; value: Uint8Array | undefined }>
+		> => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					reader.read(),
+					new Promise<
+						Readonly<{ done: boolean; value: Uint8Array | undefined }>
+					>((_, reject) => {
+						timer = setTimeout(
+							() =>
+								reject(
+									new Error(
+										`Codex stream read timeout (no data for ${STREAM_READ_TIMEOUT_MS / 1000}s)`,
+									),
+								),
+							STREAM_READ_TIMEOUT_MS,
+						);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
+
 		try {
-			while (true) {
-				const { done, value } = await reader.read();
+			streamLoop: while (true) {
+				const { done, value } = await readNext();
 				if (done) break;
 				buffer += decoder.decode(value, { stream: true });
 				const lines = buffer.split("\n");
@@ -355,7 +422,7 @@ export class CodexProvider extends BaseLLMProvider {
 					const line = rawLine.trim();
 					if (!line.startsWith("data:")) continue;
 					const payload = line.slice(5).trim();
-					if (payload === "[DONE]") return;
+					if (payload === "[DONE]") break streamLoop;
 					if (!payload) continue;
 					try {
 						const data = JSON.parse(payload) as Record<string, unknown>;
@@ -366,8 +433,23 @@ export class CodexProvider extends BaseLLMProvider {
 					}
 				}
 			}
+			// Premature-close guard. The Responses API always terminates a run
+			// with response.completed / response.failed / response.incomplete
+			// (each sets state.finishReason). If the stream ended without any of
+			// those, the socket was dropped mid-run by the backend or a proxy.
+			// Throw a network-flavoured error so BOTH the router retry (which
+			// keys off isRetryableProviderError on the message) and the runtime
+			// stream-error retry recover it — instead of misclassifying it as an
+			// empty response and silently burning the empty-response budget.
+			if (!state.finishReason) {
+				throw new Error(
+					"Codex stream closed before completion (network: connection dropped)",
+				);
+			}
 		} finally {
-			reader.releaseLock();
+			// cancel() (not just releaseLock()) tears the underlying socket down
+			// when we bail out on timeout or premature close.
+			await reader.cancel().catch(() => {});
 		}
 	}
 
@@ -376,7 +458,10 @@ export class CodexProvider extends BaseLLMProvider {
 			text: "",
 			thinking: "",
 			toolCalls: [] as LLMToolCall[],
-			argsByItem: new Map<string, { callId: string; name: string; args: string }>(),
+			argsByItem: new Map<
+				string,
+				{ callId: string; name: string; args: string }
+			>(),
 			usage: undefined as LLMResponse["usage"] | undefined,
 			finishReason: "stop" as string | undefined,
 			model: this.mapModel(request.model),

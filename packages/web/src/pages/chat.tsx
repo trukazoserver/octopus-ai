@@ -23,6 +23,20 @@ import {
 	apiPutJson,
 } from "../hooks/useApi.js";
 import { publicAsset } from "../utils/assets.js";
+import {
+	fileCategory,
+	fileIconSvg,
+	fileTypeBadge,
+	formatFileSize,
+} from "../utils/file-category.js";
+
+/** Accepted attachment types in the chat composer (images + documents/code/archives). */
+const ACCEPTED_ATTACHMENT_TYPES =
+	"image/*,audio/*,video/*," +
+	".pdf,.txt,.md,.markdown,.csv,.tsv,.json,.xml,.yaml,.yml,.html,.htm,.log,.ini,.toml," +
+	".doc,.docx,.rtf,.odt,.odp,.ppt,.pptx,.xls,.xlsx,.ods,.zip,.rar,.7z,.tar,.gz," +
+	".js,.jsx,.ts,.tsx,.mjs,.cjs,.py,.rs,.go,.java,.c,.cc,.cpp,.h,.hpp,.cs,.php,.rb," +
+	".pl,.sh,.bash,.zsh,.lua,.swift,.kt,.scala,.r,.vue,.svelte,.css,.scss,.less,.sql";
 
 function resolveWebSocketUrl(): string {
 	const url = new URL(API_BASE);
@@ -1729,13 +1743,16 @@ function renderMediaInline(
 	if (mediaType === "file") {
 		const filename = escapeAttr(getMediaFilename(fullUrl));
 		const label = escapeAttr(alt || filename);
+		const badge = fileTypeBadge(getMediaFilename(fullUrl) || fullUrl);
+		const iconStyle =
+			"background:transparent;border-radius:0;width:auto;height:auto;padding:0;display:inline-flex;align-items:center;justify-content:center;line-height:0";
 		const download = showDownload
 			? renderDownloadButton(fullUrl, "Descargar", true)
 			: "";
 		const cardClass = showDownload
 			? "media-file-card media-has-download"
 			: "media-file-card";
-		return `<div class="media-embed media-file"><div class="${cardClass}"><div class="media-file-icon" aria-hidden="true">↓</div><div class="media-file-meta"><div class="media-file-title">${label}</div><div class="media-file-name">${filename}</div></div>${download}</div></div>`;
+		return `<div class="media-embed media-file"><div class="${cardClass}"><div class="media-file-icon" aria-hidden="true" style="${iconStyle}">${fileIconSvg(badge.bg, badge.label, 44)}</div><div class="media-file-meta"><div class="media-file-title">${label}</div><div class="media-file-name">${filename}</div></div>${download}</div></div>`;
 	}
 	return "";
 }
@@ -3917,10 +3934,14 @@ export const ChatPage: React.FC<{
 
 		let finalContent = text;
 		if (pendingAttachments.length > 0) {
-			const imagesMd = pendingAttachments
-				.map((a) => `![Image](${a.url})`)
+			// Alt text carries the original filename so document attachments render
+			// as a typed file card (and the backend can label them on extraction).
+			const attachmentsMd = pendingAttachments
+				.map((a) => `![${a.file?.name ?? "Image"}](${a.url})`)
 				.join("\n");
-			finalContent = finalContent ? `${finalContent}\n\n${imagesMd}` : imagesMd;
+			finalContent = finalContent
+				? `${finalContent}\n\n${attachmentsMd}`
+				: attachmentsMd;
 		}
 
 		const userMsg: Message = {
@@ -5400,51 +5421,127 @@ export const ChatPage: React.FC<{
 												marginBottom: "8px",
 											}}
 										>
-											{pendingAttachments.map((attachment, idx) => (
+											{pendingAttachments.map((attachment, idx) => {
+												const cat = fileCategory(
+													attachment.file?.name ?? attachment.url,
+													attachment.file?.type,
+												);
+												const badge = fileTypeBadge(
+													attachment.file?.name ?? attachment.url,
+													attachment.file?.type,
+												);
+												const isImage = cat.kind === "image";
+												return (
 												<div
 													key={attachment.previewUrl}
 													style={{
 														position: "relative",
-														width: "60px",
-														height: "60px",
+														width: isImage ? "60px" : "auto",
+														maxWidth: "240px",
+														height: isImage ? "60px" : "50px",
 														borderRadius: "8px",
 														overflow: "hidden",
 														border: "1px solid #3f3f46",
+														display: "flex",
+														alignItems: "center",
+														gap: "6px",
+														padding: isImage ? 0 : "4px 30px 4px 6px",
+														background: isImage
+															? "transparent"
+															: "rgba(39,39,42,0.6)",
 													}}
 												>
 													<button
 														type="button"
 														onClick={() =>
+															isImage &&
 															setMediaPreviewSrc(attachment.previewUrl)
 														}
-														aria-label="Ampliar imagen adjunta"
+														aria-label={
+															isImage
+																? "Ampliar imagen adjunta"
+																: cat.label
+														}
 														style={{
 															width: "100%",
 															height: "100%",
 															padding: 0,
 															border: 0,
 															background: "transparent",
-															cursor: "zoom-in",
+															cursor: isImage ? "zoom-in" : "default",
+															display: "flex",
+															alignItems: "center",
+															gap: "6px",
 														}}
 													>
-														<img
-															src={attachment.previewUrl}
-															alt="adjunto"
-															style={{
-																width: "100%",
-																height: "100%",
-																objectFit: "cover",
-																display: "block",
-															}}
-														/>
+														{isImage ? (
+															<img
+																src={attachment.previewUrl}
+																alt="adjunto"
+																style={{
+																	width: "100%",
+																	height: "100%",
+																	objectFit: "cover",
+																	display: "block",
+																}}
+															/>
+														) : (
+															<>
+																<span
+																	style={{
+																		display: "inline-flex",
+																		alignItems: "center",
+																		justifyContent: "center",
+																		flexShrink: 0,
+																		lineHeight: 0,
+																	}}
+																	dangerouslySetInnerHTML={{
+																		__html: fileIconSvg(badge.bg, badge.label, 42),
+																	}}
+																/>
+																<span
+																	style={{
+																		display: "flex",
+																		flexDirection: "column",
+																		lineHeight: 1.1,
+																		overflow: "hidden",
+																		textAlign: "left",
+																	}}
+																>
+																	<span
+																		style={{
+																			fontSize: "12px",
+																			whiteSpace: "nowrap",
+																			overflow: "hidden",
+																			textOverflow: "ellipsis",
+																			maxWidth: "150px",
+																		}}
+																	>
+																		{attachment.file?.name ?? cat.label}
+																	</span>
+																	<span
+																		style={{
+																			fontSize: "10px",
+																			opacity: 0.6,
+																		}}
+																	>
+																		{cat.label}
+																		{attachment.file?.size
+																			? ` · ${formatFileSize(attachment.file.size)}`
+																			: ""}
+																	</span>
+																</span>
+															</>
+														)}
 													</button>
 													<button
 														type="button"
 														onClick={() => removePendingAttachment(idx)}
 														style={{
 															position: "absolute",
-															top: "2px",
-															right: "2px",
+															top: "50%",
+															right: "4px",
+															transform: "translateY(-50%)",
 															background: "rgba(0,0,0,0.6)",
 															color: "white",
 															border: "none",
@@ -5462,7 +5559,8 @@ export const ChatPage: React.FC<{
 														✕
 													</button>
 												</div>
-											))}
+												);
+											})}
 										</div>
 									)}
 									<div style={{ display: "flex", alignItems: "flex-end" }}>
@@ -5473,7 +5571,7 @@ export const ChatPage: React.FC<{
 											ref={fileInputRef}
 											style={{ display: "none" }}
 											onChange={handleFileUpload}
-											accept="image/*"
+											accept={ACCEPTED_ATTACHMENT_TYPES}
 										/>
 										<button
 											type="button"

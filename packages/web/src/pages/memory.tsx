@@ -1,5 +1,10 @@
 import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	type GraphViewEdge,
+	type GraphViewNode,
+	MemoryGraphView,
+} from "../components/memory/MemoryGraphView.js";
 import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
 import { Loading } from "../components/ui/Loading.js";
 import {
@@ -224,42 +229,42 @@ const GRAPH_CLUSTER_DEFS: GraphClusterDef[] = [
 	{
 		source: "shortTerm",
 		label: "Corto plazo",
-		x: 38,
-		y: 31,
-		radiusX: 12,
-		radiusY: 10,
+		x: 48,
+		y: 25,
+		radiusX: 10,
+		radiusY: 8,
 	},
 	{
 		source: "learning",
 		label: "Aprendizaje",
-		x: 71,
-		y: 31,
-		radiusX: 14,
-		radiusY: 11,
-	},
-	{
-		source: "memory",
-		label: "Largo plazo",
-		x: 36,
-		y: 62,
-		radiusX: 16,
-		radiusY: 12,
-	},
-	{
-		source: "profile",
-		label: "Usuario",
-		x: 77,
-		y: 59,
+		x: 31,
+		y: 34,
 		radiusX: 12,
 		radiusY: 10,
 	},
 	{
+		source: "memory",
+		label: "Largo plazo",
+		x: 64,
+		y: 34,
+		radiusX: 14,
+		radiusY: 11,
+	},
+	{
+		source: "profile",
+		label: "Usuario",
+		x: 63,
+		y: 55,
+		radiusX: 10,
+		radiusY: 8,
+	},
+	{
 		source: "daily",
 		label: "Diaria",
-		x: 55,
-		y: 78,
-		radiusX: 13,
-		radiusY: 9,
+		x: 33,
+		y: 55,
+		radiusX: 10,
+		radiusY: 8,
 	},
 ];
 
@@ -293,6 +298,7 @@ export const MemoryPage: React.FC = () => {
 	const [searchResults, setSearchResults] = useState<LTMItem[]>([]);
 	const [searching, setSearching] = useState(false);
 	const [searchPerformed, setSearchPerformed] = useState(false);
+	const [ltmTypeFilter, setLtmTypeFilter] = useState<string>("all");
 	const [knowledgeCollections, setKnowledgeCollections] = useState<
 		KnowledgeCollection[]
 	>([]);
@@ -371,10 +377,10 @@ export const MemoryPage: React.FC = () => {
 				] = await Promise.all([
 					apiGet<MemoryStats>("/api/memory/stats"),
 					apiGet<{ memories: LTMItem[] }>(
-						"/api/memory/ltm/recent?limit=80",
+						"/api/memory/ltm/recent?limit=1000",
 					).catch(() => ({ memories: [] })),
 					apiGet<{ insights: LearningInsight[] }>(
-						"/api/learning/insights?limit=80",
+						"/api/learning/insights?limit=1000",
 					).catch(() => ({ insights: [] })),
 					apiGet<{
 						context: string;
@@ -486,9 +492,11 @@ export const MemoryPage: React.FC = () => {
 					setStmTotal(data.total ?? 0);
 				} else if (tab === "graph") {
 					const [memories, insights] = await Promise.all([
-						apiGet<{ memories: LTMItem[] }>("/api/memory/ltm/recent?limit=40"),
+						apiGet<{ memories: LTMItem[] }>(
+							"/api/memory/ltm/recent?limit=1000",
+						),
 						apiGet<{ insights: LearningInsight[] }>(
-							"/api/learning/insights?limit=60",
+							"/api/learning/insights?limit=1000",
 						).catch(() => ({ insights: [] })),
 					]);
 					setLtmItems(memories.memories ?? []);
@@ -734,22 +742,24 @@ export const MemoryPage: React.FC = () => {
 
 	const S = {
 		card: {
-			padding: "14px",
-			borderRadius: "8px",
-			backgroundColor: "#18181b",
-			border: "1px solid #27272a",
+			padding: "12px",
+			borderRadius: "12px",
+			background: "rgba(9, 9, 11, 0.45)",
+			border: "1px solid rgba(255, 255, 255, 0.05)",
 		} as React.CSSProperties,
 		section: {
-			padding: "16px",
-			borderRadius: "10px",
-			backgroundColor: "#18181b",
+			padding: "18px",
+			borderRadius: "16px",
+			background:
+				"linear-gradient(180deg, rgba(24,24,27,0.95), rgba(15,15,18,0.95))",
 			border: "1px solid #27272a",
+			boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
 			marginBottom: "16px",
 		} as React.CSSProperties,
 		input: {
 			flex: 1,
 			padding: "10px 14px",
-			borderRadius: "8px",
+			borderRadius: "10px",
 			border: "1px solid #27272a",
 			background: "#0f1117",
 			color: "#e4e4e7",
@@ -758,13 +768,52 @@ export const MemoryPage: React.FC = () => {
 		} as React.CSSProperties,
 	};
 
-	const graph = buildMemoryGraph(ltmItems, learningInsights, {
-		profile,
-		dailySummary: dailyStructured?.summary ?? dailyContext,
-		dailyCount,
-		stmTurns,
-		stmTotal,
-	});
+	const graph = useMemo(
+		() =>
+			buildMemoryGraph(ltmItems, learningInsights, {
+				profile,
+				dailySummary: dailyStructured?.summary ?? dailyContext,
+				dailyCount,
+				stmTurns,
+				stmTotal,
+			}),
+		[
+			ltmItems,
+			learningInsights,
+			profile,
+			dailyStructured,
+			dailyContext,
+			dailyCount,
+			stmTurns,
+			stmTotal,
+		],
+	);
+	const graphById = useMemo(
+		() => new Map(graph.nodes.map((node) => [node.id, node])),
+		[graph],
+	);
+	const graphViewNodes: GraphViewNode[] = useMemo(
+		() =>
+			graph.nodes.map((node) => ({
+				id: node.id,
+				label: node.label,
+				type: node.type,
+				source: node.source,
+				weight: node.weight,
+				content: node.content,
+				keywords: node.keywords,
+			})),
+		[graph],
+	);
+	const graphViewEdges: GraphViewEdge[] = useMemo(
+		() =>
+			graph.edges.map((edge) => ({
+				source: edge.from,
+				target: edge.to,
+				weight: Math.max(1, edge.keywords.length),
+			})),
+		[graph],
+	);
 	const selectedNode = graph.nodes.find(
 		(node) => node.id === selectedGraphNode,
 	);
@@ -773,6 +822,17 @@ export const MemoryPage: React.FC = () => {
 				(edge) => edge.from === selectedNode.id || edge.to === selectedNode.id,
 			)
 		: [];
+
+	const tabCounts: Record<TabId, number | undefined> = {
+		overview: undefined,
+		graph: graph.nodes.length || undefined,
+		learning: learningInsights.length || undefined,
+		stm: stmTotal || undefined,
+		ltm: ltmItems.length || undefined,
+		knowledge: knowledgeCollections.length || undefined,
+		daily: dailyCount || undefined,
+		profile: undefined,
+	};
 	const openGraphNodeSource = async (node: GraphNode) => {
 		const targetTab = getTabForGraphSource(node.source);
 		const query = buildGraphNodeSearchQuery(node);
@@ -781,18 +841,22 @@ export const MemoryPage: React.FC = () => {
 
 		if (targetTab === "ltm") {
 			setActiveTab("ltm");
-			setSearchQuery(query);
+			setSearchQuery(node.label);
 			setSearchPerformed(true);
 			setSearching(true);
 			try {
-				const [recent, results] = await Promise.all([
-					apiGet<{ memories: LTMItem[] }>("/api/memory/ltm/recent?limit=30"),
-					apiGet<{ results: LTMItem[] }>(
+				// Show the exact memory directly (the graph is built from ltmItems,
+				// so the node maps to a real memory by id). Avoids a flaky keyword
+				// search that would otherwise report "no results".
+				const matched = ltmItems.find((m) => `memory-${m.id}` === node.id);
+				if (matched) {
+					setSearchResults([matched]);
+				} else {
+					const results = await apiGet<{ results: LTMItem[] }>(
 						`/api/memory/search?q=${encodeURIComponent(query)}`,
-					),
-				]);
-				setLtmItems(recent.memories ?? []);
-				setSearchResults(results.results ?? []);
+					);
+					setSearchResults(results.results ?? []);
+				}
 			} catch (e) {
 				setMsg(e instanceof Error ? e.message : String(e));
 			} finally {
@@ -844,125 +908,56 @@ export const MemoryPage: React.FC = () => {
 			className="page-shell page-shell--xl"
 			style={{ padding: "24px", overflowY: "auto", height: "100%" }}
 		>
-			<div className="page-header animate-fade-in">
-				<div>
-					<div
-						style={{
-							display: "inline-flex",
-							alignItems: "center",
-							gap: 8,
-							padding: "6px 10px",
-							borderRadius: 999,
-							background: stats?.enabled
-								? "rgba(16,185,129,0.12)"
-								: "rgba(239,68,68,0.1)",
-							border: stats?.enabled
-								? "1px solid rgba(16,185,129,0.22)"
-								: "1px solid rgba(239,68,68,0.2)",
-							color: stats?.enabled ? "#10b981" : "#ef4444",
-							fontSize: "0.72rem",
-							fontWeight: 800,
-							letterSpacing: "0.06em",
-							textTransform: "uppercase",
-						}}
-					>
-						<span
-							style={{
-								width: 7,
-								height: 7,
-								borderRadius: 999,
-								background: "currentColor",
-								boxShadow: "0 0 14px currentColor",
-							}}
-						/>
-						{stats?.enabled ? "Memoria activa" : "Memoria inactiva"}
+			<div className="cc-header animate-fade-in">
+				<div className="cc-header-brand">
+					<div className="cc-hero-logo">
+						<AppIcon name="brain" size={26} />
 					</div>
-					<h1 className="ui-page-title" style={{ margin: "12px 0 6px" }}>
-						Centro de Memoria
-					</h1>
-					<p className="ui-page-subtitle" style={{ maxWidth: 680 }}>
-						Explora, conecta y gestiona lo que Octopus recuerda: memoria de
-						trabajo, largo plazo, perfil del usuario y aprendizajes operativos.
-					</p>
+					<div>
+						<div className="mem-header-line">
+							<h1 className="ui-page-title" style={{ margin: 0 }}>
+								Centro de Memoria
+							</h1>
+							<span
+								className="cc-status-pill"
+								style={
+									{
+										"--pill-color": stats?.enabled ? "#34d399" : "#f87171",
+									} as React.CSSProperties
+								}
+							>
+								<span className="cc-status-pill__dot" />
+								{stats?.enabled ? "Activa" : "Inactiva"}
+							</span>
+						</div>
+						<p className="ui-page-subtitle" style={{ margin: "6px 0 0" }}>
+							Explora, conecta y gestiona lo que Octopus recuerda: memoria de
+							trabajo, largo plazo, perfil del usuario y aprendizajes
+							operativos.
+						</p>
+					</div>
 				</div>
-
-				<div
-					style={{
-						display: "flex",
-						gap: 10,
-						alignItems: "center",
-						flexWrap: "wrap",
-						justifyContent: "flex-end",
-					}}
-				>
+				<div className="mem-row" style={{ justifyContent: "flex-end" }}>
 					<form
+						className="mem-search"
 						onSubmit={(event) => {
 							event.preventDefault();
 							void handleSearch();
 							setActiveTab("ltm");
 						}}
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 8,
-							minWidth: "min(420px, 100%)",
-							padding: "10px 12px",
-							borderRadius: 14,
-							background: "rgba(9,9,11,0.76)",
-							border: "1px solid #27272a",
-							boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
-						}}
 					>
-						<AppIcon name="spark" size={16} />
+						<AppIcon name="spark" size={15} />
 						<input
 							value={searchQuery}
 							onChange={(event) => setSearchQuery(event.target.value)}
 							placeholder="Buscar memorias, conceptos o conexiones..."
-							style={{
-								background: "transparent",
-								border: 0,
-								outline: "none",
-								color: "#f4f4f5",
-								minWidth: 0,
-								flex: 1,
-								font: "inherit",
-							}}
 						/>
-						<span
-							style={{
-								padding: "2px 7px",
-								borderRadius: 7,
-								background: "#18181b",
-								border: "1px solid #27272a",
-								color: "#a1a1aa",
-								fontSize: "0.72rem",
-								fontWeight: 800,
-							}}
-						>
-							Enter
-						</span>
 					</form>
 					<button
 						type="button"
 						onClick={handleConsolidate}
 						disabled={consolidating || !stats?.enabled}
-						className="hover-lift"
-						style={{
-							padding: "12px 16px",
-							borderRadius: 14,
-							border: "1px solid rgba(99,102,241,0.35)",
-							background:
-								consolidating || !stats?.enabled
-									? "#18181b"
-									: "linear-gradient(135deg, rgba(99,102,241,0.92), rgba(14,165,233,0.82))",
-							color: consolidating || !stats?.enabled ? "#71717a" : "#fff",
-							cursor:
-								consolidating || !stats?.enabled ? "not-allowed" : "pointer",
-							fontWeight: 800,
-							display: "inline-flex",
-							alignItems: "center",
-							gap: 8,
-						}}
+						className="ui-btn ui-btn--primary"
 					>
 						<AppIcon name="database" size={16} />
 						{consolidating ? "Consolidando" : "Consolidar"}
@@ -970,30 +965,32 @@ export const MemoryPage: React.FC = () => {
 				</div>
 			</div>
 
-			<div
-				className="settings-tabbar animate-slide-up"
-				style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
+			<nav
+				className="mem-tabbar animate-slide-up"
+				aria-label="Grafos de memoria"
 			>
-				{tabs.map((t) => (
-					<button
-						key={t.id}
-						type="button"
-						onClick={() => loadTab(t.id)}
-						className={`settings-tab${activeTab === t.id ? " is-active" : ""}`}
-						style={{ padding: "12px 14px" }}
-					>
-						<span className="settings-tab-icon">
-							<AppIcon name={t.icon} size={18} />
-						</span>
-						<span>
-							<span className="settings-tab-label">{t.label}</span>
-							<span className="settings-tab-description">
-								{getTabDescription(t.id)}
-							</span>
-						</span>
-					</button>
-				))}
-			</div>
+				{tabs.map((t) => {
+					const count = tabCounts[t.id];
+					return (
+						<button
+							key={t.id}
+							type="button"
+							onClick={() => loadTab(t.id)}
+							className={`mem-tab${activeTab === t.id ? " is-active" : ""}`}
+							aria-current={activeTab === t.id ? "page" : undefined}
+						>
+							<AppIcon name={t.icon} size={16} />
+							<span>{t.label}</span>
+							{count !== undefined ? (
+								<span className="mem-tab__count">{count}</span>
+							) : null}
+						</button>
+					);
+				})}
+			</nav>
+			<p className="ui-section-subtitle" style={{ margin: "-10px 0 18px" }}>
+				{getTabDescription(activeTab)}
+			</p>
 
 			{msg && (
 				<div
@@ -1042,29 +1039,17 @@ export const MemoryPage: React.FC = () => {
 			)}
 
 			{activeTab === "graph" && (
-				<div
-					style={{
-						display: "grid",
-						gridTemplateColumns:
-							"repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
-						gap: 16,
-						alignItems: "stretch",
+				<MemoryGraphView
+					nodes={graphViewNodes}
+					edges={graphViewEdges}
+					selectedNodeId={selectedGraphNode}
+					onSelectNode={setSelectedGraphNode}
+					onOpenNode={(node) => {
+						const original = graphById.get(node.id);
+						if (original) void openGraphNodeSource(original);
 					}}
-				>
-					<MemoryNetworkMap
-						graph={graph}
-						selectedNodeId={selectedGraphNode}
-						onSelectNode={setSelectedGraphNode}
-						onRefresh={() => loadTab("graph")}
-					/>
-					<MemoryNodeInspector
-						graph={graph}
-						selectedNode={selectedNode}
-						selectedEdges={selectedEdges}
-						onSelectNode={setSelectedGraphNode}
-						onOpenSource={openGraphNodeSource}
-					/>
-				</div>
+					height={680}
+				/>
 			)}
 
 			{activeTab === "learning" && (
@@ -1566,439 +1551,446 @@ export const MemoryPage: React.FC = () => {
 
 			{/* STM */}
 			{activeTab === "stm" && (
-				<div style={S.section}>
-					<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-						⚡ Memoria a Corto Plazo ({stmTotal} turnos)
-					</h3>
+				<section className="mem-panel">
+					<div className="cc-panel-head" style={{ marginBottom: 14 }}>
+						<div>
+							<h2 className="ui-section-title">⚡ Memoria a Corto Plazo</h2>
+							<p className="ui-section-subtitle">
+								{stmTotal} turnos en contexto
+								{typeof stats?.shortTerm?.tokens === "number"
+									? ` · ${stats.shortTerm.tokens} tokens`
+									: ""}
+								{typeof stats?.shortTerm?.load === "number"
+									? ` · ${Math.round(Number(stats.shortTerm.load))}% de carga`
+									: ""}
+							</p>
+						</div>
+					</div>
 					{stmTurns.length === 0 ? (
-						<div style={{ color: "#525252", fontSize: "0.85rem" }}>
-							Sin conversaciones recientes
+						<div className="ui-empty" style={{ padding: "28px 16px" }}>
+							<div className="ui-empty-title">Sin conversaciones recientes</div>
+							<div className="ui-empty-desc">
+								Los turnos activos aparecerán aquí al conversar con Octopus.
+							</div>
 						</div>
 					) : (
-						stmTurns.map((t) => (
-							<div
-								key={`${t.timestamp ?? "sin-fecha"}-${t.role}-${t.content.slice(0, 32)}`}
-								style={{
-									padding: 10,
-									borderRadius: 6,
-									background: "#0f1117",
-									marginBottom: 6,
-									borderLeft: `3px solid ${t.role === "user" ? "#6366f1" : "#22c55e"}`,
-								}}
-							>
-								<div
-									style={{
-										fontSize: "0.75rem",
-										color: "#525252",
-										marginBottom: 2,
-									}}
+						<div style={{ display: "grid", gap: 8 }}>
+							{stmTurns.map((t) => (
+								<MemItem
+									key={`${t.timestamp ?? "sin-fecha"}-${t.role}-${t.content.slice(0, 32)}`}
+									accent={t.role === "user" ? "#6366f1" : "#22c55e"}
+									meta={
+										<>
+											<span
+												style={{
+													color: t.role === "user" ? "#a5b4fc" : "#86efac",
+													fontWeight: 700,
+												}}
+											>
+												{t.role === "user" ? "👤 Usuario" : "🐙 Asistente"}
+											</span>
+											{t.channel ? <span>· {t.channel}</span> : null}
+											{t.timestamp ? (
+												<span>
+													· {new Date(t.timestamp).toLocaleTimeString()}
+												</span>
+											) : null}
+										</>
+									}
 								>
-									{t.role === "user" ? "👤 Usuario" : "🐙 Asistente"}
-									{t.channel ? ` · ${t.channel}` : ""}
-									{t.timestamp
-										? ` · ${new Date(t.timestamp).toLocaleTimeString()}`
-										: ""}
-								</div>
-								<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>
-									{t.content}
-								</div>
-							</div>
-						))
+									<MemText text={t.content} />
+								</MemItem>
+							))}
+						</div>
 					)}
-				</div>
+				</section>
 			)}
 
 			{/* LTM */}
 			{activeTab === "ltm" && (
 				<>
-					<div style={{ ...S.section }}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							🔍 Buscar en Memoria
-						</h3>
-						<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+					<section className="mem-panel">
+						<h2 className="ui-section-title">🔍 Buscar en Memoria</h2>
+						<p className="ui-section-subtitle">
+							Búsqueda semántica sobre el largo plazo
+						</p>
+						<div className="mem-row" style={{ marginTop: 12 }}>
 							<input
 								id="memory-search"
 								name="memorySearch"
 								type="text"
+								className="mem-input"
 								value={searchQuery}
 								onChange={(e) => setSearchQuery(e.target.value)}
 								onKeyDown={(e) => e.key === "Enter" && handleSearch()}
 								placeholder="Buscar recuerdos..."
-								style={S.input}
 							/>
 							<button
 								type="button"
+								className="ui-btn ui-btn--secondary"
 								onClick={handleSearch}
 								disabled={searching}
-								style={{
-									padding: "10px 20px",
-									borderRadius: 8,
-									border: "none",
-									background: "#7c3aed",
-									color: "#fff",
-									cursor: "pointer",
-									fontWeight: 600,
-								}}
 							>
-								{searching ? "..." : "Buscar"}
+								{searching ? "Buscando..." : "Buscar"}
 							</button>
 						</div>
-						{searchResults.length > 0 && (
-							<div style={{ marginTop: 12 }}>
-								<div
-									style={{
-										color: "#71717a",
-										fontSize: "0.78rem",
-										marginBottom: 8,
-									}}
-								>
-									{searchResults.length} resultado(s) para "{searchQuery}"
+						{searchResults.length > 0 ? (
+							<div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+								<div className="ui-meta">
+									{searchResults.length} resultado(s) para “{searchQuery}”
 								</div>
-								{searchResults.map((r) => (
-									<div
-										key={
-											r.id ??
-											`${getMemoryCreatedAt(r) ?? "sin-fecha"}-${String(r.content).slice(0, 32)}`
-										}
-										style={{
-											padding: 10,
-											borderRadius: 6,
-											background: "#0f1117",
-											marginBottom: 6,
-											borderLeft: "3px solid #7c3aed",
-										}}
-									>
-										<div
-											style={{
-												fontSize: "0.75rem",
-												color: "#525252",
-												marginBottom: 2,
-											}}
+								{searchResults.map((r) => {
+									const type =
+										((r as Record<string, unknown>).type as string) ?? "memory";
+									const accent = MEMORY_TYPE_COLORS[type] ?? "#7c3aed";
+									return (
+										<MemItem
+											key={
+												r.id ??
+												`${getMemoryCreatedAt(r) ?? "sin-fecha"}-${String(r.content).slice(0, 32)}`
+											}
+											accent={accent}
+											meta={
+												<>
+													<span style={{ color: accent, fontWeight: 700 }}>
+														{type}
+													</span>
+													{getMemoryCreatedAt(r) ? (
+														<span>
+															·{" "}
+															{new Date(
+																getMemoryCreatedAt(r) as string,
+															).toLocaleString()}
+														</span>
+													) : null}
+												</>
+											}
 										>
-											{((r as Record<string, unknown>).type as string) ??
-												"memory"}{" "}
-											·{" "}
-											{getMemoryCreatedAt(r)
-												? new Date(
-														getMemoryCreatedAt(r) as string,
-													).toLocaleString()
-												: ""}
-										</div>
-										<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>
-											{typeof r.content === "string"
-												? r.content
-												: JSON.stringify(r.content ?? r)}
-										</div>
-									</div>
-								))}
+											<MemText
+												text={
+													typeof r.content === "string"
+														? r.content
+														: JSON.stringify(r.content ?? r)
+												}
+											/>
+										</MemItem>
+									);
+								})}
 							</div>
-						)}
-						{searchPerformed && !searching && searchResults.length === 0 && (
+						) : null}
+						{searchPerformed && !searching && searchResults.length === 0 ? (
 							<div
-								style={{
-									marginTop: 12,
-									padding: 14,
-									borderRadius: 8,
-									background: "#0f1117",
-									color: "#71717a",
-									border: "1px dashed #27272a",
-								}}
+								className="ui-empty"
+								style={{ marginTop: 14, padding: "22px 16px" }}
 							>
-								Sin resultados para "{searchQuery}".
+								<div className="ui-empty-title">Sin resultados</div>
+								<div className="ui-empty-desc">
+									Nada encontrado para “{searchQuery}”.
+								</div>
 							</div>
-						)}
-					</div>
-					<div style={S.section}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							📋 Memorias Recientes
-						</h3>
+						) : null}
+					</section>
+
+					<section className="mem-panel">
+						<div className="cc-panel-head" style={{ marginBottom: 12 }}>
+							<div>
+								<h2 className="ui-section-title">📋 Memorias Recientes</h2>
+								<p className="ui-section-subtitle">
+									{ltmItems.length} recuerdos almacenados
+								</p>
+							</div>
+						</div>
 						{ltmItems.length === 0 ? (
-							<div style={{ color: "#525252", fontSize: "0.85rem" }}>
-								Sin memorias almacenadas
+							<div className="ui-empty" style={{ padding: "28px 16px" }}>
+								<div className="ui-empty-title">Sin memorias almacenadas</div>
+								<div className="ui-empty-desc">
+									Las memorias del largo plazo aparecerán tras consolidar.
+								</div>
 							</div>
 						) : (
-							ltmItems.map((m) => (
+							<>
 								<div
-									key={
-										m.id ??
-										`${getMemoryCreatedAt(m) ?? "sin-fecha"}-${String(m.content).slice(0, 32)}`
-									}
-									style={{
-										padding: 10,
-										borderRadius: 6,
-										background: "#0f1117",
-										marginBottom: 6,
-										borderLeft: `3px solid ${m.type === "episodic" ? "#f59e0b" : m.type === "fact" ? "#22c55e" : "#6366f1"}`,
-									}}
+									className="settings-chip-list"
+									style={{ marginBottom: 12 }}
 								>
-									<div
-										style={{
-											fontSize: "0.75rem",
-											color: "#525252",
-											marginBottom: 2,
-										}}
-									>
-										{m.type ?? "unknown"} · importancia: {m.importance ?? "?"} ·{" "}
-										{getMemoryCreatedAt(m)
-											? new Date(
-													getMemoryCreatedAt(m) as string,
-												).toLocaleString()
-											: ""}
-									</div>
-									<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>
-										{typeof m.content === "string"
-											? m.content.length > 300
-												? `${m.content.substring(0, 300)}...`
-												: m.content
-											: JSON.stringify(m)}
-									</div>
+									{(
+										[
+											"all",
+											...Array.from(
+												new Set(ltmItems.map((m) => m.type ?? "unknown")),
+											),
+										] as string[]
+									).map((t) => {
+										const active = ltmTypeFilter === t;
+										return (
+											<button
+												key={t}
+												type="button"
+												onClick={() => setLtmTypeFilter(t)}
+												style={{
+													padding: "5px 11px",
+													borderRadius: 999,
+													border: `1px solid ${active ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.08)"}`,
+													background: active
+														? "rgba(99,102,241,0.14)"
+														: "rgba(255,255,255,0.04)",
+													color: active ? "#c7d2fe" : "#a1a1aa",
+													fontSize: "0.76rem",
+													fontWeight: 700,
+													cursor: "pointer",
+													fontFamily: "inherit",
+												}}
+											>
+												{t === "all" ? "Todos" : t}
+											</button>
+										);
+									})}
 								</div>
-							))
+								<div style={{ display: "grid", gap: 8 }}>
+									{ltmItems
+										.filter(
+											(m) =>
+												ltmTypeFilter === "all" ||
+												(m.type ?? "unknown") === ltmTypeFilter,
+										)
+										.map((m) => {
+											const type = m.type ?? "unknown";
+											const accent = MEMORY_TYPE_COLORS[type] ?? "#6366f1";
+											return (
+												<MemItem
+													key={
+														m.id ??
+														`${getMemoryCreatedAt(m) ?? "sin-fecha"}-${String(m.content).slice(0, 32)}`
+													}
+													accent={accent}
+													meta={
+														<>
+															<span style={{ color: accent, fontWeight: 700 }}>
+																{type}
+															</span>
+															<span>· importancia {m.importance ?? "?"}</span>
+															{getMemoryCreatedAt(m) ? (
+																<span>
+																	·{" "}
+																	{new Date(
+																		getMemoryCreatedAt(m) as string,
+																	).toLocaleString()}
+																</span>
+															) : null}
+														</>
+													}
+												>
+													<MemText
+														text={
+															typeof m.content === "string"
+																? m.content
+																: JSON.stringify(m)
+														}
+													/>
+												</MemItem>
+											);
+										})}
+								</div>
+							</>
 						)}
-					</div>
+					</section>
 				</>
 			)}
 
 			{/* Knowledge */}
 			{activeTab === "knowledge" && (
-				<>
-					<div style={S.section}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							Base de conocimiento multimodal
-						</h3>
-						<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+				<div className="mem-grid-2">
+					{/* Left: actions */}
+					<div>
+						<section className="mem-panel">
+							<h2 className="ui-section-title">📚 Colecciones</h2>
+							<p className="ui-section-subtitle">
+								Base de conocimiento multimodal (RAG)
+							</p>
+							<div className="mem-row" style={{ marginTop: 12 }}>
+								<input
+									type="text"
+									className="mem-input"
+									value={knowledgeCollectionName}
+									onChange={(e) => setKnowledgeCollectionName(e.target.value)}
+									placeholder="Nueva colección"
+								/>
+								<button
+									type="button"
+									className="ui-btn ui-btn--primary"
+									onClick={handleCreateKnowledgeCollection}
+								>
+									Crear
+								</button>
+							</div>
+							{knowledgeCollections.length > 0 ? (
+								<select
+									className="mem-input mem-input--block"
+									value={selectedKnowledgeCollectionId}
+									onChange={(e) => void loadKnowledge(e.target.value)}
+									style={{ marginTop: 10 }}
+								>
+									{knowledgeCollections.map((collection) => (
+										<option key={collection.id} value={collection.id}>
+											{collection.name}
+										</option>
+									))}
+								</select>
+							) : null}
+						</section>
+
+						<section className="mem-panel">
+							<h2 className="ui-section-title">➕ Indexar texto</h2>
 							<input
 								type="text"
-								value={knowledgeCollectionName}
-								onChange={(e) => setKnowledgeCollectionName(e.target.value)}
-								placeholder="Nueva colección"
-								style={S.input}
+								className="mem-input mem-input--block"
+								value={knowledgeItemTitle}
+								onChange={(e) => setKnowledgeItemTitle(e.target.value)}
+								placeholder="Título"
+								style={{ marginTop: 10, marginBottom: 8 }}
+							/>
+							<textarea
+								className="mem-input mem-input--block"
+								value={knowledgeItemContent}
+								onChange={(e) => setKnowledgeItemContent(e.target.value)}
+								placeholder="Texto, notas, transcripción, descripción..."
+								rows={4}
+								style={{ resize: "vertical", fontFamily: "inherit" }}
 							/>
 							<button
 								type="button"
-								onClick={handleCreateKnowledgeCollection}
-								style={{
-									padding: "10px 16px",
-									borderRadius: 8,
-									border: "none",
-									background: "#6366f1",
-									color: "#fff",
-									fontWeight: 700,
-								}}
-							>
-								Crear colección
-							</button>
-						</div>
-						{knowledgeCollections.length > 0 && (
-							<select
-								value={selectedKnowledgeCollectionId}
-								onChange={(e) => void loadKnowledge(e.target.value)}
-								style={{ ...S.input, marginTop: 12, width: "100%" }}
-							>
-								{knowledgeCollections.map((collection) => (
-									<option key={collection.id} value={collection.id}>
-										{collection.name}
-									</option>
-								))}
-							</select>
-						)}
-					</div>
-
-					<div style={S.section}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							Añadir documento textual
-						</h3>
-						<input
-							type="text"
-							value={knowledgeItemTitle}
-							onChange={(e) => setKnowledgeItemTitle(e.target.value)}
-							placeholder="Título"
-							style={{ ...S.input, width: "100%", marginBottom: 8 }}
-						/>
-						<textarea
-							value={knowledgeItemContent}
-							onChange={(e) => setKnowledgeItemContent(e.target.value)}
-							placeholder="Texto, notas, transcripción, descripción de imagen/video/audio..."
-							rows={5}
-							style={{
-								...S.input,
-								width: "100%",
-								resize: "vertical",
-								fontFamily: "inherit",
-							}}
-						/>
-						<button
-							type="button"
-							onClick={handleCreateKnowledgeTextItem}
-							disabled={
-								!selectedKnowledgeCollectionId || !knowledgeItemContent.trim()
-							}
-							style={{
-								marginTop: 10,
-								padding: "10px 16px",
-								borderRadius: 8,
-								border: "none",
-								background: "#10b981",
-								color: "#fff",
-								fontWeight: 700,
-								opacity:
+								className="ui-btn ui-btn--secondary"
+								onClick={handleCreateKnowledgeTextItem}
+								disabled={
 									!selectedKnowledgeCollectionId || !knowledgeItemContent.trim()
-										? 0.5
-										: 1,
-							}}
-						>
-							Indexar conocimiento
-						</button>
-					</div>
+								}
+								style={{ marginTop: 10 }}
+							>
+								Indexar texto
+							</button>
+						</section>
 
-					<div style={S.section}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							Indexar archivo multimodal
-						</h3>
-						<p
-							style={{
-								margin: "0 0 12px",
-								color: "#a1a1aa",
-								fontSize: "0.85rem",
-								lineHeight: 1.5,
-							}}
-						>
-							Acepta texto, documentos, imágenes, audio y video desde rutas
-							locales permitidas. Para OCR/transcripción/captions usa sidecars
-							junto al archivo: <code>.ocr.txt</code>,{" "}
-							<code>.transcript.txt</code>, <code>.captions.vtt</code>,{" "}
-							<code>.captions.srt</code> o <code>.keyframes.json</code>.
-						</p>
-						<input
-							type="text"
-							value={knowledgeFileTitle}
-							onChange={(e) => setKnowledgeFileTitle(e.target.value)}
-							placeholder="Título opcional"
-							style={{ ...S.input, width: "100%", marginBottom: 8 }}
-						/>
-						<input
-							type="text"
-							value={knowledgeFilePath}
-							onChange={(e) => setKnowledgeFilePath(e.target.value)}
-							placeholder="Ruta local: ./docs/spec.md, C:\\Users\\...\\video.mp4, ~/.octopus/media/..."
-							style={{ ...S.input, width: "100%" }}
-						/>
-						<button
-							type="button"
-							onClick={handleCreateKnowledgeFileItem}
-							disabled={
-								!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()
-							}
-							style={{
-								marginTop: 10,
-								padding: "10px 16px",
-								borderRadius: 8,
-								border: "none",
-								background: "#6366f1",
-								color: "#fff",
-								fontWeight: 700,
-								opacity:
-									!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()
-										? 0.5
-										: 1,
-							}}
-						>
-							Indexar archivo
-						</button>
-					</div>
-
-					<div style={S.section}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							Buscar en conocimiento
-						</h3>
-						<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+						<section className="mem-panel">
+							<h2 className="ui-section-title">📎 Indexar archivo</h2>
+							<p className="ui-section-subtitle">
+								Texto, docs, imágenes, audio y video (rutas locales). Sidecars
+								de OCR/transcripción: <code>.ocr.txt</code>,{" "}
+								<code>.transcript.txt</code>, <code>.captions.vtt</code>
+							</p>
 							<input
 								type="text"
-								value={knowledgeQuery}
-								onChange={(e) => setKnowledgeQuery(e.target.value)}
-								onKeyDown={(e) => e.key === "Enter" && handleKnowledgeSearch()}
-								placeholder="Buscar chunks indexados..."
-								style={S.input}
+								className="mem-input mem-input--block"
+								value={knowledgeFileTitle}
+								onChange={(e) => setKnowledgeFileTitle(e.target.value)}
+								placeholder="Título opcional"
+								style={{ marginTop: 10, marginBottom: 8 }}
+							/>
+							<input
+								type="text"
+								className="mem-input mem-input--block"
+								value={knowledgeFilePath}
+								onChange={(e) => setKnowledgeFilePath(e.target.value)}
+								placeholder="Ruta local: ./docs/spec.md, ~/.octopus/media/..."
 							/>
 							<button
 								type="button"
-								onClick={handleKnowledgeSearch}
-								style={{
-									padding: "10px 16px",
-									borderRadius: 8,
-									border: "none",
-									background: "#7c3aed",
-									color: "#fff",
-									fontWeight: 700,
-								}}
+								className="ui-btn ui-btn--secondary"
+								onClick={handleCreateKnowledgeFileItem}
+								disabled={
+									!selectedKnowledgeCollectionId || !knowledgeFilePath.trim()
+								}
+								style={{ marginTop: 10 }}
 							>
-								Buscar
+								Indexar archivo
 							</button>
-						</div>
-						{knowledgeResults.map((result) => (
-							<div
-								key={result.id}
-								style={{
-									padding: 10,
-									borderRadius: 6,
-									background: "#0f1117",
-									marginTop: 8,
-									borderLeft: "3px solid #7c3aed",
-								}}
-							>
-								<div
-									style={{
-										fontSize: "0.75rem",
-										color: "#71717a",
-										marginBottom: 4,
-									}}
-								>
-									{result.item_title ?? result.item_id} · {result.modality}
-								</div>
-								<div style={{ fontSize: "0.85rem", color: "#d4d4d8" }}>
-									{result.content}
-								</div>
-							</div>
-						))}
+						</section>
 					</div>
 
-					<div style={S.section}>
-						<h3 style={{ margin: "0 0 12px", fontSize: "1rem" }}>
-							Items de la colección
-						</h3>
-						{knowledgeItems.length === 0 ? (
-							<div style={{ color: "#71717a", fontSize: "0.85rem" }}>
-								Sin items indexados en esta colección.
-							</div>
-						) : (
-							knowledgeItems.map((item) => (
-								<div
-									key={item.id}
-									style={{
-										padding: 10,
-										borderRadius: 6,
-										background: "#0f1117",
-										marginBottom: 6,
-									}}
+					{/* Right: search + items */}
+					<div>
+						<section className="mem-panel">
+							<h2 className="ui-section-title">🔎 Buscar en conocimiento</h2>
+							<div className="mem-row" style={{ marginTop: 12 }}>
+								<input
+									type="text"
+									className="mem-input"
+									value={knowledgeQuery}
+									onChange={(e) => setKnowledgeQuery(e.target.value)}
+									onKeyDown={(e) =>
+										e.key === "Enter" && handleKnowledgeSearch()
+									}
+									placeholder="Buscar chunks indexados..."
+								/>
+								<button
+									type="button"
+									className="ui-btn ui-btn--secondary"
+									onClick={handleKnowledgeSearch}
 								>
-									<div style={{ color: "#e4e4e7", fontWeight: 700 }}>
-										{item.title ?? item.id}
-									</div>
-									<div
-										style={{
-											color: "#71717a",
-											fontSize: "0.76rem",
-											marginTop: 4,
-										}}
-									>
-										{item.source_type} · {item.status} ·{" "}
-										{item.source_uri ?? "sin URI"}
+									Buscar
+								</button>
+							</div>
+							{knowledgeResults.length > 0 ? (
+								<div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+									{knowledgeResults.map((result) => (
+										<MemItem
+											key={result.id}
+											accent="#7c3aed"
+											meta={
+												<>
+													<span style={{ color: "#c4b5fd", fontWeight: 700 }}>
+														{result.item_title ?? result.item_id}
+													</span>
+													<span>· {result.modality}</span>
+												</>
+											}
+										>
+											<MemText text={result.content} />
+										</MemItem>
+									))}
+								</div>
+							) : null}
+						</section>
+
+						<section className="mem-panel">
+							<div className="cc-panel-head" style={{ marginBottom: 12 }}>
+								<div>
+									<h2 className="ui-section-title">🗂 Items de la colección</h2>
+									<p className="ui-section-subtitle">
+										{knowledgeItems.length} indexados
+									</p>
+								</div>
+							</div>
+							{knowledgeItems.length === 0 ? (
+								<div className="ui-empty" style={{ padding: "24px 16px" }}>
+									<div className="ui-empty-title">Sin items</div>
+									<div className="ui-empty-desc">
+										Indexa texto o archivos en esta colección.
 									</div>
 								</div>
-							))
-						)}
+							) : (
+								<div style={{ display: "grid", gap: 8 }}>
+									{knowledgeItems.map((item) => (
+										<MemItem
+											key={item.id}
+											accent="#6366f1"
+											title={item.title ?? item.id}
+										>
+											<div className="ui-meta">
+												{item.source_type} ·{" "}
+												<span
+													className={`ui-status ${item.status === "ready" ? "is-success" : item.status === "failed" ? "is-error" : "is-info"}`}
+												>
+													{item.status}
+												</span>
+												{item.source_uri ? ` · ${item.source_uri}` : ""}
+											</div>
+										</MemItem>
+									))}
+								</div>
+							)}
+						</section>
 					</div>
-				</>
+				</div>
 			)}
 
 			{/* Daily */}
@@ -2527,6 +2519,32 @@ const MemoryOverviewDashboard: React.FC<{
 	onOpenSource,
 }) => {
 	const stmTokens = getRecordNumber(stats?.shortTerm, "tokens");
+	const overviewNodes: GraphViewNode[] = useMemo(
+		() =>
+			graph.nodes.map((node) => ({
+				id: node.id,
+				label: node.label,
+				type: node.type,
+				source: node.source,
+				weight: node.weight,
+				content: node.content,
+				keywords: node.keywords,
+			})),
+		[graph],
+	);
+	const overviewEdges: GraphViewEdge[] = useMemo(
+		() =>
+			graph.edges.map((edge) => ({
+				source: edge.from,
+				target: edge.to,
+				weight: Math.max(1, edge.keywords.length),
+			})),
+		[graph],
+	);
+	const overviewById = useMemo(
+		() => new Map(graph.nodes.map((node) => [node.id, node])),
+		[graph],
+	);
 	const stmMaxTokens = stats?.shortTerm?.maxTokens;
 	const stmLoad = getRecordNumber(stats?.shortTerm, "load");
 	const ltmCount = getRecordNumber(stats?.longTerm, "count") ?? ltmItems.length;
@@ -2607,11 +2625,19 @@ const MemoryOverviewDashboard: React.FC<{
 				}}
 			>
 				<div style={{ minWidth: 0 }}>
-					<MemoryNetworkMap
-						graph={graph}
+					<MemoryGraphView
+						nodes={overviewNodes}
+						edges={overviewEdges}
 						selectedNodeId={selectedNode?.id ?? null}
-						onSelectNode={onSelectNode}
+						onSelectNode={(id) => {
+							if (id) onSelectNode(id);
+						}}
+						onOpenNode={(node) => {
+							const original = overviewById.get(node.id);
+							if (original) onOpenSource(original);
+						}}
 						compact
+						height={420}
 					/>
 				</div>
 				<div
@@ -2730,6 +2756,66 @@ const MemoryOverviewDashboard: React.FC<{
 	);
 };
 
+const WARM_NODE_COLORS: Record<GraphSource, string> = {
+	memory: "#FFA500",
+	learning: "#FFB347",
+	profile: "#FF8C00",
+	daily: "#FFD180",
+	shortTerm: "#FFC107",
+};
+
+interface BrainMesh {
+	points: Array<{ x: number; y: number }>;
+	edges: Array<[number, number]>;
+}
+
+function insideBrainShape(x: number, y: number): boolean {
+	const ellipse = (cx: number, cy: number, rx: number, ry: number) =>
+		((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1;
+	return (
+		ellipse(34, 41, 22, 27) ||
+		ellipse(62, 41, 22, 27) ||
+		ellipse(48, 25, 25, 14) ||
+		ellipse(48, 63, 17, 11)
+	);
+}
+
+function generateBrainMesh(count = 260): BrainMesh {
+	const points: Array<{ x: number; y: number }> = [];
+	let guard = 0;
+	while (points.length < count && guard < count * 50) {
+		guard += 1;
+		const x = 10 + Math.random() * 78;
+		const y = 12 + Math.random() * 60;
+		if (insideBrainShape(x, y)) {
+			points.push({
+				x: x + (Math.random() - 0.5) * 1.2,
+				y: y + (Math.random() - 0.5) * 1.2,
+			});
+		}
+	}
+	const edges: Array<[number, number]> = [];
+	const seen = new Set<string>();
+	points.forEach((point, i) => {
+		const nearest = points
+			.map((other, j) => ({
+				j,
+				d: (point.x - other.x) ** 2 + (point.y - other.y) ** 2,
+			}))
+			.filter((o) => o.j !== i)
+			.sort((a, b) => a.d - b.d)
+			.slice(0, 3);
+		for (const o of nearest) {
+			const key = i < o.j ? `${i}-${o.j}` : `${o.j}-${i}`;
+			if (!seen.has(key)) {
+				seen.add(key);
+				edges.push([i, o.j]);
+			}
+		}
+	});
+	return { points, edges };
+}
+
 const MemoryNetworkMap: React.FC<{
 	graph: { nodes: GraphNode[]; edges: GraphEdge[] };
 	selectedNodeId: string | null;
@@ -2771,8 +2857,97 @@ const MemoryNetworkMap: React.FC<{
 			: [],
 	);
 	const updateZoom = (nextZoom: number) => {
-		setMapZoom(Math.max(0.8, Math.min(1.45, nextZoom)));
+		setMapZoom(Math.max(0.8, Math.min(1.6, nextZoom)));
 	};
+
+	const stageRef = useRef<HTMLDivElement>(null);
+	const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+	const [isPanning, setIsPanning] = useState(false);
+	const dragRef = useRef<{
+		x: number;
+		y: number;
+		px: number;
+		py: number;
+	} | null>(null);
+	const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+
+	useEffect(() => {
+		const el = stageRef.current;
+		if (!el) return;
+		const onWheel = (event: WheelEvent) => {
+			event.preventDefault();
+			const delta = -event.deltaY * 0.0016;
+			setMapZoom((value) => Math.max(0.8, Math.min(1.45, value + delta)));
+		};
+		el.addEventListener("wheel", onWheel, { passive: false });
+		return () => el.removeEventListener("wheel", onWheel);
+	}, []);
+
+	const onStagePointerDown = (event: React.PointerEvent) => {
+		if ((event.target as HTMLElement).closest("button")) return;
+		dragRef.current = {
+			x: event.clientX,
+			y: event.clientY,
+			px: pan.x,
+			py: pan.y,
+		};
+		setIsPanning(true);
+		try {
+			(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+		} catch {
+			/* pointer capture unavailable in this environment */
+		}
+	};
+	const onStagePointerMove = (event: React.PointerEvent) => {
+		const drag = dragRef.current;
+		if (!drag) return;
+		setPan({
+			x: drag.px + (event.clientX - drag.x),
+			y: drag.py + (event.clientY - drag.y),
+		});
+	};
+	const onStagePointerUp = (event: React.PointerEvent) => {
+		if (dragRef.current) {
+			try {
+				(event.currentTarget as HTMLElement).releasePointerCapture?.(
+					event.pointerId,
+				);
+			} catch {
+				/* pointer capture already released */
+			}
+		}
+		dragRef.current = null;
+		setIsPanning(false);
+	};
+	const resetView = () => {
+		setMapZoom(1);
+		setPan({ x: 0, y: 0 });
+	};
+
+	const focusId = hoveredNode?.id ?? selectedNodeId ?? null;
+	const litIds = new Set<string>(
+		focusId
+			? [
+					focusId,
+					...graph.edges.flatMap((edge) =>
+						edge.from === focusId
+							? [edge.to]
+							: edge.to === focusId
+								? [edge.from]
+								: [],
+					),
+				]
+			: [],
+	);
+	const labelOpacity = Math.max(0, Math.min(1, (mapZoom - 1) / 0.45));
+	const showLabels = mapZoom > 1.1;
+	const weightRank = new Map<string, number>();
+	[...visibleNodes]
+		.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+		.forEach((node, index) => weightRank.set(node.id, index));
+	const totalRanked = Math.max(visibleNodes.length, 1);
+	const mesh = useMemo(() => generateBrainMesh(260), []);
+	const meshPts = mesh.points.map((p) => scaleGraphPoint(p, mapZoom));
 
 	return (
 		<div
@@ -2782,7 +2957,7 @@ const MemoryNetworkMap: React.FC<{
 				minHeight: compact ? 560 : 690,
 				overflow: "hidden",
 				background:
-					"radial-gradient(circle at 50% 54%, rgba(14,165,233,0.18), transparent 24%), radial-gradient(circle at 76% 26%, rgba(168,85,247,0.14), transparent 20%), linear-gradient(180deg, rgba(9,9,11,0.97), rgba(3,7,18,0.98))",
+					"radial-gradient(circle at 48% 42%, rgba(255,140,30,0.16), transparent 38%), radial-gradient(circle at 50% 108%, rgba(70,24,0,0.7), transparent 60%), linear-gradient(180deg, #08060c, #1a0c03)",
 			}}
 		>
 			<div
@@ -2885,134 +3060,128 @@ const MemoryNetworkMap: React.FC<{
 			) : (
 				<>
 					<div
-						style={{
-							position: "absolute",
-							inset: compact ? "120px 18px 18px" : "128px 22px 22px",
-							borderRadius: 24,
-							background:
-								"radial-gradient(circle, rgba(59,130,246,0.08) 1px, transparent 1px)",
-							backgroundSize: "28px 28px",
-							opacity: 0.8,
-						}}
-					/>
-					{GRAPH_CLUSTER_DEFS.map((cluster) => {
-						const count = visibleNodes.filter(
-							(node) => node.source === cluster.source,
-						).length;
-						if (count === 0) return null;
-						const color = getSourceColor(cluster.source);
-						const point = scaleGraphPoint(
-							{ x: cluster.x, y: cluster.y },
-							mapZoom,
-						);
-						return (
-							<div
-								key={cluster.source}
-								style={{
-									position: "absolute",
-									left: `${point.x}%`,
-									top: `${point.y}%`,
-									transform: "translate(-50%, -50%)",
-									width: compact ? 164 : 190,
-									height: compact ? 128 : 148,
-									borderRadius: 32,
-									background: `radial-gradient(circle, ${hexToRgba(color, 0.16)}, transparent 66%)`,
-									border: `1px solid ${hexToRgba(color, 0.1)}`,
-									zIndex: 1,
-								}}
-							>
-								<div
-									style={{
-										position: "absolute",
-										left: 14,
-										top: 12,
-										color,
-										fontSize: "0.72rem",
-										fontWeight: 900,
-										textTransform: "uppercase",
-										letterSpacing: "0.06em",
-									}}
-								>
-									{cluster.label} · {count}
-								</div>
-							</div>
-						);
-					})}
-					<svg
-						viewBox="0 0 100 100"
-						preserveAspectRatio="none"
-						style={{
-							position: "absolute",
-							inset: 0,
-							width: "100%",
-							height: "100%",
-						}}
+						ref={stageRef}
+						className={`mem-cosmos-stage${isPanning ? " is-panning" : ""}`}
+						style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}
+						onPointerDown={onStagePointerDown}
+						onPointerMove={onStagePointerMove}
+						onPointerUp={onStagePointerUp}
+						onPointerCancel={onStagePointerUp}
+						onPointerLeave={onStagePointerUp}
 					>
-						<title>Conexiones semánticas entre memorias</title>
-						<defs>
-							<filter
-								id="memory-glow"
-								x="-50%"
-								y="-50%"
-								width="200%"
-								height="200%"
-							>
-								<feGaussianBlur stdDeviation="0.65" result="coloredBlur" />
-								<feMerge>
-									<feMergeNode in="coloredBlur" />
-									<feMergeNode in="SourceGraphic" />
-								</feMerge>
-							</filter>
-						</defs>
-						{visibleEdges.map((edge, index) => {
-							const from = mapLayout[edge.from];
-							const to = mapLayout[edge.to];
-							if (!from || !to) return null;
-							const selected =
-								selectedNodeId === edge.from || selectedNodeId === edge.to;
-							const color = selected ? "#67e8f9" : "#4f46e5";
-							return (
-								<path
-									key={`${edge.from}-${edge.to}-${index}`}
-									d={`M ${from.x} ${from.y} C ${from.x} 52, ${to.x} 52, ${to.x} ${to.y}`}
-									stroke={color}
-									strokeWidth={selected ? 0.38 : 0.12}
-									strokeOpacity={selected ? 0.86 : 0.14}
+						<div className="mem-cosmos" />
+						<div className="mem-cosmos-twinkle" />
+						<svg
+							viewBox="0 0 100 100"
+							preserveAspectRatio="none"
+							style={{
+								position: "absolute",
+								inset: 0,
+								width: "100%",
+								height: "100%",
+							}}
+						>
+							<title>Conexiones semánticas entre memorias</title>
+							<defs>
+								<filter
+									id="neural-bloom"
+									x="-20%"
+									y="-20%"
+									width="140%"
+									height="140%"
+								>
+									<feGaussianBlur stdDeviation="0.45" />
+								</filter>
+								<filter
+									id="memory-glow"
+									x="-50%"
+									y="-50%"
+									width="200%"
+									height="200%"
+								>
+									<feGaussianBlur stdDeviation="0.5" result="b" />
+									<feMerge>
+										<feMergeNode in="b" />
+										<feMergeNode in="SourceGraphic" />
+									</feMerge>
+								</filter>
+								<radialGradient id="brain-warm" cx="48%" cy="42%" r="44%">
+									<stop offset="0%" stopColor="rgba(255,150,40,0.22)" />
+									<stop offset="60%" stopColor="rgba(255,120,0,0.08)" />
+									<stop offset="100%" stopColor="rgba(255,120,0,0)" />
+								</radialGradient>
+							</defs>
+							<g>
+								<ellipse
+									cx="48"
+									cy="44"
+									rx="36"
+									ry="32"
+									fill="url(#brain-warm)"
+								/>
+								<g
+									stroke="#ff8c1a"
+									strokeWidth="0.1"
+									strokeOpacity="0.3"
 									fill="none"
-									strokeDasharray={selected ? "2 1.6" : "1 2.2"}
-									filter={selected ? "url(#memory-glow)" : undefined}
+									filter="url(#neural-bloom)"
 								>
-									<animate
-										attributeName="stroke-dashoffset"
-										values="0;6"
-										dur={`${5 + (index % 5)}s`}
-										repeatCount="indefinite"
-									/>
-								</path>
-							);
-						})}
-					</svg>
-					<div
-						style={{
-							position: "absolute",
-							left: "50%",
-							top: compact ? "56%" : "55%",
-							transform: "translate(-50%, -50%)",
-							width: compact ? 78 : 96,
-							height: compact ? 78 : 96,
-							borderRadius: 28,
-							background:
-								"linear-gradient(135deg, rgba(6,182,212,0.95), rgba(99,102,241,0.95))",
-							border: "1px solid rgba(103,232,249,0.72)",
-							boxShadow:
-								"0 0 32px rgba(34,211,238,0.42), inset 0 0 22px rgba(255,255,255,0.16)",
-							display: "grid",
-							placeItems: "center",
-							color: "#fff",
-							zIndex: 2,
-						}}
-					>
-						<AppIcon name="brain" size={compact ? 34 : 42} strokeWidth={1.5} />
+									{mesh.edges.map(([a, b], i) => {
+										const pa = meshPts[a];
+										const pb = meshPts[b];
+										if (!pa || !pb) return null;
+										return (
+											<line
+												key={`mesh-${a}-${b}`}
+												x1={pa.x}
+												y1={pa.y}
+												x2={pb.x}
+												y2={pb.y}
+											/>
+										);
+									})}
+								</g>
+								<g fill="#ffa733" filter="url(#neural-bloom)">
+									{meshPts.map((p, i) => (
+										<circle
+											key={`mp-${p.x.toFixed(2)}-${p.y.toFixed(2)}`}
+											cx={p.x}
+											cy={p.y}
+											r={0.32}
+											opacity="0.7"
+										/>
+									))}
+								</g>
+							</g>
+							{visibleEdges.map((edge, index) => {
+								const from = mapLayout[edge.from];
+								const to = mapLayout[edge.to];
+								if (!from || !to) return null;
+								const lit =
+									!focusId || edge.from === focusId || edge.to === focusId;
+								const color = lit ? "#ffd27a" : "#b85c00";
+								return (
+									<path
+										key={`${edge.from}-${edge.to}-${index}`}
+										d={`M ${from.x} ${from.y} C ${from.x} 44, ${to.x} 44, ${to.x} ${to.y}`}
+										stroke={color}
+										strokeWidth={lit ? 0.36 : 0.1}
+										strokeOpacity={lit ? 0.85 : 0.1}
+										fill="none"
+										strokeDasharray={lit ? "2 1.6" : "1 2.2"}
+										filter={lit ? "url(#memory-glow)" : undefined}
+										style={{ transition: "stroke-opacity 0.2s ease" }}
+									>
+										<animate
+											attributeName="stroke-dashoffset"
+											values="0;6"
+											dur={`${5 + (index % 5)}s`}
+											repeatCount="indefinite"
+										/>
+									</path>
+								);
+							})}
+						</svg>
 					</div>
 					{selectedNode && (
 						<div
@@ -3047,71 +3216,70 @@ const MemoryNetworkMap: React.FC<{
 							selectedNodeId={selectedNodeId}
 						/>
 					)}
-					{visibleNodes.map((node, index) => {
+					{visibleNodes.map((node) => {
 						const point = mapLayout[node.id];
 						if (!point) return null;
-						const color = getSourceColor(node.source);
+						const color = WARM_NODE_COLORS[node.source];
 						const selected = selectedNodeId === node.id;
-						const connected = connectedIds.has(node.id);
-						const size = compact
-							? 54 + node.weight * 12
-							: 62 + node.weight * 14;
+						const isFocus = !!focusId && node.id === focusId;
+						const isNeighbor = !!focusId && litIds.has(node.id) && !isFocus;
+						const lit = !focusId || litIds.has(node.id);
+						const weight = node.weight ?? 0.5;
+						const rank = weightRank.get(node.id) ?? 0;
+						const radius = compact
+							? 4 + (1 - rank / totalRanked) * 9
+							: 6 + (1 - rank / totalRanked) * 22;
+						const showName =
+							showLabels ||
+							selected ||
+							hoveredNode?.id === node.id ||
+							weight >= 0.85;
 						return (
 							<button
 								key={node.id}
 								type="button"
 								onClick={() => onSelectNode(node.id)}
-								className="hover-lift"
+								onPointerEnter={() => setHoveredNode(node)}
+								onPointerLeave={() => setHoveredNode(null)}
+								className={`mem-dot${selected ? " is-selected" : ""}`}
 								style={{
 									position: "absolute",
 									left: `${point.x}%`,
 									top: `${point.y}%`,
-									transform: "translate(-50%, -50%)",
-									width: size,
-									minHeight: size,
-									borderRadius: 20,
-									padding: compact ? "8px 7px" : "9px 8px",
-									border:
-										selected || connected
-											? `1px solid ${color}`
-											: "1px solid rgba(255,255,255,0.12)",
-									background: `linear-gradient(180deg, ${hexToRgba(color, 0.22)}, rgba(9,9,11,0.88))`,
-									boxShadow: selected
-										? `0 0 28px ${hexToRgba(color, 0.55)}`
-										: connected
-											? `0 0 22px ${hexToRgba(color, 0.32)}`
-											: `0 0 18px ${hexToRgba(color, 0.2)}`,
-									color: "#f4f4f5",
+									transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${isFocus ? 1.3 : isNeighbor ? 1.12 : 1})`,
+									width: radius * 2,
+									height: radius * 2,
+									borderRadius: "50%",
+									padding: 0,
+									border: "none",
+									background: `radial-gradient(circle at 34% 30%, ${hexToRgba(color, 1)}, ${hexToRgba(color, 0.6)} 55%, ${hexToRgba(color, 0.18)})`,
+									boxShadow: isFocus
+										? `0 0 16px ${color}, 0 0 34px ${hexToRgba(color, 0.55)}`
+										: isNeighbor
+											? `0 0 12px ${hexToRgba(color, 0.8)}`
+											: selected
+												? `0 0 14px ${hexToRgba(color, 0.6)}`
+												: `0 0 8px ${hexToRgba(color, 0.45)}`,
 									cursor: "pointer",
-									opacity: selectedNodeId && !selected && !connected ? 0.58 : 1,
-									zIndex: selected ? 7 : connected ? 6 : 4,
-									animation: `fadeIn ${260 + index * 18}ms ease-out both`,
+									opacity: lit ? 1 : 0.2,
+									zIndex: isFocus ? 8 : selected ? 7 : isNeighbor ? 6 : 4,
+									transition: "opacity 0.2s ease, box-shadow 0.2s ease",
 								}}
 							>
-								<span
-									style={{
-										display: "grid",
-										placeItems: "center",
-										margin: "0 auto 5px",
-										color,
-									}}
-								>
-									<AppIcon
-										name={getSourceIcon(node.source)}
-										size={compact ? 16 : 18}
-									/>
-								</span>
-								<span
-									style={{
-										display: "block",
-										fontSize: compact ? "0.58rem" : "0.66rem",
-										fontWeight: 800,
-										lineHeight: 1.15,
-										wordBreak: "break-word",
-									}}
-								>
-									{truncateText(node.label, compact ? 18 : 24)}
-								</span>
+								{showName ? (
+									<span
+										className="mem-dot__label"
+										style={{
+											opacity:
+												selected || hoveredNode?.id === node.id
+													? 1
+													: labelOpacity,
+											color,
+										}}
+									>
+										{truncateText(node.label, compact ? 16 : 22)}
+									</span>
+								) : null}
 							</button>
 						);
 					})}
@@ -3120,13 +3288,46 @@ const MemoryNetworkMap: React.FC<{
 							zoom={mapZoom}
 							onZoomIn={() => updateZoom(mapZoom + 0.1)}
 							onZoomOut={() => updateZoom(mapZoom - 0.1)}
-							onReset={() => updateZoom(1)}
+							onReset={resetView}
 							focusConnectionsOnly={focusConnectionsOnly}
 							onToggleFocus={() => setFocusConnectionsOnly((value) => !value)}
 							disabledFocus={!selectedNodeId}
 						/>
 					)}
 					{!compact && <MemoryActivityStrip items={activityItems} />}
+					<div className="mem-cosmos-hint">
+						Arrastra para mover · rueda para zoom
+					</div>
+					{hoveredNode && mapLayout[hoveredNode.id] ? (
+						<div
+							className="mem-cosmos-tooltip"
+							style={{
+								left: `calc(${mapLayout[hoveredNode.id].x}% + ${pan.x}px)`,
+								top: `calc(${mapLayout[hoveredNode.id].y}% + ${pan.y}px)`,
+							}}
+						>
+							<div
+								style={{
+									color: getSourceColor(hoveredNode.source),
+									fontWeight: 800,
+								}}
+							>
+								{hoveredNode.label}
+							</div>
+							<div
+								style={{
+									color: "#a1a1aa",
+									fontSize: "0.72rem",
+									margin: "2px 0 5px",
+								}}
+							>
+								{getSourceLabel(hoveredNode.source)} · {hoveredNode.type}
+							</div>
+							<div style={{ color: "#d4d4d8" }}>
+								{truncateText(hoveredNode.content, 120)}
+							</div>
+						</div>
+					) : null}
 				</>
 			)}
 		</div>
@@ -4119,6 +4320,56 @@ const sectionLabelStyle: React.CSSProperties = {
 	fontWeight: 800,
 };
 
+const MEMORY_TYPE_COLORS: Record<string, string> = {
+	episodic: "#f59e0b",
+	fact: "#22c55e",
+	procedural: "#6366f1",
+	semantic: "#38bdf8",
+	learn: "#a855f7",
+	skill: "#ec4899",
+};
+
+const MemText: React.FC<{ text: string; limit?: number }> = ({
+	text,
+	limit = 280,
+}) => {
+	const [open, setOpen] = useState(false);
+	const long = text.length > limit;
+	return (
+		<>
+			<div className="mem-item__content">
+				{open || !long ? text : `${text.slice(0, limit).trimEnd()}…`}
+			</div>
+			{long ? (
+				<button
+					type="button"
+					className="mem-item__more"
+					onClick={() => setOpen((v) => !v)}
+				>
+					{open ? "Ver menos" : "Ver más"}
+				</button>
+			) : null}
+		</>
+	);
+};
+
+const MemItem: React.FC<{
+	accent?: string;
+	meta?: React.ReactNode;
+	title?: React.ReactNode;
+	children?: React.ReactNode;
+}> = ({ accent = "#6366f1", meta, title, children }) => (
+	<div
+		className="mem-item"
+		style={{ "--mem-accent": accent } as React.CSSProperties}
+	>
+		<span className="mem-item__bar" />
+		{meta ? <div className="mem-item__meta">{meta}</div> : null}
+		{title ? <div className="mem-item__title">{title}</div> : null}
+		{children}
+	</div>
+);
+
 function getTabDescription(tab: TabId): string {
 	const descriptions: Record<TabId, string> = {
 		overview: "estado vivo",
@@ -4256,7 +4507,7 @@ function scaleGraphPoint(
 	point: { x: number; y: number },
 	zoom: number,
 ): { x: number; y: number } {
-	const center = { x: 55, y: 55 };
+	const center = { x: 48, y: 44 };
 	return {
 		x: center.x + (point.x - center.x) * zoom,
 		y: center.y + (point.y - center.y) * zoom,
@@ -4291,7 +4542,7 @@ function getVisibleGraphNodes(
 				)
 			: [],
 	);
-	const perClusterLimit = compact ? 5 : 7;
+	const perClusterLimit = compact ? 5 : 10;
 	const visible = new Map<string, GraphNode>();
 
 	if (focusConnectionsOnly && selectedNode) {
@@ -4518,13 +4769,28 @@ function buildMemoryGraph(
 		}
 	}
 
-	const limitedNodes = nodes.slice(0, 60);
-	const limitedIds = new Set(limitedNodes.map((node) => node.id));
+	// Anti-hairball: cap edges per node to the strongest few (no node cap — show all).
+	const MAX_EDGES_PER_NODE = 6;
+	const edgesByNode = new Map<string, GraphEdge[]>();
+	for (const edge of edges) {
+		if (!edgesByNode.has(edge.from)) edgesByNode.set(edge.from, []);
+		if (!edgesByNode.has(edge.to)) edgesByNode.set(edge.to, []);
+		const af = edgesByNode.get(edge.from);
+		const at = edgesByNode.get(edge.to);
+		if (af) af.push(edge);
+		if (at) at.push(edge);
+	}
+	const keepEdge = new Set<GraphEdge>();
+	for (const list of edgesByNode.values()) {
+		const top = list
+			.sort((a, b) => b.keywords.length - a.keywords.length)
+			.slice(0, MAX_EDGES_PER_NODE);
+		for (const e of top) keepEdge.add(e);
+	}
+
 	return {
-		nodes: limitedNodes,
-		edges: edges.filter(
-			(edge) => limitedIds.has(edge.from) && limitedIds.has(edge.to),
-		),
+		nodes,
+		edges: edges.filter((edge) => keepEdge.has(edge)),
 	};
 }
 

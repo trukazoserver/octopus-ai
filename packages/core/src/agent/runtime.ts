@@ -34,21 +34,31 @@ import type {
 import type { UserProfileManager } from "../memory/user-profile.js";
 import { WorkingMemory } from "../memory/working-memory.js";
 import type { SkillLoader } from "../skills/loader.js";
-import type { LoadedSkill } from "../skills/types.js";
 import { SkillResearcher } from "../skills/researcher.js";
+import type { LoadedSkill } from "../skills/types.js";
+import {
+	MAX_TOTAL_DOC_CHARS,
+	extractDocumentText,
+	fenceLangFor,
+	guessDocumentKind,
+} from "../tools/document-extract.js";
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
 import type { ToolHealthManager } from "../tools/tool-health-manager.js";
 import { getOctopusArmProfile } from "./arm-profiles.js";
+import { routeTaskToArm } from "./arm-router.js";
 import { ContinuityGuard } from "./continuity-guard.js";
+import type { AgentEvent, EventStream } from "./event-stream.js";
+import type { KanbanDispatcher } from "./kanban-dispatcher.js";
+import type { KanbanPlanner } from "./kanban-planner.js";
 import {
 	OctopusOrchestrator,
 	type OrchestratorConfig,
 	type OrchestratorEvent,
 } from "./orchestrator.js";
+import type { RequirementResolver } from "./requirement-resolver.js";
 import { RollingContextManager } from "./rolling-context.js";
-import { routeTaskToArm } from "./arm-router.js";
 import type {
 	AgentConfig,
 	AgentReasoningEffort,
@@ -56,10 +66,6 @@ import type {
 	TaskState,
 } from "./types.js";
 import type { WorkflowManager } from "./workflow-manager.js";
-import type { KanbanPlanner } from "./kanban-planner.js";
-import type { RequirementResolver } from "./requirement-resolver.js";
-import type { KanbanDispatcher } from "./kanban-dispatcher.js";
-import type { AgentEvent, EventStream } from "./event-stream.js";
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 128;
 const MAX_REPEATED_TOOL_SIGNATURES = 3;
@@ -72,6 +78,8 @@ const REQUIRED_RECENT_RAW_TURNS = 20;
 const STM_MIN_TURNS = 30;
 const STM_MAX_TURNS = 60;
 const TOOL_IMAGE_RE = /\[IMG:(data:image\/[a-zA-Z0-9-]+;base64,[^\]]+)\]/;
+const TOOL_IMAGE_RE_GLOBAL =
+	/\[IMG:(data:image\/[a-zA-Z0-9-]+;base64,[^\]]+)\]/g;
 const MEDIA_FILE_RE = /\/api\/media\/file\/([^\s)\]]+)/g;
 const ZAI_VISION_REQUIRED_MARKER = "[ZAI VISION REQUIRED]";
 const ZAI_VISION_REQUIRED_RE = /\s*\[ZAI VISION REQUIRED\][\s\S]*$/;
@@ -124,7 +132,9 @@ interface DelegateTaskResult {
 	error?: string;
 }
 
-function parseDelegateProduces(value: unknown): Array<Record<string, unknown>> | undefined {
+function parseDelegateProduces(
+	value: unknown,
+): Array<Record<string, unknown>> | undefined {
 	if (Array.isArray(value)) {
 		const artifacts = value.filter(
 			(item): item is Record<string, unknown> =>
@@ -204,6 +214,24 @@ export function requiresZaiVisionToolForModel(model?: string): boolean {
 		(provider === "zhipu" || provider === "zai" || provider === "z-ai") &&
 		modelName.startsWith("glm-")
 	);
+}
+
+/**
+ * True when `model` CANNOT see images natively and must therefore route any
+ * image content through an external vision tool. Covers Z.ai GLM (special-cased
+ * to the Z.AI Vision MCP tool) and any model whose provider is not multimodal
+ * (e.g. text-only providers such as DeepSeek).
+ *
+ * `supportsVision` is injected so this stays pure and testable; the runtime
+ * wires it to {@link LLMRouter.supportsVisionForModel}.
+ */
+export function requiresExternalVisionToolForModel(
+	model: string | undefined,
+	supportsVision: (model: string) => boolean,
+): boolean {
+	if (requiresZaiVisionToolForModel(model)) return true;
+	const resolved = (model ?? "").trim() || "default";
+	return !supportsVision(resolved);
 }
 
 export class AgentRuntime {
@@ -399,9 +427,8 @@ export class AgentRuntime {
 			| undefined;
 		const runId = planMeta?.run?.id;
 		const taskIds =
-			planMeta?.tasks
-				?.map((t) => t.id)
-				.filter((id): id is string => !!id) ?? [];
+			planMeta?.tasks?.map((t) => t.id).filter((id): id is string => !!id) ??
+			[];
 		if (!runId || taskIds.length === 0) return;
 		yield* this.streamDurableWorkflow(runId, taskIds, signal);
 	}
@@ -473,7 +500,7 @@ export class AgentRuntime {
 				if (dispatcher.getStatus().activeCount === 0) {
 					idleTicks += 1;
 					if (idleTicks >= 3) {
-						yield `\n⏸ No hay cards activas ahora; el workflow continúa en background (algunas pueden requerir revisión).\n`;
+						yield "\n⏸ No hay cards activas ahora; el workflow continúa en background (algunas pueden requerir revisión).\n";
 						return;
 					}
 				} else {
@@ -633,8 +660,7 @@ export class AgentRuntime {
 	 * overrides an agent that explicitly wants "none".
 	 */
 	private buildReasoning(): ReasoningConfig {
-		const effort: AgentReasoningEffort =
-			this.config.reasoningEffort ?? "none";
+		const effort: AgentReasoningEffort = this.config.reasoningEffort ?? "none";
 		return {
 			effort,
 			includeThinking: effort !== "none",
@@ -642,7 +668,9 @@ export class AgentRuntime {
 	}
 
 	/** Metadata attached to every LLM request this runtime issues (usage attribution). */
-	private requestMetadata(extra?: Partial<LLMRequestMetadata>): LLMRequestMetadata {
+	private requestMetadata(
+		extra?: Partial<LLMRequestMetadata>,
+	): LLMRequestMetadata {
 		return {
 			agentId: this.config.id,
 			...extra,
@@ -884,8 +912,21 @@ export class AgentRuntime {
 		return due;
 	}
 
+	/**
+	 * Whether the active model cannot see images natively and must route image
+	 * content through an external vision tool (Z.ai GLM, or any text-only model).
+	 * The field name `usesZaiVisionToolForImages` is kept for backward
+	 * compatibility with tool consumers (browser, executor, worker-pool, tests).
+	 */
 	private shouldUseZaiVisionToolsForImages(): boolean {
-		return requiresZaiVisionToolForModel(this.config.model);
+		return requiresExternalVisionToolForModel(this.config.model, (m) =>
+			this.llmRouter.supportsVisionForModel(m),
+		);
+	}
+
+	/** Whether the active model can see images natively (multimodal, non-GLM). */
+	private modelSeesImagesNatively(): boolean {
+		return !this.shouldUseZaiVisionToolsForImages();
 	}
 
 	private getToolExecutionContext(): ToolExecutionContext {
@@ -994,7 +1035,11 @@ export class AgentRuntime {
 				eventType: status === "failed" ? "error" : status,
 				message: message.slice(0, 4000),
 				toolName: "delegate_task",
-				metadata: { source: "kanban_swarm_delegate", workflowKind: "kanban_swarm", workerId },
+				metadata: {
+					source: "kanban_swarm_delegate",
+					workflowKind: "kanban_swarm",
+					workerId,
+				},
 			});
 		} catch (err) {
 			console.error(
@@ -1028,7 +1073,12 @@ export class AgentRuntime {
 				agentId: this.config.id,
 				eventType: "synthesis",
 				message: finalResponse.slice(0, 4000),
-				metadata: { source: "kanban_swarm_delegate", workflowKind: "kanban_swarm", succeeded, failed },
+				metadata: {
+					source: "kanban_swarm_delegate",
+					workflowKind: "kanban_swarm",
+					succeeded,
+					failed,
+				},
 			});
 		} catch (err) {
 			console.error(
@@ -1128,8 +1178,59 @@ export class AgentRuntime {
 		}
 	}
 
-	private toImageContentParts(content: string): ContentPart[] {
-		const parts: ContentPart[] = [{ type: "text", text: content }];
+	private static readonly IMAGE_MEDIA_EXTS = new Set([
+		".png",
+		".jpg",
+		".jpeg",
+		".gif",
+		".webp",
+		".svg",
+		".bmp",
+		".ico",
+	]);
+
+	private isImageMediaFilename(filename: string): boolean {
+		return AgentRuntime.IMAGE_MEDIA_EXTS.has(
+			path.extname(filename).toLowerCase(),
+		);
+	}
+
+	/**
+	 * Build native image_url content parts for the inline `[IMG:base64]` markers
+	 * and the local media file references found in `sources`. Used for models that
+	 * can see images natively, so they receive the actual image bytes instead of a
+	 * text placeholder.
+	 *
+	 * `text` is the cleaned text part (already stripped of inline base64 /
+	 * truncated as needed by the caller); `sources` is the raw content scanned for
+	 * image references.
+	 */
+	private toImageContentParts(
+		text: string,
+		sources: string = text,
+	): ContentPart[] {
+		const parts: ContentPart[] = [
+			{ type: "text", text: text || "Image data." },
+		];
+		parts.push(...this.inlineBase64ImageParts(sources));
+		parts.push(...this.localMediaImageParts(sources));
+		return parts;
+	}
+
+	private inlineBase64ImageParts(content: string): ContentPart[] {
+		const parts: ContentPart[] = [];
+		TOOL_IMAGE_RE_GLOBAL.lastIndex = 0;
+		for (const match of content.matchAll(TOOL_IMAGE_RE_GLOBAL)) {
+			const dataUrl = match[1];
+			if (dataUrl) {
+				parts.push({ type: "image_url", image_url: { url: dataUrl } });
+			}
+		}
+		return parts;
+	}
+
+	private localMediaImageParts(content: string): ContentPart[] {
+		const parts: ContentPart[] = [];
 		for (const localPath of this.getLocalMediaPathsFromContent(content)) {
 			try {
 				if (!fs.existsSync(localPath)) continue;
@@ -1161,6 +1262,100 @@ export class AgentRuntime {
 		if (localPaths.length === 0) return content;
 		const quotedPaths = localPaths.map((p) => JSON.stringify(p)).join(", ");
 		return `${content}\n\n<!-- octopus-local-media-paths: ${quotedPaths} -->`;
+	}
+
+	/**
+	 * Inline extracted text from non-image attachments (pdf, office docs,
+	 * spreadsheets, code, text, ...) into the most recent user message so the
+	 * model can read them directly. Only mutates the LLM-bound copy of the
+	 * messages (never STM), so the chat UI is unaffected. Runs for every model.
+	 */
+	private async inlineDocumentAttachments(
+		messages: LLMMessage[],
+	): Promise<LLMMessage[]> {
+		// Inline extracted text for document attachments in EVERY user message in
+		// the assembled context, not just the latest. A follow-up question ("which
+		// name repeats most?") arrives in a later user turn that doesn't itself
+		// reference the file; if we only inlined the latest message, the file's
+		// content would be absent from context and the model would re-fetch it via
+		// a tool (e.g. the browser). Extraction is cached, so revisiting earlier
+		// turns each build is cheap. A shared budget bounds total inlined text.
+		const docMediaRe = /!\[([^\]]*)\]\(\/api\/media\/file\/([^)]+)\)/g;
+		let budget = MAX_TOTAL_DOC_CHARS;
+		const seenFiles = new Set<string>();
+		const blocksByMsg = new Map<number, string[]>();
+		const ensureBucket = (i: number): string[] => {
+			let arr = blocksByMsg.get(i);
+			if (!arr) {
+				arr = [];
+				blocksByMsg.set(i, arr);
+			}
+			return arr;
+		};
+
+		for (let i = 0; i < messages.length; i++) {
+			if (messages[i].role !== "user") continue;
+			if (budget <= 0) break;
+			const msg = messages[i];
+			const contentStr =
+				typeof msg.content === "string"
+					? msg.content
+					: Array.isArray(msg.content)
+						? msg.content.map((p) => (p.type === "text" ? p.text : "")).join("")
+						: "";
+			if (!contentStr.includes("/api/media/file/")) continue;
+
+			docMediaRe.lastIndex = 0;
+			for (const match of contentStr.matchAll(docMediaRe)) {
+				if (budget <= 0) break;
+				const storedName = (match[2] ?? "").split(/[?#]/)[0];
+				if (!storedName || seenFiles.has(storedName)) continue;
+				const kind = guessDocumentKind(storedName);
+				if (kind === "media" || kind === "unknown") continue;
+				seenFiles.add(storedName);
+
+				const localPath = path.join(
+					os.homedir(),
+					".octopus",
+					"media",
+					storedName,
+				);
+				let text = "";
+				try {
+					text = (await extractDocumentText(localPath, storedName)).text;
+				} catch {
+					continue;
+				}
+				if (!text) continue;
+				const slice = text.slice(0, budget);
+				if (!slice) break;
+				budget -= slice.length;
+
+				const lang = fenceLangFor(storedName);
+				const label = (match[1] ?? "").trim() || storedName;
+				ensureBucket(i).push(
+					`\n\n--- Archivo adjunto: ${label} (${kind}). Contenido ya extraído en este contexto; responde sobre él directamente y NO uses el navegador ni otros tools para releerlo. ---\n\`\`\`${lang ?? ""}\n${slice}\n\`\`\``,
+				);
+			}
+		}
+
+		if (blocksByMsg.size === 0) return messages;
+		const result = messages.slice();
+		for (const [i, blocks] of blocksByMsg) {
+			const target = result[i];
+			const annotation = blocks.join("");
+			const updated: LLMMessage = { ...target };
+			if (typeof target.content === "string") {
+				updated.content = target.content + annotation;
+			} else if (Array.isArray(target.content)) {
+				updated.content = [
+					...target.content,
+					{ type: "text", text: annotation } as ContentPart,
+				];
+			}
+			result[i] = updated;
+		}
+		return result;
 	}
 
 	private sanitizeAssistantOutput(content: string | undefined): string {
@@ -1214,23 +1409,43 @@ export class AgentRuntime {
 		return `${stripped.slice(0, MAX_TOOL_RESULT_CONTEXT_CHARS)}\n...[tool result truncated to keep memory bounded]`;
 	}
 
+	private compactTextForContext(content: string): string {
+		const stripped = content.replace(TOOL_IMAGE_RE, "").trim();
+		if (stripped.length <= MAX_TOOL_RESULT_CONTEXT_CHARS) return stripped;
+		return `${stripped.slice(0, MAX_TOOL_RESULT_CONTEXT_CHARS)}\n...[tool result truncated to keep memory bounded]`;
+	}
+
 	private formatToolResultForModel(
 		resultContent: string,
 	): string | ContentPart[] {
-		const imgMatch = resultContent.match(TOOL_IMAGE_RE);
-		if (!imgMatch) return this.compactToolResultForContext(resultContent);
+		MEDIA_FILE_RE.lastIndex = 0;
+		const hasInlineImage = TOOL_IMAGE_RE.test(resultContent);
+		const hasMediaRef = MEDIA_FILE_RE.test(resultContent);
+		if (!hasInlineImage && !hasMediaRef) {
+			return this.compactToolResultForContext(resultContent);
+		}
 
-		const textContent = this.compactToolResultForContext(
-			resultContent.replace(imgMatch[0], ""),
-		);
+		// Models that cannot see images natively (Z.ai GLM, text-only models)
+		// route image content through an external vision tool: strip the inline
+		// base64, keep a compact text summary, and append the local media paths.
 		if (this.shouldUseZaiVisionToolsForImages()) {
+			const textContent = this.compactToolResultForContext(
+				hasInlineImage
+					? resultContent.replace(TOOL_IMAGE_RE, "")
+					: resultContent,
+			);
 			return this.appendZaiVisionHint(
 				textContent || "Image data.",
 				this.getLocalMediaPathsFromContent(resultContent),
 			);
 		}
 
-		return `${textContent || "Image data."}\n[Image data omitted: screenshot is available via the saved media URL/local path above.]`;
+		// Native multimodal models: embed the actual image bytes as content parts
+		// so the model can see them directly instead of a text placeholder.
+		const textPart = this.compactTextForContext(
+			hasInlineImage ? resultContent.replace(TOOL_IMAGE_RE, "") : resultContent,
+		);
+		return this.toImageContentParts(textPart, resultContent);
 	}
 
 	/**
@@ -1469,7 +1684,7 @@ export class AgentRuntime {
 
 		// In relentless mode, all budgets are much more generous
 		if (persistence.enabled) {
-			if (/(video|image|audio|generate|edit|veo|nano)/i.test(toolName))
+			if (/\b(video|image|audio|generate|edit|veo|nano)\b/i.test(toolName))
 				return maxIter;
 			if (toolName === "save_media") return maxIter;
 			if (toolName.startsWith("browser_")) return 20;
@@ -1489,7 +1704,7 @@ export class AgentRuntime {
 		if (toolName === "browser_extract_images") return 3;
 		if (toolName.startsWith("browser_")) return 4;
 		if (toolName === "save_media") return 6;
-		if (/(video|image|audio|generate|edit|veo|nano)/i.test(toolName))
+		if (/\b(video|image|audio|generate|edit|veo|nano)\b/i.test(toolName))
 			return maxIter;
 		return 8;
 	}
@@ -1838,7 +2053,11 @@ export class AgentRuntime {
 		toolResult: ToolResult,
 	): void {
 		const text = `${toolResult.error ?? ""} ${toolResult.output ?? ""}`;
-		if (/403|billing|permission.?denied|requires billing|enabled billing/i.test(text)) {
+		if (
+			/403|billing|permission.?denied|requires billing|enabled billing/i.test(
+				text,
+			)
+		) {
 			this.toolBillingFailures.set(
 				toolName,
 				(this.toolBillingFailures.get(toolName) ?? 0) + 1,
@@ -2253,8 +2472,11 @@ export class AgentRuntime {
 					await this.orchestrator.shouldDecompose(message);
 				if (shouldDecompose) {
 					const decomposition = this.kanbanPlanner
-					? await this.orchestrator.decomposeViaKanban(message, { conversationId: channelId, rootAgentId: this.config.id })
-					: await this.orchestrator.decompose(message);
+						? await this.orchestrator.decomposeViaKanban(message, {
+								conversationId: channelId,
+								rootAgentId: this.config.id,
+							})
+						: await this.orchestrator.decompose(message);
 					if (decomposition.subtasks.length > 1) {
 						const sharedContext = await this.buildSharedWorkerContext(
 							message,
@@ -2277,28 +2499,28 @@ export class AgentRuntime {
 								synthesisResult = event.result;
 							}
 							throwIfAborted(options.signal);
-					}
-					if (synthesisResult) {
-						const safeSynthesisResult =
-							this.sanitizeAssistantOutput(synthesisResult);
-						const assistantTurn: ConversationTurn = {
-							role: "assistant",
-							content: safeSynthesisResult,
-							timestamp: new Date(),
-							metadata: channelId ? { conversationId: channelId } : undefined,
-						};
-						this.stm.add(assistantTurn);
+						}
+						if (synthesisResult) {
+							const safeSynthesisResult =
+								this.sanitizeAssistantOutput(synthesisResult);
+							const assistantTurn: ConversationTurn = {
+								role: "assistant",
+								content: safeSynthesisResult,
+								timestamp: new Date(),
+								metadata: channelId ? { conversationId: channelId } : undefined,
+							};
+							this.stm.add(assistantTurn);
 							this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
-						this.recordLearningExperience({
-							userRequest: message,
-							finalResponse: safeSynthesisResult,
-							channelId,
-							startedAt,
-							metadata: { mode: "multi-agent" },
-						});
-						return safeSynthesisResult;
+							this.recordLearningExperience({
+								userRequest: message,
+								finalResponse: safeSynthesisResult,
+								channelId,
+								startedAt,
+								metadata: { mode: "multi-agent" },
+							});
+							return safeSynthesisResult;
+						}
 					}
-				}
 				}
 			} catch (err) {
 				console.error(
@@ -2405,8 +2627,11 @@ export class AgentRuntime {
 					await this.orchestrator.shouldDecompose(message);
 				if (shouldDecompose) {
 					const decomposition = this.kanbanPlanner
-					? await this.orchestrator.decomposeViaKanban(message, { conversationId: channelId, rootAgentId: this.config.id })
-					: await this.orchestrator.decompose(message);
+						? await this.orchestrator.decomposeViaKanban(message, {
+								conversationId: channelId,
+								rootAgentId: this.config.id,
+							})
+						: await this.orchestrator.decompose(message);
 					if (decomposition.subtasks.length > 1) {
 						yield `\x00STATUS:orchestrating:planning::${this.encodeStatusField("Analizando la solicitud para decidir cuántos agentes crear y cómo dividir el trabajo.")}\x00`;
 						const sharedContext = await this.buildSharedWorkerContext(
@@ -2519,16 +2744,16 @@ export class AgentRuntime {
 								case "telemetry":
 									yield `\x00STATUS:orchestrating:telemetry::${this.encodeStatusField(JSON.stringify(event.data))}\x00`;
 									break;
-							case "synthesis": {
-								const safeResult = this.sanitizeAssistantOutput(event.result);
-								yield "\x00STATUS:responding\x00";
-								if (safeResult) yield safeResult;
-								// Guardar en STM y memoria
-								const assistantTurn: ConversationTurn = {
-									role: "assistant",
-									content: safeResult,
-									timestamp: new Date(),
-									metadata: channelId
+								case "synthesis": {
+									const safeResult = this.sanitizeAssistantOutput(event.result);
+									yield "\x00STATUS:responding\x00";
+									if (safeResult) yield safeResult;
+									// Guardar en STM y memoria
+									const assistantTurn: ConversationTurn = {
+										role: "assistant",
+										content: safeResult,
+										timestamp: new Date(),
+										metadata: channelId
 											? { conversationId: channelId }
 											: undefined,
 									};
@@ -2538,10 +2763,10 @@ export class AgentRuntime {
 										assistantTurn,
 										channelId,
 									);
-								this.recordLearningExperience({
-									userRequest: message,
-									finalResponse: safeResult,
-									channelId,
+									this.recordLearningExperience({
+										userRequest: message,
+										finalResponse: safeResult,
+										channelId,
 										startedAt,
 										metadata: {
 											mode: "multi-agent",
@@ -2611,8 +2836,8 @@ export class AgentRuntime {
 		const toolTrace: ExperienceToolTrace[] = [];
 		let stoppedByDecision = false;
 		let continueAfterToolLimit = true;
-			let streamErrorRetryCount = 0;
-			let emptyResponseRetryCount = 0;
+		let streamErrorRetryCount = 0;
+		let emptyResponseRetryCount = 0;
 
 		while (continueAfterToolLimit && !stoppedByDecision) {
 			continueAfterToolLimit = false;
@@ -2713,7 +2938,7 @@ export class AgentRuntime {
 						}
 						yield visibleTail;
 					}
-								} catch (err) {
+				} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
 					if (chunkContent) {
 						fullResponse += chunkContent;
@@ -2731,32 +2956,35 @@ export class AgentRuntime {
 					const persistence = this.getTenacidad();
 					const isGenuine = this.isGenuineApiError(errMsg);
 
-					if (persistence.enabled && !isGenuine && streamErrorRetryCount < persistence.streamErrorRetries) {
+					if (
+						persistence.enabled &&
+						!isGenuine &&
+						streamErrorRetryCount < persistence.streamErrorRetries
+					) {
 						streamErrorRetryCount++;
-						const retryNotice = "\n\n[Stream error (attempt " + streamErrorRetryCount + "/" + persistence.streamErrorRetries + "), retrying...]\n\n";
+						const retryNotice = `\n\n[Stream error (attempt ${streamErrorRetryCount}/${persistence.streamErrorRetries}), retrying...]\n\n`;
 						fullResponse += retryNotice;
 						yield retryNotice;
 						yield ` STATUS:persistence_retry:stream_error::${this.encodeStatusField(`Stream error attempt ${streamErrorRetryCount}/${persistence.streamErrorRetries}: ${errMsg.slice(0, 200)}`)} `;
 						// Brief backoff
-						await new Promise(r => setTimeout(r, Math.min(1000 * streamErrorRetryCount, 5000)));
+						await new Promise((r) =>
+							setTimeout(r, Math.min(1000 * streamErrorRetryCount, 5000)),
+						);
 						continue;
 					}
 
-					const llmFailureNotice =
-						"\n\n⚠️ No pude completar la respuesta: el servicio de IA falló tras varios reintentos (incluido el modelo de respaldo). Detalle técnico: " +
-						errMsg.slice(0, 300) +
-						".\n\nPuedes reintentar en unos momentos; si persiste, revisa los créditos o permisos del proveedor en Ajustes.";
+					const llmFailureNotice = `\n\n⚠️ No pude completar la respuesta: el servicio de IA falló tras varios reintentos (incluido el modelo de respaldo). Detalle técnico: ${errMsg.slice(0, 300)}.\n\nPuedes reintentar en unos momentos; si persiste, revisa los créditos o permisos del proveedor en Ajustes.`;
 					fullResponse += llmFailureNotice;
 					yield llmFailureNotice;
-						// Interrupt inline run tracking
-						if (inlineRunId && this.subtaskTracker) {
-							try {
-								await this.subtaskTracker.interruptInlineRun(inlineRunId, errMsg);
-							} catch {
-								/* non-critical */
-							}
+					// Interrupt inline run tracking
+					if (inlineRunId && this.subtaskTracker) {
+						try {
+							await this.subtaskTracker.interruptInlineRun(inlineRunId, errMsg);
+						} catch {
+							/* non-critical */
 						}
-						break;
+					}
+					break;
 				}
 
 				// Record finish reason in continuity guard
@@ -2768,25 +2996,41 @@ export class AgentRuntime {
 					(tc) => tc.function.name.length > 0,
 				);
 
+				// A turn that produced real output (text or tool calls) has
+				// recovered from any earlier transient blip. Reset the per-turn
+				// transient-retry budgets so later connection drops in the same
+				// long session each get their full retry allowance — otherwise the
+				// counters (incremented, never reset) exhaust after the first few
+				// drops and the agent stops recovering for the rest of the turn,
+				// requiring a manual pause + continue.
+				if (hasContent || validToolCalls.length > 0) {
+					streamErrorRetryCount = 0;
+					emptyResponseRetryCount = 0;
+				}
+
 				// Real progress this turn (tool calls emitted): clear accumulated stall state
 				// so a fresh "promised-but-not-acted" cycle can be detected later.
 				if (validToolCalls.length > 0 && continuityGuard) {
 					continuityGuard.clearStall();
 				}
 
-								if (!hasContent && validToolCalls.length === 0) {
+				if (!hasContent && validToolCalls.length === 0) {
 					const persistence = this.getTenacidad();
 
 					// In relentless mode, retry on empty responses
-					if (persistence.enabled && emptyResponseRetryCount < persistence.emptyResponseRetries) {
+					if (
+						persistence.enabled &&
+						emptyResponseRetryCount < persistence.emptyResponseRetries
+					) {
 						emptyResponseRetryCount++;
-						const retryMsg = "\n\n[Empty response (attempt " + emptyResponseRetryCount + "/" + persistence.emptyResponseRetries + "), retrying...]\n\n";
+						const retryMsg = `\n\n[Empty response (attempt ${emptyResponseRetryCount}/${persistence.emptyResponseRetries}), retrying...]\n\n`;
 						fullResponse += retryMsg;
 						yield retryMsg;
 						yield ` STATUS:persistence_retry:empty_response::${this.encodeStatusField(`Empty model response retry ${emptyResponseRetryCount}/${persistence.emptyResponseRetries}`)} `;
 						messages.push({
 							role: "system",
-							content: "The previous model response was empty. Please continue working on the task.",
+							content:
+								"The previous model response was empty. Please continue working on the task.",
 						});
 						continue;
 					}
@@ -3291,7 +3535,11 @@ export class AgentRuntime {
 									this.getToolExecutionContext(),
 								);
 								throwIfAborted(options.signal);
-								yield* this.maybeStreamCreatedWorkflow(toolCall, toolResult, options.signal);
+								yield* this.maybeStreamCreatedWorkflow(
+									toolCall,
+									toolResult,
+									options.signal,
+								);
 							}
 						}
 					}
@@ -3690,19 +3938,16 @@ export class AgentRuntime {
 						messages.push({ role: "assistant", content: stallContent });
 						messages.push({
 							role: "system",
-							content: guard.buildForceActPrompt(
-								stall.reason,
-								stall.repeated,
-								{ content: stallContent, attempt: guard.stallForceCount },
-							),
+							content: guard.buildForceActPrompt(stall.reason, stall.repeated, {
+								content: stallContent,
+								attempt: guard.stallForceCount,
+							}),
 						});
 						continue; // re-enter the while loop for another LLM call
 					}
 					if (stall.exhausted && guard.stallForceCount > 0) {
 						return {
-							content:
-								stallContent +
-								"\n\n⚠️ El agente declaró una intención de acción varias veces pero no emitió la tool call correspondiente tras varios reintentos. La ejecución se detiene para evitar un bucle. Revisa el historial: la última intención declarada NO se completó.",
+							content: `${stallContent}\n\n⚠️ El agente declaró una intención de acción varias veces pero no emitió la tool call correspondiente tras varios reintentos. La ejecución se detiene para evitar un bucle. Revisa el historial: la última intención declarada NO se completó.`,
 							toolCallsExecuted,
 						};
 					}
@@ -3733,7 +3978,13 @@ export class AgentRuntime {
 
 	private getAvailableTools(options: AgentProcessOptions = {}): LLMTool[] {
 		if (!this.toolRegistry) return [];
-		const tools = this.toolRegistry.toLLMTools();
+		// Multimodal models see images natively, so they neither need nor should
+		// use the Z.AI Vision MCP tools — hide that server from their tool list.
+		const tools = this.toolRegistry.toLLMTools({
+			excludeServerNames: this.modelSeesImagesNatively()
+				? ["zai-vision"]
+				: undefined,
+		});
 		return options.disableDelegation
 			? tools.filter((tool) => tool.function.name !== "delegate_task")
 			: tools;
@@ -4190,7 +4441,7 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 
 ### BLOCKED PAGE HANDLING
 6. If the page appears blocked, empty, stuck on verification, hidden by an overlay, or not showing the expected content, take or inspect a browser screenshot before giving up.
-7. ${zaiVisionMode ? "Because the active model is Z.ai GLM, analyze browser screenshots with a Z.AI Vision MCP tool using the local screenshot path before deciding the next browser action. Do not rely on direct image understanding for these screenshots." : "Because the active model is not Z.ai GLM, use direct multimodal image understanding for browser screenshots when available. Do not call Z.AI Vision MCP tools solely to inspect browser screenshots."}
+7. ${zaiVisionMode ? "Because the active model cannot see images natively, analyze browser screenshots with a Z.AI Vision MCP tool using the local screenshot path before deciding the next browser action. Do not rely on direct image understanding for these screenshots." : "Because the active model can see images natively, use direct multimodal image understanding for browser screenshots when available. Do not call Z.AI Vision MCP tools solely to inspect browser screenshots."}
 8. Based on the screenshot or vision analysis, decide and act: close popups, dismiss cookie banners, click Continue/Verify/Accept buttons using browser_click_uid, retry the original page, or continue reading if no real block exists.
 9. For CAPTCHA pages, do not manually click reCAPTCHA/anti-bot checkboxes and do not claim the CAPTCHA was solved unless a fresh snapshot/read/screenshot shows the verification UI is gone. If configured, browser_solve_captchas may attempt supported provider handling, but token application is only an attempt; verifiedClear=true or equivalent page evidence is required before continuing. If the challenge remains visible, report the blocker, ask for manual completion, or use a source-specific/non-Google alternative.
 10. If normal Playwright navigation is blocked, the IP appears blocked, or the task is pure public scraping where browser interaction is unnecessary, use Decodo: continue with the configured Decodo browser fallback or call decodo_scrape for advanced Web Scraping API retrieval.
@@ -4338,12 +4589,29 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			if (typeof msg.content === "string") {
 				const imgRegex = /!\[.*?\]\(\/api\/media\/file\/([^)]+)\)/g;
 				const matches = [...msg.content.matchAll(imgRegex)];
-				if (matches.length > 0) {
-					const localPaths = this.getLocalMediaPathsFromContent(msg.content);
+				const imageMatches = matches.filter((m) =>
+					this.isImageMediaFilename(m[1] ?? ""),
+				);
+				if (imageMatches.length > 0) {
+					// Needs an external vision tool (Z.ai GLM / text-only models):
+					// append the local media paths (images only) so the model can
+					// call analyze_image. Document attachments are handled separately.
 					if (this.shouldUseZaiVisionToolsForImages()) {
+						const localPaths = this.getLocalMediaPathsFromContent(
+							msg.content,
+						).filter((p) => this.isImageMediaFilename(p));
 						return {
 							...msg,
 							content: this.appendZaiVisionHint(msg.content, localPaths),
+						};
+					}
+
+					// Native multimodal model: embed the image bytes directly as
+					// content parts so the model sees the image without a tool call.
+					if (this.modelSeesImagesNatively()) {
+						return {
+							...msg,
+							content: this.toImageContentParts(msg.content),
 						};
 					}
 
@@ -4356,7 +4624,9 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			return msg;
 		});
 
-		return parsedMessages;
+		// Inline extracted text from non-image attachments (pdf, docs, sheets,
+		// code, ...) so the model can read them directly. Runs for every model.
+		return await this.inlineDocumentAttachments(parsedMessages);
 	}
 
 	private extractVisibleMemoryIdentifiers(content: string): string[] {

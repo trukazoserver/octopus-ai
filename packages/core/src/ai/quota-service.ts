@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { LLMRouter } from "./router.js";
 import { getProviderRegistry, resolveProviderConfig } from "./router.js";
 import type { OctopusConfig } from "../config/index.js";
@@ -6,10 +7,11 @@ import type { OctopusConfig } from "../config/index.js";
  * Provider quota for the plans that expose usage limits:
  *  - OpenAI in Codex (ChatGPT account) mode → 5-hour + weekly windows, read from
  *    `x-codex-*` response headers on every /responses call (captured into the
- *    cache below). No dedicated usage GET endpoint exists.
- *  - Zhipu / Z.ai in Coding Plan / Coding Global mode → the coding plan exposes
- *    NO quota via API headers or a public endpoint (only the web dashboard at
- *    z.ai/manage-apikey/rate-limits), so this stays best-effort / unavailable.
+ *    cache below) and re-probed live from a minimal /responses request on each
+ *    dashboard poll, so it refreshes automatically like ZhipuAI. Codex exposes
+ *    no dedicated usage endpoint, so the probe spends a few tokens per refresh.
+ *  - Zhipu / Z.ai in Coding Plan / Coding Global mode → live quota windows from
+ *    the /api/monitor/usage/quota/limit monitor endpoint.
  *
  * Secrets are never returned. Every parse is defensive.
  */
@@ -61,6 +63,12 @@ export interface CachedQuota {
 	capturedAt: number;
 }
 
+/** Subset of UsageStore used to read/write durable quota snapshots. */
+export interface QuotaStore {
+	loadQuotaSnapshot(provider: string): Promise<CachedQuota | null>;
+	saveQuotaSnapshot?(snapshot: CachedQuota): Promise<void> | void;
+}
+
 const quotaCache = new Map<string, CachedQuota>();
 /** Slightly under the 10-min UI refresh so stale entries re-probe/re-wait. */
 const CACHE_TTL_MS = 9 * 60 * 1000;
@@ -77,44 +85,64 @@ export function getCachedQuota(provider: string): CachedQuota | undefined {
 }
 
 /**
- * Parse Codex rate-limit headers (present on every successful /responses call)
- * into a cached quota snapshot. Returns null when no quota headers are present.
+ * Extract Codex rate-limit windows + plan metadata from response headers.
+ * Centralized so the header-capture path (parseCodexHeaders) and the proactive
+ * probe (probeCodex) never drift apart on header names.
  *
  * Known headers: x-codex-primary-used-percent, x-codex-secondary-used-percent,
  * x-codex-primary-reset-at (epoch seconds), x-codex-secondary-reset-at,
- * x-codex-primary-window-minutes (300 = 5h), x-codex-secondary-window-minutes
- * (10080 = 7d), x-codex-plan-type, x-codex-active-limit.
+ * x-codex-plan-type, x-codex-active-limit.
  */
-export function parseCodexHeaders(headers: Headers): CachedQuota | null {
-	const usedPrimary = headers.get("x-codex-primary-used-percent");
-	const usedSecondary = headers.get("x-codex-secondary-used-percent");
-	if (usedPrimary === null && usedSecondary === null) return null;
+function codexWindowsFromHeaders(headers: Headers): {
+	windows: QuotaWindow[];
+	planType?: string;
+	activeLimit?: string;
+} {
 	const windows: QuotaWindow[] = [];
-	if (usedPrimary !== null) {
-		const resetsAt = headers.get("x-codex-primary-reset-at");
+	const primaryUsed = parsePercent(headers.get("x-codex-primary-used-percent"));
+	const primaryResets = headers.get("x-codex-primary-reset-at") ?? undefined;
+	if (primaryUsed !== undefined || primaryResets) {
 		windows.push({
 			id: "codex-5h",
 			label: "Ventana de 5 horas",
-			usedPercent: parsePercent(usedPrimary) ?? undefined,
-			resetsAt: resetsAt ? toIso(resetsAt) : undefined,
-			resetLabel: resetsAt ? formatReset(resetsAt) : undefined,
+			usedPercent: primaryUsed,
+			resetsAt: primaryResets ? toIso(primaryResets) : undefined,
+			resetLabel: primaryResets ? formatReset(primaryResets) : undefined,
 		});
 	}
-	if (usedSecondary !== null) {
-		const resetsAt = headers.get("x-codex-secondary-reset-at");
+	const secondaryUsed = parsePercent(
+		headers.get("x-codex-secondary-used-percent"),
+	);
+	const secondaryResets =
+		headers.get("x-codex-secondary-reset-at") ?? undefined;
+	if (secondaryUsed !== undefined || secondaryResets) {
 		windows.push({
 			id: "codex-weekly",
 			label: "Límite semanal",
-			usedPercent: parsePercent(usedSecondary) ?? undefined,
-			resetsAt: resetsAt ? toIso(resetsAt) : undefined,
-			resetLabel: resetsAt ? formatReset(resetsAt) : undefined,
+			usedPercent: secondaryUsed,
+			resetsAt: secondaryResets ? toIso(secondaryResets) : undefined,
+			resetLabel: secondaryResets ? formatReset(secondaryResets) : undefined,
 		});
 	}
 	return {
-		provider: "openai",
 		windows,
 		planType: headers.get("x-codex-plan-type") ?? undefined,
 		activeLimit: headers.get("x-codex-active-limit") ?? undefined,
+	};
+}
+
+/**
+ * Parse Codex rate-limit headers (present on every successful /responses call)
+ * into a cached quota snapshot. Returns null when no quota headers are present.
+ */
+export function parseCodexHeaders(headers: Headers): CachedQuota | null {
+	const { windows, planType, activeLimit } = codexWindowsFromHeaders(headers);
+	if (windows.length === 0) return null;
+	return {
+		provider: "openai",
+		windows,
+		planType,
+		activeLimit,
 		capturedAt: Date.now(),
 	};
 }
@@ -164,7 +192,7 @@ const PROBE_TIMEOUT_MS = 8000;
 export async function resolveProviderQuotas(
 	config: OctopusConfig,
 	_router?: LLMRouter,
-	store?: { loadQuotaSnapshot(provider: string): Promise<CachedQuota | null> },
+	store?: QuotaStore,
 ): Promise<ProviderQuota[]> {
 	const registry = getProviderRegistry();
 	const results: ProviderQuota[] = [];
@@ -175,20 +203,34 @@ export async function resolveProviderQuotas(
 		const isCodex = resolved.authMode === "codex" && Boolean(resolved.accessToken);
 		if (isCodex) {
 			const displayName = registry.openai?.displayName ?? "OpenAI";
-			// Prefer in-memory cache, then the persisted snapshot (survives restart),
-			// then a best-effort probe. Codex exposes no usage GET endpoint, so the
-			// snapshot is the only restart-safe source.
-			const cached = getCachedQuota("openai") ?? (await store?.loadQuotaSnapshot("openai").catch(() => null)) ?? undefined;
+			// Mirror ZhipuAI: serve the warm in-memory snapshot (set from x-codex-*
+			// headers on each /responses call), and otherwise re-probe the backend on
+			// every poll so the dashboard refreshes live — not only after a message.
+			// The persisted snapshot is a graceful fallback used only when a probe
+			// fails (e.g. network error or account not yet provisioned).
+			const cached = getCachedQuota("openai");
 			if (cached) {
 				results.push(quotaFromCache(cached, displayName, "codex"));
 			} else {
 				const probed = await probeCodex(resolved.accessToken ?? "", displayName);
-				if (!probed.available) {
-					probed.detail =
-						(probed.detail ? probed.detail + " · " : "") +
-						"La cuota se actualiza tras el primer mensaje (cabeceras x-codex-* en /responses).";
+				if (probed.available) {
+					// probeCodex refreshed the cache; persist so it survives restarts.
+					const fresh = getCachedQuota("openai");
+					if (fresh) void store?.saveQuotaSnapshot?.(fresh);
+					results.push(probed);
+				} else {
+					const persisted =
+						(await store?.loadQuotaSnapshot("openai").catch(() => null)) ??
+						undefined;
+					if (persisted) {
+						results.push(quotaFromCache(persisted, displayName, "codex"));
+					} else {
+						probed.detail =
+							(probed.detail ? probed.detail + " · " : "") +
+							"La cuota aparece tras el primer mensaje con este modelo (cabeceras x-codex-* en /responses).";
+						results.push(probed);
+					}
 				}
-				results.push(probed);
 			}
 		}
 	}
@@ -212,6 +254,11 @@ export async function resolveProviderQuotas(
 
 // ---------------------------------------------------------------------------
 // Codex (ChatGPT account) — 5h primary + weekly secondary windows.
+// The Codex backend exposes no usage endpoint: rate-limit data only appears in
+// the x-codex-* headers of a real /responses call. To refresh the dashboard
+// automatically (like ZhipuAI), probeCodex issues a minimal /responses request
+// and reads those headers, cancelling the stream immediately to keep the token
+// cost negligible. This spends a few tokens per refresh.
 // ---------------------------------------------------------------------------
 
 async function probeCodex(
@@ -219,81 +266,83 @@ async function probeCodex(
 	displayName: string,
 ): Promise<ProviderQuota> {
 	const token = accessToken.replace(/^Bearer\s+/i, "");
-	const base = (process.env.CODEX_BASE_URL || "https://chatgpt.com/backend-api/codex").replace(/\/$/, "");
-	// The Codex backend exposes usage via rate-limit headers on responses and a
-	// usage summary endpoint. Allow an explicit override for safety.
-	const usageUrl =
-		process.env.CODEX_USAGE_URL || `${base.replace(/\/codex$/, "")}/sentinel/chat-requirements`;
+	const base = (
+		process.env.CODEX_BASE_URL || "https://chatgpt.com/backend-api/codex"
+	).replace(/\/$/, "");
+	const model = process.env.CODEX_PROBE_MODEL || "gpt-5.5";
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${token}`,
-		originator: "codex_cli_rs",
 		"content-type": "application/json",
+		accept: "text/event-stream",
+		originator: "codex_cli_rs",
+		"session-id": randomUUID(),
 	};
 	const accountId = process.env.CODEX_ACCOUNT_ID;
 	if (accountId) headers["chatgpt_account_id"] = accountId;
 
+	// Minimal Responses API call: a trivial user turn, no tools, store:false,
+	// stream:true (the backend rejects stream:false). Body mirrors
+	// CodexProvider.buildBody so the request is accepted; we only need the
+	// rate-limit headers from the initial HTTP response.
+	const body = JSON.stringify({
+		model,
+		input: [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "ok" }],
+			},
+		],
+		tools: [],
+		store: false,
+		stream: true,
+	});
+
 	const probedAt = new Date().toISOString();
 	try {
-		const resp = await fetchWithTimeout(usageUrl, { method: "GET", headers }, PROBE_TIMEOUT_MS);
-		const windows: QuotaWindow[] = [];
-		// Rate-limit headers are the most reliable signal across accounts.
-		const primaryUsed = parsePercent(resp.headers.get("x-codex-primary-used-percent"));
-		const primaryResets = resp.headers.get("x-codex-primary-resets-at") ?? undefined;
-		if (primaryUsed !== undefined || primaryResets) {
-			windows.push({
-				id: "codex-5h",
-				label: "Ventana de 5 horas",
-				usedPercent: primaryUsed,
-				resetsAt: primaryResets ? toIso(primaryResets) : undefined,
-				resetLabel: primaryResets ? formatReset(primaryResets) : undefined,
-			});
+		const resp = await fetchWithTimeout(
+			`${base}/responses`,
+			{ method: "POST", headers, body },
+			PROBE_TIMEOUT_MS,
+		);
+		const parsed = codexWindowsFromHeaders(resp.headers);
+		// Headers received — cancel the stream so the backend stops generating
+		// and we don't pay for the (unread) completion tokens.
+		try {
+			await resp.body?.cancel();
+		} catch {
+			/* cancellation is best-effort */
 		}
-		const secondaryUsed = parsePercent(resp.headers.get("x-codex-secondary-used-percent"));
-		const secondaryResets = resp.headers.get("x-codex-secondary-resets-at") ?? undefined;
-		if (secondaryUsed !== undefined || secondaryResets) {
-			windows.push({
-				id: "codex-weekly",
-				label: "Límite semanal",
-				usedPercent: secondaryUsed,
-				resetsAt: secondaryResets ? toIso(secondaryResets) : undefined,
-				resetLabel: secondaryResets ? formatReset(secondaryResets) : undefined,
-			});
-		}
-		// Some responses include a JSON body with structured usage. If header-based
-		// windows were not found, try to read a simple shape; otherwise ignore.
-		if (windows.length === 0 && resp.ok) {
-			try {
-				const body = (await resp.json()) as Record<string, unknown>;
-				const used = parsePercent(String(body.primary_used_percent ?? ""));
-				const resets = body.primary_resets_at
-					? toIso(String(body.primary_resets_at))
-					: undefined;
-				if (used !== undefined || resets) {
-					windows.push({
-						id: "codex-5h",
-						label: "Ventana de 5 horas",
-						usedPercent: used,
-						resetsAt: resets,
-						resetLabel: resets ? formatReset(resets) : undefined,
-					});
-				}
-			} catch {
-				/* non-JSON body is fine */
-			}
-		}
-		if (windows.length > 0) {
+		if (parsed.windows.length > 0) {
+			const snapshot: CachedQuota = {
+				provider: "openai",
+				windows: parsed.windows,
+				planType: parsed.planType,
+				activeLimit: parsed.activeLimit,
+				capturedAt: Date.now(),
+			};
+			updateQuotaCache(snapshot);
 			return {
 				provider: "openai",
 				providerDisplayName: displayName,
 				mode: "codex",
+				planType: parsed.planType,
+				activeLimit: parsed.activeLimit,
 				configured: true,
 				available: true,
 				status: "ok",
-				windows,
+				windows: parsed.windows,
+				capturedAt: new Date(snapshot.capturedAt).toISOString(),
 				probedAt,
 			};
 		}
-		return unavailable("openai", displayName, "codex", probedAt, `no quota fields (HTTP ${resp.status})`);
+		return unavailable(
+			"openai",
+			displayName,
+			"codex",
+			probedAt,
+			`/responses sin cabeceras de cuota (HTTP ${resp.status})`,
+		);
 	} catch (err) {
 		return unavailable(
 			"openai",
