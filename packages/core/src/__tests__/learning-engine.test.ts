@@ -267,4 +267,102 @@ describe("LearningEngine", () => {
 		);
 		expect(createdSkills[0]?.whatWorked).toContain("User confirmed");
 	});
+
+	it("captures the root cause of a failure masked as partial (e.g. 10MB overflow)", async () => {
+		const engine = await createEngine();
+		await engine.recordExperience({
+			userRequest: "Create a wedding website with generated images",
+			finalResponse:
+				"He completado la web. Nota: un request fallo con Codex backend error (400): string_above_max_length (string too long). Listo.",
+			status: "partial",
+			confidence: 0.85,
+			toolsUsed: [{ name: "codex_generate_image", success: true }],
+		});
+
+		const insights = await engine.listInsights({ limit: 30 });
+		const anti = insights.find(
+			(i) => i.type === "anti_pattern" && i.confidence >= 0.9,
+		);
+		expect(anti).toBeTruthy();
+		expect(anti?.content).toMatch(/string_above_max_length|too long/i);
+		expect(anti?.evidence ?? "").toContain("context_over_limit");
+	});
+
+	it("promotes a high-confidence failure lesson into retrieved guidance", async () => {
+		const engine = await createEngine();
+		await engine.recordExperience({
+			userRequest: "Create a wedding website with generated images",
+			finalResponse:
+				"Completed but a request failed: Codex backend error (400) string_above_max_length string too long.",
+			status: "partial",
+			confidence: 0.85,
+		});
+
+		const relevant = await engine.retrieveRelevant("wedding website images");
+		// The captured anti_pattern (conf >= 0.8) must be promoted into the
+		// results instead of being crowded out by general insights.
+		expect(
+			relevant.some((i) => i.type === "anti_pattern" && i.confidence >= 0.8),
+		).toBe(true);
+	});
+
+	it("reinforces an existing near-duplicate lesson instead of duplicating it", async () => {
+		const engine = await createEngine();
+		const base = {
+			userRequest: "Extract product images from Etsy page",
+			finalResponse:
+				"Completed successfully using browser_extract_images to get the image URLs.",
+			confidence: 0.9,
+			toolsUsed: [{ name: "browser_extract_images", success: true }],
+		};
+		await engine.recordExperience(base);
+		const beforeProcedures = (
+			await engine.listInsights({ limit: 50, type: "procedure" })
+		).length;
+
+		// Same lesson again — should reinforce the existing one, not add a copy.
+		await engine.recordExperience(base);
+		const afterProcedures = (
+			await engine.listInsights({ limit: 50, type: "procedure" })
+		).length;
+
+		expect(afterProcedures).toBe(beforeProcedures);
+	});
+
+	it("consolidates exact-keyword duplicate insights", async () => {
+		const engine = await createEngine();
+		// Insert two insights with identical type + keyword set directly, then
+		// consolidate — they must merge into one (highest confidence kept).
+		const kw = JSON.stringify(["etsy", "images", "extract"]);
+		for (const conf of [0.7, 0.9]) {
+			await db?.run(
+				`INSERT INTO learning_insights (id, experience_id, type, domain, keywords, content, evidence, confidence, importance, embedding, use_count, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					`dup-${conf}`,
+					"exp",
+					"procedure",
+					"web",
+					kw,
+					`Extract Etsy images (conf ${conf})`,
+					null,
+					conf,
+					0.7,
+					"[]",
+					0,
+					new Date().toISOString(),
+				],
+			);
+		}
+		const removed = await engine.consolidateInsights();
+		expect(removed).toBe(1);
+		const remaining = await engine.listInsights({
+			limit: 50,
+			type: "procedure",
+		});
+		expect(
+			remaining.filter((i) => i.content.startsWith("Extract Etsy images")),
+		).toHaveLength(1);
+		expect(remaining[0]?.confidence).toBeGreaterThanOrEqual(0.9);
+	});
 });

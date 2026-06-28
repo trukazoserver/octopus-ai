@@ -92,6 +92,8 @@ export class LearningEngine {
 		await this.ensureTables();
 	}
 
+	private consolidateCounter = 0;
+
 	async recordExperience(
 		input: ExperienceRecordInput,
 	): Promise<ExperienceRecord> {
@@ -141,6 +143,12 @@ export class LearningEngine {
 		for (const insight of insights) await this.storeInsight(insight);
 		await this.recordSkillUsage(experience);
 		await this.maybeCreateSkill(experience, insights);
+		// Periodically consolidate the insight store (dedupe near-duplicates)
+		// so semantic retrieval stays high-signal as the store grows.
+		this.consolidateCounter++;
+		if (this.consolidateCounter % 25 === 0) {
+			await this.consolidateInsights().catch(() => {});
+		}
 		return experience;
 	}
 
@@ -242,15 +250,49 @@ export class LearningEngine {
 		});
 
 		scored.sort((a, b) => b.score - a.score);
+
+		// Critical failure lessons (anti_pattern / what_failed) are promoted so
+		// the agent does NOT repeat a costly past mistake, even when they'd
+		// otherwise lose the general-insight cap race. This is the fix for "the
+		// agent learned the lesson but still repeated it": the captured mistake
+		// is guaranteed a slot when it is relevant, instead of being crowded out
+		// by noisier lower-value insights.
+		const CRITICAL_CONFIDENCE = 0.8;
+		const CRITICAL_RELEVANCE = 0.3;
+		const MAX_CRITICAL = 3;
+		const totalCap = this.config.maxInsightsPerContext + MAX_CRITICAL;
 		const selected: LearningInsight[] = [];
+		const seenIds = new Set<string>();
 		let tokens = 0;
+		const isCriticalFailure = (item: { insight: LearningInsight }) =>
+			(item.insight.type === "anti_pattern" ||
+				item.insight.type === "what_failed") &&
+			item.insight.confidence >= CRITICAL_CONFIDENCE;
+
+		// Phase 1 — always include relevant high-confidence failure lessons.
+		let criticalAdded = 0;
 		for (const item of scored) {
-			if (selected.length >= this.config.maxInsightsPerContext) break;
-			if (item.score < 0.3) continue;
+			if (criticalAdded >= MAX_CRITICAL) break;
+			if (!isCriticalFailure(item) || item.score < CRITICAL_RELEVANCE) continue;
+			if (seenIds.has(item.insight.id)) continue;
+			const nextTokens = Math.ceil(item.insight.content.length / 4);
+			if (tokens + nextTokens > this.config.maxContextTokens) continue;
+			tokens += nextTokens;
+			selected.push(item.insight);
+			seenIds.add(item.insight.id);
+			criticalAdded++;
+		}
+
+		// Phase 2 — fill the remaining slots with the top general insights.
+		for (const item of scored) {
+			if (selected.length >= totalCap) break;
+			if (seenIds.has(item.insight.id)) continue;
+			if (item.score < 0.3) break;
 			const nextTokens = Math.ceil(item.insight.content.length / 4);
 			if (tokens + nextTokens > this.config.maxContextTokens) break;
 			tokens += nextTokens;
 			selected.push(item.insight);
+			seenIds.add(item.insight.id);
 		}
 
 		if (selected.length > 0)
@@ -301,6 +343,61 @@ export class LearningEngine {
 		if (!existing) return false;
 		await this.db.run("DELETE FROM learning_insights WHERE id = ?", [id]);
 		return true;
+	}
+
+	/**
+	 * Consolidate the insight store: merge exact-keyset duplicates (same type +
+	 * identical keyword set) into a single highest-confidence entry. Cheap O(n)
+	 * scan, safe (only merges true duplicates), keeps retrieval high-signal as
+	 * the store grows. Returns how many redundant rows were removed.
+	 */
+	async consolidateInsights(): Promise<number> {
+		await this.ensureTables();
+		const rows = await this.db
+			.all<{
+				id: string;
+				type: string;
+				keywords: string;
+				confidence: number;
+				importance: number;
+			}>(
+				"SELECT id, type, keywords, confidence, importance FROM learning_insights",
+			)
+			.catch(() => []);
+		const bySig = new Map<
+			string,
+			Array<{
+				id: string;
+				confidence: number;
+				importance: number;
+			}>
+		>();
+		for (const r of rows) {
+			let kw: string[] = [];
+			try {
+				kw = JSON.parse(r.keywords) as string[];
+			} catch {
+				continue;
+			}
+			const sig = `${r.type}|${[...new Set(kw)].sort().join(",")}`;
+			const arr = bySig.get(sig) ?? [];
+			arr.push(r);
+			bySig.set(sig, arr);
+		}
+		let removed = 0;
+		for (const arr of bySig.values()) {
+			if (arr.length < 2) continue;
+			arr.sort(
+				(a, b) => b.confidence * b.importance - a.confidence * a.importance,
+			);
+			for (const r of arr.slice(1)) {
+				await this.db
+					.run("DELETE FROM learning_insights WHERE id = ?", [r.id])
+					.catch(() => {});
+				removed++;
+			}
+		}
+		return removed;
 	}
 
 	async addFeedback(feedback: LearningFeedbackInput): Promise<void> {
@@ -474,6 +571,27 @@ export class LearningEngine {
 			});
 		}
 
+		// Capture the ROOT CAUSE of failures that retries/fallback masked as
+		// "partial"/"succeeded" — e.g. a 400 string_above_max_length from
+		// embedding base64, a 429, a timeout, an auth drop. Without this the
+		// lesson never gets a strong, specific anti_pattern, so the agent
+		// repeats the same mistake. Confidence 0.9 makes it a promoted
+		// critical failure in retrieveRelevant.
+		const masked = this.detectMaskedFailure(experience);
+		if (masked) {
+			insights.push({
+				experienceId: experience.id,
+				type: "anti_pattern",
+				domain,
+				keywords,
+				content: `Past failure to avoid repeating in similar tasks: ${masked.excerpt}`,
+				evidence: `markers: ${masked.markers.join(", ")}`,
+				confidence: 0.9,
+				importance: 0.9,
+				lastUsedAt: undefined,
+			});
+		}
+
 		const result: LearningInsight[] = [];
 		for (const insight of insights) {
 			const embedding = await this.embedFn(
@@ -488,6 +606,77 @@ export class LearningEngine {
 			});
 		}
 		return result;
+	}
+
+	/**
+	 * Detect a failure that retries/fallback may have masked as a non-failure.
+	 * Scans the final response + tool errors for concrete error signatures
+	 * (10MB overflow, auth, rate-limit, timeout, network, empty-response,
+	 * quota) and returns an excerpt of the root cause to turn into a strong
+	 * anti_pattern insight.
+	 */
+	private detectMaskedFailure(
+		experience: ExperienceRecord,
+	): { excerpt: string; markers: string[] } | null {
+		const toolErrors = experience.toolsUsed
+			.map((t) => t.error || t.summary || "")
+			.filter(Boolean)
+			.join(" ");
+		const text = `${experience.finalResponse}\n${toolErrors}`;
+		const MARKERS: Array<[string, RegExp]> = [
+			[
+				"context_over_limit",
+				/string_above_max_length|string too long|maximum length/i,
+			],
+			["auth", /\b40[13]\b|unauthorized|forbidden|invalid.?api.?key/i],
+			[
+				"rate_limit",
+				/\b429\b|rate.?limit|too many requests|overload|code["']?\s*:\s*1305/i,
+			],
+			["timeout", /timed out|timeout|operation was aborted/i],
+			[
+				"network",
+				/econnreset|econnrefused|fetch failed|socket hang up|network error/i,
+			],
+			[
+				"empty_response",
+				/empty response|closed before completion|stream error/i,
+			],
+			[
+				"quota",
+				/quota|insufficient|sin saldo|limit.{0,15}(exhaust|exceed|reach)/i,
+			],
+		];
+		const markers: string[] = [];
+		let firstRe: RegExp | undefined;
+		for (const [label, re] of MARKERS) {
+			if (re.test(text)) {
+				markers.push(label);
+				if (!firstRe) firstRe = re;
+			}
+		}
+		if (markers.length === 0) return null;
+		let excerpt = "";
+		if (firstRe) {
+			const m = firstRe.exec(text);
+			if (m?.index != null) {
+				const start = Math.max(0, m.index - 80);
+				const end = Math.min(text.length, m.index + 120);
+				excerpt = text.slice(start, end).replace(/\s+/g, " ").trim();
+			}
+		}
+		if (!excerpt) excerpt = this.compact(text, 220);
+		return { excerpt, markers };
+	}
+
+	/** Jaccard similarity between two keyword sets, in [0, 1]. */
+	private jaccard(a: string[], b: string[]): number {
+		const setA = new Set(a);
+		const setB = new Set(b);
+		if (setA.size === 0 || setB.size === 0) return 0;
+		let inter = 0;
+		for (const k of setA) if (setB.has(k)) inter++;
+		return inter / (setA.size + setB.size - inter);
 	}
 
 	private async extractLlmInsights(
@@ -559,7 +748,79 @@ export class LearningEngine {
 		return result;
 	}
 
+	/**
+	 * Reinforce an existing near-duplicate insight (same type + high keyword
+	 * overlap) by raising its confidence/importance, instead of storing a new
+	 * copy. Bounded to recent insights of the same type so it stays cheap on
+	 * every experience. Returns true when it reinforced an existing insight.
+	 */
+	private async reinforceExisting(insight: LearningInsight): Promise<boolean> {
+		const rows = await this.db
+			.all<{
+				id: string;
+				keywords: string;
+				confidence: number;
+				importance: number;
+			}>(
+				"SELECT id, keywords, confidence, importance FROM learning_insights WHERE type = ? ORDER BY created_at DESC LIMIT 60",
+				[insight.type],
+			)
+			.catch(() => []);
+		for (const row of rows) {
+			let existingKw: string[] = [];
+			try {
+				existingKw = JSON.parse(row.keywords) as string[];
+			} catch {
+				continue;
+			}
+			if (this.jaccard(insight.keywords, existingKw) < 0.6) continue;
+			const newConfidence = Math.min(
+				0.99,
+				Math.max(row.confidence, insight.confidence) + 0.03,
+			);
+			const newImportance = Math.min(
+				0.99,
+				Math.max(row.importance, insight.importance) + 0.02,
+			);
+			// If the incoming lesson is the stronger / more specific version
+			// (higher confidence — e.g. a captured root-cause failure vs a
+			// generic one), adopt its wording + keywords so the store holds the
+			// best phrasing instead of the first one written.
+			if (insight.confidence > row.confidence) {
+				await this.db
+					.run(
+						"UPDATE learning_insights SET confidence = ?, importance = ?, content = ?, evidence = ?, keywords = ? WHERE id = ?",
+						[
+							newConfidence,
+							newImportance,
+							insight.content,
+							insight.evidence ?? null,
+							JSON.stringify(insight.keywords),
+							row.id,
+						],
+					)
+					.catch(() => {});
+			} else {
+				await this.db
+					.run(
+						"UPDATE learning_insights SET confidence = ?, importance = ?, evidence = COALESCE(?, evidence) WHERE id = ?",
+						[newConfidence, newImportance, insight.evidence ?? null, row.id],
+					)
+					.catch(() => {});
+			}
+			return true;
+		}
+		return false;
+	}
+
 	private async storeInsight(insight: LearningInsight): Promise<void> {
+		// Upsert: if a near-duplicate already exists, reinforce it (raise
+		// confidence/importance) instead of inserting another copy. This keeps
+		// the insight store high-signal — the same lesson surfacing again
+		// strengthens it rather than adding noise — and is the closed learning
+		// loop (a repeated mistake makes the existing lesson more prominent).
+		if (await this.reinforceExisting(insight)) return;
+
 		await this.db.run(
 			`INSERT INTO learning_insights (id, experience_id, type, domain, keywords, content, evidence, confidence, importance, embedding, use_count, last_used_at, created_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

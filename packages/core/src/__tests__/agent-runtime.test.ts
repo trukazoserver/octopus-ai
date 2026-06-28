@@ -1044,7 +1044,7 @@ describe("AgentRuntime", () => {
 			);
 			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
 			expect(request.messages[0]?.content).toContain(
-				"Learned Operating Guidance",
+				"Learned operating guidance",
 			);
 			expect(request.messages[0]?.content).toContain(
 				"Run type checks after code edits.",

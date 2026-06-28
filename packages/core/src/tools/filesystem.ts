@@ -1,4 +1,13 @@
-import { copyFile, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import {
+	copyFile,
+	lstat,
+	mkdir,
+	readFile,
+	readdir,
+	rename,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -46,9 +55,7 @@ export function createFileSystemTools(
 	};
 	// Combines the lexical allowed-paths check with a real-path (symlink/junction)
 	// check. Returns null when the path is authorized, or an error ToolResult.
-	const authorize = async (
-		resolved: string,
-	): Promise<ToolResult | null> => {
+	const authorize = async (resolved: string): Promise<ToolResult | null> => {
 		if (!isPathAllowed(resolved, allowedPaths)) {
 			return {
 				success: false,
@@ -95,7 +102,8 @@ export function createFileSystemTools(
 
 	const write_file: ToolDefinition = {
 		name: "write_file",
-		description: "Write content to a file at the specified path",
+		description:
+			"Write content to a file at the specified path. On success the tool returns the ABSOLUTE path of the written file — always report that absolute path to the user (not just the filename) and, for HTML or other viewable files, preview it with browser_open_file so the user can see it.",
 		uiIcon: FILE_SVG,
 		managesOwnPathPolicy: true,
 		parameters: {

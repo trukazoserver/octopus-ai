@@ -4234,13 +4234,30 @@ export class AgentRuntime {
 		}
 
 		if (learningInsights.length > 0) {
-			const guidance = learningInsights
-				.map((insight) => {
-					const label = insight.type.replace(/_/g, " ");
-					return `- ${label}: ${insight.content}`;
-				})
-				.join("\n");
-			systemContent += `\n\n# Learned Operating Guidance\nUse these prior operational learnings when they are relevant. Prefer higher-confidence procedures and avoid listed anti-patterns.\n${guidance}`;
+			// Surface captured failure lessons FIRST and unmissably — they are
+			// the high-confidence anti-patterns the engine guarantees a slot
+			// for, so the agent does not repeat a known costly mistake.
+			const critical = learningInsights.filter(
+				(i) =>
+					(i.type === "anti_pattern" || i.type === "what_failed") &&
+					i.confidence >= 0.8,
+			);
+			const general = learningInsights.filter((i) => !critical.includes(i));
+			const lines: string[] = [];
+			if (critical.length > 0) {
+				lines.push(
+					"# MISTAKES TO AVOID — DO NOT repeat these in this task (they failed before)",
+				);
+				for (const i of critical) lines.push(`- ${i.content}`);
+			}
+			if (general.length > 0) {
+				lines.push("# Learned operating guidance (apply when relevant)");
+				for (const i of general) {
+					const label = i.type.replace(/_/g, " ");
+					lines.push(`- ${label}: ${i.content}`);
+				}
+			}
+			systemContent += `\n\n${lines.join("\n")}`;
 		}
 
 		// Web tool health: if a web search/reader provider is currently out of
