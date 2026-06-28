@@ -93,6 +93,9 @@ export function createCodexImageTools(): ToolDefinition[] {
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					const aborted = /aborted|timeout|timed out|TimeoutError/i.test(msg);
+					console.error(
+						`[codex-image] request failed (prompt=${prompt.slice(0, 80)}): ${msg}`,
+					);
 					return {
 						success: false,
 						output: "",
@@ -103,6 +106,9 @@ export function createCodexImageTools(): ToolDefinition[] {
 				}
 				if (!response.ok) {
 					const text = await response.text().catch(() => response.statusText);
+					console.error(
+						`[codex-image] API error ${response.status} (prompt=${prompt.slice(0, 80)}): ${text.slice(0, 300)}`,
+					);
 					return {
 						success: false,
 						output: "",

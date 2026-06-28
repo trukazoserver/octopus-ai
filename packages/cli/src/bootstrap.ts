@@ -86,6 +86,7 @@ import {
 	coerceReasoningEffort,
 	handleProviderResponseHeaders,
 	getCachedQuota,
+	refreshCodexToken,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
@@ -1000,6 +1001,42 @@ export async function bootstrap(options?: {
 		handleProviderResponseHeaders(provider, headers);
 		const snap = getCachedQuota(provider);
 		if (snap) void usageStore.saveQuotaSnapshot(snap);
+	});
+
+	// Reactive Codex token refresh: when the ChatGPT access_token expires
+	// mid-task (HTTP 401), the CodexProvider calls this to obtain a fresh token
+	// (via the stored refresh_token), persist it to config, and retry — so an
+	// expiring token no longer kills long-running turns. Returns undefined on
+	// any failure so the provider surfaces the 401 and the router's fallback
+	// takes over.
+	router.setTokenRefreshHandler(async (provider) => {
+		if (provider !== "openai") return undefined;
+		try {
+			const loader = new ConfigLoader();
+			const cfg = loader.load();
+			const openai = cfg.ai.providers.openai as Record<string, unknown>;
+			if (openai.authMode !== "codex" || !openai.oauthRefreshToken) {
+				return undefined;
+			}
+			const refreshed = await refreshCodexToken(
+				String(openai.oauthRefreshToken),
+			);
+			openai.accessToken = refreshed.accessToken;
+			if (refreshed.refreshToken) {
+				openai.oauthRefreshToken = refreshed.refreshToken;
+			}
+			if (refreshed.expiresAt) {
+				openai.oauthExpiresAt = refreshed.expiresAt;
+			}
+			loader.save(cfg);
+			console.log("[codex-auth] access_token refreshed after 401 and persisted");
+			return refreshed.accessToken;
+		} catch (err) {
+			console.error(
+				`[codex-auth] token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return undefined;
+		}
 	});
 
 	// Wire STM condensation callback — uses LLM to summarize before evicting

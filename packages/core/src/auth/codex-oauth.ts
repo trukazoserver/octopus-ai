@@ -16,9 +16,9 @@
  * Constants verified against the Codex CLI source (github.com/openai/codex).
  */
 import { spawn } from "node:child_process";
-import { createServer, type Server } from "node:http";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
+import { type Server, createServer } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { renderOAuthCallbackPage } from "./oauth.js";
 
 /** Public Codex CLI OAuth client id (codex-rs/login/src/auth/manager.rs). */
@@ -158,9 +158,7 @@ function buildAuthorizeUrl(
 		["state", state],
 		["originator", CODEX_ORIGINATOR],
 	];
-	const qs = params
-		.map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
-		.join("&");
+	const qs = params.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
 	return `${CODEX_AUTH_ENDPOINT}?${qs}`;
 }
 
@@ -212,6 +210,56 @@ async function obtainApiKey(idToken: string): Promise<string> {
 	}
 	const data = (await response.json()) as { access_token: string };
 	return data.access_token;
+}
+
+export interface CodexRefreshedToken {
+	accessToken: string;
+	/** Rotated refresh token, if the issuer returns a new one. */
+	refreshToken?: string;
+	/** Epoch ms when the new access token expires, if reported. */
+	expiresAt?: number;
+}
+
+/**
+ * Refresh the Codex (ChatGPT-account) OAuth access_token using the stored
+ * refresh_token. Hits the SAME token endpoint + client_id as the login flow
+ * (grant_type=refresh_token), so the refreshed access_token works directly
+ * against the Codex backend (Responses API) — no obtain_api_key re-exchange
+ * needed. Used by CodexProvider's reactive 401 refresh so an expired token
+ * mid-task no longer kills the run.
+ */
+export async function refreshCodexToken(
+	refreshToken: string,
+): Promise<CodexRefreshedToken> {
+	const body = new URLSearchParams({
+		grant_type: "refresh_token",
+		refresh_token: refreshToken,
+		client_id: CODEX_CLIENT_ID,
+	});
+	const response = await fetch(CODEX_TOKEN_ENDPOINT, {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: body.toString(),
+		signal: AbortSignal.timeout(15000),
+	});
+	if (!response.ok) {
+		const text = await response.text().catch(() => response.statusText);
+		throw new Error(
+			`Codex token refresh failed (${response.status}): ${text.slice(0, 300)}`,
+		);
+	}
+	const data = (await response.json()) as {
+		access_token: string;
+		refresh_token?: string;
+		expires_in?: number;
+	};
+	return {
+		accessToken: data.access_token,
+		refreshToken: data.refresh_token,
+		expiresAt: data.expires_in
+			? Date.now() + data.expires_in * 1000
+			: undefined,
+	};
 }
 
 function fail(message: string): void {
@@ -305,7 +353,8 @@ function handleCallback(
  * is opened; poll `getCodexStatus()`.
  */
 export function startCodexLogin(): Promise<{ ok: boolean; error?: string }> {
-	if (active && active.status === "waiting") return Promise.resolve({ ok: true });
+	if (active && active.status === "waiting")
+		return Promise.resolve({ ok: true });
 
 	const verifier = generateCodeVerifier();
 	const pkce: PkceCodes = {
@@ -317,8 +366,8 @@ export function startCodexLogin(): Promise<{ ok: boolean; error?: string }> {
 	const state0: CodexLoginState = { status: "waiting", pkce, state };
 	active = state0;
 
-	const server = createServer((req, res) =>
-		handleCallback(req, res, pkce, state, ""), // redirectUri filled after bind
+	const server = createServer(
+		(req, res) => handleCallback(req, res, pkce, state, ""), // redirectUri filled after bind
 	);
 	state0.server = server;
 
@@ -326,7 +375,10 @@ export function startCodexLogin(): Promise<{ ok: boolean; error?: string }> {
 		const tryBind = (port: number, isFallback: boolean): void => {
 			server.removeAllListeners("error");
 			server.on("error", (err: NodeJS.ErrnoException) => {
-				if (!isFallback && (err.code === "EADDRINUSE" || err.code === "EACCES")) {
+				if (
+					!isFallback &&
+					(err.code === "EADDRINUSE" || err.code === "EACCES")
+				) {
 					tryBind(FALLBACK_PORT, true);
 					return;
 				}

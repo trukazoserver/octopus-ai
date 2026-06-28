@@ -1,9 +1,9 @@
 import { createLogger } from "../utils/logger.js";
 import { getModelContextWindow } from "./model-context.js";
 import { estimateCost } from "./pricing.js";
-import type { UsageSink } from "./usage-store.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import type { BaseLLMProvider } from "./providers/base.js";
+import { CodexProvider } from "./providers/codex.js";
 import { CohereProvider } from "./providers/cohere.js";
 import { GoogleProvider } from "./providers/google.js";
 import { OllamaProvider } from "./providers/ollama.js";
@@ -12,7 +12,6 @@ import {
 	OpenAICompatibleProvider,
 } from "./providers/openai-compatible.js";
 import { OpenAIProvider } from "./providers/openai.js";
-import { CodexProvider } from "./providers/codex.js";
 import { ZhipuProvider } from "./providers/zhipu.js";
 import type {
 	LLMChunk,
@@ -25,6 +24,7 @@ import type {
 	ReasoningEffort,
 	UsageStats,
 } from "./types.js";
+import type { UsageSink } from "./usage-store.js";
 
 const logger = createLogger("llm-router");
 const DEFAULT_PROVIDER_RETRIES = 2;
@@ -315,6 +315,67 @@ export function isRetryableProviderError(error: unknown): boolean {
 }
 
 /**
+ * Z.ai coding-plan reports transient backend overload as HTTP 429 with a JSON
+ * body code 1305 ("The service may be temporarily overloaded..."). Short
+ * retries hammer the same overloaded window, so it needs a longer, escalating
+ * backoff than a generic 429. The thrown provider error includes the full body,
+ * so we can detect 1305/overloaded from the message text.
+ */
+export function isZaiOverloadError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	// Z.ai coding-plan reports backend overload as 429 with body code 1305
+	// ("The service may be temporarily overloaded..."). Match that specific
+	// signature only — a plain quota 429 (code "429") must NOT be treated as
+	// overload, or it would get the long escalating backoff unnecessarily.
+	return /code["']?\s*:\s*1305|temporarily overloaded|service.{0,20}overload/i.test(
+		message,
+	);
+}
+
+/**
+ * Provider rejected the request payload on schema grounds (HTTP 400 "extra
+ * inputs not permitted", invalid schema, validation failed). These are NOT
+ * transient — retrying or falling over sends the same bad payload — so the
+ * backoff helper returns -1 to signal "fail fast".
+ */
+export function isSchemaValidationError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /extra inputs (are )?not permitted|invalid schema|schema validation|validation failed|unprocessable entit/i.test(
+		message,
+	);
+}
+
+const ZAI_OVERLOAD_BACKOFF_MS = [30_000, 60_000, 90_000, 120_000];
+const BACKOFF_EXP_CAP_MS = 30_000;
+
+/**
+ * Compute the retry delay (ms) for a provider error.
+ *
+ * - Schema/validation errors → -1 (caller fails fast; not transient).
+ * - z.ai overload (429/1305) → escalating fixed schedule (30→60→90→120s) +
+ *   small jitter, so concurrent retries don't synchronize on an overloaded window.
+ * - Otherwise → decorrelated full-jitter exponential backoff in
+ *   [exp/2, exp] (capped), preventing thundering-herd when parallel workers
+ *   all back off at the same instant after a shared 429.
+ */
+export function computeBackoffDelay(
+	error: unknown,
+	attempt: number,
+	baseMs: number,
+): number {
+	if (isSchemaValidationError(error)) return -1;
+	if (isZaiOverloadError(error)) {
+		const step =
+			ZAI_OVERLOAD_BACKOFF_MS[
+				Math.min(attempt, ZAI_OVERLOAD_BACKOFF_MS.length - 1)
+			];
+		return step + Math.floor(Math.random() * 5_000);
+	}
+	const exp = Math.min(baseMs * 2 ** attempt, BACKOFF_EXP_CAP_MS);
+	return Math.floor(exp * (0.5 + Math.random() * 0.5));
+}
+
+/**
  * Compact one-line summary of a provider error for logs (truncated, whitespace-
  * normalized) so router WARN lines show the actual status/message instead of
  * a bare "transient failure".
@@ -577,6 +638,9 @@ export class LLMRouter {
 	);
 	private usageSink?: UsageSink;
 	private quotaHeaderHandler?: (provider: string, headers: Headers) => void;
+	private tokenRefreshHandler?: (
+		provider: string,
+	) => Promise<string | undefined>;
 
 	constructor(config: LLMRouterConfig) {
 		this.config = config;
@@ -598,6 +662,39 @@ export class LLMRouter {
 		this.quotaHeaderHandler = handler;
 		for (const [name, provider] of this.providers) {
 			provider.onResponseHeaders = (h) => this.quotaHeaderHandler?.(name, h);
+		}
+	}
+
+	/**
+	 * Attach a token-refresh handler. When a refresh-capable provider (currently
+	 * CodexProvider) hits a 401, it calls this to obtain a fresh access token —
+	 * which the handler persists — then retries the request transparently. If the
+	 * handler returns undefined/throws, the 401 propagates to the router's
+	 * fallback. Mirrors the setQuotaHeaderHandler wiring pattern.
+	 */
+	setTokenRefreshHandler(
+		handler: ((provider: string) => Promise<string | undefined>) | undefined,
+	): void {
+		this.tokenRefreshHandler = handler;
+		this.applyTokenRefreshHook();
+	}
+
+	private applyTokenRefreshHook(): void {
+		const handler = this.tokenRefreshHandler;
+		for (const [name, provider] of this.providers) {
+			if (provider instanceof CodexProvider) {
+				provider.onTokenRefresh = handler
+					? async () => {
+							const token = await handler(name);
+							if (!token) {
+								throw new Error(
+									`token refresh returned no token for '${name}'`,
+								);
+							}
+							return token;
+						}
+					: undefined;
+			}
 		}
 	}
 
@@ -641,6 +738,7 @@ export class LLMRouter {
 				"No AI providers available. Please configure at least one provider with a valid API key.",
 			);
 		}
+		this.applyTokenRefreshHook();
 	}
 
 	addProvider(name: string, provider: BaseLLMProvider): void {
@@ -852,7 +950,12 @@ export class LLMRouter {
 						attempt < this.providerRetries &&
 						isRetryableProviderError(error)
 					) {
-						const delay = this.providerRetryBaseDelayMs * 2 ** attempt;
+						const delay = computeBackoffDelay(
+							error,
+							attempt,
+							this.providerRetryBaseDelayMs,
+						);
+						if (delay < 0) throw error; // schema/validation: fail fast
 						logger.warn(
 							`Provider '${providerName}' transient failure; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries}): ${summarizeError(error)}`,
 						);
@@ -933,7 +1036,12 @@ export class LLMRouter {
 						attempt < this.providerRetries &&
 						isRetryableProviderError(error)
 					) {
-						const delay = this.providerRetryBaseDelayMs * 2 ** attempt;
+						const delay = computeBackoffDelay(
+							error,
+							attempt,
+							this.providerRetryBaseDelayMs,
+						);
+						if (delay < 0) throw error; // schema/validation: fail fast
 						logger.warn(
 							`Provider '${providerName}' stream failed before output; retrying in ${delay}ms (${attempt + 1}/${this.providerRetries}): ${summarizeError(error)}`,
 						);
@@ -1049,6 +1157,8 @@ export class LLMRouter {
 			const available = await provider.isAvailable();
 			if (available) {
 				this.providers.set(name, provider);
+				provider.onResponseHeaders = (h) => this.quotaHeaderHandler?.(name, h);
+				this.applyTokenRefreshHook();
 				logger.info(`Provider '${name}' hot-added successfully`);
 				return true;
 			}

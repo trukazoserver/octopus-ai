@@ -71,10 +71,47 @@ interface ResponseInputItem {
 	[name: string]: unknown;
 }
 
+/**
+ * Per-string cap for content sent to the Codex backend. The Responses API
+ * rejects any single string > ~10MB with HTTP 400 `string_above_max_length`
+ * (param `input[N].output`), which a turn hits as soon as the assistant
+ * embeds generated images as base64 data URIs in its output/HTML, or a tool
+ * returns a large blob. 1MB per field stays well under the limit while leaving
+ * the surrounding structure intact.
+ */
+const CODEX_MAX_FIELD_CHARS = 1_000_000;
+const DATA_URI_RE =
+	/data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}/gi;
+
+function sanitizeForTransport(text: string): string {
+	if (typeof text !== "string") return text;
+	let out = text;
+	if (out.includes(";base64,")) {
+		// Strip embedded image/media data URIs (the usual cause of multi-MB
+		// outputs when the agent inlines generated images as base64).
+		out = out.replace(DATA_URI_RE, "[data-uri omitted]");
+	}
+	if (out.length > CODEX_MAX_FIELD_CHARS) {
+		const head = out.slice(0, 200_000);
+		const tail = out.slice(-100_000);
+		out = `${head}\n\n[...content truncated: ${out.length - 300_000} chars omitted to fit the provider's per-field limit...]\n\n${tail}`;
+	}
+	return out;
+}
+
 export class CodexProvider extends BaseLLMProvider {
 	private baseUrl: string;
 	private accessToken: string;
 	private accountId?: string;
+	/**
+	 * Router-injected refresh callback. When set, a 401 from the Codex backend
+	 * triggers a single token refresh (which also persists the new token), then
+	 * retries the request. If unset or refresh fails, the 401 propagates so the
+	 * router's fallback can take over. Kept as a callback (not a direct import
+	 * of the auth module) to avoid a circular provider↔auth dependency.
+	 */
+	onTokenRefresh?: () => Promise<string>;
+	private inflightRefresh?: Promise<string>;
 
 	constructor(config: ProviderConfig) {
 		super(config);
@@ -104,6 +141,59 @@ export class CodexProvider extends BaseLLMProvider {
 		return headers;
 	}
 
+	/**
+	 * Refresh the access_token exactly once, deduping concurrent callers on a
+	 * shared in-flight promise (parallel 401s must not trigger N refreshes).
+	 * Updates this.accessToken immediately so the next call uses it even before
+	 * persistence completes. Throws if no hook is wired or the refresh fails.
+	 */
+	private async refreshOnce(): Promise<string> {
+		if (this.inflightRefresh) return this.inflightRefresh;
+		const refresh = this.onTokenRefresh;
+		if (!refresh) {
+			throw new Error(
+				"Codex 401: no token-refresh hook wired (re-login required)",
+			);
+		}
+		this.inflightRefresh = (async () => {
+			try {
+				const fresh = await refresh();
+				this.accessToken = fresh;
+				return fresh;
+			} finally {
+				this.inflightRefresh = undefined;
+			}
+		})();
+		return this.inflightRefresh;
+	}
+
+	/**
+	 * POST to the Codex backend. On a 401 (expired ChatGPT access_token), if a
+	 * refresh hook is wired, refresh once and retry the same request. If refresh
+	 * fails or there's no hook, return the original 401 response so the caller
+	 * surfaces a normal auth error (→ router fallback / runtime terminal auth).
+	 */
+	private async codexFetch(url: string, init: RequestInit): Promise<Response> {
+		let response = await fetch(url, init);
+		if (response.status === 401 && this.onTokenRefresh) {
+			try {
+				// refreshOnce dedupes concurrent callers on a shared in-flight
+				// promise, so N parallel 401s trigger a single refresh.
+				const fresh = await this.refreshOnce();
+				response = await fetch(url, {
+					...init,
+					headers: {
+						...(init.headers as Record<string, string>),
+						Authorization: `Bearer ${fresh.replace(/^Bearer\s+/i, "")}`,
+					},
+				});
+			} catch {
+				// refresh failed — surface the original 401 (fall through below)
+			}
+		}
+		return response;
+	}
+
 	private mapModel(model: string): string {
 		return model.startsWith("openai/") ? model.slice("openai/".length) : model;
 	}
@@ -118,7 +208,7 @@ export class CodexProvider extends BaseLLMProvider {
 		for (const msg of messages) {
 			if (msg.role === "system") {
 				const text = typeof msg.content === "string" ? msg.content : "";
-				if (text) instructions.push(text);
+				if (text) instructions.push(sanitizeForTransport(text));
 				continue;
 			}
 			if (msg.role === "tool") {
@@ -130,7 +220,7 @@ export class CodexProvider extends BaseLLMProvider {
 				input.push({
 					type: "function_call_output",
 					call_id: msg.toolCallId ?? "",
-					output,
+					output: sanitizeForTransport(output),
 				});
 				continue;
 			}
@@ -141,7 +231,9 @@ export class CodexProvider extends BaseLLMProvider {
 					input.push({
 						type: "message",
 						role: "assistant",
-						content: [{ type: "output_text", text }],
+						content: [
+							{ type: "output_text", text: sanitizeForTransport(text) },
+						],
 					});
 				}
 				// Prior tool calls → function_call items.
@@ -150,7 +242,7 @@ export class CodexProvider extends BaseLLMProvider {
 						type: "function_call",
 						call_id: tc.id,
 						name: tc.function.name,
-						arguments: tc.function.arguments,
+						arguments: sanitizeForTransport(tc.function.arguments),
 					});
 				}
 				continue;
@@ -158,11 +250,17 @@ export class CodexProvider extends BaseLLMProvider {
 			// user
 			const content: Array<Record<string, unknown>> = [];
 			if (typeof msg.content === "string") {
-				content.push({ type: "input_text", text: msg.content });
+				content.push({
+					type: "input_text",
+					text: sanitizeForTransport(msg.content),
+				});
 			} else if (Array.isArray(msg.content)) {
 				for (const part of msg.content) {
 					if (part.type === "text") {
-						content.push({ type: "input_text", text: part.text });
+						content.push({
+							type: "input_text",
+							text: sanitizeForTransport(part.text),
+						});
 					} else if (part.type === "image_url") {
 						content.push({
 							type: "input_image",
@@ -242,6 +340,29 @@ export class CodexProvider extends BaseLLMProvider {
 		const type = data.type as string | undefined;
 		switch (type) {
 			case "response.output_text.delta": {
+				const delta = (data.delta as string) ?? "";
+				state.text += delta;
+				return { content: delta };
+			}
+			case "response.output_text.done": {
+				// Some Responses-API runs deliver the full text only via the
+				// `.done` event with NO preceding `.delta` events (shorter
+				// replies, certain provider modes). Without this, such a turn is
+				// misread as empty. Only emit when we saw no deltas (state.text
+				// empty) to avoid double-counting when deltas were streamed.
+				if (!state.text) {
+					const text = (data.text as string) ?? "";
+					if (text) {
+						state.text = text;
+						return { content: text };
+					}
+				}
+				return null;
+			}
+			case "response.refusal.delta": {
+				// A moderation refusal streams as refusal text, not output_text.
+				// Surface it as content so the user sees the refusal instead of
+				// an opaque "empty response".
 				const delta = (data.delta as string) ?? "";
 				state.text += delta;
 				return { content: delta };
@@ -340,7 +461,7 @@ export class CodexProvider extends BaseLLMProvider {
 	}
 
 	async *chatStream(request: LLMRequest): AsyncIterable<LLMChunk> {
-		const response = await fetch(`${this.baseUrl}/responses`, {
+		const response = await this.codexFetch(`${this.baseUrl}/responses`, {
 			method: "POST",
 			headers: this.getHeaders(),
 			body: JSON.stringify(this.buildBody(request, true)),
