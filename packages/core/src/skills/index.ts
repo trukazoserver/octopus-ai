@@ -26,3 +26,7 @@ export type {
 	SharedSkillMetadata,
 	SkillMarketplaceConfig,
 } from "./marketplace.js";
+export {
+	buildWebSelfReviewSkill,
+	WEB_SELF_REVIEW_SKILL_ID,
+} from "./builtin/web-self-review.js";

@@ -87,6 +87,7 @@ import {
 	handleProviderResponseHeaders,
 	getCachedQuota,
 	refreshCodexToken,
+	buildWebSelfReviewSkill,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
@@ -1116,6 +1117,23 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	await userProfileManager.initialize();
 
 	const skillRegistry = new SkillRegistry(db, embedFn);
+	// Seed the built-in "web self-review" skill so every agent has the visual-QA
+	// loop (open → screenshot section-by-section → analyze with vision → fix →
+	// re-verify) available and semantically retrievable for web tasks. Idempotent
+	// upsert on the fixed id.
+	try {
+		await skillRegistry.save(
+			buildWebSelfReviewSkill(
+				await embedFn(
+					"web self-review open screenshot section vision analyze fix verify html website landing page design",
+				),
+			),
+		);
+	} catch (err) {
+		console.error(
+			`[bootstrap] failed to seed web-self-review skill: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 	const skillLoader = new SkillLoader(skillRegistry, embedFn, {
 		maxTokenBudget: config.skills.loading.maxTokenBudget,
 		progressiveLevels: config.skills.loading.progressiveLevels,

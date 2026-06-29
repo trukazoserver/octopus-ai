@@ -295,6 +295,7 @@ export {
 	SkillMarketplace,
 	SkillResearcher,
 	Context7HttpClient,
+	buildWebSelfReviewSkill,
 } from "./skills/index.js";
 export type {
 	Skill,

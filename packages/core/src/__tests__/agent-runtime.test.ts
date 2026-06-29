@@ -15,10 +15,10 @@ import type {
 	ContextAssemblyResult,
 	MemoryContext,
 } from "../memory/types.js";
+import type { SkillResearcher } from "../skills/researcher.js";
 import type { LoadedSkill } from "../skills/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry, ToolResult } from "../tools/registry.js";
-import type { SkillResearcher } from "../skills/researcher.js";
 
 function createMockLLMRouter(responseOverrides?: Partial<LLMResponse>) {
 	const defaultResponse: LLMResponse = {
@@ -933,7 +933,9 @@ describe("AgentRuntime", () => {
 									role: "qa",
 									task: "Review risks",
 									arm_key: "crabby",
-									produces: [{ artifactKey: "risk_review", artifactType: "qa_result" }],
+									produces: [
+										{ artifactKey: "risk_review", artifactType: "qa_result" },
+									],
 									model: "cheap-model",
 								}),
 							},
@@ -1056,6 +1058,16 @@ describe("AgentRuntime", () => {
 					finalResponse: "Hello from assistant",
 				}),
 			);
+		});
+
+		it("injects the mandatory web self-review rule for web deliverable requests", async () => {
+			await runtime.processMessage(
+				"crea una pagina web html para una boda",
+				"conv-1",
+			);
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+			expect(request.messages[0]?.content).toContain("Web self-review");
+			expect(request.messages[0]?.content).toContain("browser_open_file");
 		});
 
 		it("should allow expensive tools even when a matching task is already completed", async () => {
@@ -1867,7 +1879,10 @@ describe("image routing classification", () => {
 		).toBe(true);
 		// Native multimodal must not be flagged even if the function is misused.
 		expect(
-			requiresExternalVisionToolForModel("deepseek/deepseek-chat", visionCapable),
+			requiresExternalVisionToolForModel(
+				"deepseek/deepseek-chat",
+				visionCapable,
+			),
 		).toBe(false);
 	});
 });

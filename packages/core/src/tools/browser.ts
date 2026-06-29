@@ -1093,7 +1093,8 @@ export class BrowserTool {
 				url: (q) => `https://duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
 			},
 		];
-		const wanted = engines.length > 0 ? engines : ["google", "bing", "duckduckgo"];
+		const wanted =
+			engines.length > 0 ? engines : ["google", "bing", "duckduckgo"];
 		const ordered = engineBuilders.filter((e) => wanted.includes(e.name));
 		let lastError = "";
 
@@ -1147,9 +1148,11 @@ export class BrowserTool {
 			const host = hostnameFromUrl(this.page.url());
 			if (!host) return;
 			// clearCookies accepts a URL filter (domain/path) in Playwright.
-			await (this.context as {
-				clearCookies: (filter?: { domain?: string }) => Promise<void>;
-			}).clearCookies({ domain: host });
+			await (
+				this.context as {
+					clearCookies: (filter?: { domain?: string }) => Promise<void>;
+				}
+			).clearCookies({ domain: host });
 		} catch {
 			// Best-effort; not all contexts support filtered clearing.
 		}
@@ -1177,8 +1180,7 @@ export class BrowserTool {
 				for (const a of anchors) {
 					let href = (a as HTMLAnchorElement).href;
 					if (!href) continue;
-					const heading =
-						a.querySelector("h3, h2") as HTMLElement | null;
+					const heading = a.querySelector("h3, h2") as HTMLElement | null;
 					const text = (
 						heading?.innerText ||
 						(a as HTMLElement).innerText ||
@@ -3381,7 +3383,7 @@ export class BrowserTool {
 		}
 
 		lines.push(
-			"Screenshot image data is saved on disk and intentionally not embedded as base64 to keep the agent context bounded.",
+			"The screenshot above is attached to your context as an image — inspect it visually to judge the page (layout, broken images, overflow, contrast, responsiveness) before deciding the next action. If you spot a flaw, fix the source and re-screenshot to confirm.",
 		);
 		return lines.join("\n");
 	}
@@ -4480,7 +4482,9 @@ export class BrowserTool {
 						}
 						const maxResults = Number(params.maxResults) || 8;
 						const engines = Array.isArray(params.engines)
-							? (params.engines.filter((e) => typeof e === "string") as string[])
+							? (params.engines.filter(
+									(e) => typeof e === "string",
+								) as string[])
 							: [];
 						await this.init();
 						const outcome = await this.searchViaBrowser(

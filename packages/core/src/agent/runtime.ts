@@ -4143,6 +4143,25 @@ export class AgentRuntime {
 		return tech && codeVerb;
 	}
 
+	/**
+	 * Whether the current task involves building/editing a web page or HTML
+	 * deliverable — used to auto-trigger the visual self-review rule. Matches
+	 * the request OR (via the caller) a write_file of an .html / web app, in
+	 * both English and Spanish.
+	 */
+	private isWebDeliverableRequest(message: string): boolean {
+		const text = message.toLowerCase();
+		const webNoun =
+			/\b(web|website|web ?page|p(?:á|a)gina web|html|landing|sitio|site|invitaci(?:ó|o)n|frontend|front-?end|portfolio|one-?pager)\b/.test(
+				text,
+			);
+		const buildVerb =
+			/\b(crea|crear|creaci(?:ó|o)n|haz|hacer|dise(?:ñ|n)a|dise(?:ñ|n)ar|build|edit[ao]?|edita|edit|redise(?:ñ|n)a|genera|maquet[ao]|mockup)\b/.test(
+				text,
+			);
+		return webNoun && buildVerb;
+	}
+
 	private async buildContext(
 		memories: MemoryContext,
 		skills: LoadedSkill[],
@@ -4258,6 +4277,15 @@ export class AgentRuntime {
 				}
 			}
 			systemContent += `\n\n${lines.join("\n")}`;
+		}
+
+		// Auto-trigger the visual self-review loop for web/HTML deliverables: the
+		// agent must SEE what it built (open → screenshot each section → analyze with
+		// vision → fix → re-verify) before declaring the task done. Multimodal models
+		// inspect the screenshot directly; text-only models use the analyze_image MCP.
+		if (this.isWebDeliverableRequest(userMessage)) {
+			systemContent +=
+				"\n\n# Web self-review (mandatory before finishing)\nBefore declaring this web/HTML deliverable done, you MUST visually verify it: open the file with `browser_open_file` (use the absolute path from write_file), screenshot EACH section (scroll + browser_screenshot), and analyze every screenshot for flaws — layout, broken/missing images, overflow, contrast, responsiveness, and fit to the requested style. If you are a text-only model, call the `analyze_image` MCP tool on each screenshot. Fix every flaw you find (edit the HTML/CSS; regenerate images with codex_generate_image using a relative `path`, never base64), then re-screenshot the fixed section to confirm. Do NOT claim the task is finished until you have seen the page render correctly end-to-end, and report the final absolute path.";
 		}
 
 		// Web tool health: if a web search/reader provider is currently out of
