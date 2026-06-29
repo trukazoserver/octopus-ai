@@ -90,13 +90,11 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		if (!reasoning || reasoning.effort === "none") return {};
 
 		if (this.prefix === "xai") {
-			// Grok 4.x exposes a configurable `reasoning_effort`
-			// (low/medium/high). "xhigh" is not a Grok level — clamp to "high".
-			const effort = reasoning.effort;
-			return {
-				reasoning_effort:
-					effort === "low" || effort === "medium" ? effort : "high",
-			};
+			// Grok reasoning is NOT adjustable via `reasoning_effort` for the
+			// grok-4 family — docs.x.ai/docs/guides/reasoning: only grok-3-mini
+			// accepts it; grok-3/4/4-fast-reasoning REJECT it with an error.
+			// Reasoning is inherent to the model variant, so we send nothing.
+			return {};
 		}
 
 		if (this.prefix === "mistral") {

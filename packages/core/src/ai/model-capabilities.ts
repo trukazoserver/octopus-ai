@@ -59,6 +59,18 @@ const STANDARD: Profile = {
 	efforts: ["none", "low", "medium", "high"],
 	def: "medium",
 };
+// On/off reasoning: thinking enabled/disabled with no gradation. Used by GLM-4.5+
+// (except GLM-5.2), Grok-4.x (model-variant-driven), etc.
+const ONOFF: Profile = { supports: true, efforts: ["none", "high"], def: "high" };
+// GLM-5.2: the only REAL reasoning-effort tiers are High and Max (z.ai
+// `reasoning_effort`; low/medium are compat aliases → High, xhigh → Max). So we
+// expose none / High(=high) / Max(=xhigh) and nothing else. (Verified
+// docs.z.ai/guides/overview/concept-param.)
+const GLM_52: Profile = {
+	supports: true,
+	efforts: ["none", "high", "xhigh"],
+	def: "high",
+};
 
 // Model-name patterns → reasoning profile. First match wins, so list more
 // specific keys before their prefixes (e.g. "gpt-5.4" before bare "gpt-5").
@@ -100,6 +112,29 @@ const MODEL_REASONING_PROFILES: Array<{ match: string; profile: Profile }> = [
 	{ match: "o3-mini", profile: O_SERIES },
 	{ match: "o3", profile: O_SERIES },
 	{ match: "o4", profile: O_SERIES },
+
+	// ── Zhipu / GLM (verified docs.z.ai/guides/overview/concept-param) ──────
+	// GLM-5.2 exposes reasoning_effort (real tiers High/Max); other GLM-4.5+/5.x
+	// only support thinking on/off (no reasoning_effort).
+	{ match: "glm-5.2", profile: GLM_52 },
+	{ match: "glm-5.1", profile: ONOFF },
+	{ match: "glm-5-turbo", profile: ONOFF },
+	{ match: "glm-5v-turbo", profile: ONOFF },
+	{ match: "glm-5", profile: ONOFF },
+	{ match: "glm-4.7", profile: ONOFF },
+	{ match: "glm-4.6v", profile: ONOFF },
+	{ match: "glm-4.6", profile: ONOFF },
+	{ match: "glm-4.5", profile: ONOFF },
+
+	// ── xAI Grok (verified docs.x.ai/docs/guides/reasoning) ────────────────
+	// reasoning_effort is REJECTED by grok-3/4/4-fast-reasoning (only grok-3-mini
+	// accepts it, low/high). Grok-4.x reasoning is inherent to the model variant
+	// → on/off (advisory); the provider sends no parameter.
+	{
+		match: "grok-3-mini",
+		profile: { supports: true, efforts: ["low", "high"], def: "high" },
+	},
+	{ match: "grok", profile: ONOFF },
 ];
 
 function profileForModel(provider: string, model: string): Profile {

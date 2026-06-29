@@ -98,8 +98,19 @@ export class ZhipuProvider extends BaseLLMProvider {
 				? { temperature: request.temperature }
 				: {}),
 			...(request.tools?.length ? { tools: request.tools } : {}),
+			// GLM thinking: on/off via `thinking` (GLM-4.5+). GLM-5.2+ additionally
+			// accepts `reasoning_effort` (real tiers high/max; xhigh→max). Other
+			// GLM models have no effort levels. (docs.z.ai concept-param.)
 			...(request.reasoning && request.reasoning.effort !== "none"
-				? { thinking: { type: "enabled" } }
+				? {
+						thinking: { type: "enabled" },
+						...(model.toLowerCase().includes("glm-5.2") && {
+							reasoning_effort:
+								request.reasoning.effort === "xhigh"
+									? "max"
+									: "high",
+						}),
+					}
 				: request.reasoning && request.reasoning.effort === "none"
 					? { thinking: { type: "disabled" } }
 					: {}),
@@ -202,8 +213,19 @@ export class ZhipuProvider extends BaseLLMProvider {
 				? { temperature: request.temperature }
 				: {}),
 			...(request.tools?.length ? { tools: request.tools } : {}),
+			// GLM thinking: on/off via `thinking` (GLM-4.5+). GLM-5.2+ additionally
+			// accepts `reasoning_effort` (real tiers high/max; xhigh→max). Other
+			// GLM models have no effort levels. (docs.z.ai concept-param.)
 			...(request.reasoning && request.reasoning.effort !== "none"
-				? { thinking: { type: "enabled" } }
+				? {
+						thinking: { type: "enabled" },
+						...(model.toLowerCase().includes("glm-5.2") && {
+							reasoning_effort:
+								request.reasoning.effort === "xhigh"
+									? "max"
+									: "high",
+						}),
+					}
 				: request.reasoning && request.reasoning.effort === "none"
 					? { thinking: { type: "disabled" } }
 					: {}),
