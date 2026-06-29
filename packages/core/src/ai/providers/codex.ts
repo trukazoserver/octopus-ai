@@ -312,6 +312,14 @@ export class CodexProvider extends BaseLLMProvider {
 			};
 			body.include = ["reasoning.encrypted_content"];
 		}
+		// Send the output budget explicitly so Octopus (not the provider default)
+		// controls how many tokens a turn may emit. OpenAI bills reasoning tokens
+		// as output and they count against this limit — when the provider's own
+		// default is low, heavy reasoning leaves no room for the visible reply
+		// ("razonamiento agotado" / empty response). maxTokens is the cap we set.
+		if (request.maxTokens && request.maxTokens > 0) {
+			body.max_output_tokens = request.maxTokens;
+		}
 		// Reasoning models (gpt-5.x with reasoning enabled) reject `temperature`
 		// — the Responses API returns 400 "Unsupported parameter: temperature".
 		// Only send it for non-reasoning calls.
