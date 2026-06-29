@@ -2,6 +2,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { LLMRouter } from "../ai/router.js";
+import {
+	coerceReasoningEffort,
+	getModelCapabilitiesByRef,
+} from "../ai/model-capabilities.js";
 import type {
 	ContentPart,
 	LLMMessage,
@@ -660,7 +664,15 @@ export class AgentRuntime {
 	 * overrides an agent that explicitly wants "none".
 	 */
 	private buildReasoning(): ReasoningConfig {
-		const effort: AgentReasoningEffort = this.config.reasoningEffort ?? "none";
+		// Coerce the configured effort against the *current* model's capabilities
+		// so a model switch (or a stale profile) can never send an effort the
+		// model rejects — e.g. "none" to an always-reasoning o-series, or "xhigh"
+		// to a model that tops out at "high". If the model can't be resolved we
+		// fall back to the configured value unchanged.
+		const desired: AgentReasoningEffort =
+			this.config.reasoningEffort ?? "none";
+		const caps = getModelCapabilitiesByRef(this.config.model);
+		const effort = caps ? coerceReasoningEffort(caps, desired) : desired;
 		return {
 			effort,
 			includeThinking: effort !== "none",

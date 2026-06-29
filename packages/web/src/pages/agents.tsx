@@ -107,6 +107,7 @@ const REASONING_LABELS: Record<string, string> = {
 	low: "Bajo",
 	medium: "Medio",
 	high: "Alto",
+	xhigh: "Máximo",
 };
 
 const MESSAGE_TYPE_OPTIONS = [

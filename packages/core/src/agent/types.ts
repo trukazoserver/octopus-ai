@@ -8,7 +8,12 @@ export interface ToolIterationLimitConfig {
  * agent can carry its own thinking level independent of the global config, and so
  * it can be changed live from the chat / agents UI without a restart.
  */
-export type AgentReasoningEffort = "none" | "low" | "medium" | "high";
+export type AgentReasoningEffort =
+	| "none"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh";
 
 export interface ContinuityGuardRuntimeConfig {
 	enabled?: boolean;

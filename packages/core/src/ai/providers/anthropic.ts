@@ -14,6 +14,7 @@ const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, "none">, number> = {
 	low: 2048,
 	medium: 8192,
 	high: 32768,
+	xhigh: 64000,
 };
 
 export class AnthropicProvider extends BaseLLMProvider {

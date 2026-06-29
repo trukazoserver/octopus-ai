@@ -165,13 +165,14 @@ interface ModelGroup {
 	models: Array<{ value: string; label: string }>;
 }
 
-type ReasoningEffort = "none" | "low" | "medium" | "high";
+type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
 const REASONING_LABELS: Record<ReasoningEffort, string> = {
 	none: "Sin razonamiento",
 	low: "Bajo",
 	medium: "Medio",
 	high: "Alto",
+	xhigh: "Máximo",
 };
 
 interface Message {

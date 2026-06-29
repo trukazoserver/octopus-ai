@@ -21,6 +21,7 @@ const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, "none">, number> = {
 	low: 128,
 	medium: 1024,
 	high: 8192,
+	xhigh: 24576,
 };
 
 export class GoogleProvider extends BaseLLMProvider {

@@ -2815,9 +2815,9 @@ export const SettingsPage: React.FC = () => {
 					/>
 					<Select
 						label="Nivel de Razonamiento (Thinking)"
-						description="Controla la profundidad del análisis antes de responder."
+						description="Profundidad del análisis antes de responder. 'Máximo' (xhigh) solo aplica a gpt-5.x; otros modelos se ajustan solos."
 						value={ai.thinking ?? "medium"}
-						options={["none", "low", "medium", "high"]}
+						options={["none", "low", "medium", "high", "xhigh"]}
 						onChange={(v) => save("ai.thinking", v)}
 					/>
 					<div style={{ marginBottom: "16px" }}>

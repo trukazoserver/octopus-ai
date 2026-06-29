@@ -39,7 +39,7 @@ export interface LLMMessage {
 	toolCalls?: LLMToolCall[];
 }
 
-export type ReasoningEffort = "none" | "low" | "medium" | "high";
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
 export interface ReasoningConfig {
 	effort: ReasoningEffort;

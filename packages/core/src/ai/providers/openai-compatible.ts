@@ -90,13 +90,26 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		if (!reasoning || reasoning.effort === "none") return {};
 
 		if (this.prefix === "xai") {
-			return { reasoning_effort: reasoning.effort === "low" ? "low" : "high" };
+			// Grok 4.x exposes a configurable `reasoning_effort`
+			// (low/medium/high). "xhigh" is not a Grok level — clamp to "high".
+			const effort = reasoning.effort;
+			return {
+				reasoning_effort:
+					effort === "low" || effort === "medium" ? effort : "high",
+			};
 		}
 
 		if (this.prefix === "mistral") {
+			// Mistral reasoning is an on/off prompt mode (no gradation).
 			return { prompt_mode: "reasoning" };
 		}
 
+		// DeepSeek / Cohere / others: reasoning is MODEL-DRIVEN, not an effort
+		// parameter. DeepSeek reasons via the `deepseek-reasoner` model (verified
+		// api-docs.deepseek.com — no effort param); Cohere via the
+		// command-a-reasoning model. Sending an unverified parameter would 400, so
+		// we send nothing — the chosen model decides. The effort selector stays a
+		// UI abstraction (coerced to a valid level) but maps to no request field.
 		return {};
 	}
 
