@@ -4630,7 +4630,14 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			messages.push({ role: "user", content: userMessage });
 		}
 
-		const parsedMessages = messages.map((msg) => {
+		// Only re-embed screenshot/image BYTES for the most recent messages: the
+		// model analyzes the latest captures directly, while older screenshots are
+		// kept as path references (the agent still knows where each one is and can
+		// re-open it) instead of re-sending their base64 every turn — which is what
+		// ballooned the context (20K→40K tokens) during the visual self-review loop.
+		const RECENT_IMAGE_MESSAGES = 3;
+		const messageCount = messages.length;
+		const parsedMessages = messages.map((msg, idx) => {
 			if (typeof msg.content === "string") {
 				const imgRegex = /!\[.*?\]\(\/api\/media\/file\/([^)]+)\)/g;
 				const matches = [...msg.content.matchAll(imgRegex)];
@@ -4638,9 +4645,11 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 					this.isImageMediaFilename(m[1] ?? ""),
 				);
 				if (imageMatches.length > 0) {
-					// Needs an external vision tool (Z.ai GLM / text-only models):
-					// append the local media paths (images only) so the model can
-					// call analyze_image. Document attachments are handled separately.
+					const isRecent = idx >= messageCount - RECENT_IMAGE_MESSAGES;
+					// Text-only (GLM): append the local media paths so the model can
+					// call analyze_image. Paths are cheap text (no base64), so this is
+					// allowed for every message — the agent always knows where each
+					// image lives, which is what we want.
 					if (this.shouldUseZaiVisionToolsForImages()) {
 						const localPaths = this.getLocalMediaPathsFromContent(
 							msg.content,
@@ -4651,9 +4660,10 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 						};
 					}
 
-					// Native multimodal model: embed the image bytes directly as
-					// content parts so the model sees the image without a tool call.
-					if (this.modelSeesImagesNatively()) {
+					// Native multimodal: embed the actual image bytes ONLY for the most
+					// recent captures (the ones being analyzed now). Older captures stay
+					// as path references to bound the context.
+					if (isRecent && this.modelSeesImagesNatively()) {
 						return {
 							...msg,
 							content: this.toImageContentParts(msg.content),
@@ -4662,7 +4672,7 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 
 					return {
 						...msg,
-						content: `${msg.content}\n[Image media is referenced by URL/path and not re-embedded into context.]`,
+						content: `${msg.content}\n[Earlier image referenced by path above — not re-embedded, to keep context bounded. Its path is shown above; re-open or re-screenshot to view it again.]`,
 					};
 				}
 			}

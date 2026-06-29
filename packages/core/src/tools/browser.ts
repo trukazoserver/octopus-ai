@@ -3372,7 +3372,7 @@ export class BrowserTool {
 		const localPath = this.getLocalMediaPath(mediaInfo.filename);
 		const lines = [
 			`${reason} Screenshot saved: ![Screenshot](${mediaInfo.url})`,
-			`Local screenshot path: ${JSON.stringify(localPath)}`,
+			`Local media path (INTERNAL — only for vision analysis; do NOT show this raw filesystem path to the user. To display the screenshot to the user, use the markdown image URL above, which renders inline): ${JSON.stringify(localPath)}`,
 		];
 
 		if (context.agent?.usesZaiVisionToolForImages) {
