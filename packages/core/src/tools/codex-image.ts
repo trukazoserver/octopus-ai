@@ -37,6 +37,11 @@ export function createCodexImageTools(): ToolDefinition[] {
 			description:
 				"Generate one or more images from a text prompt using the OpenAI Codex backend (your ChatGPT/Codex account). Requires Codex login. By default returns the saved image URL(s) in the Octopus media library. For images that must appear in a generated HTML/site, pass `path` so the image is saved next to the HTML and referenced by relative path — do NOT embed images as base64 data URIs in HTML, it bloats the file and breaks the conversation context.",
 			uiIcon: IMAGE_SVG,
+			// This tool resolves `path` against the Octopus workspace itself (like
+			// the filesystem tools), so opt out of the executor's generic path
+			// pre-check — which resolves relative paths against process.cwd() and
+			// would wrongly deny legitimate workspace-relative destinations.
+			managesOwnPathPolicy: true,
 			parameters: {
 				prompt: {
 					type: "string",
@@ -67,7 +72,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 				path: {
 					type: "string",
 					description:
-						"Optional destination path relative to the Octopus workspace (e.g. 'boda/assets/hero.png'). When set, the image is written there (next to a generated HTML) and the tool returns that relative path (forward slashes) for use in <img src=\"...\">. If n>1, an index suffix is added before the extension. Omit to save to the media library instead.",
+						"Optional destination path RELATIVE to the Octopus workspace (e.g. 'boda/assets/hero.png' or 'green-glam-premium-assets/hero.png'). When set, the image is written there (next to a generated HTML) and the tool returns that relative path (forward slashes) for use in <img src=\"...\">. If n>1, an index suffix is added before the extension. Omit to save to the media library instead. IMPORTANT: always use a workspace-relative path; do NOT pass the application install path or absolute paths outside ~/.octopus/workspace — those are rejected by the path-safety policy.",
 					required: false,
 				},
 			},

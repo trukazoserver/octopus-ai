@@ -327,6 +327,9 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 				execute_code: 120000,
 				"nano-banana-generate": 600000,
 				"veo-video-generator": 600000,
+				// Kanban swarm planning decomposes the goal into cards via the LLM,
+				// which routinely exceeds the 45s default for complex goals.
+				"kanban_create_plan_from_goal": 180000,
 			},
 		},
 		rateLimits: {
