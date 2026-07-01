@@ -1305,10 +1305,22 @@ function AgentActivityPanel({
 	const [expanded, setExpanded] = useState(false);
 	const latest = activities[activities.length - 1];
 	if (!latest) return null;
+	// Surface the most recent tool/file action so it stays visible briefly even
+	// after the model moves on to thinking/responding. Instant tools (write_file,
+	// edit_file) would otherwise flash for ~0ms and the user would only see a
+	// generic state — this keeps "Creando el archivo X" on screen long enough.
+	const recentTool = [...activities].reverse().find((a) => a.status === "tool");
+	const surfaceRecentTool =
+		!!recentTool &&
+		(latest.status === "thinking" ||
+			latest.status === "responding" ||
+			latest.status === "tool_done") &&
+		Date.now() - (recentTool.timestamp ?? 0) < 2500;
+	const headline = (surfaceRecentTool ? recentTool : latest) as AgentActivity;
 	// Exclude the latest activity from the history: it is already rendered as the
 	// main animated card, so listing it again produced a duplicate "thinking" row.
 	const recent = activities.slice(0, -1).slice(-5);
-	const color = activityColor(latest.status);
+	const color = activityColor(headline.status);
 	const rawWorkers = multiAgentWorkers ?? [];
 	const workers = rawWorkers.length > 1 ? rawWorkers : [];
 	const activeWorkers = workers.filter(
@@ -1346,7 +1358,7 @@ function AgentActivityPanel({
 					: failedWorkers > 0
 						? `${completedWorkers}/${workers.length} brazos completaron su tarea; ${failedWorkers} tuvieron problemas.`
 						: `Los ${workers.length} brazos vivos completaron sus tareas.`
-			: latest.detail;
+			: headline.detail;
 	// Only the current card is animated and visible by default; the rest of the
 	// trace (plan summary, workers, historical steps) stays collapsed until the
 	// user expands it, so only one thinking container is shown at a time.
@@ -1370,11 +1382,13 @@ function AgentActivityPanel({
 					agent={agent}
 					alt={agent ? `${agent.name} avatar` : "Octopus"}
 				/>
-				<span className="agent-thought-cloud" aria-hidden="true">
-					<span />
-					<span />
-					<span />
-				</span>
+				{headline.status === "thinking" && (
+					<span className="agent-thought-cloud" aria-hidden="true">
+						<span />
+						<span />
+						<span />
+					</span>
+				)}
 			</div>
 			<div
 				className="agent-activity-card compact"
@@ -1413,13 +1427,13 @@ function AgentActivityPanel({
 							boxShadow: `0 0 22px ${color}33`,
 						}}
 					>
-						<AgentActivityIcon activity={latest} active />
+						<AgentActivityIcon activity={headline} active />
 					</div>
 					<div style={{ minWidth: 0 }}>
 						<div className="agent-activity-title" style={{ color }}>
 							{workers.length > 0
 								? "Octopus coordinando agentes vivos"
-								: latest.label}
+								: headline.label}
 						</div>
 						<div className="agent-activity-detail">{mainSummary}</div>
 					</div>
@@ -3762,10 +3776,7 @@ export const ChatPage: React.FC<{
 	const visibleAgentActivity = hasActiveWork
 		? agentActivity.length === 0
 			? [createFallbackAgentActivity(fallbackStatus)]
-			: latestAgentActivity?.status === "responding" &&
-					!isActivelyReceivingResponse
-				? [createFallbackAgentActivity("thinking")]
-				: agentActivity
+			: agentActivity
 		: agentActivity;
 	const shouldShowAgentActivity = hasActiveWork && !isActivelyReceivingResponse;
 	const activeWorkflowRunId = activeExecution?.workflowRunId;
