@@ -1600,7 +1600,33 @@ export class AgentRuntime {
 		modelMessage: string,
 	): string {
 		const modelDetail = this.sanitizeActivityDetail(modelMessage);
-		if (modelDetail) return modelDetail;
+
+		const filePath =
+			typeof params.path === "string"
+				? params.path
+				: typeof params.file_path === "string"
+					? params.file_path
+					: typeof params.filePath === "string"
+						? params.filePath
+						: undefined;
+		const pattern =
+			typeof params.pattern === "string"
+				? params.pattern
+				: typeof params.query === "string"
+					? params.query
+					: typeof params.search === "string"
+						? params.search
+						: undefined;
+		const command =
+			typeof params.command === "string"
+				? params.command
+				: typeof params.cmd === "string"
+					? params.cmd
+					: undefined;
+		const action =
+			typeof params.action === "string" ? params.action : undefined;
+		const prompt =
+			typeof params.prompt === "string" ? params.prompt : undefined;
 
 		const text =
 			typeof params.text === "string"
@@ -1660,8 +1686,71 @@ export class AgentRuntime {
 				return "Esperando que la página termine de cargar o estabilizarse.";
 			case "browser_eval":
 				return "Ejecutando JavaScript en la página para extraer datos o URLs.";
+			// ── Filesystem / workspace ──
+			case "write_file":
+				return filePath
+					? `Creando el archivo ${filePath}.`
+					: "Creando un archivo en el workspace.";
+			case "edit_file":
+			case "apply_patch":
+				return filePath
+					? `Editando el archivo ${filePath}.`
+					: "Editando un archivo.";
+			case "read_file":
+				return filePath
+					? `Leyendo el archivo ${filePath}.`
+					: "Leyendo un archivo.";
+			case "search_files":
+			case "search":
+				return pattern
+					? `Buscando "${pattern}"${filePath ? ` en ${filePath}` : ""}.`
+					: "Buscando archivos en el workspace.";
+			case "list_directory":
+			case "list_dir":
+				return filePath
+					? `Listando el contenido de ${filePath}.`
+					: "Listando archivos del workspace.";
+			case "create_directory":
+			case "mkdir":
+				return filePath
+					? `Creando la carpeta ${filePath}.`
+					: "Creando una carpeta.";
+			case "move_file":
+				return filePath ? `Moviendo ${filePath}.` : "Moviendo un archivo.";
+			case "copy_file":
+				return filePath ? `Copiando ${filePath}.` : "Copiando un archivo.";
+			case "delete_file":
+			case "remove_file":
+				return filePath
+					? `Eliminando ${filePath}.`
+					: "Eliminando un archivo.";
+			case "manage_workspace":
+				return action && filePath
+					? `${action} en ${filePath}.`
+					: action
+						? `Operación ${action} en el workspace.`
+						: "Gestionando archivos del workspace.";
+			// ── Shell / code / media / delegation ──
+			case "run_command":
+			case "shell":
+			case "execute_code":
+				return command
+					? `Ejecutando comando: ${command.slice(0, 80)}.`
+					: `Ejecutando ${toolName.replace(/[_-]/g, " ")}.`;
+			case "codex_generate_image":
+			case "nano-banana-generate":
+			case "nano-banana-edit":
+				return prompt
+					? `Generando imagen: "${prompt.slice(0, 80)}".`
+					: "Generando una imagen.";
+			case "delegate_task":
+				return "Delegando una subtarea a un brazo especialista.";
+			case "kanban_create_plan_from_goal":
+				return "Planificando el trabajo (Kanban swarm) y dividiendo la meta.";
 			default:
-				return `Ejecutando ${toolName.replace(/[_-]/g, " ")}.`;
+				return (
+					modelDetail || `Ejecutando ${toolName.replace(/[_-]/g, " ")}.`
+				);
 		}
 	}
 
@@ -2542,17 +2631,9 @@ export class AgentRuntime {
 			}
 		}
 
-		const memories = await this.memoryRetrieval.retrieveForContext(message);
+		const { memories, skills, learningInsights } =
+			await this.retrieveContextInputs(message);
 		throwIfAborted(options.signal);
-
-		const skills = await this.skillLoader.resolveSkillsForTask({
-			description: message,
-			complexity: 0.5,
-			domains: [],
-			keywords: message.split(/\s+/).filter((w) => w.length > 3),
-		});
-		throwIfAborted(options.signal);
-		const learningInsights = await this.getRelevantLearning(message);
 
 		const context = await this.buildContext(
 			memories,
@@ -2615,6 +2696,47 @@ export class AgentRuntime {
 	static readonly STATUS_RE =
 		/^\\x00STATUS:(\w+)(?::([\w-]+))?(?::([A-Za-z0-9+/=]*))?(?::([A-Za-z0-9+/=]*))?\\x00$/;
 
+	/**
+	 * Retrieve memory + skills + learning insights for a turn. Runs the three
+	 * INDEPENDENT lookups in parallel (they used to run serially, blocking
+	 * ~300-1300ms before the LLM call) and skips them entirely for trivial
+	 * turns (greetings/acks) where deep retrieval adds latency without value.
+	 */
+	private async retrieveContextInputs(message: string): Promise<{
+		memories: MemoryContext;
+		skills: LoadedSkill[];
+		learningInsights: LearningInsight[];
+	}> {
+		if (this.isTrivialTurn(message)) {
+			return {
+				memories: { memories: [], totalTokens: 0, fromSTM: [], combined: [] },
+				skills: [],
+				learningInsights: [],
+			};
+		}
+		const [memories, skills, learningInsights] = await Promise.all([
+			this.memoryRetrieval.retrieveForContext(message),
+			this.skillLoader.resolveSkillsForTask({
+				description: message,
+				complexity: 0.5,
+				domains: [],
+				keywords: message.split(/\s+/).filter((w) => w.length > 3),
+			}),
+			this.getRelevantLearning(message),
+		]);
+		return { memories, skills, learningInsights };
+	}
+
+	/** Very conservative trivial-turn detector (greetings/acks only). */
+	private isTrivialTurn(message: string): boolean {
+		const trimmed = message.trim();
+		if (trimmed.length === 0 || trimmed.length > 24) return false;
+		if (/[?]/.test(trimmed)) return false;
+		return /^(hola|buenas|buenos\s+d[ií]as|buenas\s+(tardes|noches)|hey|hi|hello|ok|okay|oke|vale|gracias|thanks|thank\s+you|perfecto|genial|buen[ií]simo|s[ií]|no|ya|contin[uú]a|sigue|dale|listo|hecho)\s*[!.?¡-]*$/i.test(
+			trimmed,
+		);
+	}
+
 	async *processMessageStream(
 		message: string,
 		channelId?: string,
@@ -2630,6 +2752,11 @@ export class AgentRuntime {
 		};
 		this.stm.add(userTurn);
 		this.workingMemory.updateFromUserMessage(message);
+
+		// Señal inmediata de "Trabajando": el usuario ve actividad al instante,
+		// antes del ensamblaje de contexto (que puede tardar 500-3500ms) y de la
+		// decisión de escalado. "Pensando" se reserva para el razonamiento LLM.
+		yield "\x00STATUS:working\x00";
 
 		// === Auto-escalado a multi-agente ===
 		if (this.orchestrator && !options.disableOrchestrator) {
@@ -2817,17 +2944,9 @@ export class AgentRuntime {
 				/* non-critical, continue without tracking */
 			}
 		}
-		const memories = await this.memoryRetrieval.retrieveForContext(message);
+		const { memories, skills, learningInsights } =
+			await this.retrieveContextInputs(message);
 		throwIfAborted(options.signal);
-
-		const skills = await this.skillLoader.resolveSkillsForTask({
-			description: message,
-			complexity: 0.5,
-			domains: [],
-			keywords: message.split(/\s+/).filter((w) => w.length > 3),
-		});
-		throwIfAborted(options.signal);
-		const learningInsights = await this.getRelevantLearning(message);
 
 		const context = await this.buildContext(
 			memories,

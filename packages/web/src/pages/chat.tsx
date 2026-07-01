@@ -225,6 +225,7 @@ interface WsMessage {
 
 type AgentActivityStatus =
 	| "thinking"
+	| "working"
 	| "orchestrating"
 	| "worker_start"
 	| "worker_progress"
@@ -285,6 +286,7 @@ interface MultiAgentPlanState {
 
 const AGENT_ACTIVITY_STATUSES = new Set<string>([
 	"thinking",
+	"working",
 	"orchestrating",
 	"worker_start",
 	"worker_progress",
@@ -617,6 +619,11 @@ function getActivityCopy(
 				label: "Pensando",
 				detail: "Analizando la solicitud y preparando el siguiente paso.",
 			};
+		case "working":
+			return {
+				label: "Trabajando",
+				detail: "Procesando la solicitud y preparando la siguiente acción.",
+			};
 		case "orchestrating":
 			return {
 				label: "Orquestando agentes",
@@ -909,12 +916,15 @@ function parseExecutionActivities(execution: ChatExecution): AgentActivity[] {
 
 function createFallbackAgentActivity(status?: AgentStatus): AgentActivity {
 	const activityStatus: AgentActivityStatus =
-		status && status !== "idle" ? status : "thinking";
+		status && status !== "idle" ? status : "working";
 	const copy = getActivityCopy(activityStatus);
 	return {
 		id: "active-execution-fallback",
 		status: activityStatus,
-		label: activityStatus === "thinking" ? "Octopus trabajando" : copy.label,
+		label:
+			activityStatus === "working" || activityStatus === "thinking"
+				? "Octopus trabajando"
+				: copy.label,
 		detail:
 			"Octopus sigue trabajando. Esperando el siguiente evento de progreso.",
 		timestamp: Date.now(),
@@ -930,7 +940,7 @@ function executionStateFromRecord(
 		AGENT_ACTIVITY_STATUSES.has(execution.current_status)
 			? (execution.current_status as AgentActivityStatus)
 			: execution.status === "queued" || execution.status === "running"
-				? "thinking"
+				? "working"
 				: "idle";
 	return {
 		executionId: execution.id,
@@ -3145,7 +3155,7 @@ export const ChatPage: React.FC<{
 					setIsStreaming(Boolean(execution.assistant_message_id));
 					setAgentStatus(
 						nextState.currentStatus === "idle"
-							? "thinking"
+							? "working"
 							: nextState.currentStatus,
 					);
 					setAgentActivity((prev) =>
@@ -3748,7 +3758,7 @@ export const ChatPage: React.FC<{
 		lastResponseChunkAtRef.current > 0 &&
 		activityClock - lastResponseChunkAtRef.current < RESPONSE_ACTIVITY_GRACE_MS;
 	const fallbackStatus: AgentStatus =
-		agentStatus === "responding" ? "thinking" : agentStatus;
+		agentStatus === "responding" ? "working" : agentStatus;
 	const visibleAgentActivity = hasActiveWork
 		? agentActivity.length === 0
 			? [createFallbackAgentActivity(fallbackStatus)]
@@ -3960,13 +3970,13 @@ export const ChatPage: React.FC<{
 		lastResponseChunkAtRef.current = 0;
 		setMultiAgentPlan(null);
 		setMultiAgentWorkers([]);
-		setAgentStatus("thinking");
+		setAgentStatus("working");
 		lastActivityKeyRef.current = "";
-		const initialActivityCopy = getActivityCopy("thinking");
+		const initialActivityCopy = getActivityCopy("working");
 		setAgentActivity([
 			{
 				id: nanoid(),
-				status: "thinking",
+				status: "working",
 				label: initialActivityCopy.label,
 				detail: initialActivityCopy.detail,
 				timestamp: Date.now(),
