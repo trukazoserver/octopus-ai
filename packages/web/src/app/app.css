@@ -9,6 +9,16 @@
 		sans-serif;
 }
 
+/* Twemoji images (emoji rendered as PNG for cross-platform consistency,
+   e.g. country flags that Windows fonts can't render) — inline at text size. */
+img.emoji {
+	height: 1.15em;
+	width: 1.15em;
+	margin: 0 0.04em;
+	vertical-align: -0.18em;
+	display: inline-block;
+}
+
 .app-shell.is-electron {
 	height: 100vh;
 	padding-top: 34px;

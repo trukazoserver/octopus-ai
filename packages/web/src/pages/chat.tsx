@@ -1,5 +1,16 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import twemoji from "twemoji";
+
+// Render emoji (including flag sequences like 🇵🇪) as images from the jsDelivr
+// CDN, so they render consistently on every OS — Windows fonts don't render
+// country-flag emoji and fall back to the regional-indicator letters ("PE").
+const TWEMOJI_OPTS = {
+	base: "https://cdn.jsdelivr.net/npm/twemoji@14/assets/",
+	ext: ".png",
+	size: "72x72",
+	className: "emoji",
+} as const;
 import type React from "react";
 import {
 	Suspense,
@@ -1849,7 +1860,7 @@ function renderMarkdown(
 			breaks: true,
 			gfm: true,
 		}) as string;
-		return DOMPurify.sanitize(html, {
+		const sanitized = DOMPurify.sanitize(html, {
 			ADD_TAGS: ["img", "audio", "video", "source"],
 			ADD_ATTR: [
 				"src",
@@ -1874,6 +1885,7 @@ function renderMarkdown(
 			],
 			FORBID_ATTR: ["onclick", "onerror", "onload", "onmouseover"],
 		});
+		return twemoji.parse(sanitized, TWEMOJI_OPTS);
 	} catch {
 		return DOMPurify.sanitize(text, {
 			ADD_TAGS: ["img", "audio", "video", "source"],

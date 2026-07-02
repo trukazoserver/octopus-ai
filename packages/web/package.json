@@ -17,7 +17,8 @@
 		"dompurify": "^3.4.0",
 		"marked": "^18.0.0",
 		"react": "^19.1.0",
-		"react-dom": "^19.1.0"
+		"react-dom": "^19.1.0",
+		"twemoji": "^14.0.2"
 	},
 	"devDependencies": {
 		"@types/dompurify": "^3.2.0",
