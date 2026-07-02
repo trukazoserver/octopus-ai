@@ -1473,7 +1473,9 @@ function AgentActivityPanel({
 						{toggleLabel}
 					</button>
 				)}
-				{expanded && showWorkerDetails && (
+				{/* Show the live arm list automatically while arms are active (no
+				    need to click "Ver N agentes"); collapses back when all done. */}
+				{(expanded || activeWorkers > 0) && showWorkerDetails && (
 					<div className="multi-agent-workers compact-list">
 						{workers.map((worker, index) => {
 							const statusColor =
@@ -1524,7 +1526,13 @@ function AgentActivityPanel({
 											className="multi-agent-worker-status"
 											style={{ color: workerColor }}
 										>
-											{worker.status}
+											{worker.status === "done"
+												? "Completado"
+												: worker.status === "error"
+													? "Falló"
+													: worker.status === "queued"
+														? "En cola"
+														: "Trabajando"}
 										</span>
 									</div>
 									<div className="multi-agent-worker-desc">{workText}</div>
