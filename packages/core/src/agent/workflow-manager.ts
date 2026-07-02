@@ -1395,20 +1395,46 @@ export class WorkflowManager {
 		if (!run || TERMINAL_WORKFLOW_STATUSES.has(run.status)) return false;
 		const tasks = await this.listRunTasks(runId);
 		if (tasks.length === 0) return false;
-		const allDone = tasks.every((task) =>
-			["done", "archived"].includes(task.status),
+		// A task is "settled" (won't auto-progress) when it succeeded, was
+		// permanently blocked (retries exhausted), or cancelled. failed/
+		// timed_out/interrupted are retried/resumed, so the run must stay open.
+		const SETTLED_TASK_STATUSES = new Set<string>([
+			"done",
+			"archived",
+			"blocked",
+			"cancelled",
+		]);
+		const allSettled = tasks.every((task) =>
+			SETTLED_TASK_STATUSES.has(task.status),
 		);
-		if (!allDone) return false;
-		const openBlocker = await this.db.get<{ id: string }>(
-			"SELECT id FROM agent_workflow_blockers WHERE run_id = ? AND resolved_at IS NULL LIMIT 1",
-			[runId],
+		if (!allSettled) return false;
+		const allSucceeded = tasks.every(
+			(task) => task.status === "done" || task.status === "archived",
 		);
-		if (openBlocker) return false;
-		await this.updateRunStatus(runId, "done", { currentPhase: "completed" });
+		if (allSucceeded) {
+			const openBlocker = await this.db.get<{ id: string }>(
+				"SELECT id FROM agent_workflow_blockers WHERE run_id = ? AND resolved_at IS NULL LIMIT 1",
+				[runId],
+			);
+			if (openBlocker) return false;
+			await this.updateRunStatus(runId, "done", { currentPhase: "completed" });
+			await this.recordEvent({
+				runId,
+				eventType: "workflow_completed",
+				message: "All Kanban Swarm cards are done and no blockers remain.",
+			});
+			return true;
+		}
+		// Some tasks were permanently blocked or cancelled — the run can't fully
+		// succeed, but it must still reach a terminal (resumable) state instead
+		// of hanging in "running" forever. "partial" is resumable so the blocked
+		// work can be retried later.
+		await this.updateRunStatus(runId, "partial", { currentPhase: "partial" });
 		await this.recordEvent({
 			runId,
-			eventType: "workflow_completed",
-			message: "All Kanban Swarm cards are done and no blockers remain.",
+			eventType: "workflow_partial",
+			message:
+				"Some Kanban Swarm cards were blocked or cancelled. The run finished partially and can be resumed to retry the blocked work.",
 		});
 		return true;
 	}
