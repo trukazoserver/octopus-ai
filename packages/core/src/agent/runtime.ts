@@ -4332,46 +4332,84 @@ export class AgentRuntime {
 
 		let systemContent = this.config.systemPrompt;
 
-		if (this.contextAssembler) {
-			try {
-				const assembled = await this.contextAssembler.assemble({
-					objective: userMessage,
-					tenantId: "local",
-					userId: "owner",
-					projectId: process.cwd(),
-					agentRole: this.config.id,
-					sessionId: channelId,
-					budgetTokens: 900,
-				});
-				advancedMemoryPack = assembled.memoryPack;
-				proactiveMemoryNotices = assembled.proactiveNotices;
-				degradedMemorySections = assembled.degradedSections;
-				const generatedAt = new Date();
-				this.lastMemoryTrace = {
-					responseId: `memory-${generatedAt.getTime()}-${Math.random()
-						.toString(36)
-						.slice(2, 10)}`,
-					generatedAt,
-					objective: userMessage,
-					channelId,
-					uncertaintyLevel: assembled.memoryPack.uncertaintyLevel,
-					memoryIds: Array.from(
-						new Set([
-							...assembled.memoryPack.memories.map((memory) => memory.item.id),
-							...assembled.proactiveMemoryIds,
-						]),
-					),
-					knownGaps: assembled.memoryPack.knownGaps,
-					proactiveNotices: assembled.proactiveNotices,
-					degradedSections: assembled.degradedSections,
-				};
-			} catch (e) {
-				this.lastMemoryTrace = undefined;
-				console.error("Failed to assemble advanced memory context:", e);
-			}
+		// Fetch all independent async context sources IN PARALLEL (they used to run
+		// serially, blocking first-token by their combined latency). Each is
+		// error-isolated; the append order below is unchanged, so the final prompt
+		// is byte-identical to before — just assembled faster.
+		const isCodegen = this.isCodegenRequest(userMessage);
+		const toolHealth =
+			this.toolHealth ??
+			(this.toolExecutor && "getHealth" in this.toolExecutor
+				? this.toolExecutor.getHealth()
+				: undefined);
+		const [assembledResult, profile, dailyContext, healthSummary, research] =
+			await Promise.all([
+				this.contextAssembler
+					? this.contextAssembler
+							.assemble({
+								objective: userMessage,
+								tenantId: "local",
+								userId: "owner",
+								projectId: process.cwd(),
+								agentRole: this.config.id,
+								sessionId: channelId,
+								budgetTokens: 900,
+							})
+							.then((assembled) => {
+								const generatedAt = new Date();
+								this.lastMemoryTrace = {
+									responseId: `memory-${generatedAt.getTime()}-${Math.random()
+										.toString(36)
+										.slice(2, 10)}`,
+									generatedAt,
+									objective: userMessage,
+									channelId,
+									uncertaintyLevel: assembled.memoryPack.uncertaintyLevel,
+									memoryIds: Array.from(
+										new Set([
+											...assembled.memoryPack.memories.map(
+												(memory) => memory.item.id,
+											),
+											...assembled.proactiveMemoryIds,
+										]),
+									),
+									knownGaps: assembled.memoryPack.knownGaps,
+									proactiveNotices: assembled.proactiveNotices,
+									degradedSections: assembled.degradedSections,
+								};
+								return assembled;
+							})
+							.catch((e) => {
+								this.lastMemoryTrace = undefined;
+								console.error(
+									"Failed to assemble advanced memory context:",
+									e,
+								);
+								return undefined;
+							})
+					: Promise.resolve(undefined),
+				this.getCachedUserProfile(),
+				this.dailyMemory
+					? this.dailyMemory.getCurrentContext().catch(() => undefined)
+					: Promise.resolve(undefined),
+				toolHealth
+					? toolHealth.getHealthSummary().catch(() => undefined)
+					: Promise.resolve(undefined),
+				this.researcher && isCodegen
+					? this.researcher
+							.research({
+								description: userMessage,
+								keywords: [],
+								domains: [],
+							})
+							.catch(() => undefined)
+					: Promise.resolve(undefined),
+			]);
+		if (assembledResult) {
+			advancedMemoryPack = assembledResult.memoryPack;
+			proactiveMemoryNotices = assembledResult.proactiveNotices;
+			degradedMemorySections = assembledResult.degradedSections;
 		}
-
-		const profile = await this.getCachedUserProfile();
 		if (profile) {
 			try {
 				let profileStr = "### User Profile (Preferences & Context)\n";
@@ -4396,8 +4434,7 @@ export class AgentRuntime {
 			}
 		}
 
-		if (this.dailyMemory) {
-			const dailyContext = await this.dailyMemory.getCurrentContext();
+		if (dailyContext) {
 			systemContent += `\n\n${dailyContext}`;
 		}
 
@@ -4442,40 +4479,12 @@ export class AgentRuntime {
 				"\n\n# Web self-review (mandatory before finishing)\nBefore declaring this web/HTML deliverable done, you MUST visually verify it: open the file with `browser_open_file` (use the absolute path from write_file), screenshot EACH section (scroll + browser_screenshot), and analyze every screenshot for flaws — layout, broken/missing images, overflow, contrast, responsiveness, and fit to the requested style. If you are a text-only model, call the `analyze_image` MCP tool on each screenshot. Fix every flaw you find (edit the HTML/CSS; regenerate images with codex_generate_image using a relative `path`, never base64), then re-screenshot the fixed section to confirm. Do NOT claim the task is finished until you have seen the page render correctly end-to-end, and report the final absolute path.";
 		}
 
-		// Web tool health: if a web search/reader provider is currently out of
-		// quota (or repeatedly failing), tell the model up front so it goes
-		// straight to the fallback (browser_search / pdf_read) instead of
-		// discovering the failure by trying the tool and burning turns.
-		const toolHealth =
-			this.toolHealth ??
-			(this.toolExecutor && "getHealth" in this.toolExecutor
-				? this.toolExecutor.getHealth()
-				: undefined);
-		if (toolHealth) {
-			try {
-				const healthSummary = await toolHealth.getHealthSummary();
-				if (healthSummary) systemContent += `\n\n${healthSummary}`;
-			} catch {
-				// Health summary is advisory; never block the turn on it.
-			}
+		if (healthSummary) {
+			systemContent += `\n\n${healthSummary}`;
 		}
 
-		// Fresh research before codegen: for technical/code-writing requests, fetch
-		// up-to-date docs (Context7 -> web -> browser) and ground the response in them
-		// so the agent does not assume endpoints, model names, versions or compatibility.
-		if (this.researcher && this.isCodegenRequest(userMessage)) {
-			try {
-				const research = await this.researcher.research({
-					description: userMessage,
-					keywords: [],
-					domains: [],
-				});
-				if (research.context) {
-					systemContent += `\n\n# Fresh Research (verified — prefer over assumptions)\nUp-to-date documentation gathered for this request. Ground your code in it. Verify the exact model/library names, endpoints, request/response shapes and current versions, and confirm compatibility across the stack you choose. Do NOT invent APIs, options or signatures that are not present here.\nSources: ${research.sources.join(", ") || "n/a"}\n\n${research.context}`;
-				}
-			} catch {
-				/* best-effort: proceed without fresh research */
-			}
+		if (research?.context) {
+			systemContent += `\n\n# Fresh Research (verified — prefer over assumptions)\nUp-to-date documentation gathered for this request. Ground your code in it. Verify the exact model/library names, endpoints, request/response shapes and current versions, and confirm compatibility across the stack you choose. Do NOT invent APIs, options or signatures that are not present here.\nSources: ${research.sources.join(", ") || "n/a"}\n\n${research.context}`;
 		}
 
 		const selectedAgentContext = this.formatSelectedAgentContext(selectedAgent);
