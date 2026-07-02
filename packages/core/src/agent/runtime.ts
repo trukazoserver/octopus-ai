@@ -4293,6 +4293,29 @@ export class AgentRuntime {
 		return webNoun && buildVerb;
 	}
 
+	private userProfileCache: {
+		value: Awaited<ReturnType<UserProfileManager["getProfile"]>>;
+		at: number;
+	} | null = null;
+
+	/** Cached user profile (60s TTL) — avoids a DB read on every single turn. */
+	private async getCachedUserProfile(): Promise<
+		Awaited<ReturnType<UserProfileManager["getProfile"]>> | null
+	> {
+		if (!this.userProfileManager) return null;
+		const now = Date.now();
+		if (this.userProfileCache && now - this.userProfileCache.at < 60_000) {
+			return this.userProfileCache.value;
+		}
+		try {
+			const value = await this.userProfileManager.getProfile("owner");
+			this.userProfileCache = { value, at: now };
+			return value;
+		} catch {
+			return this.userProfileCache?.value ?? null;
+		}
+	}
+
 	private async buildContext(
 		memories: MemoryContext,
 		skills: LoadedSkill[],
@@ -4348,9 +4371,9 @@ export class AgentRuntime {
 			}
 		}
 
-		if (this.userProfileManager) {
+		const profile = await this.getCachedUserProfile();
+		if (profile) {
 			try {
-				const profile = await this.userProfileManager.getProfile("owner");
 				let profileStr = "### User Profile (Preferences & Context)\n";
 				profileStr += `- Communication Style: ${profile.communicationStyle}\n`;
 				if (Object.keys(profile.preferences).length > 0) {

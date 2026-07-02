@@ -2627,6 +2627,7 @@ export const ChatPage: React.FC<{
 	>({});
 	const lastActivityKeyRef = useRef<string>("");
 	const lastResponseChunkAtRef = useRef(0);
+	const scrollRafRef = useRef<number | null>(null);
 	const hydratedMultiAgentExecutionRef = useRef<string>("");
 	const notifiedExecutionRef = useRef<Set<string>>(new Set());
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
@@ -3592,8 +3593,14 @@ export const ChatPage: React.FC<{
 						}
 						return [...prev, incoming];
 					});
-					// Auto-scroll on each streaming chunk
-					scrollToBottom(true);
+					// Auto-scroll on each streaming chunk, but coalesce via rAF so we
+					// never force layout more than once per animation frame.
+					if (scrollRafRef.current == null) {
+						scrollRafRef.current = requestAnimationFrame(() => {
+							scrollRafRef.current = null;
+							scrollToBottom(true);
+						});
+					}
 				} else if (msg.type === "stream_end") {
 					updateConversationExecution(conversationId, (prev) => ({
 						executionId: executionId ?? prev?.executionId ?? msg.id,
