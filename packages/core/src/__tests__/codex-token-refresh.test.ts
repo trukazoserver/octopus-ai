@@ -83,7 +83,10 @@ describe("CodexProvider reactive 401 token refresh", () => {
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
 
 		const provider = new CodexProvider(config);
-		provider.onTokenRefresh = async () => "new-token";
+		provider.onTokenRefresh = async () => ({
+			accessToken: "new-token",
+			expiresAt: Date.now() + 3_600_000,
+		});
 
 		await drain(provider.chatStream(baseRequest));
 
@@ -129,7 +132,7 @@ describe("CodexProvider reactive 401 token refresh", () => {
 			refreshCalls++;
 			// Yield so both callers overlap on the in-flight promise.
 			await Promise.resolve();
-			return "new-token";
+			return { accessToken: "new-token", expiresAt: Date.now() + 3_600_000 };
 		};
 
 		await Promise.all([
@@ -143,5 +146,42 @@ describe("CodexProvider reactive 401 token refresh", () => {
 		// paired old/new.
 		expect(calls).toHaveLength(4);
 		expect(calls.filter((t) => t === "new-token")).toHaveLength(2);
+	});
+
+	it("refreshes PROACTIVELY before the request when the token is near expiry", async () => {
+		// Fresh token → 200 on first fetch; the proactive refresh fires first.
+		const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+			const headers = init.headers as Record<string, string>;
+			const auth = (headers.Authorization ?? "").replace(/^Bearer\s+/i, "");
+			// The proactive refresh replaces the token before any fetch, so the
+			// only fetch we see carries the refreshed token and succeeds.
+			return auth === "fresh-token"
+				? sseResponse(COMPLETED, 200)
+				: sseResponse([], 401, "Unauthorized");
+		});
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const nearExpiry = {
+			...config,
+			oauthExpiresAt: Date.now() + 60_000,
+		} as ProviderConfig;
+		const provider = new CodexProvider(nearExpiry);
+		provider.onTokenRefresh = async () => ({
+			accessToken: "fresh-token",
+			expiresAt: Date.now() + 3_600_000,
+		});
+
+		await drain(provider.chatStream(baseRequest));
+
+		// No 401 ever happened — the token was refreshed proactively, so the lone
+		// fetch already carried "fresh-token" and succeeded.
+		const auths = fetchMock.mock.calls.map((c) =>
+			((c[1]?.headers as Record<string, string>)?.Authorization ?? "").replace(
+				/^Bearer\s+/i,
+				"",
+			),
+		);
+		expect(auths).toContain("fresh-token");
+		expect(auths).not.toContain("old-token");
 	});
 });

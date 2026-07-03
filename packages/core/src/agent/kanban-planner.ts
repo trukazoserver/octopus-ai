@@ -187,6 +187,29 @@ export class KanbanPlanner {
 		});
 	}
 
+	/**
+	 * Propose tasks for a goal WITHOUT persisting a new run.
+	 *
+	 * Used by C1 (auto re-plan): the orchestrator needs alternative subtasks for
+	 * a failed task and must add them to an EXISTING run via `createTask`, not
+	 * spawn a brand-new run. Reuses the same model/heuristic + normalization +
+	 * overrides as `planFromGoal`, just skips `persistPlan`.
+	 */
+	async proposeTasks(input: {
+		goal: string;
+		model?: string;
+		workerArmKeys?: string[];
+	}): Promise<KanbanPlanTaskSpec[]> {
+		const rawPlan = this.router
+			? await this.generatePlanWithModel(input.goal, input.model)
+			: this.createHeuristicPlan(input.goal);
+		const plan = this.applyOverrides(rawPlan, {
+			defaultTaskModel: input.model,
+			workerArmKeys: input.workerArmKeys,
+		});
+		return plan.tasks;
+	}
+
 	async persistPlan(input: {
 		goal: string;
 		conversationId?: string;

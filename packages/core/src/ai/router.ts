@@ -640,7 +640,13 @@ export class LLMRouter {
 	private quotaHeaderHandler?: (provider: string, headers: Headers) => void;
 	private tokenRefreshHandler?: (
 		provider: string,
-	) => Promise<string | undefined>;
+	) => Promise<{ accessToken: string; expiresAt?: number } | undefined>;
+	/** Per-provider auth health, surfaced via /api/status so the UI can tell the
+	 * user to re-login instead of failing silently. */
+	private authStatus = new Map<
+		string,
+		{ requiresRelogin: boolean; reason?: string; at: number }
+	>();
 
 	constructor(config: LLMRouterConfig) {
 		this.config = config;
@@ -673,7 +679,11 @@ export class LLMRouter {
 	 * fallback. Mirrors the setQuotaHeaderHandler wiring pattern.
 	 */
 	setTokenRefreshHandler(
-		handler: ((provider: string) => Promise<string | undefined>) | undefined,
+		handler:
+			| ((
+					provider: string,
+			  ) => Promise<{ accessToken: string; expiresAt?: number } | undefined>)
+			| undefined,
 	): void {
 		this.tokenRefreshHandler = handler;
 		this.applyTokenRefreshHook();
@@ -685,17 +695,49 @@ export class LLMRouter {
 			if (provider instanceof CodexProvider) {
 				provider.onTokenRefresh = handler
 					? async () => {
-							const token = await handler(name);
-							if (!token) {
+							const refreshed = await handler(name);
+							if (!refreshed) {
 								throw new Error(
 									`token refresh returned no token for '${name}'`,
 								);
 							}
-							return token;
+							return refreshed;
 						}
 					: undefined;
 			}
 		}
+	}
+
+	/**
+	 * Mark a provider's auth as needing re-login (e.g. Codex refresh token
+	 * revoked/expired). Surfaced via getAuthStatus() → /api/status so the UI can
+	 * prompt the user instead of failing silently through the fallback.
+	 */
+	markAuthStatus(
+		provider: string,
+		entry: { requiresRelogin: boolean; reason?: string },
+	): void {
+		this.authStatus.set(provider, { ...entry, at: Date.now() });
+	}
+
+	/** Clear a provider's auth-status (e.g. after a successful refresh/re-login). */
+	clearAuthStatus(provider: string): void {
+		this.authStatus.delete(provider);
+	}
+
+	/** Snapshot of per-provider auth health for /api/status. */
+	getAuthStatus(): Record<
+		string,
+		{ requiresRelogin: boolean; reason?: string; at: number }
+	> {
+		const out: Record<
+			string,
+			{ requiresRelogin: boolean; reason?: string; at: number }
+		> = {};
+		for (const [provider, entry] of this.authStatus) {
+			out[provider] = entry;
+		}
+		return out;
 	}
 
 	async reconfigure(config: LLMRouterConfig): Promise<void> {

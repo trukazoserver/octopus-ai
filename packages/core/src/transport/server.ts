@@ -22,15 +22,15 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "eventemitter3";
 import WebSocket, { WebSocketServer, type WebSocket as WSWebSocket } from "ws";
-import { type LLMRouter, getProviderRegistry } from "../ai/router.js";
+import type { AgentReasoningEffort } from "../agent/types.js";
 import {
+	coerceReasoningEffort,
 	getModelCapabilities,
 	getModelCapabilitiesFromRef,
-	coerceReasoningEffort,
 } from "../ai/model-capabilities.js";
-import type { AgentReasoningEffort } from "../agent/types.js";
-import { resolveProviderQuotas } from "../ai/quota-service.js";
 import { listCodexModels } from "../ai/providers/codex.js";
+import { resolveProviderQuotas } from "../ai/quota-service.js";
+import { type LLMRouter, getProviderRegistry } from "../ai/router.js";
 import type { UsageStats } from "../ai/types.js";
 import {
 	closeBrowserAuth,
@@ -38,12 +38,12 @@ import {
 	getAuthStatus,
 	startBrowserAuth,
 } from "../auth/browser-session.js";
-import { prepareVertexProject } from "../auth/google-cloud.js";
 import {
 	getCodexResult,
 	getCodexStatus,
 	startCodexLogin,
 } from "../auth/codex-oauth.js";
+import { prepareVertexProject } from "../auth/google-cloud.js";
 import {
 	createAuthorizationUrl,
 	exchangeCodeForToken,
@@ -350,7 +350,8 @@ function guessMime(filename: string): string {
 		".docx":
 			"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		".doc": "application/msword",
-		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		".xlsx":
+			"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 		".xls": "application/vnd.ms-excel",
 		".ods": "application/vnd.oasis.opendocument.spreadsheet",
 		".pptx":
@@ -1768,9 +1769,11 @@ export class TransportServer {
 				fallbackProvider: fallback.provider,
 				fallbackModel: fallback.model,
 				// Compatibility alias — mirrors the effective agent reasoning now.
-				thinking: mainRuntime?.getConfig().reasoningEffort ?? config.ai.thinking,
+				thinking:
+					mainRuntime?.getConfig().reasoningEffort ?? config.ai.thinking,
 				maxTokens: config.ai.maxTokens,
 				availableProviders: router?.getAvailableProviders() ?? [],
+				authStatus: router?.getAuthStatus() ?? {},
 				usage,
 				channels: enabledChannels,
 				memoryEnabled: config.memory.enabled,
@@ -1851,10 +1854,7 @@ export class TransportServer {
 		}
 	}
 
-	private async handleGetUsage(
-		res: ServerResponse,
-		url: URL,
-	): Promise<void> {
+	private async handleGetUsage(res: ServerResponse, url: URL): Promise<void> {
 		try {
 			const usageStore = this.system?.usageStore;
 			if (!usageStore) {
@@ -1898,7 +1898,10 @@ export class TransportServer {
 				this.system?.router,
 				this.system?.usageStore,
 			);
-			jsonRes(res, 200, { providers: quotas, updatedAt: new Date().toISOString() });
+			jsonRes(res, 200, {
+				providers: quotas,
+				updatedAt: new Date().toISOString(),
+			});
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -5196,7 +5199,9 @@ export class TransportServer {
 	 * or the persisted profile), and model capabilities to an agent record so the
 	 * chat / agents / dashboard UIs can render and edit them consistently.
 	 */
-	private async enrichAgentRecord<T extends { id: string; model: string | null }>(
+	private async enrichAgentRecord<
+		T extends { id: string; model: string | null },
+	>(
 		agent: T,
 	): Promise<
 		T & {
@@ -5209,10 +5214,15 @@ export class TransportServer {
 		const effectiveModel = agent.model ?? config.ai.default;
 		const caps = getModelCapabilitiesFromRef(config, effectiveModel);
 		const runtime = this.system?.agentManager?.getRuntime(agent.id);
-		const fallback: AgentReasoningEffort = caps ? caps.defaultReasoningEffort : "none";
+		const fallback: AgentReasoningEffort = caps
+			? caps.defaultReasoningEffort
+			: "none";
 		let reasoning: AgentReasoningEffort = fallback;
 		if (runtime?.getConfig().reasoningEffort) {
-			reasoning = coerceReasoningEffort(caps, runtime.getConfig().reasoningEffort);
+			reasoning = coerceReasoningEffort(
+				caps,
+				runtime.getConfig().reasoningEffort,
+			);
 		} else if (this.system?.agentManager) {
 			try {
 				reasoning = await this.system.agentManager.resolveReasoningForModel(
@@ -5224,7 +5234,12 @@ export class TransportServer {
 				/* keep fallback */
 			}
 		}
-		return { ...agent, effectiveModel, reasoningEffort: reasoning, capabilities: caps };
+		return {
+			...agent,
+			effectiveModel,
+			reasoningEffort: reasoning,
+			capabilities: caps,
+		};
 	}
 
 	private async handleCreateAgent(
@@ -5399,12 +5414,19 @@ export class TransportServer {
 				const config = this.loadConfig();
 				const updatedRecord = await agentManager.getAgent(id);
 				effectiveModel =
-					updatedRecord?.model ?? newModel ?? existing.model ?? config.ai.default;
+					updatedRecord?.model ??
+					newModel ??
+					existing.model ??
+					config.ai.default;
 				if (wantsReasoning) {
 					const caps = getModelCapabilitiesFromRef(config, effectiveModel);
 					const desired = body.reasoningEffort as AgentReasoningEffort;
 					effectiveReasoning = coerceReasoningEffort(caps, desired);
-					await agentManager.upsertModelProfile(id, effectiveModel, effectiveReasoning);
+					await agentManager.upsertModelProfile(
+						id,
+						effectiveModel,
+						effectiveReasoning,
+					);
 				} else {
 					const caps = getModelCapabilitiesFromRef(config, effectiveModel);
 					const fallback = caps ? caps.defaultReasoningEffort : "none";
@@ -5433,7 +5455,9 @@ export class TransportServer {
 				agent: updated,
 				effectiveModel: effectiveModel ?? updated?.model ?? undefined,
 				effectiveReasoning:
-					effectiveReasoning ?? runtime?.getConfig().reasoningEffort ?? undefined,
+					effectiveReasoning ??
+					runtime?.getConfig().reasoningEffort ??
+					undefined,
 			});
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });

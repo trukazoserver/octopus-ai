@@ -1,11 +1,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { LLMRouter } from "../ai/router.js";
 import {
 	coerceReasoningEffort,
 	getModelCapabilitiesByRef,
 } from "../ai/model-capabilities.js";
+import type { LLMRouter } from "../ai/router.js";
 import type {
 	ContentPart,
 	LLMMessage,
@@ -669,8 +669,7 @@ export class AgentRuntime {
 		// model rejects — e.g. "none" to an always-reasoning o-series, or "xhigh"
 		// to a model that tops out at "high". If the model can't be resolved we
 		// fall back to the configured value unchanged.
-		const desired: AgentReasoningEffort =
-			this.config.reasoningEffort ?? "none";
+		const desired: AgentReasoningEffort = this.config.reasoningEffort ?? "none";
 		const caps = getModelCapabilitiesByRef(this.config.model);
 		const effort = caps ? coerceReasoningEffort(caps, desired) : desired;
 		return {
@@ -1721,9 +1720,7 @@ export class AgentRuntime {
 				return filePath ? `Copiando ${filePath}.` : "Copiando un archivo.";
 			case "delete_file":
 			case "remove_file":
-				return filePath
-					? `Eliminando ${filePath}.`
-					: "Eliminando un archivo.";
+				return filePath ? `Eliminando ${filePath}.` : "Eliminando un archivo.";
 			case "manage_workspace":
 				return action && filePath
 					? `${action} en ${filePath}.`
@@ -1748,9 +1745,7 @@ export class AgentRuntime {
 			case "kanban_create_plan_from_goal":
 				return "Planificando el trabajo (Kanban swarm) y dividiendo la meta.";
 			default:
-				return (
-					modelDetail || `Ejecutando ${toolName.replace(/[_-]/g, " ")}.`
-				);
+				return modelDetail || `Ejecutando ${toolName.replace(/[_-]/g, " ")}.`;
 		}
 	}
 
@@ -2569,9 +2564,11 @@ export class AgentRuntime {
 		if (this.orchestrator && !options.disableOrchestrator) {
 			try {
 				throwIfAborted(options.signal);
-				const shouldDecompose =
-					await this.orchestrator.shouldDecompose(message);
-				if (shouldDecompose) {
+				const assessment = await this.orchestrator.assessParallelism(message);
+				console.log(
+					`[Orchestrator] assessment ${assessment.source} decompose=${assessment.decompose}: ${assessment.reason}`,
+				);
+				if (assessment.decompose) {
 					const decomposition = this.kanbanPlanner
 						? await this.orchestrator.decomposeViaKanban(message, {
 								conversationId: channelId,
@@ -2762,9 +2759,11 @@ export class AgentRuntime {
 		if (this.orchestrator && !options.disableOrchestrator) {
 			try {
 				throwIfAborted(options.signal);
-				const shouldDecompose =
-					await this.orchestrator.shouldDecompose(message);
-				if (shouldDecompose) {
+				const assessment = await this.orchestrator.assessParallelism(message);
+				console.log(
+					`[Orchestrator] assessment ${assessment.source} decompose=${assessment.decompose}: ${assessment.reason}`,
+				);
+				if (assessment.decompose) {
 					const decomposition = this.kanbanPlanner
 						? await this.orchestrator.decomposeViaKanban(message, {
 								conversationId: channelId,
@@ -4299,9 +4298,9 @@ export class AgentRuntime {
 	} | null = null;
 
 	/** Cached user profile (60s TTL) — avoids a DB read on every single turn. */
-	private async getCachedUserProfile(): Promise<
-		Awaited<ReturnType<UserProfileManager["getProfile"]>> | null
-	> {
+	private async getCachedUserProfile(): Promise<Awaited<
+		ReturnType<UserProfileManager["getProfile"]>
+	> | null> {
 		if (!this.userProfileManager) return null;
 		const now = Date.now();
 		if (this.userProfileCache && now - this.userProfileCache.at < 60_000) {
@@ -4381,10 +4380,7 @@ export class AgentRuntime {
 							})
 							.catch((e) => {
 								this.lastMemoryTrace = undefined;
-								console.error(
-									"Failed to assemble advanced memory context:",
-									e,
-								);
+								console.error("Failed to assemble advanced memory context:", e);
 								return undefined;
 							})
 					: Promise.resolve(undefined),

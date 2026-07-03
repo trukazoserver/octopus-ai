@@ -14,25 +14,29 @@ import type { LLMRequest } from "../ai/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { AgentCoordinationBus } from "./agent-coordination-bus.js";
-import { EventStream } from "./event-stream.js";
 import { getOctopusArmProfile } from "./arm-profiles.js";
 import { routeTaskToArm } from "./arm-router.js";
-import type { KanbanPlanner } from "./kanban-planner.js";
-import type { RequirementResolver } from "./requirement-resolver.js";
 import {
-	CrossReviewEngine,
 	type CrossReviewConfig,
+	CrossReviewEngine,
 	type CrossReviewResult,
 } from "./cross-review-engine.js";
+import { EventStream } from "./event-stream.js";
+import type {
+	KanbanPlanTaskSpec,
+	KanbanPlanner,
+	PersistedKanbanPlan,
+} from "./kanban-planner.js";
+import type { RequirementResolver } from "./requirement-resolver.js";
 import { createProgressSignature } from "./retry-policy.js";
 import type { AgentConfig } from "./types.js";
+import { type SubTask, type WorkerConfig, WorkerPool } from "./worker-pool.js";
+import type { LiveAgentRuntime } from "./worker-pool.js";
 import type {
 	WorkflowManager,
 	WorkflowRunRecord,
 	WorkflowTaskRecord,
 } from "./workflow-manager.js";
-import { type SubTask, type WorkerConfig, WorkerPool } from "./worker-pool.js";
-import type { LiveAgentRuntime } from "./worker-pool.js";
 
 export interface TaskDecomposition {
 	originalGoal: string;
@@ -40,6 +44,20 @@ export interface TaskDecomposition {
 	executionPlan: "parallel" | "sequential" | "mixed";
 	reasoning: string;
 	kanbanPlanRunId?: string;
+}
+
+export type ParallelismAssessmentSource =
+	| "regex-no"
+	| "regex-yes"
+	| "llm-yes"
+	| "llm-no"
+	| "assessment-timeout"
+	| "assessment-error";
+
+export interface ParallelismAssessment {
+	decompose: boolean;
+	reason: string;
+	source: ParallelismAssessmentSource;
 }
 
 export interface WorkerAgentMetadata {
@@ -60,12 +78,33 @@ export interface OrchestratorConfig {
 	complexityThreshold: number;
 	/** Modelo específico para la descomposición (puede ser diferente al de los workers) */
 	decompositionModel?: string;
+	/**
+	 * Evaluación dinámica de paralelismo (Pillar 1): decide si una tarea se beneficia
+	 * de multi-agente. Default: true. false → usa solo shouldDecompose (legacy regex).
+	 */
+	enableDynamicAssessment?: boolean;
+	/** Modelo rápido para la evaluación LLM de paralelismo. Si no se setea, usa decompositionModel || baseConfig.model. */
+	assessmentModel?: string;
+	/** Timeout local para la evaluación LLM de paralelismo. Default: 6000ms. */
+	assessmentTimeoutMs: number;
+	/** Longitud mínima (chars) del mensaje para considerar evaluación LLM (mensajes cortos → regex). Default: 40. */
+	assessmentMinLengthForLlm: number;
 	/** Timeout local para descomponer antes de caer a single-agent. */
 	decompositionTimeoutMs: number;
 	/** Timeout local para síntesis antes de usar fallback determinista. */
 	synthesisTimeoutMs: number;
 	/** Presupuesto máximo de tokens para síntesis final multiagente. */
 	synthesisMaxTokens: number;
+	/**
+	 * C1 auto re-plan: tras una pasada, las subtareas fallidas se re-descomponen
+	 * en alternativas que se ejecutan en una segunda pasada dentro del MISMO run.
+	 * Default: true. Se desactiva si no hay KanbanPlanner configurado.
+	 */
+	enableAutoReplan?: boolean;
+	/** Máximo de pasadas de re-plan por run (cada una re-descompone los fallos). Default: 1. */
+	maxReplanPasses?: number;
+	/** Máximo de subtareas alternativas creadas por cada tarea fallida. Default: 3. */
+	maxReplacementsPerTask?: number;
 	/** Config for cross-review between agents */
 	crossReview?: Partial<CrossReviewConfig>;
 }
@@ -87,12 +126,45 @@ export type OrchestratorEvent =
 			progress: number;
 			toolName?: string;
 	  } & WorkerAgentMetadata)
-	| ({ type: "worker_done"; workerId: string; taskId: string; result: string } & WorkerAgentMetadata)
-	| ({ type: "worker_error"; workerId: string; taskId: string; error: string } & WorkerAgentMetadata)
-	| { type: "review_started"; data: { artifactCount: number; reviewersAssigned: number } }
-	| { type: "review_completed"; data: { taskId: string; reviewerName: string; verdict: string; issues: string[] } }
-	| { type: "correction_applied"; data: { taskId: string; correctorName: string; reason: string } }
+	| ({
+			type: "worker_done";
+			workerId: string;
+			taskId: string;
+			result: string;
+	  } & WorkerAgentMetadata)
+	| ({
+			type: "worker_error";
+			workerId: string;
+			taskId: string;
+			error: string;
+	  } & WorkerAgentMetadata)
+	| {
+			type: "review_started";
+			data: { artifactCount: number; reviewersAssigned: number };
+	  }
+	| {
+			type: "review_completed";
+			data: {
+				taskId: string;
+				reviewerName: string;
+				verdict: string;
+				issues: string[];
+			};
+	  }
+	| {
+			type: "correction_applied";
+			data: { taskId: string; correctorName: string; reason: string };
+	  }
 	| { type: "verification_phase"; data: CrossReviewResult }
+	| {
+			type: "replan";
+			data: {
+				pass: number;
+				failedTaskIds: string[];
+				replacementTaskIds: string[];
+				reason: string;
+			};
+	  }
 	| { type: "telemetry"; data: OrchestratorTelemetry }
 	| { type: "synthesis"; result: string };
 
@@ -115,6 +187,12 @@ const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 	decompositionTimeoutMs: 30_000,
 	synthesisTimeoutMs: 10_000,
 	synthesisMaxTokens: 1200,
+	enableDynamicAssessment: true,
+	assessmentTimeoutMs: 6_000,
+	assessmentMinLengthForLlm: 40,
+	enableAutoReplan: true,
+	maxReplanPasses: 1,
+	maxReplacementsPerTask: 3,
 };
 
 const SYNTHESIS_RESULT_CHARS_PER_TASK = 1500;
@@ -203,7 +281,8 @@ function eventAgentMetadata(
 	return {
 		...taskAgentMetadata(task),
 		agentId: stringMetadata(eventMetadata ?? {}, "agentId") ?? task?.agentId,
-		agentName: stringMetadata(eventMetadata ?? {}, "agentName") ?? task?.agentName,
+		agentName:
+			stringMetadata(eventMetadata ?? {}, "agentName") ?? task?.agentName,
 		armKey: stringMetadata(eventMetadata ?? {}, "armKey") ?? task?.armKey,
 		avatar: stringMetadata(eventMetadata ?? {}, "avatar") ?? task?.avatar,
 		color: stringMetadata(eventMetadata ?? {}, "color") ?? task?.color,
@@ -249,6 +328,15 @@ Reglas:
 6. toolScope es una recomendación de herramientas prioritarias para cada worker, NO una restricción. Todos los workers tendrán acceso completo a las herramientas registradas, MCPs, memoria, skills y contexto compartido disponibles en el sistema.
 7. Para subtareas de generación programática de imágenes/audio/video, incluye SIEMPRE execute_code en toolScope. execute_code auto-guarda archivos media generados si el worker los escribe en el directorio actual del script; save_media solo es necesario para payloads pequeños que ya vienen en base64 desde una API externa. Nunca conviertas archivos o URLs de media de Octopus a base64.
 8. Un máximo de MAX_WORKERS subtareas paralelas.`;
+
+const ASSESSMENT_PROMPT = `Decides si la petición del usuario se beneficia de ejecutarse con múltiples agentes en paralelo.
+
+Multi-agente conviene cuando hay 2 o MÁS subtareas INDEPENDIENTES que pueden avanzar a la vez (ej: investigar varias cosas distintas por separado, procesar múltiples archivos, generar y luego revisar, comparar opciones).
+
+NO conviene (single-agent) cuando es una sola pregunta o tarea coherente, una traducción, una edición puntual, un cálculo, una explicación, una conversación, o cualquier tarea donde dividir agregue overhead sin ganar velocidad real.
+
+Responde SOLO con un JSON válido (sin markdown, sin texto extra):
+{"parallelize": <true|false>, "reason": "<motivo breve, máx 15 palabras>"}`;
 
 export class OctopusOrchestrator {
 	private eventStream: EventStream;
@@ -308,28 +396,41 @@ export class OctopusOrchestrator {
 		if (!this.kanbanPlanner) {
 			return this.decompose(goal);
 		}
-		const plan = await this.kanbanPlanner.planFromGoal({
-			goal,
-			conversationId: options.conversationId,
-			rootAgentId: options.rootAgentId,
-		});
+		// Pillar 2: el planner no tiene timeout propio; lo envolvemos para evitar
+		// hangs silenciosos. Si falla/timed-out, caemos al decompose() legacy
+		// (que tiene su propio withTimeout + complexity gate) antes de single-agent.
+		let plan: PersistedKanbanPlan | undefined;
+		try {
+			plan = await withTimeout(
+				this.kanbanPlanner.planFromGoal({
+					goal,
+					conversationId: options.conversationId,
+					rootAgentId: options.rootAgentId,
+				}),
+				this.config.decompositionTimeoutMs,
+			);
+		} catch (err) {
+			console.warn(
+				`[Orchestrator] Kanban planner falló/timed-out (${err instanceof Error ? err.message : err}); fallback a decompose() legacy.`,
+			);
+			return this.decompose(goal);
+		}
+		if (!plan) return this.decompose(goal);
 
 		await this.requirementResolver?.evaluatePendingRequirements({
 			runId: plan.run.id,
 		});
 
-		const subtasks: SubTask[] = plan.tasks.map((taskRecord) => {
+		const subtasks: SubTask[] = plan.tasks.flatMap((taskRecord) => {
 			const taskMeta = parseJsonRecord(taskRecord.metadata);
 			const planTaskKey =
 				typeof taskMeta.key === "string" ? taskMeta.key : undefined;
 			const armKey =
-				typeof taskRecord.arm_key === "string"
-					? taskRecord.arm_key
-					: undefined;
+				typeof taskRecord.arm_key === "string" ? taskRecord.arm_key : undefined;
 			const arm = armKey
 				? getOctopusArmProfile(armKey)
 				: routeTaskToArm({ description: taskRecord.title });
-				if (!arm) return null as any;
+			if (!arm) return [];
 			return {
 				id: planTaskKey ?? taskRecord.id,
 				description: taskRecord.description ?? taskRecord.title,
@@ -344,7 +445,9 @@ export class OctopusOrchestrator {
 				color: arm.color,
 				acceptanceCriteria: taskRecord.acceptance_criteria
 					? parseJsonStringArray(taskRecord.acceptance_criteria)
-					: ["La subtarea debe reportar evidencia concreta de avance o bloqueo."],
+					: [
+							"La subtarea debe reportar evidencia concreta de avance o bloqueo.",
+						],
 				status: "pending" as const,
 			};
 		});
@@ -354,10 +457,140 @@ export class OctopusOrchestrator {
 			subtasks,
 			executionPlan: subtasks.length > 1 ? "parallel" : "sequential",
 			reasoning:
-				plan.plan.reasoning ??
-				"Kanban Swarm decomposition via KanbanPlanner.",
+				plan.plan.reasoning ?? "Kanban Swarm decomposition via KanbanPlanner.",
 			kanbanPlanRunId: plan.run.id,
 		};
+	}
+
+	/**
+	 * Evaluación DINÁMICA de paralelismo (Pillar 1). Reemplaza a shouldDecompose
+	 * como puerta del multi-agente automático:
+	 *  - Tier 1 OBVIOUS-NO (regex, sin LLM): mensajes triviales/no-paralelizables.
+	 *  - Tier 2 OBVIOUS-YES: shouldDecompose (regex explícito existente).
+	 *  - Tier 3 LLM: medio incierto, llamada rápida con timeout; fallback seguro a NO.
+	 */
+	async assessParallelism(message: string): Promise<ParallelismAssessment> {
+		if (this.config.enableDynamicAssessment === false) {
+			const yes = await this.shouldDecompose(message);
+			return {
+				decompose: yes,
+				reason: yes ? "señal explícita" : "sin señal explícita",
+				source: yes ? "regex-yes" : "regex-no",
+			};
+		}
+
+		if (this.isObviousSingleAgent(message)) {
+			return {
+				decompose: false,
+				reason: "trivial/no-paralelizable",
+				source: "regex-no",
+			};
+		}
+
+		if (await this.shouldDecompose(message)) {
+			return {
+				decompose: true,
+				reason: "señal explícita de paralelismo",
+				source: "regex-yes",
+			};
+		}
+
+		if (message.trim().length < this.config.assessmentMinLengthForLlm) {
+			return {
+				decompose: false,
+				reason: "mensaje demasiado corto para evaluar",
+				source: "regex-no",
+			};
+		}
+
+		return this.assessWithLlm(message);
+	}
+
+	private async assessWithLlm(message: string): Promise<ParallelismAssessment> {
+		const request: LLMRequest = {
+			model:
+				this.config.assessmentModel ||
+				this.config.decompositionModel ||
+				this.baseConfig.model ||
+				"default",
+			messages: [
+				{ role: "system", content: ASSESSMENT_PROMPT },
+				{ role: "user", content: message },
+			],
+			maxTokens: 120,
+			temperature: 0,
+		};
+		try {
+			const response = await withTimeout(
+				this.llmRouter.chat(request),
+				this.config.assessmentTimeoutMs,
+			);
+			const match = (response.content || "").match(/\{[\s\S]*\}/);
+			if (!match) {
+				return {
+					decompose: false,
+					reason: "respuesta no-JSON",
+					source: "llm-no",
+				};
+			}
+			const parsed = JSON.parse(match[0]) as {
+				parallelize?: boolean;
+				reason?: string;
+			};
+			const yes = parsed.parallelize === true;
+			return {
+				decompose: yes,
+				reason: parsed.reason ?? "evaluación LLM",
+				source: yes ? "llm-yes" : "llm-no",
+			};
+		} catch {
+			// Timeout o error: NUNCA bloquear la respuesta. Fallback seguro a single-agent.
+			return {
+				decompose: false,
+				reason: "evaluación LLM falló o timed-out",
+				source: "assessment-timeout",
+			};
+		}
+	}
+
+	/**
+	 * Tier 1: mensajes obviamente single-agent (sin gastar LLM). Intencionalmente
+	 * conservador: solo captura triviales claros para no bloquear paralelismo real.
+	 */
+	private isObviousSingleAgent(message: string): boolean {
+		const m = message.trim();
+		if (m.length < 12) return true;
+		if (
+			/^(hola|buenas|hey|hi|hello|gracias|ok|vale|adios|adiós|chao|qu[eé]\s+tal|c[oó]mo\s+est[aá]s|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches)\b/i.test(
+				m,
+			)
+		)
+			return true;
+		// Pregunta/instrucción factual única y corta: "¿qué es X?", "quién fue X", "define X", "explica X"
+		if (
+			/^(?:qu[eé]\s+(?:es|son|significa|fue|hace|sabes)|qui[eé]n\s+(?:es|fue|sabe)|define|explica|calcula|cu[aá]l\s+es|d[oó]nde\s+(?:est[aá]|queda))\b/i.test(
+				m,
+			) &&
+			m.length < 200
+		)
+			return true;
+		// Traducción corta única (sin más acciones encadenadas)
+		if (
+			/^traduc[eia]\b[\s\S]{0,160}$/i.test(m) &&
+			!/\b(y\s+(?:analiza|resume|investiga|genera|compara)|despu[eé]s\s+(?:analiza|resume))\b/i.test(
+				m,
+			)
+		)
+			return true;
+		// Comando corto de una sola acción sobre un único artefacto
+		if (
+			/^(renombra|elimina|crea|abre|lee|mu[eé]strame|busca)\s+(?:el|la|los|las|un|una)\s+\S+/i.test(
+				m,
+			) &&
+			m.length < 120
+		)
+			return true;
+		return false;
 	}
 
 	/**
@@ -654,9 +887,10 @@ export class OctopusOrchestrator {
 					? metadata.role
 					: task.arm_key || "worker",
 			agentId: task.assigned_agent_id ?? undefined,
-			agentName: stringMetadata(metadata, "agentName") ?? armProfile?.name ?? (task.title.includes(":")
-				? task.title.split(":")[0]
-				: undefined),
+			agentName:
+				stringMetadata(metadata, "agentName") ??
+				armProfile?.name ??
+				(task.title.includes(":") ? task.title.split(":")[0] : undefined),
 			armKey: task.arm_key ?? undefined,
 			avatar: stringMetadata(metadata, "avatar") ?? armProfile?.avatar,
 			color: stringMetadata(metadata, "color") ?? armProfile?.color,
@@ -782,10 +1016,7 @@ export class OctopusOrchestrator {
 			let orchEvent: OrchestratorEvent | null = null;
 			const workflowTaskId = workflowTaskBySubtask.get(event.taskId);
 			const sourceTask = taskById.get(event.taskId);
-			const agentMetadata = eventAgentMetadata(
-				sourceTask,
-				event.data.metadata,
-			);
+			const agentMetadata = eventAgentMetadata(sourceTask, event.data.metadata);
 
 			void this.workflowManager
 				?.recordEvent({
@@ -1033,7 +1264,8 @@ export class OctopusOrchestrator {
 				);
 				for (const task of existingTasks) {
 					const metadata = parseJsonRecord(task.metadata);
-					const key = typeof metadata.key === "string" ? metadata.key : undefined;
+					const key =
+						typeof metadata.key === "string" ? metadata.key : undefined;
 					workflowTaskBySubtask.set(task.id, task.id);
 					if (key) workflowTaskBySubtask.set(key, task.id);
 				}
@@ -1073,14 +1305,14 @@ export class OctopusOrchestrator {
 					kanbanPlanRunId: decomposition.kanbanPlanRunId,
 					reusedKanbanRun: usingExistingKanbanRun,
 					subtasks: decomposition.subtasks.map((task) => ({
-							id: task.id,
-							workflowTaskId: workflowTaskBySubtask.get(task.id),
-							armKey: task.armKey,
-							agentId: task.agentId,
-							agentName: task.agentName,
-							avatar: task.avatar,
-							color: task.color,
-						})),
+						id: task.id,
+						workflowTaskId: workflowTaskBySubtask.get(task.id),
+						armKey: task.armKey,
+						agentId: task.agentId,
+						agentName: task.agentName,
+						avatar: task.avatar,
+						color: task.color,
+					})),
 				},
 			});
 		}
@@ -1103,10 +1335,7 @@ export class OctopusOrchestrator {
 			let orchEvent: OrchestratorEvent | null = null;
 			const workflowTaskId = workflowTaskBySubtask.get(event.taskId);
 			const sourceTask = taskById.get(event.taskId);
-			const agentMetadata = eventAgentMetadata(
-				sourceTask,
-				event.data.metadata,
-			);
+			const agentMetadata = eventAgentMetadata(sourceTask, event.data.metadata);
 			if (workflowRun && this.workflowManager) {
 				void this.workflowManager
 					.recordEvent({
@@ -1242,89 +1471,146 @@ export class OctopusOrchestrator {
 			}
 		});
 
-		// Lanzar ejecución paralela (no-blocking)
-		const executionPromise = this.workerPool.executeAll(
-			decomposition.subtasks,
-			{ ...this.config.workerConfig, ...workerConfig, runId },
+		// === C1: bucle multi-pasada con auto re-plan ===
+		// activeSubtasks: las que se ejecutan en la pasada actual.
+		// allRunSubtasks: acumula TODAS (originales + sustitutas) para síntesis/estado.
+		const maxReplanPasses = Math.max(0, this.config.maxReplanPasses ?? 1);
+		const maxReplacementsPerTask = Math.max(
+			1,
+			this.config.maxReplacementsPerTask ?? 3,
 		);
+		const autoReplanEnabled =
+			(this.config.enableAutoReplan ?? true) &&
+			Boolean(this.kanbanPlanner) &&
+			maxReplanPasses > 0;
+
+		let activeSubtasks: SubTask[] = decomposition.subtasks;
+		const allRunSubtasks: SubTask[] = [...decomposition.subtasks];
+		const accumulatedResults = new Map<string, string>();
+		const replannedSourceIds = new Set<string>();
 		const executionStartedAt = Date.now();
+		let executionMs = 0;
+		let pass = 0;
 
-		// Emitir eventos mientras se ejecutan los workers
 		try {
+			// Bucle de pasadas: ejecutar -> detectar fallos -> re-planificar -> repetir.
 			while (true) {
-				if (workerConfig.signal?.aborted) {
-					this.cancel();
-					break;
-				}
-				// Drenar la cola de eventos
-				while (eventQueue.length > 0) {
-					const queuedEvent = eventQueue.shift();
-					if (queuedEvent) yield queuedEvent;
-				}
+				// Lanzar ejecución paralela de la pasada actual (no-blocking)
+				const executionPromise = this.workerPool.executeAll(activeSubtasks, {
+					...this.config.workerConfig,
+					...workerConfig,
+					runId,
+				});
+				const passStartedAt = Date.now();
 
-				// Verificar si terminó
-				const taskIds = decomposition.subtasks.map((t) => t.id);
-				if (this.eventStream.areAllTasksComplete(taskIds, runId)) {
-					break;
-				}
+				// Emitir eventos mientras se ejecutan los workers de esta pasada
+				while (true) {
+					if (workerConfig.signal?.aborted) {
+						this.cancel();
+						break;
+					}
+					// Drenar la cola de eventos
+					while (eventQueue.length > 0) {
+						const queuedEvent = eventQueue.shift();
+						if (queuedEvent) yield queuedEvent;
+					}
 
-				// Esperar al siguiente evento con timeout
-				await Promise.race([
-					new Promise<void>((resolve) => {
-						resolveWaiting = resolve;
-					}),
-					new Promise<void>((resolve) => setTimeout(resolve, 1000)),
-				]);
+					// Verificar si terminaron las tareas de esta pasada
+					if (
+						this.eventStream.areAllTasksComplete(
+							activeSubtasks.map((t) => t.id),
+							runId,
+						)
+					) {
+						break;
+					}
+
+					// Esperar al siguiente evento con timeout
+					await Promise.race([
+						new Promise<void>((resolve) => {
+							resolveWaiting = resolve;
+						}),
+						new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+					]);
+				}
+				resolveWaiting = null;
+
+				// Si fue cancelado, salir a síntesis con lo acumulado.
+				if (workerConfig.signal?.aborted) break;
+
+				const passResults = await executionPromise;
+				executionMs += Date.now() - passStartedAt;
+				for (const [taskId, result] of passResults)
+					accumulatedResults.set(taskId, result);
+
+				// --- C1: detectar tareas fallidas (no canceladas) y re-planificar ---
+				if (!autoReplanEnabled || pass >= maxReplanPasses) break;
+				const failedTasks = activeSubtasks.filter(
+					(task) =>
+						task.status === "failed" && !replannedSourceIds.has(task.id),
+				);
+				if (failedTasks.length === 0) break;
+
+				const replanOutcome = await this.replanFailedTasks({
+					failedTasks,
+					originalGoal: decomposition.originalGoal,
+					results: accumulatedResults,
+					workflowRun,
+					workflowTaskBySubtask,
+					taskById,
+					runId,
+					maxReplacementsPerTask,
+					pass,
+				});
+				if (replanOutcome.replacements.length === 0) break;
+
+				for (const failedTask of failedTasks)
+					replannedSourceIds.add(failedTask.id);
+				allRunSubtasks.push(...replanOutcome.replacements);
+				yield {
+					type: "replan",
+					data: {
+						pass: pass + 1,
+						failedTaskIds: failedTasks.map((task) => task.id),
+						replacementTaskIds: replanOutcome.replacements.map(
+							(task) => task.id,
+						),
+						reason: replanOutcome.reason,
+					},
+				};
+				activeSubtasks = replanOutcome.replacements;
+				pass++;
 			}
 
-			// Esperar a que termine la ejecución
-			const results = await executionPromise;
-			const executionMs = Date.now() - executionStartedAt;
+			// Conjunto "efectivo" para estado/síntesis: una tarea fuente
+			// re-planificada se sustituye por sus reemplazos (recuperación).
+			const effectiveSubtasks = this.buildEffectiveSubtasks(
+				allRunSubtasks,
+				replannedSourceIds,
+			);
 
-			// Sintetizar resultados
+			// Sintetizar resultados sobre el conjunto efectivo
 			const synthesisStartedAt = Date.now();
-			const synthesis = await this.synthesize(decomposition, results);
+			const synthesis = await this.synthesize(
+				{ ...decomposition, subtasks: effectiveSubtasks },
+				accumulatedResults,
+			);
 			const synthesisMs = Date.now() - synthesisStartedAt;
-			const finalEvents = this.eventStream.query({ runId });
-			const terminalByTask = new Map<string, string>();
-			for (const event of finalEvents) {
-				if (
-					event.type === "result" ||
-					event.type === "error" ||
-					event.type === "cancelled" ||
-					event.type === "blocked"
-				) {
-					terminalByTask.set(event.taskId, event.type);
-				}
-			}
-			const succeeded = [...terminalByTask.values()].filter(
-				(type) => type === "result",
-			).length;
-			const failed = [...terminalByTask.values()].filter(
-				(type) => type === "error" || type === "blocked",
-			).length;
-			const cancelled = [...terminalByTask.values()].filter(
-				(type) => type === "cancelled",
-			).length;
+			const final = this.getFinalStatusFromSubtasks(effectiveSubtasks);
 			if (workflowRun && this.workflowManager) {
-				const finalStatus =
-					failed > 0 || cancelled > 0
-						? succeeded > 0
-							? "partial"
-							: "failed"
-						: "done";
 				await this.workflowManager.updateRunStatus(
 					workflowRun.id,
-					finalStatus,
+					final.status,
 					{
 						currentPhase: "synthesis",
 						metadata: {
 							orchestratorRunId: runId,
 							executionMs,
 							synthesisMs,
-							succeeded,
-							failed,
-							cancelled,
+							replanPasses: pass,
+							succeeded: final.succeeded,
+							failed: final.failed,
+							cancelled: final.cancelled,
 						},
 					},
 				);
@@ -1333,7 +1619,12 @@ export class OctopusOrchestrator {
 					agentId: this.baseConfig.id,
 					eventType: "synthesis",
 					message: synthesis.slice(0, 4000),
-					metadata: { succeeded, failed, cancelled },
+					metadata: {
+						succeeded: final.succeeded,
+						failed: final.failed,
+						cancelled: final.cancelled,
+						replanPasses: pass,
+					},
 				});
 			}
 			yield {
@@ -1344,10 +1635,10 @@ export class OctopusOrchestrator {
 					totalMs: Date.now() - startedAt,
 					executionMs,
 					synthesisMs,
-					workerCount: decomposition.subtasks.length,
-					succeeded,
-					failed,
-					cancelled,
+					workerCount: allRunSubtasks.length,
+					succeeded: final.succeeded,
+					failed: final.failed,
+					cancelled: final.cancelled,
 				},
 			};
 			yield { type: "synthesis", result: synthesis };
@@ -1355,6 +1646,161 @@ export class OctopusOrchestrator {
 			unsubscribe();
 			this.eventStream.prune();
 		}
+	}
+
+	/**
+	 * C1: construye el conjunto "efectivo" de subtareas para estado/síntesis.
+	 * Una tarea fuente re-planificada se sustituye por sus reemplazos (que ya
+	 * están en allRunSubtasks), así una tarea recuperada vía re-plan cuenta
+	 * como éxito en vez de arrastrar el fallo original.
+	 */
+	private buildEffectiveSubtasks(
+		allRunSubtasks: SubTask[],
+		replannedSourceIds: Set<string>,
+	): SubTask[] {
+		return allRunSubtasks.filter((task) => !replannedSourceIds.has(task.id));
+	}
+
+	/**
+	 * C1: re-planifica cada tarea fallida en subtareas alternativas dentro del
+	 * MISMO run (vía createTask), listas para una segunda pasada de executeAll.
+	 * Actualiza los mapas de tracking de eventos para que la suscripción active
+	 * mapee correctamente los eventos de los reemplazos.
+	 */
+	private async replanFailedTasks(input: {
+		failedTasks: SubTask[];
+		originalGoal: string;
+		results: Map<string, string>;
+		workflowRun: WorkflowRunRecord | null;
+		workflowTaskBySubtask: Map<string, string>;
+		taskById: Map<string, SubTask>;
+		runId: string;
+		maxReplacementsPerTask: number;
+		pass: number;
+	}): Promise<{ replacements: SubTask[]; reason: string }> {
+		const replacements: SubTask[] = [];
+		if (!this.kanbanPlanner) {
+			return { replacements, reason: "sin planner configurado" };
+		}
+
+		for (const failedTask of input.failedTasks) {
+			const failureReason =
+				input.results.get(failedTask.id) || "error desconocido";
+			const replanGoal = [
+				`Objetivo global del usuario: ${input.originalGoal}`,
+				`Tarea original que fallo: ${failedTask.description}`,
+				`Error reportado: ${failureReason}`,
+				"",
+				"Descompone ESTA tarea fallida en 1 a N subtareas alternativas, mas simples y verificables, que logren el mismo objetivo evitando el error reportado. No repitas el enfoque que fallo.",
+			].join("\n");
+
+			let specs: KanbanPlanTaskSpec[];
+			try {
+				specs = await this.kanbanPlanner.proposeTasks({ goal: replanGoal });
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				console.error(
+					`[Orchestrator] C1 re-plan fallo para ${failedTask.id}: ${reason}`,
+				);
+				continue;
+			}
+			const capped = specs.slice(0, input.maxReplacementsPerTask);
+
+			for (let index = 0; index < capped.length; index++) {
+				const spec = capped[index];
+				if (!spec) continue;
+				const arm =
+					(spec.armKey ? getOctopusArmProfile(spec.armKey) : undefined) ??
+					routeTaskToArm({
+						description: spec.description ?? spec.title,
+					});
+				if (!arm) continue;
+
+				const replacementId = `replan_${failedTask.id}_${input.pass}_${index}`;
+				const description = [
+					spec.description ?? spec.title,
+					`[Contexto: esta subtarea reemplaza a la tarea fallida "${failedTask.description}" tras el error: ${failureReason.slice(0, 300)}]`,
+				].join("\n\n");
+				const replacement: SubTask = {
+					id: replacementId,
+					description,
+					role: arm.role,
+					toolScope: [],
+					priority: failedTask.priority,
+					model: spec.model ?? failedTask.model,
+					agentId: arm.agentId,
+					agentName: arm.name,
+					armKey: arm.key,
+					avatar: arm.avatar,
+					color: arm.color,
+					acceptanceCriteria:
+						spec.acceptanceCriteria && spec.acceptanceCriteria.length > 0
+							? spec.acceptanceCriteria
+							: (failedTask.acceptanceCriteria ?? [
+									"La subtarea debe reportar evidencia concreta de avance o bloqueo.",
+								]),
+					status: "pending",
+				};
+
+				// Persistir en el MISMO run para observabilidad/reanudacion.
+				if (input.workflowRun && this.workflowManager) {
+					const parentTaskId = input.workflowTaskBySubtask.get(failedTask.id);
+					const workflowTask = await this.workflowManager.createTask({
+						runId: input.workflowRun.id,
+						parentTaskId,
+						assignedAgentId: replacement.agentId,
+						armKey: replacement.armKey,
+						title:
+							`${replacement.agentName ?? replacement.role}: ${spec.title}`.slice(
+								0,
+								120,
+							),
+						description: replacement.description,
+						priority: replacement.priority,
+						acceptanceCriteria: replacement.acceptanceCriteria,
+						model: replacement.model,
+						metadata: {
+							sourceTaskId: replacementId,
+							replanOf: failedTask.id,
+							replanPass: input.pass,
+							role: replacement.role,
+							agentId: replacement.agentId,
+							agentName: replacement.agentName,
+							armKey: replacement.armKey,
+							avatar: replacement.avatar,
+							color: replacement.color,
+							failureReason: failureReason.slice(0, 500),
+						},
+					});
+					input.workflowTaskBySubtask.set(replacementId, workflowTask.id);
+				}
+				input.taskById.set(replacementId, replacement);
+				replacements.push(replacement);
+			}
+		}
+
+		if (input.workflowRun && this.workflowManager && replacements.length > 0) {
+			await this.workflowManager.recordEvent({
+				runId: input.workflowRun.id,
+				agentId: this.baseConfig.id,
+				eventType: "replan_scheduled",
+				message: `C1: re-planificando ${input.failedTasks.length} tarea(s) fallida(s) en ${replacements.length} sustituta(s) (pasada ${input.pass + 1}).`,
+				metadata: {
+					orchestratorRunId: input.runId,
+					failedTaskIds: input.failedTasks.map((task) => task.id),
+					replacementTaskIds: replacements.map((task) => task.id),
+					pass: input.pass + 1,
+				},
+			});
+		}
+
+		return {
+			replacements,
+			reason:
+				replacements.length > 0
+					? `${input.failedTasks.length} tarea(s) fallida(s) re-planificada(s).`
+					: "el planner no devolvio alternativas",
+		};
 	}
 
 	/**
@@ -1516,8 +1962,7 @@ export class OctopusOrchestrator {
 		if (artifacts.length === 0) return;
 
 		// Phase 3: Assign peer reviewers
-		const assignments =
-			this.crossReviewEngine.assignReviewers(artifacts);
+		const assignments = this.crossReviewEngine.assignReviewers(artifacts);
 		yield {
 			type: "review_started",
 			data: {
@@ -1527,12 +1972,11 @@ export class OctopusOrchestrator {
 		};
 
 		// Phase 4-6: Run cross-review cycle
-		const reviewResult =
-			await this.crossReviewEngine.runCrossReview(
-				artifacts,
-				decomposition.originalGoal,
-				workerConfig.signal,
-			);
+		const reviewResult = await this.crossReviewEngine.runCrossReview(
+			artifacts,
+			decomposition.originalGoal,
+			workerConfig.signal,
+		);
 
 		// Yield review events
 		for (const artifact of this.coordinationBus.getAllArtifacts()) {
@@ -1572,10 +2016,7 @@ export class OctopusOrchestrator {
 			}
 		}
 
-		const synthesis = await this.synthesize(
-			decomposition,
-			verifiedResults,
-		);
+		const synthesis = await this.synthesize(decomposition, verifiedResults);
 		yield {
 			type: "telemetry",
 			data: {

@@ -1,5 +1,6 @@
 import type React from "react";
 import { Suspense, lazy, useEffect, useState } from "react";
+import { AuthReloginBanner } from "../components/AuthReloginBanner.js";
 import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
 import { ToastContainer } from "../components/ui/Toast.js";
 import { publicAsset } from "../utils/assets.js";
@@ -287,6 +288,7 @@ export const App: React.FC = () => {
 
 	return (
 		<div className={`app-shell${isDesktop ? " is-electron" : ""}`}>
+			<AuthReloginBanner />
 			{isDesktop && (
 				<div className="app-electron-titlebar">
 					<div className="app-electron-titlebar-drag" />

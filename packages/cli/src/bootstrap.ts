@@ -40,6 +40,7 @@ import {
 	MemoryOrchestrator,
 	MemoryRetentionScheduler,
 	MemoryRetrieval,
+	PdfReader,
 	PluginMarketplace,
 	PluginRegistry,
 	RequirementResolver,
@@ -56,21 +57,23 @@ import {
 	TeamBlackboard,
 	TokenCounter,
 	ToolExecutor,
-	ToolRegistry,
 	ToolHealthManager,
-	PdfReader,
+	ToolRegistry,
+	UsageStore,
 	UserProfileManager,
 	WorkflowManager,
 	WorkflowScheduler,
+	buildWebSelfReviewSkill,
+	coerceReasoningEffort,
 	createAgentCommsTools,
 	createAgentSpawnTools,
 	createAutomationTools,
+	createCodexImageTools,
 	createConfiguredKnowledgeExtractor,
 	createDatabaseAdapter,
 	createFileSystemTools,
 	createKanbanCardTools,
 	createLogger,
-	createCodexImageTools,
 	createMediaTools,
 	createSandboxTools,
 	createShellTool,
@@ -80,14 +83,11 @@ import {
 	createWorkflowTools,
 	expandTildePath,
 	generateEncryptionKey,
-	getZaiMCPConfigs,
-	UsageStore,
-	getModelCapabilitiesFromRef,
-	coerceReasoningEffort,
-	handleProviderResponseHeaders,
 	getCachedQuota,
+	getModelCapabilitiesFromRef,
+	getZaiMCPConfigs,
+	handleProviderResponseHeaders,
 	refreshCodexToken,
-	buildWebSelfReviewSkill,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
@@ -100,6 +100,7 @@ import type {
 	ProviderConfig,
 	ToolDefinition,
 } from "@octopus-ai/core";
+import { acquireFileLock } from "./auth/file-lock.js";
 
 export interface OctopusSystem {
 	config: OctopusConfig;
@@ -1012,12 +1013,32 @@ export async function bootstrap(options?: {
 	// takes over.
 	router.setTokenRefreshHandler(async (provider) => {
 		if (provider !== "openai") return undefined;
+		// Cross-process lock: serialize refreshes so the server + dispatcher
+		// (or any concurrent Octopus process) never refresh the same token at
+		// once — that triggers ChatGPT's strict rotation/reuse detection and
+		// revokes the whole session.
+		const lockPath = join(homedir(), ".octopus", "data", ".codex-refresh.lock");
+		const release = await acquireFileLock(lockPath).catch(() => null);
 		try {
 			const loader = new ConfigLoader();
 			const cfg = loader.load();
 			const openai = cfg.ai.providers.openai as Record<string, unknown>;
 			if (openai.authMode !== "codex" || !openai.oauthRefreshToken) {
 				return undefined;
+			}
+			// Skip-if-fresh: another process may have just refreshed while we
+			// waited for the lock. If the token is still valid, reuse it without
+			// hitting the token endpoint (avoids a redundant, risky refresh).
+			const expiresAt =
+				typeof openai.oauthExpiresAt === "number"
+					? openai.oauthExpiresAt
+					: undefined;
+			if (expiresAt && expiresAt > Date.now() + 60_000) {
+				router.clearAuthStatus("openai");
+				return {
+					accessToken: String(openai.accessToken ?? ""),
+					expiresAt,
+				};
 			}
 			const refreshed = await refreshCodexToken(
 				String(openai.oauthRefreshToken),
@@ -1030,13 +1051,26 @@ export async function bootstrap(options?: {
 				openai.oauthExpiresAt = refreshed.expiresAt;
 			}
 			loader.save(cfg);
-			console.log("[codex-auth] access_token refreshed after 401 and persisted");
-			return refreshed.accessToken;
+			router.clearAuthStatus("openai");
+			console.log("[codex-auth] access_token refreshed and persisted");
+			return {
+				accessToken: refreshed.accessToken,
+				expiresAt: refreshed.expiresAt,
+			};
 		} catch (err) {
 			console.error(
 				`[codex-auth] token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
 			);
+			// Refresh token revoked/expired — surface it to the UI instead of
+			// failing silently through the fallback.
+			router.markAuthStatus("openai", {
+				requiresRelogin: true,
+				reason:
+					"Tu sesión de ChatGPT/OpenAI caducó (refresh token inválido). Vuelve a iniciar sesión.",
+			});
 			return undefined;
+		} finally {
+			if (release) await release();
 		}
 	});
 
@@ -2428,6 +2462,12 @@ Always be concise, helpful, and thorough.`,
 		maxWorkers: config.orchestration?.maxArms ?? 8,
 		getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
 		complexityThreshold: 5,
+		enableDynamicAssessment:
+			config.orchestration?.enableDynamicAssessment ?? true,
+		assessmentModel: config.orchestration?.assessmentModel,
+		assessmentTimeoutMs: config.orchestration?.assessmentTimeoutMs ?? 6_000,
+		assessmentMinLengthForLlm:
+			config.orchestration?.assessmentMinLengthForLlm ?? 40,
 		decompositionTimeoutMs:
 			config.orchestration?.decompositionTimeoutMs ?? 30_000,
 		synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,
@@ -2569,6 +2609,12 @@ Always be concise, helpful, and thorough.`,
 			maxWorkers: config.orchestration?.maxArms ?? 8,
 			getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
 			complexityThreshold: 5,
+			enableDynamicAssessment:
+				config.orchestration?.enableDynamicAssessment ?? true,
+			assessmentModel: config.orchestration?.assessmentModel,
+			assessmentTimeoutMs: config.orchestration?.assessmentTimeoutMs ?? 6_000,
+			assessmentMinLengthForLlm:
+				config.orchestration?.assessmentMinLengthForLlm ?? 40,
 			decompositionTimeoutMs:
 				config.orchestration?.decompositionTimeoutMs ?? 30_000,
 			synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,

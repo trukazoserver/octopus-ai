@@ -329,7 +329,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 				"veo-video-generator": 600000,
 				// Kanban swarm planning decomposes the goal into cards via the LLM,
 				// which routinely exceeds the 45s default for complex goals.
-				"kanban_create_plan_from_goal": 180000,
+				kanban_create_plan_from_goal: 180000,
 			},
 		},
 		rateLimits: {
@@ -360,6 +360,9 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		synthesisMaxTokens: 1200,
 		maxStagnantAttempts: 5,
 		maxSpawnDepth: 2,
+		enableDynamicAssessment: true,
+		assessmentTimeoutMs: 6000,
+		assessmentMinLengthForLlm: 40,
 	},
 	mcp: {
 		servers: {},

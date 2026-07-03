@@ -109,9 +109,21 @@ export class CodexProvider extends BaseLLMProvider {
 	 * retries the request. If unset or refresh fails, the 401 propagates so the
 	 * router's fallback can take over. Kept as a callback (not a direct import
 	 * of the auth module) to avoid a circular provider↔auth dependency.
+	 * Returns the new access token plus its expiry (epoch ms) so the provider can
+	 * refresh PROACTIVELY before the next request expires.
 	 */
-	onTokenRefresh?: () => Promise<string>;
-	private inflightRefresh?: Promise<string>;
+	onTokenRefresh?: () => Promise<{ accessToken: string; expiresAt?: number }>;
+	private inflightRefresh?: Promise<{
+		accessToken: string;
+		expiresAt?: number;
+	}>;
+	/** Refresh proactively when the access token is within this margin of expiry. */
+	private readonly refreshMarginMs =
+		Number.parseInt(
+			process.env.OCTOPUS_CODEX_REFRESH_MARGIN_MS ?? "300000",
+			10,
+		) || 300_000; // 5 min
+	private oauthExpiresAt?: number;
 
 	constructor(config: ProviderConfig) {
 		super(config);
@@ -123,6 +135,7 @@ export class CodexProvider extends BaseLLMProvider {
 		);
 		this.accessToken = config.accessToken ?? "";
 		this.accountId = config.accountId;
+		this.oauthExpiresAt = config.oauthExpiresAt;
 	}
 
 	async isAvailable(): Promise<boolean> {
@@ -147,7 +160,10 @@ export class CodexProvider extends BaseLLMProvider {
 	 * Updates this.accessToken immediately so the next call uses it even before
 	 * persistence completes. Throws if no hook is wired or the refresh fails.
 	 */
-	private async refreshOnce(): Promise<string> {
+	private async refreshOnce(): Promise<{
+		accessToken: string;
+		expiresAt?: number;
+	}> {
 		if (this.inflightRefresh) return this.inflightRefresh;
 		const refresh = this.onTokenRefresh;
 		if (!refresh) {
@@ -158,7 +174,8 @@ export class CodexProvider extends BaseLLMProvider {
 		this.inflightRefresh = (async () => {
 			try {
 				const fresh = await refresh();
-				this.accessToken = fresh;
+				this.accessToken = fresh.accessToken;
+				if (fresh.expiresAt) this.oauthExpiresAt = fresh.expiresAt;
 				return fresh;
 			} finally {
 				this.inflightRefresh = undefined;
@@ -168,13 +185,38 @@ export class CodexProvider extends BaseLLMProvider {
 	}
 
 	/**
-	 * POST to the Codex backend. On a 401 (expired ChatGPT access_token), if a
-	 * refresh hook is wired, refresh once and retry the same request. If refresh
-	 * fails or there's no hook, return the original 401 response so the caller
-	 * surfaces a normal auth error (→ router fallback / runtime terminal auth).
+	 * Proactive refresh: if the access token is within `refreshMarginMs` of
+	 * expiry (or already expired), refresh it BEFORE the request so we avoid a
+	 * 401 mid-run. Errors are swallowed — on failure the request proceeds and
+	 * the existing reactive-401 path in codexFetch handles it. No-op if no
+	 * expiry is known or no refresh hook is wired.
+	 */
+	private async ensureFreshToken(): Promise<void> {
+		if (!this.onTokenRefresh || !this.oauthExpiresAt) return;
+		if (Date.now() < this.oauthExpiresAt - this.refreshMarginMs) return;
+		try {
+			await this.refreshOnce();
+		} catch {
+			// swallow — reactive 401 path will handle a real failure
+		}
+	}
+
+	/**
+	 * POST to the Codex backend. Refreshes proactively before the request when
+	 * the token is near expiry, and reactively on a 401 (retry once). On refresh
+	 * failure / no hook, returns the original 401 so the caller surfaces a normal
+	 * auth error (→ router fallback / runtime terminal auth).
 	 */
 	private async codexFetch(url: string, init: RequestInit): Promise<Response> {
-		let response = await fetch(url, init);
+		await this.ensureFreshToken();
+		// ensureFreshToken may have rotated this.accessToken; re-apply it so the
+		// request carries the fresh token even though `init.headers` was built
+		// before the proactive refresh.
+		const refreshedHeaders = {
+			...(init.headers as Record<string, string>),
+			Authorization: `Bearer ${this.accessToken.replace(/^Bearer\s+/i, "")}`,
+		};
+		let response = await fetch(url, { ...init, headers: refreshedHeaders });
 		if (response.status === 401 && this.onTokenRefresh) {
 			try {
 				// refreshOnce dedupes concurrent callers on a shared in-flight
@@ -184,7 +226,7 @@ export class CodexProvider extends BaseLLMProvider {
 					...init,
 					headers: {
 						...(init.headers as Record<string, string>),
-						Authorization: `Bearer ${fresh.replace(/^Bearer\s+/i, "")}`,
+						Authorization: `Bearer ${fresh.accessToken.replace(/^Bearer\s+/i, "")}`,
 					},
 				});
 			} catch {
