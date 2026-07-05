@@ -15,6 +15,10 @@ import type { ToolHealthManager } from "./tool-health-manager.js";
 const DEFAULT_TOOL_TIMEOUT_MS = 45_000;
 const LONG_RUNNING_TOOL_TIMEOUT_MS = 90_000;
 const DELEGATE_TASK_TIMEOUT_MS = 300_000;
+// orchestrate_parallel runs a full swarm (decompose + N workers + synthesize +
+// C1 recovery); with slow models that can take several minutes, so it gets a
+// generous budget (mirrors the default workerTimeoutMs).
+const ORCHESTRATE_PARALLEL_TIMEOUT_MS = 600_000;
 const MEDIA_TOOL_TIMEOUT_MS = 300_000;
 const CAPTCHA_TOOL_TIMEOUT_MS = 150_000;
 const SCRAPING_TOOL_TIMEOUT_MS = 165_000;
@@ -56,6 +60,8 @@ export interface ToolExecutionContext {
 	toolScope?: string[];
 	fileScope?: string[];
 	abortSignal?: AbortSignal;
+	/** Canal de progreso para tools longRunning (lo provee el runtime). */
+	onProgress?: (status: string) => void;
 }
 
 export class ToolExecutor {
@@ -158,6 +164,9 @@ export class ToolExecutor {
 		}
 		if (toolName === "delegate_task") {
 			return DELEGATE_TASK_TIMEOUT_MS;
+		}
+		if (toolName === "orchestrate_parallel") {
+			return ORCHESTRATE_PARALLEL_TIMEOUT_MS;
 		}
 		if (toolName === "decodo_scrape") {
 			return this.timeouts.scrapingMs;
@@ -621,6 +630,7 @@ export class ToolExecutor {
 			};
 			const context: ToolContext = {
 				media: scopedMediaContext,
+				onProgress: executionContext?.onProgress,
 			};
 			if (executionContext) context.agent = executionContext;
 			const result = await this.rateLimiter.run(
@@ -635,7 +645,11 @@ export class ToolExecutor {
 					),
 			);
 			const normalized = await this.normalizeMediaOutput(toolName, result);
-			this.health?.recordOutcome(toolName, normalized.success, normalized.error);
+			this.health?.recordOutcome(
+				toolName,
+				normalized.success,
+				normalized.error,
+			);
 			return normalized;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);

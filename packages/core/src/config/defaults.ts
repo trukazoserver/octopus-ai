@@ -360,7 +360,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		synthesisMaxTokens: 1200,
 		maxStagnantAttempts: 5,
 		maxSpawnDepth: 2,
-		enableDynamicAssessment: true,
+		enableDynamicAssessment: false,
 		assessmentTimeoutMs: 6000,
 		assessmentMinLengthForLlm: 40,
 	},

@@ -56,6 +56,12 @@ export interface ToolContext {
 		fileScope?: string[];
 		abortSignal?: AbortSignal;
 	};
+	/**
+	 * Canal de progreso para tools de larga duración (longRunning). El runtime
+	 * provee un callback que el handler invoca con strings STATUS para que la
+	 * UI muestre progreso en vivo mientras la tool aún no resuelve.
+	 */
+	onProgress?: (status: string) => void;
 }
 
 export interface ToolDefinition {
@@ -70,6 +76,13 @@ export interface ToolDefinition {
 	 * path prevalidation for these tools.
 	 */
 	managesOwnPathPolicy?: boolean;
+	/**
+	 * Marca la tool como de larga duración (p.ej. orquestación multi-agente).
+	 * El runtime drena un canal de progreso (context.onProgress)
+	 * concurrentemente mientras la tool no resuelve, para que la UI no se
+	 * congele esperando el resultado.
+	 */
+	longRunning?: boolean;
 	parameters: Record<
 		string,
 		{ type: string; description: string; required?: boolean }

@@ -56,6 +56,7 @@ import { ContinuityGuard } from "./continuity-guard.js";
 import type { AgentEvent, EventStream } from "./event-stream.js";
 import type { KanbanDispatcher } from "./kanban-dispatcher.js";
 import type { KanbanPlanner } from "./kanban-planner.js";
+import { orchestratorEventToStatusStrings } from "./orchestrator-status.js";
 import {
 	OctopusOrchestrator,
 	type OrchestratorConfig,
@@ -78,6 +79,10 @@ const MAX_TOOL_RESULT_STORED_CHARS = 2000;
 const DELEGATE_SYNTHESIS_TIMEOUT_MS = 10_000;
 const DELEGATE_SYNTHESIS_MAX_TOKENS = 1200;
 const DELEGATE_SYNTHESIS_RESULT_CHARS = 1500;
+/** Delegate C1: max retries for a failed delegated worker (runtime errors).
+ * Tunable via env. Default 1 — one automatic retry before surfacing failure. */
+const DELEGATE_MAX_RETRIES =
+	Number.parseInt(process.env.OCTOPUS_DELEGATE_MAX_RETRIES ?? "1", 10) || 1;
 const REQUIRED_RECENT_RAW_TURNS = 20;
 const STM_MIN_TURNS = 30;
 const STM_MAX_TURNS = 60;
@@ -2791,97 +2796,6 @@ export class AgentRuntime {
 						)) {
 							throwIfAborted(options.signal);
 							switch (event.type) {
-								case "decomposition":
-									yield `\x00STATUS:orchestrating:multiagent::${this.encodeStatusField(
-										JSON.stringify({
-											count: event.data.subtasks.length,
-											executionPlan: event.data.executionPlan,
-											reasoning: event.data.reasoning,
-											subtasks: event.data.subtasks.map((task) => ({
-												id: task.id,
-												role: task.role,
-												description: task.description,
-												toolScope: task.toolScope,
-												agentId: task.agentId,
-												agentName: task.agentName,
-												armKey: task.armKey,
-												agentAvatar: task.avatar,
-												agentColor: task.color,
-											})),
-										}),
-									)}\x00`;
-									break;
-								case "worker_started":
-									yield `\x00STATUS:worker_start:${event.workerId}::${this.encodeStatusField(
-										JSON.stringify({
-											workerId: event.workerId,
-											taskId: event.taskId,
-											role: event.role,
-											description: event.description,
-											agentId: event.agentId,
-											agentName: event.agentName,
-											armKey: event.armKey,
-											agentAvatar: event.avatar,
-											agentColor: event.color,
-											activity: event.activity,
-											liveAgentRuntime: event.liveAgentRuntime,
-										}),
-									)}\x00`;
-									break;
-								case "worker_progress":
-									yield `\x00STATUS:worker_progress:${event.workerId}::${this.encodeStatusField(
-										JSON.stringify({
-											workerId: event.workerId,
-											taskId: event.taskId,
-											message: event.message,
-											progress: event.progress,
-											toolName: event.toolName,
-											agentId: event.agentId,
-											agentName: event.agentName,
-											armKey: event.armKey,
-											agentAvatar: event.avatar,
-											agentColor: event.color,
-											activity: event.activity,
-											liveAgentRuntime: event.liveAgentRuntime,
-										}),
-									)}\x00`;
-									break;
-								case "worker_done":
-									yield `\x00STATUS:worker_done:${event.workerId}::${this.encodeStatusField(
-										JSON.stringify({
-											workerId: event.workerId,
-											taskId: event.taskId,
-											result: event.result,
-											progress: 100,
-											agentId: event.agentId,
-											agentName: event.agentName,
-											armKey: event.armKey,
-											agentAvatar: event.avatar,
-											agentColor: event.color,
-											activity: event.activity,
-											liveAgentRuntime: event.liveAgentRuntime,
-										}),
-									)}\x00`;
-									break;
-								case "worker_error":
-									yield `\x00STATUS:worker_error:${event.workerId}::${this.encodeStatusField(
-										JSON.stringify({
-											workerId: event.workerId,
-											taskId: event.taskId,
-											error: event.error,
-											agentId: event.agentId,
-											agentName: event.agentName,
-											armKey: event.armKey,
-											agentAvatar: event.avatar,
-											agentColor: event.color,
-											activity: event.activity,
-											liveAgentRuntime: event.liveAgentRuntime,
-										}),
-									)}\x00`;
-									break;
-								case "telemetry":
-									yield `\x00STATUS:orchestrating:telemetry::${this.encodeStatusField(JSON.stringify(event.data))}\x00`;
-									break;
 								case "synthesis": {
 									const safeResult = this.sanitizeAssistantOutput(event.result);
 									yield "\x00STATUS:responding\x00";
@@ -2913,6 +2827,11 @@ export class AgentRuntime {
 									});
 									return;
 								}
+								default:
+									for (const s of orchestratorEventToStatusStrings(event)) {
+										yield s;
+									}
+									break;
 							}
 						}
 						return; // Multi-agent completado
@@ -3473,6 +3392,66 @@ export class AgentRuntime {
 						}
 					}
 
+					// Delegate C1: retry failed delegated tasks (runtime errors only —
+					// parse errors would just fail again) so a transient worker failure
+					// doesn't silently degrade the synthesized answer.
+					for (let retry = 0; retry < DELEGATE_MAX_RETRIES; retry++) {
+						throwIfAborted(options.signal);
+						const failedIndices: number[] = [];
+						for (let i = 0; i < delegateResults.length; i++) {
+							const r = delegateResults[i];
+							const task = delegatedTasks[i];
+							if (r?.error && !task?.parsedParams.error) failedIndices.push(i);
+						}
+						if (failedIndices.length === 0) break;
+						for (const idx of failedIndices) {
+							const task = delegatedTasks[idx];
+							if (!task) continue;
+							yield ` STATUS:worker_progress:${task.id}::${this.encodeStatusField(JSON.stringify({ workerId: task.id, taskId: task.id, message: `Reintentando worker delegado (intento ${retry + 1}/${DELEGATE_MAX_RETRIES}).`, progress: 30, toolName: "delegate_task" }))} `;
+							let retryResult: string;
+							let retryError: string | undefined;
+							try {
+								const result = await toolExecutor.execute(
+									"delegate_task",
+									task.parsedParams.params,
+									{
+										...this.getToolExecutionContext(),
+										abortSignal: options.signal,
+									},
+								);
+								retryResult = result.output || result.error || "";
+								retryError = result.success
+									? undefined
+									: result.error || "Worker delegado falló en el reintento.";
+							} catch (err) {
+								retryResult = `Error: ${err instanceof Error ? err.message : String(err)}`;
+								retryError = retryResult;
+							}
+							delegateResults[idx] = {
+								...(delegateResults[idx] as DelegateJobResult),
+								result: retryResult,
+								error: retryError,
+							};
+							if (retryError) {
+								await this.updateDelegateWorkflowTask(
+									delegateWorkflow,
+									task.id,
+									"failed",
+									retryError,
+								);
+								yield ` STATUS:worker_error:${task.id}::${this.encodeStatusField(JSON.stringify({ workerId: task.id, taskId: task.id, error: retryError }))} `;
+							} else {
+								await this.updateDelegateWorkflowTask(
+									delegateWorkflow,
+									task.id,
+									"done",
+									retryResult,
+								);
+								yield ` STATUS:worker_done:${task.id}::${this.encodeStatusField(JSON.stringify({ workerId: task.id, taskId: task.id, result: retryResult.slice(0, 2000) }))} `;
+							}
+						}
+					}
+
 					for (const result of delegateResults) {
 						const resultContent =
 							result?.result ??
@@ -3659,17 +3638,69 @@ export class AgentRuntime {
 									error: policyResult.resultContent,
 								};
 							} else {
-								toolResult = await this.toolExecutor.execute(
-									toolCall.function.name,
-									params,
-									this.getToolExecutionContext(),
-								);
-								throwIfAborted(options.signal);
-								yield* this.maybeStreamCreatedWorkflow(
-									toolCall,
-									toolResult,
-									options.signal,
-								);
+								const toolDef = this.toolRegistry?.get(toolCall.function.name);
+								if (toolDef?.longRunning) {
+									// Drain STATUS emissions concurrently while a long-running tool runs,
+									// so the UI shows live progress instead of freezing on "tool running".
+									const queue: string[] = [];
+									let resolveNext: (() => void) | null = null;
+									const onProgress = (status: string) => {
+										queue.push(status);
+										if (resolveNext) {
+											resolveNext();
+											resolveNext = null;
+										}
+									};
+									const execPromise = this.toolExecutor.execute(
+										toolCall.function.name,
+										params,
+										{
+											...this.getToolExecutionContext(),
+											channelId,
+											abortSignal: options.signal,
+											onProgress,
+										},
+									);
+									while (true) {
+										const raced = await Promise.race([
+											execPromise.then((result) => ({
+												done: true as const,
+												result,
+											})),
+											new Promise<{ done: false }>((resolve) => {
+												resolveNext = () => resolve({ done: false });
+												if (queue.length > 0) resolve({ done: false });
+											}),
+										]);
+										while (queue.length > 0) {
+											const status = queue.shift();
+											if (status) yield status;
+										}
+										throwIfAborted(options.signal);
+										if (raced.done) {
+											toolResult = raced.result;
+											break;
+										}
+									}
+									throwIfAborted(options.signal);
+									yield* this.maybeStreamCreatedWorkflow(
+										toolCall,
+										toolResult,
+										options.signal,
+									);
+								} else {
+									toolResult = await this.toolExecutor.execute(
+										toolCall.function.name,
+										params,
+										this.getToolExecutionContext(),
+									);
+									throwIfAborted(options.signal);
+									yield* this.maybeStreamCreatedWorkflow(
+										toolCall,
+										toolResult,
+										options.signal,
+									);
+								}
 							}
 						}
 					}

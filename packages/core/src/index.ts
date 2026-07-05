@@ -341,6 +341,7 @@ export {
 	createWorkflowTools,
 	createAutomationTools,
 	createTeamTools,
+	createOrchestrationTools,
 	createSandboxTools,
 	createTeamCommTools,
 	createAgentCommsTools,

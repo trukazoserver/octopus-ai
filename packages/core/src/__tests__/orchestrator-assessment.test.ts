@@ -84,13 +84,15 @@ describe("OctopusOrchestrator dynamic assessment (Pillar 1)", () => {
 		});
 	});
 
-	describe("Tier 3 — LLM assessment (uncertain middle)", () => {
+	describe("Tier 3 — LLM assessment (OPT-IN, uncertain middle)", () => {
 		it("returns llm-yes when the model says parallelize", async () => {
 			const chat = vi.fn(async () => ({
 				content:
 					'{"parallelize": true, "reason": "3 investigaciones independientes"}',
 			}));
-			const orchestrator = createOrchestrator(chat);
+			const orchestrator = createOrchestrator(chat, {
+				enableDynamicAssessment: true,
+			});
 			const result = await orchestrator.assessParallelism(
 				UNCERTAIN_PARALLELIZABLE,
 			);
@@ -105,7 +107,9 @@ describe("OctopusOrchestrator dynamic assessment (Pillar 1)", () => {
 			const chat = vi.fn(async () => ({
 				content: '{"parallelize": false, "reason": "tarea coherente"}',
 			}));
-			const orchestrator = createOrchestrator(chat);
+			const orchestrator = createOrchestrator(chat, {
+				enableDynamicAssessment: true,
+			});
 			const result = await orchestrator.assessParallelism(
 				UNCERTAIN_PARALLELIZABLE,
 			);
@@ -115,7 +119,9 @@ describe("OctopusOrchestrator dynamic assessment (Pillar 1)", () => {
 
 		it("falls back to llm-no on malformed model output", async () => {
 			const chat = vi.fn(async () => ({ content: "no soy json" }));
-			const orchestrator = createOrchestrator(chat);
+			const orchestrator = createOrchestrator(chat, {
+				enableDynamicAssessment: true,
+			});
 			const result = await orchestrator.assessParallelism(
 				UNCERTAIN_PARALLELIZABLE,
 			);
@@ -126,6 +132,7 @@ describe("OctopusOrchestrator dynamic assessment (Pillar 1)", () => {
 		it("falls back to assessment-timeout (safe NO) when the LLM never resolves", async () => {
 			const chat = vi.fn(() => new Promise<never>(() => undefined));
 			const orchestrator = createOrchestrator(chat, {
+				enableDynamicAssessment: true,
 				assessmentTimeoutMs: 5,
 			});
 			const start = Date.now();
@@ -142,6 +149,7 @@ describe("OctopusOrchestrator dynamic assessment (Pillar 1)", () => {
 				content: '{"parallelize": true, "reason": "x"}',
 			}));
 			const orchestrator = createOrchestrator(chat, {
+				enableDynamicAssessment: true,
 				assessmentModel: "glm-5-turbo",
 			});
 			await orchestrator.assessParallelism(UNCERTAIN_PARALLELIZABLE);
@@ -150,12 +158,12 @@ describe("OctopusOrchestrator dynamic assessment (Pillar 1)", () => {
 		});
 	});
 
-	it("respects the enableDynamicAssessment:false kill-switch (legacy regex-only)", async () => {
+	it("DEFAULT (peer pattern, no LLM) defers uncertain prompts to the main agent", async () => {
+		// No enableDynamicAssessment set -> default OFF -> no gating LLM call.
+		// The uncertain prompt is left for the main agent to handle (it decides
+		// to delegate via delegate_task during its own turn). Model-independent.
 		const chat = vi.fn();
-		const orchestrator = createOrchestrator(chat, {
-			enableDynamicAssessment: false,
-		});
-		// No explicit keyword -> legacy regex says NO, no LLM.
+		const orchestrator = createOrchestrator(chat);
 		const result = await orchestrator.assessParallelism(
 			UNCERTAIN_PARALLELIZABLE,
 		);

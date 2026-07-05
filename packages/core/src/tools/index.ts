@@ -25,6 +25,7 @@ export { createMediaTools, mediaContext } from "./media.js";
 export { createWorkflowTools } from "./workflow.js";
 export { createAutomationTools } from "./automation.js";
 export { createTeamTools } from "./team.js";
+export { createOrchestrationTools } from "./orchestration.js";
 export { createSandboxTools } from "./sandbox-tool.js";
 export { createTeamCommTools } from "./team-comm.js";
 export { createAgentCommsTools } from "./agent-comms.js";

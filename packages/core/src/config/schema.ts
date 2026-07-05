@@ -677,7 +677,7 @@ const OrchestrationConfigSchema = Type.Object({
 	synthesisMaxTokens: Type.Integer({ default: 1200, minimum: 128 }),
 	maxStagnantAttempts: Type.Integer({ default: 5, minimum: 1 }),
 	maxSpawnDepth: Type.Integer({ default: 2, minimum: 0, maximum: 5 }),
-	enableDynamicAssessment: Type.Optional(Type.Boolean({ default: true })),
+	enableDynamicAssessment: Type.Optional(Type.Boolean({ default: false })),
 	assessmentModel: Type.Optional(Type.String()),
 	assessmentTimeoutMs: Type.Optional(
 		Type.Number({ default: 6000, minimum: 1000 }),

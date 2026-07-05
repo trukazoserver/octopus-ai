@@ -75,6 +75,7 @@ import {
 	createKanbanCardTools,
 	createLogger,
 	createMediaTools,
+	createOrchestrationTools,
 	createSandboxTools,
 	createShellTool,
 	createTeamCommTools,
@@ -1839,10 +1840,14 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			skillLoader,
 		);
 
-		// Workers get tools but NOT delegate_task to prevent infinite recursion
+		// Workers get tools but NOT delegate_task / orchestrate_parallel to
+		// prevent infinite recursion (a worker must not spawn its own swarm).
 		const workerToolRegistry = new ToolRegistry();
 		for (const tool of toolRegistry.list()) {
-			if (tool.name !== "delegate_task") {
+			if (
+				tool.name !== "delegate_task" &&
+				tool.name !== "orchestrate_parallel"
+			) {
 				workerToolRegistry.register(tool);
 			}
 		}
@@ -2365,9 +2370,12 @@ IMPORTANT - Media Handling:
 - After saving or receiving a saved media URL, include the media in your response using markdown image/audio syntax.
 - Never output <tool_call>, <tool_call_block>, or pseudo-tool XML/HTML as text. Tool calls must be real structured tool calls only.
 
-IMPORTANT - Autonomy & Delegation:
+IMPORTANT - Autonomy & Delegation (HIGH PRIORITY):
+- COMPOUND PROSE → orchestrate_parallel (preferred). When the user's message is PROSE containing 2+ distinct independent deliverables chained by action verbs over different targets (e.g. "investiga los podcasts más populares, define el oyente ideal, y redacta tres ideas de episodios"; "analyze A, design B, and draft C"; "traduce esto, resume aquello y propón lo otro"; "compara X, Y y Z"), call the orchestrate_parallel tool ONCE with the full request as 'goal'. The tool decomposes, dispatches to specialist workers in PARALLEL, recovers failures (C1), and returns one synthesized answer. This is more robust than calling delegate_task many times yourself: decomposition, arm routing, and failure recovery are deterministic. You only decide "is this 2+ independent deliverables in prose?" — if yes, call orchestrate_parallel and let it orchestrate.
+- EXPLICITLY-STRUCTURED WORKERS → delegate_task. When the user EXPLICITLY structures the request as numbered/labeled workers ("worker 1: ... worker 2: ...", "agente A hace X, agente B hace Y", "usa 3 agentes en paralelo"), call delegate_task MULTIPLE TIMES in the SAME turn — one per worker — so they run in parallel. The user already did the decomposition; don't re-decompose via orchestrate_parallel.
+- DECIDE BEFORE YOU START: scan the request for multiple deliverables FIRST. If there are 2+ in prose, call orchestrate_parallel immediately; if explicitly numbered, call delegate_task per worker. Do not start one deliverable and only then realize you could have parallelized.
+- Do NOT delegate a single coherent deliverable, a single quick answer, a single translation/edit, a single calculation, or strictly sequential work (where step N+1 needs step N's output) — just do that yourself. A single isolated delegate_task call is never useful.
 - When the user asks you to do something periodically (e.g. "every morning", "cada hora", "todos los domingos"), create an automation using schedule_task with the appropriate cron expression.
-- When a request is extremely complex and involves multiple independent sub-problems (e.g. "research X AND write code for Y AND create a document for Z"), use delegate_task to assign isolated sub-tasks to specialist worker agents. Each worker runs independently with its own context. This prevents your memory from overflowing and speeds up execution.
 - You are the Manager. Workers report back to you. Synthesize their results into a coherent final answer for the user.
 
 IMPORTANT - Browser Automation:
@@ -2463,7 +2471,7 @@ Always be concise, helpful, and thorough.`,
 		getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
 		complexityThreshold: 5,
 		enableDynamicAssessment:
-			config.orchestration?.enableDynamicAssessment ?? true,
+			config.orchestration?.enableDynamicAssessment ?? false,
 		assessmentModel: config.orchestration?.assessmentModel,
 		assessmentTimeoutMs: config.orchestration?.assessmentTimeoutMs ?? 6_000,
 		assessmentMinLengthForLlm:
@@ -2480,6 +2488,18 @@ Always be concise, helpful, and thorough.`,
 	agentRuntime
 		.getOrchestrator()
 		?.setKanbanPlanner(kanbanPlanner, requirementResolver);
+	// Register orchestrate_parallel: exposes the full plan→dispatch→C1→synthesize
+	// pipeline as one tool the main agent calls for compound prose requests.
+	const mainOrchestrator = agentRuntime.getOrchestrator();
+	if (mainOrchestrator) {
+		for (const tool of createOrchestrationTools({
+			orchestrator: mainOrchestrator,
+			kanbanPlanner,
+			rootAgentId: agentConfig.id,
+		})) {
+			registerSystemTool(tool);
+		}
+	}
 	await agentRuntime.initialize();
 	teamBlackboard.registerOrchestrator(agentRuntime);
 
@@ -2610,7 +2630,7 @@ Always be concise, helpful, and thorough.`,
 			getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
 			complexityThreshold: 5,
 			enableDynamicAssessment:
-				config.orchestration?.enableDynamicAssessment ?? true,
+				config.orchestration?.enableDynamicAssessment ?? false,
 			assessmentModel: config.orchestration?.assessmentModel,
 			assessmentTimeoutMs: config.orchestration?.assessmentTimeoutMs ?? 6_000,
 			assessmentMinLengthForLlm:

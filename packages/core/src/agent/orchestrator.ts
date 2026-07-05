@@ -187,7 +187,7 @@ const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 	decompositionTimeoutMs: 30_000,
 	synthesisTimeoutMs: 10_000,
 	synthesisMaxTokens: 1200,
-	enableDynamicAssessment: true,
+	enableDynamicAssessment: false,
 	assessmentTimeoutMs: 6_000,
 	assessmentMinLengthForLlm: 40,
 	enableAutoReplan: true,
@@ -470,15 +470,7 @@ export class OctopusOrchestrator {
 	 *  - Tier 3 LLM: medio incierto, llamada rápida con timeout; fallback seguro a NO.
 	 */
 	async assessParallelism(message: string): Promise<ParallelismAssessment> {
-		if (this.config.enableDynamicAssessment === false) {
-			const yes = await this.shouldDecompose(message);
-			return {
-				decompose: yes,
-				reason: yes ? "señal explícita" : "sin señal explícita",
-				source: yes ? "regex-yes" : "regex-no",
-			};
-		}
-
+		// Tier 1 — OBVIOUS-NO (regex, no LLM): trivial / non-parallelizable.
 		if (this.isObviousSingleAgent(message)) {
 			return {
 				decompose: false,
@@ -487,6 +479,7 @@ export class OctopusOrchestrator {
 			};
 		}
 
+		// Tier 2 — OBVIOUS-YES (regex, no LLM): explicit parallelism signal.
 		if (await this.shouldDecompose(message)) {
 			return {
 				decompose: true,
@@ -495,6 +488,21 @@ export class OctopusOrchestrator {
 			};
 		}
 
+		// DEFAULT (peer pattern, model-independent): no explicit signal and not
+		// trivial → defer to the MAIN AGENT, which decides during its own turn to
+		// delegate in parallel via delegate_task. This avoids a gating LLM call
+		// (latency + model-speed dependence) — works with any provider, fast or
+		// slow, exactly like Claude Code / opencode.
+		if (this.config.enableDynamicAssessment !== true) {
+			return {
+				decompose: false,
+				reason: "sin señal explícita — el agente decide delegar",
+				source: "regex-no",
+			};
+		}
+
+		// Tier 3 — OPT-IN LLM assessment (enableDynamicAssessment=true): a quick
+		// bounded call for the uncertain middle, with a safe NO fallback.
 		if (message.trim().length < this.config.assessmentMinLengthForLlm) {
 			return {
 				decompose: false,
