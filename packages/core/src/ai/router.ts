@@ -747,12 +747,26 @@ export class LLMRouter {
 	}
 
 	async initialize(): Promise<void> {
+		const routerStreamMs = this.config.streamReadTimeoutMs;
+		const routerStreamLocalMs = this.config.streamReadTimeoutLocalMs;
 		for (const [name, config] of Object.entries(this.config.providers)) {
 			const registryEntry = PROVIDER_REGISTRY[name];
 			if (registryEntry) {
 				try {
+					// Thread the router-wide stream-read timeout defaults into each
+					// provider config (per-provider overrides win). Providers read
+					// these via BaseLLMProvider.resolveStreamReadTimeoutMs.
+					const providerConfig: ProviderConfig =
+						routerStreamMs != null && config.streamReadTimeoutMs == null
+							? {
+									...config,
+									streamReadTimeoutMs: routerStreamMs,
+									streamReadTimeoutLocalMs:
+										config.streamReadTimeoutLocalMs ?? routerStreamLocalMs,
+								}
+							: config;
 					const provider = registryEntry.factory(
-						resolveProviderConfig(name, config),
+						resolveProviderConfig(name, providerConfig),
 					);
 					const available = await provider.isAvailable();
 					if (available) {

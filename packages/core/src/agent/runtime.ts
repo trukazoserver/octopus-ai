@@ -6,6 +6,7 @@ import {
 	getModelCapabilitiesByRef,
 } from "../ai/model-capabilities.js";
 import type { LLMRouter } from "../ai/router.js";
+import { TokenCounter } from "../ai/tokenizer.js";
 import type {
 	ContentPart,
 	LLMMessage,
@@ -64,6 +65,12 @@ import {
 } from "./orchestrator.js";
 import type { RequirementResolver } from "./requirement-resolver.js";
 import { RollingContextManager } from "./rolling-context.js";
+import {
+	DEFAULT_TOOL_LOOP_GUARDRAILS_CONFIG,
+	ToolLoopGuardrails,
+	type ToolLoopGuardrailsConfig,
+} from "./tool-loop-guardrails.js";
+import { truncateToolResultForContext } from "./truncate-result.js";
 import type {
 	AgentConfig,
 	AgentReasoningEffort,
@@ -73,8 +80,8 @@ import type {
 import type { WorkflowManager } from "./workflow-manager.js";
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 128;
-const MAX_REPEATED_TOOL_SIGNATURES = 3;
 const MAX_TOOL_RESULT_CONTEXT_CHARS = 12000;
+const MAX_TOOL_RESULT_TOKENS = 4000;
 const MAX_TOOL_RESULT_STORED_CHARS = 2000;
 const DELEGATE_SYNTHESIS_TIMEOUT_MS = 10_000;
 const DELEGATE_SYNTHESIS_MAX_TOKENS = 1200;
@@ -269,6 +276,7 @@ export class AgentRuntime {
 	private readonly toolBillingFailures = new Map<string, number>();
 	private subtaskTracker?: import("./subtask-tracker.js").SubtaskTracker;
 	private continuityGuard: ContinuityGuard;
+	private toolLoopGuardrails: ToolLoopGuardrails;
 	private workingMemory: WorkingMemory = new WorkingMemory();
 	private rollingContext: RollingContextManager;
 	private rollingContexts = new Map<string, RollingContextManager>();
@@ -300,15 +308,26 @@ export class AgentRuntime {
 		} else {
 			this.continuityGuard = new ContinuityGuard(config.continuityGuard);
 		}
-		this.rollingContext = new RollingContextManager(llmRouter);
+		this.toolLoopGuardrails = new ToolLoopGuardrails(
+			this.buildToolLoopGuardrailsConfig(config.toolLoopGuardrails),
+		);
+		this.rollingContext = new RollingContextManager(
+			llmRouter,
+			undefined,
+			config.compression,
+		);
 		this.rollingContexts.set("__default__", this.rollingContext);
 	}
 
 	private createRollingContext(key: string): RollingContextManager {
-		return new RollingContextManager(this.llmRouter, async (summary) => {
-			if (!this.chatManager || key === "__default__") return;
-			await this.chatManager.saveConversationContextSnapshot?.(key, summary);
-		});
+		return new RollingContextManager(
+			this.llmRouter,
+			async (summary) => {
+				if (!this.chatManager || key === "__default__") return;
+				await this.chatManager.saveConversationContextSnapshot?.(key, summary);
+			},
+			this.config.compression,
+		);
 	}
 
 	private async getRollingContext(
@@ -1126,8 +1145,45 @@ export class AgentRuntime {
 		);
 	}
 
-	private getMaxRepeatedToolSignatures(): number {
-		return this.getTenacidad().enabled ? 5 : MAX_REPEATED_TOOL_SIGNATURES;
+	private buildToolLoopGuardrailsConfig(
+		override?: AgentConfig["toolLoopGuardrails"],
+	): ToolLoopGuardrailsConfig {
+		const base = DEFAULT_TOOL_LOOP_GUARDRAILS_CONFIG;
+		if (!override) return base;
+		return {
+			warningsEnabled: override.warningsEnabled ?? base.warningsEnabled,
+			hardStopEnabled: override.hardStopEnabled ?? base.hardStopEnabled,
+			workerHardStopEnabled:
+				override.workerHardStopEnabled ?? base.workerHardStopEnabled,
+			warnAfter: {
+				exactFailure:
+					override.warnAfter?.exactFailure ?? base.warnAfter.exactFailure,
+				sameToolFailure:
+					override.warnAfter?.sameToolFailure ?? base.warnAfter.sameToolFailure,
+				idempotentNoProgress:
+					override.warnAfter?.idempotentNoProgress ??
+					base.warnAfter.idempotentNoProgress,
+			},
+			hardStopAfter: {
+				exactFailure:
+					override.hardStopAfter?.exactFailure ??
+					base.hardStopAfter.exactFailure,
+				sameToolFailure:
+					override.hardStopAfter?.sameToolFailure ??
+					base.hardStopAfter.sameToolFailure,
+				idempotentNoProgress:
+					override.hardStopAfter?.idempotentNoProgress ??
+					base.hardStopAfter.idempotentNoProgress,
+			},
+		};
+	}
+
+	/** Stable short signature of a tool result for idempotent-loop detection. */
+	private resultSignature(content: string): string {
+		// Normalize whitespace and cap length — enough to detect identical
+		// no-progress results without being fooled by trivial differences.
+		const normalized = content.replace(/\s+/g, " ").trim().slice(0, 200);
+		return normalized;
 	}
 
 	private getToolIterationLimit(): { enabled: boolean; maxIterations: number } {
@@ -1419,16 +1475,47 @@ export class AgentRuntime {
 		);
 	}
 
+	private getTokenCounter(): TokenCounter {
+		if (!this._tokenCounter) this._tokenCounter = new TokenCounter();
+		return this._tokenCounter;
+	}
+
+	private _tokenCounter?: TokenCounter;
+
+	private getResultTruncationLimits(): {
+		maxTokens: number;
+		maxCharsCeiling: number;
+	} {
+		return {
+			maxTokens:
+				this.config.resultTruncation?.maxTokens ?? MAX_TOOL_RESULT_TOKENS,
+			maxCharsCeiling:
+				this.config.resultTruncation?.maxCharsCeiling ??
+				MAX_TOOL_RESULT_CONTEXT_CHARS,
+		};
+	}
+
+	/**
+	 * Truncates tool-result text to the configured token budget (primary) with a
+	 * hard char ceiling (backstop). Mirrors HermesAgent `tool_output.max_bytes`
+	 * and Claude Code `MAX_MCP_OUTPUT_TOKENS`. Fits the token budget exactly via
+	 * a binary search over the substring length (≈14 tiktoken encodes, only when
+	 * the result actually exceeds the budget).
+	 */
+	private truncateForContext(content: string): string {
+		return truncateToolResultForContext(
+			content,
+			this.getResultTruncationLimits(),
+			this.getTokenCounter(),
+		);
+	}
+
 	private compactToolResultForContext(content: string): string {
-		const stripped = this.stripInlineImageData(content).trim();
-		if (stripped.length <= MAX_TOOL_RESULT_CONTEXT_CHARS) return stripped;
-		return `${stripped.slice(0, MAX_TOOL_RESULT_CONTEXT_CHARS)}\n...[tool result truncated to keep memory bounded]`;
+		return this.truncateForContext(this.stripInlineImageData(content).trim());
 	}
 
 	private compactTextForContext(content: string): string {
-		const stripped = content.replace(TOOL_IMAGE_RE, "").trim();
-		if (stripped.length <= MAX_TOOL_RESULT_CONTEXT_CHARS) return stripped;
-		return `${stripped.slice(0, MAX_TOOL_RESULT_CONTEXT_CHARS)}\n...[tool result truncated to keep memory bounded]`;
+		return this.truncateForContext(content.replace(TOOL_IMAGE_RE, "").trim());
 	}
 
 	private formatToolResultForModel(
@@ -2276,12 +2363,18 @@ export class AgentRuntime {
 			)
 			.join(", ");
 		const objectiveSatisfied = this.isObjectiveSatisfied(ledger);
+		const suppressPressure =
+			this.config.toolIterationLimit?.suppressPressureReminders === true;
 		const remainingBudget =
 			remainingIterations === null ? "unlimited" : remainingIterations;
 		return [
 			"# Navigation Decision Guidance",
 			`Previous tool: ${toolName} (${success ? "success" : "error"}).`,
-			`Remaining tool budget: ${remainingBudget}.`,
+			// HermesAgent removed mid-task budget reminders (they nudged models to
+			// abandon complex tasks prematurely). Suppressed when configured.
+			...(suppressPressure
+				? []
+				: [`Remaining tool budget: ${remainingBudget}.`]),
 			`Evidence: images=${ledger.imageUrls.length}, media=${ledger.mediaUrls.length}, screenshots=${ledger.capturedScreenshots.length}, detailScreenshots=${ledger.detailScreenshots.length}, detailUrl=${ledger.detailUrl ? "yes" : "no"}.`,
 			`Recent actions: ${recent || "none"}.`,
 			objectiveSatisfied
@@ -2879,7 +2972,6 @@ export class AgentRuntime {
 		const messages = [...context];
 		let iterations = 0;
 		let fullResponse = "";
-		const toolSignatureCounts = new Map<string, number>();
 		const toolNameCounts = new Map<string, number>();
 		const ledger = this.createEvidenceLedger(message);
 		const toolTrace: ExperienceToolTrace[] = [];
@@ -3562,6 +3654,7 @@ export class AgentRuntime {
 
 					let toolResult: ToolResult;
 					let skipped = false;
+					let paramsSignature = "";
 					if (parsedParams.error) {
 						skipped = true;
 						const policyResult = this.createToolPolicyResult(
@@ -3577,10 +3670,11 @@ export class AgentRuntime {
 							(toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
 						toolNameCounts.set(toolCall.function.name, toolNameCount);
 						const toolBudget = this.getToolBudget(toolCall.function.name);
-						const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
-						const signatureCount =
-							(toolSignatureCounts.get(signature) ?? 0) + 1;
-						toolSignatureCounts.set(signature, signatureCount);
+						paramsSignature = this.stableJson(params);
+						const guardSkip = this.toolLoopGuardrails.beforeCall(
+							toolCall.function.name,
+							paramsSignature,
+						);
 
 						if (toolNameCount > toolBudget) {
 							if (this.shouldStopOnToolBudgetExceeded(toolCall.function.name)) {
@@ -3610,10 +3704,10 @@ export class AgentRuntime {
 								output: "",
 								error: policyResult.resultContent,
 							};
-						} else if (signatureCount > this.getMaxRepeatedToolSignatures()) {
+						} else if (guardSkip.skip) {
 							skipped = true;
 							const policyResult = this.createToolPolicyResult(
-								`Repeated action suppressed for ${toolCall.function.name}. The same parameters were already tried ${MAX_REPEATED_TOOL_SIGNATURES} times. Choose a different approach or provide a final answer with the current evidence.`,
+								guardSkip.reason,
 							);
 							toolResult = {
 								success: false,
@@ -3711,19 +3805,38 @@ export class AgentRuntime {
 							? toolResult.output
 							: JSON.stringify(toolResult.output, null, 2)
 						: `Error: ${toolResult.error ?? "Unknown error"}`;
-					const resultContentStr =
+					let resultContentStr =
 						this.compactToolResultForContext(rawResultContentStr);
 					this.workingMemory.updateFromToolResult(
 						toolCall.function.name,
 						toolResult.success && !skipped,
 						toolResult.success ? undefined : toolResult.error,
 					);
+					const usefulBeforeGuard = ledger.usefulResults;
 					this.updateEvidenceLedger(
 						ledger,
 						toolCall.function.name,
 						resultContentStr,
 						toolResult.success && !skipped,
 					);
+					// Tool-loop guardrails: detect unproductive loops (exact/same-tool
+					// failures, idempotent no-progress) and inject a warning so the
+					// model self-corrects. Mirrors HermesAgent `tool_loop_guardrails`.
+					if (!skipped) {
+						const guardVerdict = this.toolLoopGuardrails.recordOutcome(
+							{
+								toolName: toolCall.function.name,
+								paramsSignature,
+								success: toolResult.success,
+								resultSignature: this.resultSignature(resultContentStr),
+								progressed: ledger.usefulResults > usefulBeforeGuard,
+							},
+							{ worker: false },
+						);
+						if (guardVerdict.action !== "continue") {
+							resultContentStr = `${resultContentStr}\n\n${guardVerdict.reason}`;
+						}
+					}
 					fullResponse += this.buildContinuationCheckpoint(
 						ledger,
 						toolCall.function.name,
@@ -3893,7 +4006,6 @@ export class AgentRuntime {
 		const toolCallsExecuted: { name: string; result: string }[] = [];
 		const messages = [...context];
 		let iterations = 0;
-		const toolSignatureCounts = new Map<string, number>();
 		const toolNameCounts = new Map<string, number>();
 		const lastUser = [...context].reverse().find((msg) => msg.role === "user");
 		const userText =
@@ -3955,6 +4067,7 @@ export class AgentRuntime {
 					const parsedParams = this.parseToolParams(toolCall);
 					const params = parsedParams.params;
 					let toolResult: ToolResult;
+					let paramsSignature = "";
 
 					if (parsedParams.error) {
 						toolResult = {
@@ -3982,10 +4095,11 @@ export class AgentRuntime {
 						const toolNameCount =
 							(toolNameCounts.get(toolCall.function.name) ?? 0) + 1;
 						toolNameCounts.set(toolCall.function.name, toolNameCount);
-						const signature = `${toolCall.function.name}:${this.stableJson(params)}`;
-						const signatureCount =
-							(toolSignatureCounts.get(signature) ?? 0) + 1;
-						toolSignatureCounts.set(signature, signatureCount);
+						paramsSignature = this.stableJson(params);
+						const guardSkip = this.toolLoopGuardrails.beforeCall(
+							toolCall.function.name,
+							paramsSignature,
+						);
 						const toolBudget = this.getToolBudget(toolCall.function.name);
 
 						if (toolNameCount > toolBudget) {
@@ -4004,13 +4118,12 @@ export class AgentRuntime {
 									`${toolCall.function.name} exceeded its per-task budget (${toolBudget}). Use a simpler alternative, summarize progress, or finish with the useful results already collected.`,
 								).resultContent,
 							};
-						} else if (signatureCount > this.getMaxRepeatedToolSignatures()) {
+						} else if (guardSkip.skip) {
 							toolResult = {
 								success: false,
 								output: "",
-								error: this.createToolPolicyResult(
-									`Repeated action suppressed for ${toolCall.function.name}. The same parameters were already tried ${MAX_REPEATED_TOOL_SIGNATURES} times. Choose a different approach or provide a final answer with the current evidence.`,
-								).resultContent,
+								error: this.createToolPolicyResult(guardSkip.reason)
+									.resultContent,
 							};
 						} else if (decision.action === "skip") {
 							toolResult = {
@@ -4032,19 +4145,36 @@ export class AgentRuntime {
 					const rawResultContent = toolResult.success
 						? toolResult.output
 						: `Error: ${toolResult.error ?? "Unknown error"}`;
-					const resultContent =
+					let resultContent =
 						this.compactToolResultForContext(rawResultContent);
 					this.workingMemory.updateFromToolResult(
 						toolCall.function.name,
 						toolResult.success,
 						toolResult.success ? undefined : toolResult.error,
 					);
+					const usefulBeforeGuard = ledger.usefulResults;
 					this.updateEvidenceLedger(
 						ledger,
 						toolCall.function.name,
 						resultContent,
 						toolResult.success,
 					);
+					// Tool-loop guardrails (non-streaming path mirrors the streaming loop).
+					{
+						const guardVerdict = this.toolLoopGuardrails.recordOutcome(
+							{
+								toolName: toolCall.function.name,
+								paramsSignature,
+								success: toolResult.success,
+								resultSignature: this.resultSignature(resultContent),
+								progressed: ledger.usefulResults > usefulBeforeGuard,
+							},
+							{ worker: false },
+						);
+						if (guardVerdict.action !== "continue") {
+							resultContent = `${resultContent}\n\n${guardVerdict.reason}`;
+						}
+					}
 
 					const parsedContent = this.formatToolResultForModel(resultContent);
 

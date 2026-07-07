@@ -1,6 +1,21 @@
 export interface ToolIterationLimitConfig {
 	enabled?: boolean;
 	maxIterations?: number;
+	/** Suppress the per-tool-result "Remaining tool budget" reminder (HermesAgent-aligned). */
+	suppressPressureReminders?: boolean;
+}
+
+/**
+ * Tool-result truncation before re-entering the model context. Mirrors
+ * HermesAgent's `tool_output.max_bytes` and Claude Code's
+ * `MAX_MCP_OUTPUT_TOKENS`: a token budget (primary) with a hard char ceiling
+ * (backstop). Defaults preserve the prior char-only behavior.
+ */
+export interface ToolResultTruncationConfig {
+	/** Max tokens of a single tool result fed back to the model. Default 4000. */
+	maxTokens?: number;
+	/** Hard char backstop applied after the token cap. Default 12000. */
+	maxCharsCeiling?: number;
 }
 
 /**
@@ -8,12 +23,7 @@ export interface ToolIterationLimitConfig {
  * agent can carry its own thinking level independent of the global config, and so
  * it can be changed live from the chat / agents UI without a restart.
  */
-export type AgentReasoningEffort =
-	| "none"
-	| "low"
-	| "medium"
-	| "high"
-	| "xhigh";
+export type AgentReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
 export interface ContinuityGuardRuntimeConfig {
 	enabled?: boolean;
@@ -52,6 +62,34 @@ export interface AgentConfig {
 	maxTokens?: number;
 	temperature?: number;
 	toolIterationLimit?: ToolIterationLimitConfig;
+	resultTruncation?: ToolResultTruncationConfig;
+	/** Rolling-context compression knobs (mirrors HermesAgent `compression.*`). */
+	compression?: {
+		threshold?: number;
+		targetRatio?: number;
+		protectLastN?: number;
+		protectFirstN?: number;
+		outputReserve?: number;
+		summaryMaxTokens?: number;
+		condenseMaxTokens?: number;
+		hygieneHardMessageLimit?: number;
+	};
+	/** Tool-loop guardrails config (mirrors HermesAgent `tool_loop_guardrails`). */
+	toolLoopGuardrails?: {
+		warningsEnabled?: boolean;
+		hardStopEnabled?: boolean;
+		workerHardStopEnabled?: boolean;
+		warnAfter?: {
+			exactFailure?: number;
+			sameToolFailure?: number;
+			idempotentNoProgress?: number;
+		};
+		hardStopAfter?: {
+			exactFailure?: number;
+			sameToolFailure?: number;
+			idempotentNoProgress?: number;
+		};
+	};
 	continuityGuard?: ContinuityGuardRuntimeConfig;
 	tenacidad?: TenacidadConfig;
 }

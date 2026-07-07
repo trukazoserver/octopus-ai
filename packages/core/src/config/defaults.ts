@@ -105,6 +105,8 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		},
 		thinking: "medium",
 		maxTokens: 32768,
+		streamReadTimeoutMs: 120000,
+		streamReadTimeoutLocalMs: 1800000,
 	},
 	channels: {
 		whatsapp: { enabled: false },
@@ -316,6 +318,11 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		iterationLimit: {
 			enabled: true,
 			maxIterations: 256,
+			suppressPressureReminders: false,
+		},
+		resultTruncation: {
+			maxTokens: 4000,
+			maxCharsCeiling: 12000,
 		},
 		timeouts: {
 			defaultMs: 45000,
@@ -355,6 +362,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		maxArms: 8,
 		workerTimeoutMs: 600000,
 		maxToolIterationsPerArm: 32,
+		maxIterationsPerRun: 192,
 		decompositionTimeoutMs: 30000,
 		synthesisTimeoutMs: 10000,
 		synthesisMaxTokens: 1200,
@@ -363,6 +371,33 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		enableDynamicAssessment: false,
 		assessmentTimeoutMs: 6000,
 		assessmentMinLengthForLlm: 40,
+	},
+	context: {
+		compression: {
+			threshold: 0.8,
+			targetRatio: 0.3,
+			protectLastN: 20,
+			protectFirstN: 0,
+			outputReserve: 16384,
+			summaryMaxTokens: 4096,
+			condenseMaxTokens: 2048,
+			hygieneHardMessageLimit: 5000,
+		},
+	},
+	toolLoopGuardrails: {
+		warningsEnabled: true,
+		hardStopEnabled: false,
+		workerHardStopEnabled: true,
+		warnAfter: {
+			exactFailure: 2,
+			sameToolFailure: 3,
+			idempotentNoProgress: 2,
+		},
+		hardStopAfter: {
+			exactFailure: 5,
+			sameToolFailure: 8,
+			idempotentNoProgress: 5,
+		},
 	},
 	mcp: {
 		servers: {},

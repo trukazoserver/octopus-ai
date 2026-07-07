@@ -9,6 +9,7 @@ import type {
 	ReasoningEffort,
 } from "../types.js";
 import { BaseLLMProvider } from "./base.js";
+import { readNextWithTimeout } from "./stream-reader.js";
 
 interface GoogleServiceAccountCredentials {
 	client_email?: string;
@@ -329,22 +330,12 @@ export class GoogleProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
-		const readNext = async () => {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				return await Promise.race([
-					reader.read(),
-					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
-						timer = setTimeout(
-							() => reject(new Error("Google stream read timeout")),
-							120_000,
-						);
-					}),
-				]);
-			} finally {
-				if (timer) clearTimeout(timer);
-			}
-		};
+		const readNext = async () =>
+			readNextWithTimeout(
+				reader,
+				this.resolveStreamReadTimeoutMs(120_000, 1_800_000),
+				"Google",
+			);
 
 		try {
 			while (true) {

@@ -13,6 +13,10 @@ import type { LLMMessage, LLMRequest, LLMToolCall } from "../ai/types.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ToolDefinition, ToolRegistry } from "../tools/registry.js";
 import type { AgentEvent, EventStream } from "./event-stream.js";
+import {
+	DEFAULT_TOOL_LOOP_GUARDRAILS_CONFIG,
+	ToolLoopGuardrails,
+} from "./tool-loop-guardrails.js";
 import type { AgentConfig } from "./types.js";
 
 const STATUS_RE =
@@ -86,6 +90,13 @@ export interface WorkerConfig {
 	channelId?: string;
 	usesZaiVisionToolForImages?: boolean;
 	signal?: AbortSignal;
+	/**
+	 * Aggregate iteration cap shared across ALL workers in one executeAll run
+	 * (sum of every worker's toolIterations). When reached, in-flight workers
+	 * stop and no further arms are dispatched. HermesAgent-aligned run budget.
+	 * Not a cost cap — iterations only.
+	 */
+	maxIterationsPerRun?: number;
 }
 
 interface WorkerState {
@@ -126,6 +137,16 @@ export class WorkerPool {
 	private workers: Map<string, WorkerState> = new Map();
 	private maxConcurrent: number;
 	private workerIdCounter = 0;
+	/**
+	 * Shared aggregate-iteration budget for the current executeAll run. Each
+	 * tool-loop worker increments `used`; on reaching `max`, in-flight workers
+	 * stop and dispatch halts. Mirrors HermesAgent's per-run iteration budget.
+	 */
+	private activeRunBudget: {
+		used: number;
+		max: number;
+		exhausted: boolean;
+	} = { used: 0, max: Number.POSITIVE_INFINITY, exhausted: false };
 
 	constructor(
 		private llmRouter: LLMRouter,
@@ -137,6 +158,16 @@ export class WorkerPool {
 		private options: WorkerPoolOptions = {},
 	) {
 		this.maxConcurrent = maxConcurrent;
+	}
+
+	/** Aggregate toolIterations consumed by the last executeAll run. */
+	getLastRunIterations(): number {
+		return this.activeRunBudget.used;
+	}
+
+	/** True when the last executeAll run drained its aggregate iteration budget. */
+	isRunBudgetExhausted(): boolean {
+		return this.activeRunBudget.exhausted;
 	}
 
 	/**
@@ -232,7 +263,8 @@ export class WorkerPool {
 					const status = statusMatch[1] ?? "status";
 					const toolName = statusMatch[2] || undefined;
 					const detail = this.decodeStatusField(statusMatch[4]);
-					const message = detail || toolName || `${task.agentName ?? state.id} activo.`;
+					const message =
+						detail || toolName || `${task.agentName ?? state.id} activo.`;
 					if (status === "tool" || status === "code") {
 						this.eventStream.append({
 							runId: config.runId,
@@ -311,9 +343,7 @@ export class WorkerPool {
 
 		return [
 			`Eres ${task.agentName ?? "un worker especializado"} con el rol de "${task.role}".`,
-			task.armKey
-				? `Identidad de brazo Octopus: ${task.armKey}.`
-				: "",
+			task.armKey ? `Identidad de brazo Octopus: ${task.armKey}.` : "",
 			`Tu tarea específica es: ${task.description}`,
 			task.acceptanceCriteria?.length
 				? `Criterios de aceptacion verificables:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`
@@ -519,7 +549,20 @@ export class WorkerPool {
 			},
 		}));
 
+		// Tool-loop guardrails: workers are unattended, so hard-stop (circuit
+		// break) when a tool loops unproductively instead of burning the budget.
+		const guardrails = new ToolLoopGuardrails({
+			...DEFAULT_TOOL_LOOP_GUARDRAILS_CONFIG,
+			hardStopEnabled: true,
+			workerHardStopEnabled: true,
+		});
+		let guardBlocked = false;
+
 		while (state.toolIterations < config.maxToolIterations) {
+			// Run-level aggregate iteration budget (HermesAgent-style run cap).
+			if (this.activeRunBudget.exhausted) {
+				return `[Budget] Presupuesto de iteraciones del run agotado (${this.activeRunBudget.max}).`;
+			}
 			// Verificar timeout
 			if (Date.now() - state.startedAt > config.timeoutMs) {
 				return `[Timeout] La tarea excedió el límite de ${config.timeoutMs / 1000}s.`;
@@ -547,7 +590,10 @@ export class WorkerPool {
 
 			const request: LLMRequest = {
 				model:
-					state.task.model || config.model || this.baseConfig.model || "default",
+					state.task.model ||
+					config.model ||
+					this.baseConfig.model ||
+					"default",
 				messages: state.messages,
 				tools: llmTools.length > 0 ? llmTools : undefined,
 				maxTokens: this.baseConfig.maxTokens,
@@ -589,6 +635,13 @@ export class WorkerPool {
 
 			for (const toolCall of response.toolCalls) {
 				state.toolIterations++;
+				this.activeRunBudget.used++;
+				if (
+					!this.activeRunBudget.exhausted &&
+					this.activeRunBudget.used >= this.activeRunBudget.max
+				) {
+					this.activeRunBudget.exhausted = true;
+				}
 
 				this.eventStream.append({
 					runId: config.runId,
@@ -609,28 +662,66 @@ export class WorkerPool {
 				});
 
 				let resultContent: string;
-				try {
-					const params = JSON.parse(toolCall.function.arguments || "{}");
-					const result = await this.toolExecutor.execute(
-						toolCall.function.name,
-						params,
+				const paramsSignature = toolCall.function.arguments || "";
+				const guardSkip = guardrails.beforeCall(
+					toolCall.function.name,
+					paramsSignature,
+				);
+				let toolSucceeded = false;
+				if (guardSkip.skip) {
+					resultContent = guardSkip.reason;
+				} else {
+					try {
+						const params = JSON.parse(toolCall.function.arguments || "{}");
+						const result = await this.toolExecutor.execute(
+							toolCall.function.name,
+							params,
+							{
+								agentId: state.task.agentId ?? this.baseConfig.id,
+								model:
+									state.task.model || config.model || this.baseConfig.model,
+								usesZaiVisionToolForImages: config.usesZaiVisionToolForImages,
+								workerId: state.id,
+								taskId: state.task.id,
+								role: state.task.role,
+								channelId: config.channelId,
+								runId: config.runId,
+								toolScope: state.task.toolScope,
+								fileScope: state.task.fileScope,
+								abortSignal: state.abortController.signal,
+							},
+						);
+						toolSucceeded = !!result.success;
+						resultContent = result.output || "[Sin resultado]";
+					} catch (err) {
+						resultContent = `Error ejecutando ${toolCall.function.name}: ${err instanceof Error ? err.message : String(err)}`;
+					}
+				}
+
+				// Tool-loop guardrails: warn / hard-stop on unproductive loops.
+				if (!guardSkip.skip) {
+					const verdict = guardrails.recordOutcome(
 						{
-							agentId: state.task.agentId ?? this.baseConfig.id,
-							model: state.task.model || config.model || this.baseConfig.model,
-							usesZaiVisionToolForImages: config.usesZaiVisionToolForImages,
-							workerId: state.id,
-							taskId: state.task.id,
-							role: state.task.role,
-							channelId: config.channelId,
-							runId: config.runId,
-							toolScope: state.task.toolScope,
-							fileScope: state.task.fileScope,
-							abortSignal: state.abortController.signal,
+							toolName: toolCall.function.name,
+							paramsSignature,
+							success: toolSucceeded,
+							resultSignature: resultContent
+								.replace(/\s+/g, " ")
+								.trim()
+								.slice(0, 200),
+							// Workers have no EvidenceLedger: treat a successful call as
+							// progress (idempotent_no_progress can't fire here; exact/
+							// same-tool failure detection is the worker-relevant part).
+							progressed: toolSucceeded,
 						},
+						{ worker: true },
 					);
-					resultContent = result.output || "[Sin resultado]";
-				} catch (err) {
-					resultContent = `Error ejecutando ${toolCall.function.name}: ${err instanceof Error ? err.message : String(err)}`;
+					if (verdict.action === "block") {
+						resultContent = `${resultContent}\n\n${verdict.reason}`;
+						guardBlocked = true;
+					} else if (verdict.action === "warn") {
+						resultContent = `${resultContent}\n\n${verdict.reason}`;
+					}
 				}
 
 				state.messages.push({
@@ -657,17 +748,26 @@ export class WorkerPool {
 					},
 				});
 			}
+			// Guardrail circuit-breaker tripped this turn → stop the worker loop
+			// and let the final-response path summarize what was achieved.
+			if (guardBlocked) {
+				break;
+			}
 		}
 
-		// Budget agotado — pedir respuesta final
+		// Budget agotado — pedir respuesta final (HermesAgent-style wrap-up: state
+		// what was accomplished + recommend what remains, with run-budget context).
+		const runBudgetContext = Number.isFinite(this.activeRunBudget.max)
+			? ` Iteraciones usadas en el run: ${this.activeRunBudget.used}/${this.activeRunBudget.max}${this.activeRunBudget.exhausted ? " (agotado)" : ""}.`
+			: "";
 		state.messages.push({
 			role: "system",
-			content:
-				"Has agotado tu presupuesto de herramientas. Responde ahora con lo que hayas conseguido.",
+			content: `Has agotado tu presupuesto de herramientas (${state.toolIterations} iteraciones en esta subtarea).${runBudgetContext} Responde ahora resumiendo lo que lograste, indicando el estado de cada parte de la tarea (completada/parcial/fallida), y recomendando concretamente qué falta hacer para terminar. No inventes resultados no verificados.`,
 		});
 
 		const finalResponse = await this.llmRouter.chat({
-			model: state.task.model || config.model || this.baseConfig.model || "default",
+			model:
+				state.task.model || config.model || this.baseConfig.model || "default",
 			messages: state.messages,
 			maxTokens: this.baseConfig.maxTokens,
 			temperature: config.temperature,
@@ -684,6 +784,17 @@ export class WorkerPool {
 		config: Partial<WorkerConfig> = {},
 	): Promise<Map<string, string>> {
 		const results = new Map<string, string>();
+		// Reset the shared run-iteration budget for this run.
+		this.activeRunBudget = {
+			used: 0,
+			max:
+				typeof config.maxIterationsPerRun === "number" &&
+				Number.isFinite(config.maxIterationsPerRun) &&
+				config.maxIterationsPerRun > 0
+					? config.maxIterationsPerRun
+					: Number.POSITIVE_INFINITY,
+			exhausted: false,
+		};
 
 		// Separar tareas con y sin dependencias
 		const ready: SubTask[] = [];
@@ -705,6 +816,7 @@ export class WorkerPool {
 			}
 
 			for (const chunk of chunks) {
+				if (this.activeRunBudget.exhausted) break;
 				// Stagger worker starts within the chunk so they don't all hit
 				// the provider API at the same instant (avoids 429 bursts).
 				const promises = chunk.map((task, index) =>
@@ -727,6 +839,16 @@ export class WorkerPool {
 		let maxPasses = pending.length + 1; // Evitar loops infinitos
 
 		while (pending.length > 0 && maxPasses-- > 0) {
+			if (this.activeRunBudget.exhausted) {
+				// Run iteration budget drained: mark remaining pending tasks so the
+				// orchestrator/C1 sees them as not-done and can short-circuit.
+				for (const task of pending) {
+					task.status = "failed";
+					const message = `[Budget] Presupuesto de iteraciones del run agotado (${this.activeRunBudget.max}).`;
+					results.set(task.id, results.get(task.id) ?? message);
+				}
+				break;
+			}
 			const nowReady: SubTask[] = [];
 			const stillPending: SubTask[] = [];
 

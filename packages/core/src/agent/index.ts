@@ -136,3 +136,12 @@ export type {
 	ContinuityGuardConfig,
 	ContinuityState,
 } from "./continuity-guard.js";
+export { ToolLoopGuardrails } from "./tool-loop-guardrails.js";
+export type {
+	ToolLoopGuardrailsConfig,
+	ToolLoopGuardrailsThresholds,
+	GuardrailAction,
+	GuardrailPattern,
+	GuardrailVerdict,
+	GuardrailOutcome,
+} from "./tool-loop-guardrails.js";

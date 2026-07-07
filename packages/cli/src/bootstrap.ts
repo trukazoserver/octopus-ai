@@ -834,6 +834,9 @@ function buildAgentRuntimeConfig(
 		reasoningEffort: reasoningEffort ?? fallbackConfig.reasoningEffort,
 		maxTokens: fallbackConfig.maxTokens,
 		toolIterationLimit: fallbackConfig.toolIterationLimit,
+		resultTruncation: fallbackConfig.resultTruncation,
+		compression: fallbackConfig.compression,
+		toolLoopGuardrails: fallbackConfig.toolLoopGuardrails,
 		continuityGuard: fallbackConfig.continuityGuard,
 		tenacidad: fallbackConfig.tenacidad,
 	};
@@ -992,6 +995,8 @@ export async function bootstrap(options?: {
 		fallback: config.ai.fallback,
 		providers,
 		thinking: config.ai.thinking,
+		streamReadTimeoutMs: config.ai.streamReadTimeoutMs,
+		streamReadTimeoutLocalMs: config.ai.streamReadTimeoutLocalMs,
 	});
 	await router.initialize();
 
@@ -2435,6 +2440,9 @@ Always be concise, helpful, and thorough.`,
 		model: config.ai.default,
 		maxTokens: config.ai.maxTokens,
 		toolIterationLimit: config.tools.iterationLimit,
+		resultTruncation: config.tools.resultTruncation,
+		compression: config.context?.compression,
+		toolLoopGuardrails: config.toolLoopGuardrails,
 		continuityGuard: config.continuityGuard,
 		tenacidad: config.tenacidad,
 	};
@@ -2480,6 +2488,7 @@ Always be concise, helpful, and thorough.`,
 			config.orchestration?.decompositionTimeoutMs ?? 30_000,
 		synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,
 		synthesisMaxTokens: config.orchestration?.synthesisMaxTokens ?? 1200,
+		maxIterationsPerRun: config.orchestration?.maxIterationsPerRun ?? 192,
 		workerConfig: {
 			maxToolIterations: config.orchestration?.maxToolIterationsPerArm ?? 32,
 			timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,
@@ -2639,6 +2648,7 @@ Always be concise, helpful, and thorough.`,
 				config.orchestration?.decompositionTimeoutMs ?? 30_000,
 			synthesisTimeoutMs: config.orchestration?.synthesisTimeoutMs ?? 10_000,
 			synthesisMaxTokens: config.orchestration?.synthesisMaxTokens ?? 1200,
+			maxIterationsPerRun: config.orchestration?.maxIterationsPerRun ?? 192,
 			workerConfig: {
 				maxToolIterations: config.orchestration?.maxToolIterationsPerArm ?? 32,
 				timeoutMs: config.orchestration?.workerTimeoutMs ?? 600_000,

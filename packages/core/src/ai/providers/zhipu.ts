@@ -6,6 +6,7 @@ import type {
 	ThinkingBlock,
 } from "../types.js";
 import { BaseLLMProvider } from "./base.js";
+import { readNextWithTimeout } from "./stream-reader.js";
 
 export type ZhipuApiMode = "api" | "coding-plan" | "coding-global" | "global";
 
@@ -106,9 +107,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 						thinking: { type: "enabled" },
 						...(model.toLowerCase().includes("glm-5.2") && {
 							reasoning_effort:
-								request.reasoning.effort === "xhigh"
-									? "max"
-									: "high",
+								request.reasoning.effort === "xhigh" ? "max" : "high",
 						}),
 					}
 				: request.reasoning && request.reasoning.effort === "none"
@@ -221,9 +220,7 @@ export class ZhipuProvider extends BaseLLMProvider {
 						thinking: { type: "enabled" },
 						...(model.toLowerCase().includes("glm-5.2") && {
 							reasoning_effort:
-								request.reasoning.effort === "xhigh"
-									? "max"
-									: "high",
+								request.reasoning.effort === "xhigh" ? "max" : "high",
 						}),
 					}
 				: request.reasoning && request.reasoning.effort === "none"
@@ -258,22 +255,17 @@ export class ZhipuProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
-		const readNext = async () => {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				return await Promise.race([
-					reader.read(),
-					new Promise<Awaited<ReturnType<typeof reader.read>>>((_, reject) => {
-						timer = setTimeout(
-							() => reject(new Error("Z.ai stream read timeout")),
-							this.streamReadTimeoutMs,
-						);
-					}),
-				]);
-			} finally {
-				if (timer) clearTimeout(timer);
-			}
-		};
+		// Env override (legacy) wins; else honor the unified ai.streamReadTimeoutMs
+		// config (via resolveStreamReadTimeoutMs); else fall back to the 15-min
+		// default captured in this.streamReadTimeoutMs.
+		const streamReadMs = process.env.OCTOPUS_ZAI_STREAM_READ_TIMEOUT_MS
+			? this.streamReadTimeoutMs
+			: this.resolveStreamReadTimeoutMs(
+					this.streamReadTimeoutMs,
+					this.streamReadTimeoutMs,
+				);
+		const readNext = async () =>
+			readNextWithTimeout(reader, streamReadMs, "Z.ai");
 
 		try {
 			while (true) {

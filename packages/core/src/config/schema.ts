@@ -300,6 +300,12 @@ const AiSchema = Type.Object({
 		{ default: "medium" },
 	),
 	maxTokens: Type.Number({ default: 16384 }),
+	streamReadTimeoutMs: Type.Optional(
+		Type.Number({ default: 120000, minimum: 1000 }),
+	),
+	streamReadTimeoutLocalMs: Type.Optional(
+		Type.Number({ default: 1800000, minimum: 1000 }),
+	),
 });
 
 const ChannelSchema = Type.Object({
@@ -615,7 +621,7 @@ const MCPServerEntrySchema = Type.Object({
 
 const ContinuityGuardSchema = Type.Object({
 	enabled: Type.Boolean({ default: true }),
-	maxAutoContinuations: Type.Integer({ default: 10, minimum: 1 }),
+	maxAutoContinuations: Type.Integer({ default: 25, minimum: 1 }),
 	truncationDetection: Type.Boolean({ default: true }),
 	stallDetection: Type.Optional(Type.Boolean({ default: true })),
 	maxStallForcings: Type.Optional(Type.Integer({ default: 3, minimum: 0 })),
@@ -632,6 +638,18 @@ const MCPchema = Type.Object({
 const ToolIterationLimitSchema = Type.Object({
 	enabled: Type.Boolean({ default: true }),
 	maxIterations: Type.Integer({ default: 256, minimum: 1 }),
+	/**
+	 * When true, suppress the per-tool-result "Remaining tool budget" reminder
+	 * injected into the model context. HermesAgent removed mid-task budget
+	 * reminders (April 2026) because they nudged models to abandon complex
+	 * tasks prematurely. Default false preserves prior behavior.
+	 */
+	suppressPressureReminders: Type.Optional(Type.Boolean({ default: false })),
+});
+
+const ToolResultTruncationSchema = Type.Object({
+	maxTokens: Type.Integer({ default: 4000, minimum: 256 }),
+	maxCharsCeiling: Type.Integer({ default: 12000, minimum: 1000 }),
 });
 
 const ToolTimeoutsSchema = Type.Object({
@@ -659,6 +677,7 @@ const ToolRateLimitsSchema = Type.Object({
 const ToolsConfigSchema = Type.Object({
 	disabled: Type.Array(Type.String(), { default: [] }),
 	iterationLimit: ToolIterationLimitSchema,
+	resultTruncation: ToolResultTruncationSchema,
 	timeouts: ToolTimeoutsSchema,
 	rateLimits: Type.Optional(ToolRateLimitsSchema),
 });
@@ -672,6 +691,9 @@ const OrchestrationConfigSchema = Type.Object({
 	maxArms: Type.Integer({ default: 8, minimum: 1, maximum: 8 }),
 	workerTimeoutMs: Type.Number({ default: 600000, minimum: 1000 }),
 	maxToolIterationsPerArm: Type.Integer({ default: 32, minimum: 1 }),
+	maxIterationsPerRun: Type.Optional(
+		Type.Integer({ default: 192, minimum: 1 }),
+	),
 	decompositionTimeoutMs: Type.Number({ default: 30000, minimum: 1000 }),
 	synthesisTimeoutMs: Type.Number({ default: 10000, minimum: 1000 }),
 	synthesisMaxTokens: Type.Integer({ default: 1200, minimum: 128 }),
@@ -732,6 +754,38 @@ const WebToolsHealthSchema = Type.Object({
 	breaker: WebToolsHealthBreakerSchema,
 });
 
+const CompressionSchema = Type.Object({
+	threshold: Type.Number({ default: 0.8, minimum: 0.1, maximum: 0.99 }),
+	targetRatio: Type.Number({ default: 0.3, minimum: 0.05, maximum: 0.95 }),
+	protectLastN: Type.Integer({ default: 20, minimum: 1 }),
+	protectFirstN: Type.Integer({ default: 0, minimum: 0 }),
+	outputReserve: Type.Integer({ default: 16384, minimum: 1024 }),
+	summaryMaxTokens: Type.Integer({ default: 4096, minimum: 256 }),
+	condenseMaxTokens: Type.Integer({ default: 2048, minimum: 256 }),
+	hygieneHardMessageLimit: Type.Integer({ default: 5000, minimum: 0 }),
+});
+
+const ContextSchema = Type.Object({
+	compression: CompressionSchema,
+});
+
+const ToolLoopGuardrailsSchema = Type.Object({
+	warningsEnabled: Type.Boolean({ default: true }),
+	hardStopEnabled: Type.Boolean({ default: false }),
+	/** Swarm workers circuit-break on hard-stop (unattended) while the interactive loop warns only. */
+	workerHardStopEnabled: Type.Optional(Type.Boolean({ default: true })),
+	warnAfter: Type.Object({
+		exactFailure: Type.Integer({ default: 2, minimum: 1 }),
+		sameToolFailure: Type.Integer({ default: 3, minimum: 1 }),
+		idempotentNoProgress: Type.Integer({ default: 2, minimum: 1 }),
+	}),
+	hardStopAfter: Type.Object({
+		exactFailure: Type.Integer({ default: 5, minimum: 1 }),
+		sameToolFailure: Type.Integer({ default: 8, minimum: 1 }),
+		idempotentNoProgress: Type.Integer({ default: 5, minimum: 1 }),
+	}),
+});
+
 export const ConfigSchema = Type.Object({
 	version: Type.Number({ default: 1 }),
 	server: ServerSchema,
@@ -747,8 +801,10 @@ export const ConfigSchema = Type.Object({
 	storage: StorageSchema,
 	security: SecuritySchema,
 	tools: ToolsConfigSchema,
+	context: Type.Optional(ContextSchema),
 	orchestration: Type.Optional(OrchestrationConfigSchema),
 	continuityGuard: Type.Optional(ContinuityGuardSchema),
+	toolLoopGuardrails: Type.Optional(ToolLoopGuardrailsSchema),
 	tenacidad: Type.Optional(TenacidadSchema),
 	mcp: Type.Optional(MCPchema),
 	webToolsHealth: Type.Optional(WebToolsHealthSchema),

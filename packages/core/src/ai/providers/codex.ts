@@ -22,6 +22,7 @@ import type {
 	ProviderConfig,
 } from "../types.js";
 import { BaseLLMProvider } from "./base.js";
+import { readNextWithTimeout } from "./stream-reader.js";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const ORIGINATOR = "codex_cli_rs";
@@ -554,31 +555,12 @@ export class CodexProvider extends BaseLLMProvider {
 		// a retryable error so the runtime's stream-error retry path can recover
 		// instead of the user having to pause and manually resume.
 		const STREAM_READ_TIMEOUT_MS = 120_000;
-		const readNext = async (): Promise<
-			Readonly<{ done: boolean; value: Uint8Array | undefined }>
-		> => {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				return await Promise.race([
-					reader.read(),
-					new Promise<
-						Readonly<{ done: boolean; value: Uint8Array | undefined }>
-					>((_, reject) => {
-						timer = setTimeout(
-							() =>
-								reject(
-									new Error(
-										`Codex stream read timeout (no data for ${STREAM_READ_TIMEOUT_MS / 1000}s)`,
-									),
-								),
-							STREAM_READ_TIMEOUT_MS,
-						);
-					}),
-				]);
-			} finally {
-				if (timer) clearTimeout(timer);
-			}
-		};
+		const readNext = async () =>
+			readNextWithTimeout(
+				reader,
+				this.resolveStreamReadTimeoutMs(STREAM_READ_TIMEOUT_MS, 1_800_000),
+				"Codex",
+			);
 
 		try {
 			streamLoop: while (true) {

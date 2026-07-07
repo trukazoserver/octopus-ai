@@ -105,6 +105,13 @@ export interface OrchestratorConfig {
 	maxReplanPasses?: number;
 	/** Máximo de subtareas alternativas creadas por cada tarea fallida. Default: 3. */
 	maxReplacementsPerTask?: number;
+	/**
+	 * Aggregate iteration cap across ALL arms/passes of one run (sum of every
+	 * worker's toolIterations). When reached, in-flight workers stop, no further
+	 * arms dispatch, and C1 replan short-circuits. Iteration budget (not cost).
+	 * Default 192 (≈ maxArms 8 × perArm 32 × 0.75).
+	 */
+	maxIterationsPerRun?: number;
 	/** Config for cross-review between agents */
 	crossReview?: Partial<CrossReviewConfig>;
 }
@@ -178,6 +185,10 @@ export interface OrchestratorTelemetry {
 	succeeded: number;
 	failed: number;
 	cancelled: number;
+	/** Aggregate tool-call iterations across all arms/passes (run budget accounting). */
+	toolIterations?: number;
+	/** True when the run-level iteration budget was exhausted (C1 short-circuits). */
+	budgetExhausted?: boolean;
 }
 
 const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -193,6 +204,7 @@ const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 	enableAutoReplan: true,
 	maxReplanPasses: 1,
 	maxReplacementsPerTask: 3,
+	maxIterationsPerRun: 192,
 };
 
 const SYNTHESIS_RESULT_CHARS_PER_TASK = 1500;
@@ -1148,6 +1160,7 @@ export class OctopusOrchestrator {
 		const executionPromise = this.workerPool.executeAll(pendingSubtasks, {
 			...this.config.workerConfig,
 			...workerConfig,
+			maxIterationsPerRun: this.config.maxIterationsPerRun,
 			runId,
 		});
 
@@ -1334,12 +1347,23 @@ export class OctopusOrchestrator {
 		// Suscribirse al event stream para re-emitir eventos
 		const eventQueue: OrchestratorEvent[] = [];
 		let resolveWaiting: (() => void) | null = null;
+		let totalRunIterations = 0;
 		const taskById = new Map(
 			decomposition.subtasks.map((task) => [task.id, task]),
 		);
 
 		const unsubscribe = this.eventStream.subscribe((event) => {
 			if (event.runId !== runId) return;
+			// Accumulate aggregate tool iterations from terminal worker events.
+			if (
+				event.type === "result" ||
+				event.type === "error" ||
+				event.type === "cancelled"
+			) {
+				const it = (event.data as { toolIterations?: number } | undefined)
+					?.toolIterations;
+				if (typeof it === "number") totalRunIterations += it;
+			}
 			let orchEvent: OrchestratorEvent | null = null;
 			const workflowTaskId = workflowTaskBySubtask.get(event.taskId);
 			const sourceTask = taskById.get(event.taskId);
@@ -1507,6 +1531,7 @@ export class OctopusOrchestrator {
 				const executionPromise = this.workerPool.executeAll(activeSubtasks, {
 					...this.config.workerConfig,
 					...workerConfig,
+					maxIterationsPerRun: this.config.maxIterationsPerRun,
 					runId,
 				});
 				const passStartedAt = Date.now();
@@ -1552,6 +1577,9 @@ export class OctopusOrchestrator {
 					accumulatedResults.set(taskId, result);
 
 				// --- C1: detectar tareas fallidas (no canceladas) y re-planificar ---
+				// Budget short-circuit: if the run iteration budget is drained,
+				// replanning can't make headway — exit to synthesis with what we have.
+				if (this.workerPool.isRunBudgetExhausted()) break;
 				if (!autoReplanEnabled || pass >= maxReplanPasses) break;
 				const failedTasks = activeSubtasks.filter(
 					(task) =>
@@ -1647,6 +1675,8 @@ export class OctopusOrchestrator {
 					succeeded: final.succeeded,
 					failed: final.failed,
 					cancelled: final.cancelled,
+					toolIterations: totalRunIterations,
+					budgetExhausted: this.workerPool.isRunBudgetExhausted(),
 				},
 			};
 			yield { type: "synthesis", result: synthesis };

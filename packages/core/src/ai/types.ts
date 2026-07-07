@@ -120,6 +120,17 @@ export interface ProviderConfig {
 	oauthExpiresAt?: number;
 	browserCookies?: string;
 	browserUserAgent?: string;
+	/**
+	 * Per-provider override for the streaming chunk-gap (per-read) timeout in
+	 * milliseconds. Populated by the router from `ai.streamReadTimeoutMs` unless
+	 * the provider sets its own. See `BaseLLMProvider.resolveStreamReadTimeoutMs`.
+	 */
+	streamReadTimeoutMs?: number;
+	/**
+	 * Per-provider override applied when the base URL is local/self-hosted
+	 * (long prefills). Falls back to `ai.streamReadTimeoutLocalMs`.
+	 */
+	streamReadTimeoutLocalMs?: number;
 }
 
 export interface UsageStats {
@@ -144,6 +155,18 @@ export interface LLMRouterConfig {
 	fallback?: string;
 	providers: Record<string, ProviderConfig>;
 	thinking?: ReasoningEffort;
+	/**
+	 * Router-wide default for the streaming chunk-gap (per-read) timeout in ms,
+	 * applied to every provider that doesn't override it. Mirrors HermesAgent's
+	 * `HERMES_STREAM_READ_TIMEOUT`. Default 120000 (2 min).
+	 */
+	streamReadTimeoutMs?: number;
+	/**
+	 * Auto-applied when a provider's base URL is local/self-hosted (long
+	 * prefills). Mirrors HermesAgent's local-provider auto-raise to 30 min.
+	 * Default 1800000.
+	 */
+	streamReadTimeoutLocalMs?: number;
 }
 
 export interface ProviderInfo {

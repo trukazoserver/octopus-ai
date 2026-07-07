@@ -23,18 +23,60 @@ Rules:
 12. Never convert completed work into a pending request. If a later agent reads this summary, it must know what was already done so it does not repeat expensive generation/tool calls unless the user explicitly asks.
 13. Output ONLY the summary text. No meta-commentary.`;
 
-const RAW_TURNS_TO_KEEP = 20;
-const CONTEXT_THRESHOLD = 0.8;
+/**
+ * Configurable context-compression knobs. Mirrors HermesAgent's
+ * `compression.*` block (threshold / target_ratio / protect_last_n /
+ * protect_first_n / hygiene_hard_message_limit) and opencode's
+ * `compaction.*`. Defaults preserve Octopus's prior hardcoded behavior.
+ */
+export interface CompressionConfig {
+	/** Compress at this fraction of the model's context window. */
+	threshold: number;
+	/** Re-condense the cumulative summary when it exceeds this fraction of the input budget. */
+	targetRatio: number;
+	/** Minimum recent messages kept uncompressed (HermesAgent `protect_last_n`). */
+	protectLastN: number;
+	/** First N non-system conversation messages pinned raw across compactions (HermesAgent `protect_first_n`). 0 = pin nothing. */
+	protectFirstN: number;
+	/** Tokens reserved for model output (subtracted from context window for the input budget). */
+	outputReserve: number;
+	/** Max tokens for a single summary LLM call. */
+	summaryMaxTokens: number;
+	/** Max tokens for a summary-condensation LLM call. */
+	condenseMaxTokens: number;
+	/**
+	 * Hard message-count safety valve: force compression when the non-system
+	 * message count reaches this, even if the token threshold can't fire
+	 * (e.g. API disconnects on oversized sessions). 0 = disabled.
+	 * HermesAgent `hygiene_hard_message_limit`.
+	 */
+	hygieneHardMessageLimit: number;
+}
+
+export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
+	threshold: 0.8,
+	targetRatio: 0.3,
+	protectLastN: 20,
+	protectFirstN: 0,
+	outputReserve: 16384,
+	summaryMaxTokens: 4096,
+	condenseMaxTokens: 2048,
+	hygieneHardMessageLimit: 5000,
+};
 
 export class RollingContextManager {
 	private tokenCounter = new TokenCounter();
 	private currentSummary = "";
 	private summarizing = false;
+	private readonly compression: CompressionConfig;
 
 	constructor(
 		private llmRouter: LLMRouter,
 		private onSummaryUpdated?: (summary: string) => Promise<void> | void,
-	) {}
+		compressionConfig?: Partial<CompressionConfig>,
+	) {
+		this.compression = { ...DEFAULT_COMPRESSION_CONFIG, ...compressionConfig };
+	}
 
 	reset(): void {
 		this.currentSummary = "";
@@ -58,21 +100,30 @@ export class RollingContextManager {
 		}
 
 		const contextWindow = getModelContextWindow(model);
-		const threshold = Math.floor(contextWindow * CONTEXT_THRESHOLD);
-		const outputReserve = 16384;
-		const inputBudget = contextWindow - outputReserve;
+		const threshold = Math.floor(contextWindow * this.compression.threshold);
+		const inputBudget = contextWindow - this.compression.outputReserve;
 		const currentTokens =
 			this.tokenCounter.countMessagesTokens(workingMessages);
 
-		if (currentTokens < threshold) {
+		// Hygiene safety valve: force compression on message count alone, even
+		// when token accounting can't fire (e.g. API disconnects on oversized
+		// sessions). Mirrors HermesAgent `hygiene_hard_message_limit`.
+		const nonSystemCount = workingMessages.filter(
+			(m) => m.role !== "system",
+		).length;
+		const hygieneForce =
+			this.compression.hygieneHardMessageLimit > 0 &&
+			nonSystemCount >= this.compression.hygieneHardMessageLimit;
+
+		if (currentTokens < threshold && !hygieneForce) {
 			logger.debug(
-				`Context at ${currentTokens}/${inputBudget} tokens (${((currentTokens / inputBudget) * 100).toFixed(1)}%) — below 80% threshold, no summarization needed.`,
+				`Context at ${currentTokens}/${inputBudget} tokens (${((currentTokens / inputBudget) * 100).toFixed(1)}%) — below ${this.compression.threshold * 100}% threshold, no summarization needed.`,
 			);
 			return workingMessages;
 		}
 
 		logger.info(
-			`Context reached ${currentTokens}/${inputBudget} tokens (${((currentTokens / inputBudget) * 100).toFixed(1)}%) — triggering rolling summarization.`,
+			`Context reached ${currentTokens}/${inputBudget} tokens (${((currentTokens / inputBudget) * 100).toFixed(1)}%)${hygieneForce ? ` [hygiene valve: ${nonSystemCount} messages]` : ""} — triggering rolling summarization.`,
 		);
 
 		return this.summarizeAndCompress(workingMessages, model, inputBudget);
@@ -119,13 +170,22 @@ export class RollingContextManager {
 		const { systemMessages, conversationMessages } =
 			this.splitSystemAndConversation(messages);
 
-		if (conversationMessages.length <= RAW_TURNS_TO_KEEP) {
+		const protectFirstN = Math.max(0, this.compression.protectFirstN);
+		const protectLastN = Math.max(1, this.compression.protectLastN);
+
+		// Pin the first N non-system conversation messages raw so the original
+		// goal survives every compaction (HermesAgent `protect_first_n`).
+		const protectedHead =
+			protectFirstN > 0 ? conversationMessages.slice(0, protectFirstN) : [];
+		const remaining = conversationMessages.slice(protectedHead.length);
+
+		if (remaining.length <= protectLastN) {
 			logger.debug("Conversation too short to summarize, returning as-is.");
 			return messages;
 		}
 
-		const rawRecent = conversationMessages.slice(-RAW_TURNS_TO_KEEP);
-		const toSummarize = conversationMessages.slice(0, -RAW_TURNS_TO_KEEP);
+		const rawRecent = remaining.slice(-protectLastN);
+		const toSummarize = remaining.slice(0, -protectLastN);
 
 		if (toSummarize.length === 0) {
 			return messages;
@@ -140,7 +200,7 @@ export class RollingContextManager {
 		const totalSummaryTokens = this.tokenCounter.countTokens(
 			this.currentSummary,
 		);
-		if (totalSummaryTokens > inputBudget * 0.3) {
+		if (totalSummaryTokens > inputBudget * this.compression.targetRatio) {
 			this.currentSummary = await this.condenseExistingSummary(
 				this.currentSummary,
 				model,
@@ -153,21 +213,20 @@ export class RollingContextManager {
 		const compressed: LLMMessage[] = [
 			...systemMessages,
 			summaryMessage,
+			...protectedHead,
 			...rawRecent,
 		];
 
 		const previousTokens = this.tokenCounter.countMessagesTokens(messages);
 		const newTokens = this.tokenCounter.countMessagesTokens(compressed);
 		logger.info(
-			`Rolling context compressed: ${previousTokens} → ${newTokens} tokens (kept ${RAW_TURNS_TO_KEEP} raw turns + summary)`,
+			`Rolling context compressed: ${previousTokens} → ${newTokens} tokens (kept ${protectLastN} raw + ${protectedHead.length} pinned + summary)`,
 		);
 
-		const contextWindow = getModelContextWindow(model);
-		const threshold = Math.floor(contextWindow * CONTEXT_THRESHOLD);
-		if (newTokens >= threshold && rawRecent.length > RAW_TURNS_TO_KEEP) {
-			return this.summarizeAndCompress(compressed, model, inputBudget);
-		}
-
+		// Single pass per call. Progressive compaction across calls handles
+		// further growth (each call compresses the front-`protectLastN`). The
+		// previous in-method recursion here was dead code (its guard could never
+		// fire) and is intentionally removed.
 		return compressed;
 	}
 
@@ -208,7 +267,7 @@ export class RollingContextManager {
 						content: `Summarize this conversation segment. Preserve ALL important details, tool outcomes, media references, and user goals. Include a mandatory [Retrieval Hints] section based on the retrieval map so a future agent can find exact missing details in the raw conversation.\n\nRetrieval map:\n${retrievalMap}\n\nConversation segment:\n${formatted}`,
 					},
 				],
-				maxTokens: 4096,
+				maxTokens: this.compression.summaryMaxTokens,
 				temperature: 0.1,
 			});
 
@@ -238,7 +297,7 @@ export class RollingContextManager {
 					},
 					{ role: "user", content: existingSummary },
 				],
-				maxTokens: 2048,
+				maxTokens: this.compression.condenseMaxTokens,
 				temperature: 0.1,
 			});
 			return response.content?.trim() || existingSummary;
