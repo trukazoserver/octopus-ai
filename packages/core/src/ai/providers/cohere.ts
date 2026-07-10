@@ -5,7 +5,7 @@ import type {
 	LLMToolCall,
 	ProviderConfig,
 } from "../types.js";
-import { BaseLLMProvider } from "./base.js";
+import { BaseLLMProvider, verifyModelsGet } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 export class CohereProvider extends BaseLLMProvider {
@@ -217,5 +217,11 @@ export class CohereProvider extends BaseLLMProvider {
 
 	async isAvailable(): Promise<boolean> {
 		return !!this.config.apiKey;
+	}
+
+	async verifyKey(): Promise<{ ok: boolean; error?: string }> {
+		return verifyModelsGet(`${this.baseUrl}/models`, {
+			Authorization: `Bearer ${this.config.apiKey ?? ""}`,
+		});
 	}
 }

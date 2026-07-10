@@ -8,7 +8,7 @@ import type {
 	ReasoningEffort,
 	ThinkingBlock,
 } from "../types.js";
-import { BaseLLMProvider } from "./base.js";
+import { BaseLLMProvider, verifyModelsGet } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, "none">, number> = {
@@ -459,5 +459,9 @@ export class AnthropicProvider extends BaseLLMProvider {
 
 	async isAvailable(): Promise<boolean> {
 		return !!this.config.apiKey;
+	}
+
+	async verifyKey(): Promise<{ ok: boolean; error?: string }> {
+		return verifyModelsGet(`${this.baseUrl}/models`, this.getHeaders());
 	}
 }

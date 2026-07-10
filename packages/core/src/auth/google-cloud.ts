@@ -312,7 +312,9 @@ async function createServiceAccount(
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		if (!/409|already exists|alreadyexists/i.test(msg)) {
-			warnings.push(`No se pudo crear la service account '${accountId}': ${msg}`);
+			warnings.push(
+				`No se pudo crear la service account '${accountId}': ${msg}`,
+			);
 		}
 	}
 	return email;
@@ -404,34 +406,39 @@ export async function prepareVertexProject(
 		createdProject = true;
 	}
 
-	const billingAccounts = await listBillingAccounts(accessToken).catch(
-		(err) => {
-			warnings.push(
-				`No se pudieron listar cuentas de facturacion: ${err instanceof Error ? err.message : String(err)}`,
-			);
-			return [];
-		},
-	);
-
+	// Billing: Vertex REQUIRES billing to infer. A freshly-created project can
+	// take a few seconds before it accepts a billing account, and listBillingAccounts
+	// can briefly 400 right after the gcloud account switch — so retry a few times.
 	const requestedBilling = normalizeBillingAccountName(
 		options.billingAccountName,
 	);
-	const selectedBilling =
-		requestedBilling ?? billingAccounts.find((account) => account.open)?.name;
+	let billingAccounts: GoogleBillingAccount[] = [];
 	let linkedBillingAccount: string | undefined;
-	if (selectedBilling) {
-		try {
-			await linkBillingAccount(projectId, selectedBilling, accessToken);
-			linkedBillingAccount = selectedBilling;
-		} catch (err) {
-			warnings.push(
-				`No se pudo vincular facturacion (${selectedBilling}): ${err instanceof Error ? err.message : String(err)}`,
-			);
-		}
-	} else {
-		warnings.push(
-			"No hay cuentas de facturacion abiertas disponibles para vincular automaticamente.",
+	for (let attempt = 0; attempt < 3 && !linkedBillingAccount; attempt++) {
+		if (attempt > 0) await sleep(3000);
+		billingAccounts = await listBillingAccounts(accessToken).catch(
+			() => billingAccounts,
 		);
+		const selected =
+			requestedBilling ?? billingAccounts.find((account) => account.open)?.name;
+		if (!selected) {
+			if (attempt === 2) {
+				warnings.push(
+					"No hay cuentas de facturacion abiertas disponibles para vincular automaticamente.",
+				);
+			}
+			continue;
+		}
+		try {
+			await linkBillingAccount(projectId, selected, accessToken);
+			linkedBillingAccount = selected;
+		} catch (err) {
+			if (attempt === 2) {
+				warnings.push(
+					`No se pudo vincular facturacion (${selected}): ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
 	}
 
 	const projectRef = project.projectNumber ?? project.projectId ?? projectId;

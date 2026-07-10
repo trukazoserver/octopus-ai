@@ -7,7 +7,7 @@ import type {
 	ProviderConfig,
 	ThinkingBlock,
 } from "../types.js";
-import { BaseLLMProvider } from "./base.js";
+import { BaseLLMProvider, verifyModelsGet } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 export interface OpenAICompatibleConfig extends ProviderConfig {
@@ -394,6 +394,10 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		} catch {
 			return this.prefix === "local";
 		}
+	}
+
+	async verifyKey(): Promise<{ ok: boolean; error?: string }> {
+		return verifyModelsGet(`${this.baseUrl}/models`, this.getHeaders());
 	}
 }
 

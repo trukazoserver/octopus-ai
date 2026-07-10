@@ -12,9 +12,9 @@ import {
 	StatusBadge,
 	Toggle,
 } from "../components/ConfigSection.js";
+import { UsageSection } from "../components/settings/UsageSection.js";
 import { AppIcon } from "../components/ui/AppIcon.js";
 import { BrandLogo } from "../components/ui/BrandLogo.js";
-import { UsageSection } from "../components/settings/UsageSection.js";
 import {
 	apiDelete,
 	apiGet,
@@ -174,6 +174,7 @@ interface UserProfileResponse {
 
 interface StatusResponse {
 	availableProviders?: string[];
+	configuredProviders?: string[];
 }
 
 interface VertexSetupResponse {
@@ -258,12 +259,7 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "anthropic.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/anthropic.svg",
-		authModes: [
-			{ value: "api-key", label: "API key" },
-			{ value: "bearer", label: "Bearer token" },
-			{ value: "oauth", label: "OAuth (Login)" },
-			{ value: "browser", label: "Browser (Login)" },
-		],
+		authModes: [{ value: "api-key", label: "API key" }],
 		defaultAuthMode: "api-key",
 		apiKeyEnvPlaceholder: "ANTHROPIC_API_KEY",
 	},
@@ -295,10 +291,7 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "deepseek.com",
 		logoSrc:
 			"https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/deepseek.svg",
-		authModes: [
-			{ value: "api-key", label: "API key" },
-			{ value: "browser", label: "Browser (Login)" },
-		],
+		authModes: [{ value: "api-key", label: "API key" }],
 		defaultAuthMode: "api-key",
 		apiKeyEnvPlaceholder: "DEEPSEEK_API_KEY",
 	},
@@ -318,10 +311,7 @@ const PROVIDERS: ProviderOption[] = [
 		logoDomain: "x.ai",
 		logoSrc: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/x.svg",
 		fallbackLabel: "xAI",
-		authModes: [
-			{ value: "api-key", label: "API key" },
-			{ value: "browser", label: "Browser (Login)" },
-		],
+		authModes: [{ value: "api-key", label: "API key" }],
 		defaultAuthMode: "api-key",
 		apiKeyEnvPlaceholder: "XAI_API_KEY",
 	},
@@ -629,6 +619,7 @@ interface BrowserLoginSectionProps {
 	providerName: string;
 	isConfigured: boolean;
 	onLogin: () => void;
+	onDisconnected?: () => void;
 }
 
 function BrowserLoginSection({
@@ -636,6 +627,7 @@ function BrowserLoginSection({
 	providerName,
 	isConfigured,
 	onLogin,
+	onDisconnected,
 }: BrowserLoginSectionProps) {
 	const [status, setStatus] = useState<
 		"idle" | "waiting" | "captured" | "error" | "closed"
@@ -698,49 +690,6 @@ function BrowserLoginSection({
 
 	return (
 		<div>
-			<div
-				style={{
-					display: "flex",
-					alignItems: "center",
-					gap: 8,
-					marginBottom: 12,
-				}}
-			>
-				<span
-					style={{
-						display: "inline-block",
-						padding: "2px 8px",
-						borderRadius: 8,
-						fontSize: "0.7rem",
-						fontWeight: 600,
-						background:
-							status === "captured" || isConfigured
-								? "rgba(52,211,153,.15)"
-								: status === "waiting"
-									? "rgba(251,191,36,.15)"
-									: status === "error" || status === "closed"
-										? "rgba(239,68,68,.15)"
-										: "rgba(99,102,241,.15)",
-						color:
-							status === "captured" || isConfigured
-								? "#34d399"
-								: status === "waiting"
-									? "#fbbf24"
-									: status === "error" || status === "closed"
-										? "#f87171"
-										: "#818cf8",
-					}}
-				>
-					{status === "captured" || isConfigured
-						? "Conectado"
-						: status === "waiting"
-							? "Abriendo navegador..."
-							: status === "error" || status === "closed"
-								? "Error"
-								: "No conectado"}
-				</span>
-			</div>
-
 			{error && (
 				<div
 					style={{
@@ -780,6 +729,31 @@ function BrowserLoginSection({
 						? "Esperando login en navegador..."
 						: `Iniciar sesion via ${providerName}`}
 				</button>
+				{(status === "captured" || isConfigured) && (
+					<button
+						type="button"
+						onClick={async () => {
+							try {
+								await apiPost(`/api/providers/${provider}/disconnect`, {});
+								setStatus("idle");
+								onDisconnected?.();
+							} catch {
+								// ignore
+							}
+						}}
+						style={{
+							padding: "8px 16px",
+							borderRadius: 8,
+							border: "1px solid rgba(239,68,68,.35)",
+							background: "rgba(239,68,68,.08)",
+							color: "#f87171",
+							fontSize: "0.8rem",
+							cursor: "pointer",
+						}}
+					>
+						Desconectar
+					</button>
+				)}
 			</div>
 
 			<div
@@ -793,6 +767,213 @@ function BrowserLoginSection({
 				Abre la pagina de {providerName} en tu navegador para que inicies
 				sesion. Octopus AI captura la sesion automaticamente.
 			</div>
+		</div>
+	);
+}
+
+interface ApiKeyConnectSectionProps {
+	providerKey: string;
+	providerName: string;
+	fieldKey: string;
+	configured: boolean;
+	onConnected: () => void;
+	onDisconnected: () => void;
+}
+
+type ApiKeyPhase = "idle" | "testing" | "connected" | "error";
+
+/**
+ * API-key connection with real validation. The user pastes a key and clicks
+ * "Conectar": the backend tests it against the provider (GET /models) and only
+ * if it works do we persist it. "Desconectar" wipes the credential via
+ * /disconnect.
+ */
+function ApiKeyConnectSection({
+	providerKey,
+	providerName,
+	fieldKey,
+	configured,
+	onConnected,
+	onDisconnected,
+}: ApiKeyConnectSectionProps) {
+	const [phase, setPhase] = useState<ApiKeyPhase>(
+		configured ? "connected" : "idle",
+	);
+	const [apiKeyInput, setApiKeyInput] = useState("");
+	const [error, setError] = useState<string | null>(null);
+
+	// Re-sync when the upstream `configured` flag changes (e.g. after disconnect
+	// from elsewhere or a config refresh).
+	useEffect(() => {
+		setPhase(configured ? "connected" : "idle");
+	}, [configured]);
+
+	const handleConnect = async () => {
+		const candidate = apiKeyInput.trim();
+		if (!candidate) {
+			setError("Introduce una API key");
+			setPhase("error");
+			return;
+		}
+		setError(null);
+		setPhase("testing");
+		try {
+			const r = (await apiPost(`/api/providers/${providerKey}/test`, {
+				apiKey: candidate,
+			})) as { ok: boolean; error?: string };
+			if (r.ok) {
+				// ONLY persist after successful validation.
+				await apiPut(`/api/config/${fieldKey}`, candidate);
+				setApiKeyInput("");
+				setPhase("connected");
+				onConnected();
+			} else {
+				setError(r.error ?? "No se pudo validar la API key");
+				setPhase("error");
+			}
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Error al validar la API key");
+			setPhase("error");
+		}
+	};
+
+	const handleDisconnect = async () => {
+		setError(null);
+		try {
+			await apiPost(`/api/providers/${providerKey}/disconnect`, {});
+			setPhase("idle");
+			onDisconnected();
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Error al desconectar");
+		}
+	};
+
+	const handleEdit = () => {
+		setApiKeyInput("");
+		setError(null);
+		setPhase("idle");
+	};
+
+	if (phase === "connected") {
+		return (
+			<div style={{ display: "grid", gap: 10 }}>
+				<div style={{ display: "flex", gap: 8 }}>
+					<button
+						type="button"
+						onClick={handleEdit}
+						style={{
+							padding: "6px 12px",
+							borderRadius: 8,
+							border: "1px solid #2a303a",
+							background: "transparent",
+							color: "#94a3b8",
+							fontSize: "0.75rem",
+							cursor: "pointer",
+						}}
+					>
+						Editar API key
+					</button>
+					<button
+						type="button"
+						onClick={handleDisconnect}
+						style={{
+							padding: "6px 12px",
+							borderRadius: 8,
+							border: "1px solid rgba(239,68,68,.35)",
+							background: "rgba(239,68,68,.08)",
+							color: "#f87171",
+							fontSize: "0.75rem",
+							cursor: "pointer",
+						}}
+					>
+						Desconectar
+					</button>
+				</div>
+				{error && (
+					<div
+						style={{
+							color: "#f87171",
+							fontSize: "0.72rem",
+							lineHeight: 1.45,
+						}}
+					>
+						{error}
+					</div>
+				)}
+			</div>
+		);
+	}
+
+	const testing = phase === "testing";
+	return (
+		<div style={{ display: "grid", gap: 8 }}>
+			<div>
+				<label
+					htmlFor={`apikey-${providerKey}`}
+					style={{
+						display: "block",
+						fontSize: "0.75rem",
+						color: "#94a3b8",
+						marginBottom: 4,
+					}}
+				>
+					API key de {providerName}
+				</label>
+				<input
+					id={`apikey-${providerKey}`}
+					type="password"
+					value={apiKeyInput}
+					placeholder={`Pega tu API key de ${providerName}`}
+					onChange={(e) => setApiKeyInput(e.target.value)}
+					disabled={testing}
+					style={{
+						width: "100%",
+						padding: "8px 12px",
+						borderRadius: 8,
+						border: "1px solid #2a303a",
+						background: "#090a0d",
+						color: "#e2e8f0",
+						fontSize: "0.8rem",
+						boxSizing: "border-box",
+					}}
+				/>
+			</div>
+			<div style={{ display: "flex", gap: 8 }}>
+				<button
+					type="button"
+					disabled={testing || !apiKeyInput.trim()}
+					onClick={handleConnect}
+					style={{
+						padding: "8px 16px",
+						borderRadius: 8,
+						border: "none",
+						background: testing
+							? "#374151"
+							: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+						color: "#fff",
+						fontSize: "0.8rem",
+						fontWeight: 500,
+						cursor: testing ? "not-allowed" : "pointer",
+						opacity: testing ? 0.7 : 1,
+					}}
+				>
+					{testing ? "Validando…" : "Conectar"}
+				</button>
+			</div>
+			{error && (
+				<div
+					style={{
+						padding: "6px 10px",
+						borderRadius: 8,
+						background: "rgba(239,68,68,.1)",
+						color: "#f87171",
+						fontSize: "0.72rem",
+						lineHeight: 1.45,
+					}}
+				>
+					{error}
+				</div>
+			)}
 		</div>
 	);
 }
@@ -1101,6 +1282,410 @@ function OAuthLoginSection({
 					http://127.0.0.1:18789/api/auth/{provider}/callback
 				</code>
 			</div>
+		</div>
+	);
+}
+
+/** Small inline CSS spinner (self-contained keyframes via a <style> tag). */
+function Spinner({ size = 16 }: { size?: number }) {
+	return (
+		<>
+			<style>{`@keyframes octo-spin { to { transform: rotate(360deg); } }`}</style>
+			<span
+				aria-hidden
+				style={{
+					display: "inline-block",
+					width: size,
+					height: size,
+					marginRight: 8,
+					verticalAlign: "middle",
+					border: `${Math.max(2, Math.round(size / 8))}px solid rgba(255,255,255,.25)`,
+					borderTopColor: "#fff",
+					borderRadius: "50%",
+					animation: "octo-spin 0.7s linear infinite",
+					flexShrink: 0,
+				}}
+			/>
+		</>
+	);
+}
+
+interface GcloudConnectSectionProps {
+	providerConfig: ProviderConfig;
+	connected: boolean;
+	onConnected: () => void;
+	onDisconnected?: () => void;
+}
+
+type GcloudConnectPhase =
+	| "loading"
+	| "needs-gcloud"
+	| "needs-login"
+	| "logging-in"
+	| "provisioning"
+	| "connected"
+	| "error";
+
+interface GcloudConnectResult {
+	ok: boolean;
+	code?:
+		| "needs-login"
+		| "gcloud-missing"
+		| "billing-warning"
+		| "token-exchange-failed"
+		| "permission-denied"
+		| "quota-exceeded"
+		| "billing-error"
+		| "unknown";
+	projectId?: string;
+	projectNumber?: string;
+	account?: string;
+	serviceAccountEmail?: string;
+	billingLinked?: boolean;
+	linkedBillingAccount?: string;
+	warnings?: string[];
+	credentialsFile?: string;
+	error?: string;
+	installUrl?: string;
+}
+
+function GcloudConnectSection({
+	providerConfig,
+	connected,
+	onConnected,
+	onDisconnected,
+}: GcloudConnectSectionProps) {
+	// `connected` comes from configuredProviders (the raw config file), NOT from
+	// the masked /api/config fields — masked credentialsFile would otherwise
+	// always look non-empty and the card would never show "disconnected".
+	const [phase, setPhase] = useState<GcloudConnectPhase>(
+		connected ? "connected" : "loading",
+	);
+	const [result, setResult] = useState<GcloudConnectResult | null>(null);
+	const [error, setError] = useState<string | null>(null);
+	const [projectIdInput, setProjectIdInput] = useState("");
+	const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+	const stopPolling = () => {
+		if (pollRef.current) {
+			clearInterval(pollRef.current);
+			pollRef.current = null;
+		}
+	};
+
+	// Mount probe: discover gcloud + ADC presence (single round-trip).
+	useEffect(() => {
+		if (connected) return;
+		let cancelled = false;
+		void (async () => {
+			try {
+				const snap = (await apiGet("/api/auth/google/gcloud-status")) as {
+					status: string;
+					gcloudInstalled: boolean;
+					adcPresent: boolean;
+					account?: string;
+				};
+				if (cancelled) return;
+				// Always go through the browser login on click (lets the user
+				// choose/confirm their Google account), even if ADC already exists.
+				setPhase(!snap.gcloudInstalled ? "needs-gcloud" : "needs-login");
+			} catch {
+				if (!cancelled) setPhase("needs-login");
+			}
+		})();
+		return () => {
+			cancelled = true;
+			if (pollRef.current) {
+				clearInterval(pollRef.current);
+				pollRef.current = null;
+			}
+		};
+	}, [connected]);
+
+	const handleConnect = async () => {
+		setError(null);
+		// Kick off gcloud login + poll if ADC is not yet ready.
+		if (result?.ok !== true) {
+			setPhase("logging-in");
+			try {
+				const start = (await apiPost("/api/auth/google/gcloud-login", {})) as {
+					ok: boolean;
+					error?: string;
+				};
+				if (!start.ok) {
+					setError(start.error ?? "No se pudo iniciar el login de gcloud");
+					setPhase("error");
+					return;
+				}
+				await new Promise<void>((resolve, reject) => {
+					let capTimer: ReturnType<typeof setTimeout> | null = null;
+					const finish = (fn: () => void) => {
+						stopPolling();
+						if (capTimer) clearTimeout(capTimer);
+						fn();
+					};
+					pollRef.current = setInterval(async () => {
+						try {
+							const s = (await apiGet("/api/auth/google/gcloud-status")) as {
+								status: string;
+								account?: string;
+								error?: string;
+							};
+							if (s.status === "ready") {
+								finish(() => {
+									if (s.account) setResult({ ok: true, account: s.account });
+									resolve();
+								});
+							} else if (s.status === "error") {
+								finish(() =>
+									reject(new Error(s.error ?? "gcloud login falló")),
+								);
+							}
+						} catch (e) {
+							finish(() =>
+								reject(e instanceof Error ? e : new Error(String(e))),
+							);
+						}
+					}, 3000);
+					capTimer = setTimeout(
+						() =>
+							finish(() =>
+								reject(new Error("Timeout esperando el login de gcloud")),
+							),
+						310_000,
+					);
+				});
+			} catch (e) {
+				stopPolling();
+				setError(
+					e instanceof Error ? e.message : "Error en el login de gcloud",
+				);
+				setPhase("error");
+				return;
+			}
+		}
+
+		// ADC ready → one-click auto-provision.
+		setPhase("provisioning");
+		try {
+			const r = (await apiPost("/api/auth/google/connect", {
+				projectId: projectIdInput.trim() || undefined,
+			})) as unknown as GcloudConnectResult;
+			if (r.ok) {
+				setResult(r);
+				setPhase("connected");
+				onConnected();
+			} else if (r.code === "needs-login") {
+				setResult(null);
+				setPhase("needs-login");
+				setError("Vuelve a pulsar conectar para reintentar.");
+			} else {
+				setError(r.error ?? r.code ?? "Error al conectar");
+				setPhase("error");
+			}
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Error al conectar");
+			setPhase("error");
+		}
+	};
+
+	const busy = phase === "logging-in" || phase === "provisioning";
+	const buttonLabel =
+		phase === "logging-in"
+			? "Esperando inicio de sesión en Google…"
+			: phase === "provisioning"
+				? "Aprovisionando proyecto y credenciales…"
+				: "Conectar cuenta de Google Cloud Platform";
+
+	return (
+		<div style={{ display: "grid", gap: 10 }}>
+			{phase === "connected" && (
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 8,
+						flexWrap: "wrap",
+					}}
+				>
+					<span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>
+						{result?.projectId ?? providerConfig.projectId} ·{" "}
+						{providerConfig.location ?? "us-central1"}
+						{result?.account ? ` · ${result.account}` : ""}
+					</span>
+					<button
+						type="button"
+						onClick={async () => {
+							try {
+								await apiPost("/api/providers/vertex/disconnect", {});
+								setResult(null);
+								setPhase("needs-login");
+								onDisconnected?.();
+							} catch {
+								// ignore
+							}
+						}}
+						style={{
+							padding: "4px 10px",
+							borderRadius: 8,
+							border: "1px solid rgba(239,68,68,.35)",
+							background: "rgba(239,68,68,.08)",
+							color: "#f87171",
+							fontSize: "0.72rem",
+							cursor: "pointer",
+						}}
+					>
+						Desconectar
+					</button>
+				</div>
+			)}
+
+			{phase === "needs-gcloud" ? (
+				<div
+					style={{
+						padding: 12,
+						borderRadius: 12,
+						border: "1px solid rgba(251,191,36,.28)",
+						background: "rgba(251,191,36,.08)",
+						fontSize: "0.8rem",
+						color: "#cbd5e1",
+						lineHeight: 1.5,
+					}}
+				>
+					Para conectar necesitas <strong>Google Cloud SDK (gcloud)</strong>.
+					Instálalo desde{" "}
+					<a
+						href="https://cloud.google.com/sdk/docs/install"
+						target="_blank"
+						rel="noreferrer"
+						style={{ color: "#818cf8" }}
+					>
+						cloud.google.com/sdk/docs/install
+					</a>{" "}
+					y reinicia Octopus AI.
+				</div>
+			) : phase !== "connected" ? (
+				<>
+					<div>
+						<label
+							htmlFor="vertex-project-id"
+							style={{
+								display: "block",
+								fontSize: "0.72rem",
+								color: "#94a3b8",
+								marginBottom: 4,
+							}}
+						>
+							Project ID existente (opcional)
+						</label>
+						<input
+							id="vertex-project-id"
+							type="text"
+							value={projectIdInput}
+							placeholder="mi-proyecto-con-billing"
+							onChange={(e) => setProjectIdInput(e.target.value)}
+							disabled={busy}
+							style={{
+								width: "100%",
+								padding: "6px 10px",
+								borderRadius: 8,
+								border: "1px solid #2a303a",
+								background: "#090a0d",
+								color: "#e2e8f0",
+								fontSize: "0.78rem",
+								boxSizing: "border-box",
+								marginBottom: 8,
+							}}
+						/>
+						<div
+							style={{
+								fontSize: "0.68rem",
+								color: "#475569",
+								marginBottom: 8,
+								lineHeight: 1.4,
+							}}
+						>
+							Déjalo vacío para crear uno nuevo. Si tu cuenta (la que elijas al
+							conectar) ya tiene un proyecto con facturación, pega su ID para
+							reusarlo.
+						</div>
+					</div>
+					<button
+						type="button"
+						disabled={busy}
+						onClick={handleConnect}
+						style={{
+							...settingsPrimaryButtonStyle,
+							display: "inline-flex",
+							alignItems: "center",
+							justifyContent: "center",
+							opacity: busy ? 0.85 : 1,
+							cursor: busy ? "not-allowed" : "pointer",
+						}}
+					>
+						{busy && <Spinner />}
+						{buttonLabel}
+					</button>
+					<div
+						style={{
+							fontSize: "0.72rem",
+							color: "#475569",
+							lineHeight: 1.45,
+						}}
+					>
+						Se abrirá tu navegador para autorizar gcloud. Después Octopus creará
+						automáticamente un proyecto, vinculará facturación y generará las
+						credenciales de Vertex.
+					</div>
+				</>
+			) : null}
+
+			{result?.billingLinked === false && phase === "connected" && (
+				<div
+					style={{
+						padding: "8px 10px",
+						borderRadius: 8,
+						background: "rgba(251,191,36,.12)",
+						color: "#fbbf24",
+						fontSize: "0.75rem",
+						lineHeight: 1.45,
+					}}
+				>
+					No se vinculó facturación. Vertex AI requiere facturación activa;
+					configúrala en{" "}
+					<a
+						href="https://console.cloud.google.com/billing"
+						target="_blank"
+						rel="noreferrer"
+						style={{ color: "#fbbf24" }}
+					>
+						console.cloud.google.com/billing
+					</a>{" "}
+					antes de usar el modelo.
+				</div>
+			)}
+
+			{error && (
+				<div
+					style={{
+						padding: "8px 10px",
+						borderRadius: 8,
+						background: "rgba(239,68,68,.1)",
+						color: "#f87171",
+						fontSize: "0.75rem",
+						lineHeight: 1.45,
+					}}
+				>
+					{error}
+					{result?.code === "permission-denied" && (
+						<>
+							<br />
+							Pide a tu administrador de Google Cloud el rol Creador de
+							proyectos.
+						</>
+					)}
+				</div>
+			)}
 		</div>
 	);
 }
@@ -1628,6 +2213,10 @@ export const SettingsPage: React.FC = () => {
 			preferences: {},
 		};
 	const activeProviderKeys = new Set(status?.availableProviders ?? []);
+	// Providers with a credential stored EXPLICITLY in the config file (not
+	// auto-detected from env). This is the "Conectado" signal — the user (or an
+	// app flow) deliberately saved credentials for it.
+	const explicitProviderKeys = new Set(status?.configuredProviders ?? []);
 	const configuredModels = buildConfiguredModelOptions(
 		providers,
 		activeProviderKeys,
@@ -2585,11 +3174,10 @@ export const SettingsPage: React.FC = () => {
 							prov.accessTokenEnv,
 						].some(hasText);
 						const active = activeProviderKeys.has(p.key);
-						const statusText = active
-							? "Activo"
-							: configured
-								? "Configurado"
-								: "No config.";
+						// "Conectado" reflects explicit configuration only (credential saved
+						// in the config file), not env-auto-detected providers.
+						const explicit = explicitProviderKeys.has(p.key);
+						const statusText = explicit ? "Conectado" : "No conectado";
 						return (
 							<div
 								key={p.key}
@@ -2631,7 +3219,7 @@ export const SettingsPage: React.FC = () => {
 										/>
 										{p.name}
 									</span>
-									<StatusBadge ok={active || configured} text={statusText} />
+									<StatusBadge ok={explicit} text={statusText} />
 								</div>
 								{p.isLocal ? (
 									<Field
@@ -2641,7 +3229,7 @@ export const SettingsPage: React.FC = () => {
 									/>
 								) : (
 									<div style={{ marginBottom: "12px" }}>
-										{p.authModes && (
+										{p.authModes && p.authModes.length > 1 && (
 											<Select
 												label="Metodo de conexion"
 												value={currentAuthMode}
@@ -2655,82 +3243,29 @@ export const SettingsPage: React.FC = () => {
 											/>
 										)}
 										{p.key === "vertex" ? (
-											<>
-												<VertexSetupSection
-													providerConfig={prov}
-													onSaveClientId={(v) =>
-														save(`ai.providers.${p.key}.oauthClientId`, v)
-													}
-													onSaveClientSecret={(v) =>
-														save(`ai.providers.${p.key}.oauthClientSecret`, v)
-													}
-													onTokenSaved={() => refreshConfig()}
-													onComplete={() => refreshConfig()}
-												/>
-												<div style={{ marginTop: 10 }}>
-													<Field
-														label="Archivo credenciales manual"
-														value={prov.credentialsFile ?? ""}
-														placeholder="C:\\ruta\\service-account.json"
-														onChange={(v) =>
-															save(`ai.providers.${p.key}.credentialsFile`, v)
-														}
-													/>
-												</div>
-											</>
-										) : currentAuthMode === "oauth" ? (
-											<OAuthLoginSection
-												provider={p.key}
-												providerName={p.name}
-												oauthClientId={prov.oauthClientId ?? ""}
-												oauthClientSecret={prov.oauthClientSecret ?? ""}
-												oauthAccessToken={prov.oauthAccessToken ?? ""}
-												oauthExpiresAt={prov.oauthExpiresAt}
-												onSaveClientId={(v) =>
-													save(`ai.providers.${p.key}.oauthClientId`, v)
-												}
-												onSaveClientSecret={(v) =>
-													save(`ai.providers.${p.key}.oauthClientSecret`, v)
-												}
-												onTokenSaved={() => refreshConfig()}
+											<GcloudConnectSection
+												providerConfig={prov}
+												connected={explicit}
+												onConnected={() => refreshConfig()}
+												onDisconnected={() => refreshConfig()}
 											/>
-										) : currentAuthMode === "browser" ||
-										  (p.key === "openai" &&
-												currentAuthMode === "codex") ? (
+										) : p.key === "openai" && currentAuthMode === "codex" ? (
 											<BrowserLoginSection
 												provider={p.key}
 												providerName={p.name}
-												isConfigured={Boolean(
-													prov.browserCookies || prov.accessToken,
-												)}
+												isConfigured={explicit}
 												onLogin={() => refreshConfig()}
+												onDisconnected={() => refreshConfig()}
 											/>
 										) : (
-											<>
-												{renderSecretEditor({
-													configured: apiKeyConfigured,
-													fieldKey: `ai.providers.${p.key}.apiKey`,
-													inputName: `provider-${p.key}-api-key`,
-													unlockedPlaceholder:
-														currentAuthMode === "bearer"
-															? "Bearer token"
-															: apiKeyConfigured
-																? "Nueva API Key"
-																: "Introduce tu API Key",
-												})}
-												{p.key === "openai" && currentAuthMode === "codex" && (
-													<>
-														{renderSecretEditor({
-															configured: accessTokenConfigured,
-															fieldKey: `ai.providers.${p.key}.accessToken`,
-															inputName: `provider-${p.key}-access-token`,
-															unlockedPlaceholder: accessTokenConfigured
-																? "Nuevo access token"
-																: "Access token Codex",
-														})}
-													</>
-												)}
-											</>
+											<ApiKeyConnectSection
+												providerKey={p.key}
+												providerName={p.name}
+												fieldKey={`ai.providers.${p.key}.apiKey`}
+												configured={explicit}
+												onConnected={() => refreshConfig()}
+												onDisconnected={() => refreshConfig()}
+											/>
 										)}
 									</div>
 								)}

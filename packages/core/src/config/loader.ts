@@ -40,6 +40,43 @@ export class ConfigLoader {
 		return merged;
 	}
 
+	/**
+	 * Provider keys that have a credential stored DIRECTLY in the config file
+	 * (apiKey / accessToken / credentialsFile / etc.) — NOT resolved from
+	 * environment variables. Used to distinguish "the user configured this
+	 * explicitly" from "auto-detected from env" for the connection status UI.
+	 * Reads the raw file (no `${VAR}` substitution, no env auto-resolution).
+	 */
+	getExplicitlyConfiguredProviderKeys(): string[] {
+		if (!existsSync(this.configPath)) return [];
+		try {
+			const raw = readFileSync(this.configPath, "utf-8").replace(/^﻿/, "");
+			const parsed = JSON.parse(raw) as {
+				ai?: { providers?: Record<string, unknown> };
+			};
+			const providers = parsed.ai?.providers ?? {};
+			const result: string[] = [];
+			for (const [key, value] of Object.entries(providers)) {
+				if (value && typeof value === "object") {
+					const p = value as Record<string, unknown>;
+					if (
+						p.apiKey ||
+						p.accessToken ||
+						p.credentialsFile ||
+						p.credentialsJson ||
+						p.oauthAccessToken ||
+						p.browserCookies
+					) {
+						result.push(key);
+					}
+				}
+			}
+			return result;
+		} catch {
+			return [];
+		}
+	}
+
 	save(config: OctopusConfig): void {
 		const result = this.validator.validate(config);
 		if (!result.valid) {

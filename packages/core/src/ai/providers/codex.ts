@@ -21,7 +21,7 @@ import type {
 	LLMToolCall,
 	ProviderConfig,
 } from "../types.js";
-import { BaseLLMProvider } from "./base.js";
+import { BaseLLMProvider, verifyModelsGet } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
@@ -141,6 +141,13 @@ export class CodexProvider extends BaseLLMProvider {
 
 	async isAvailable(): Promise<boolean> {
 		return Boolean(this.accessToken);
+	}
+
+	async verifyKey(): Promise<{ ok: boolean; error?: string }> {
+		return verifyModelsGet(
+			`${this.baseUrl}/models?client_version=${CODEX_CLIENT_VERSION}`,
+			this.getHeaders(),
+		);
 	}
 
 	private getHeaders(): Record<string, string> {

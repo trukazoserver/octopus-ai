@@ -5,7 +5,7 @@ import type {
 	ProviderConfig,
 	ThinkingBlock,
 } from "../types.js";
-import { BaseLLMProvider } from "./base.js";
+import { BaseLLMProvider, verifyModelsGet } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 export type ZhipuApiMode = "api" | "coding-plan" | "coding-global" | "global";
@@ -341,6 +341,10 @@ export class ZhipuProvider extends BaseLLMProvider {
 
 	async isAvailable(): Promise<boolean> {
 		return !!this.config.apiKey;
+	}
+
+	async verifyKey(): Promise<{ ok: boolean; error?: string }> {
+		return verifyModelsGet(`${this.getBaseUrl()}/models`, this.getHeaders());
 	}
 
 	getMode(): ZhipuApiMode {

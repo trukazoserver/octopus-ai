@@ -30,8 +30,12 @@ import {
 } from "../ai/model-capabilities.js";
 import { listCodexModels } from "../ai/providers/codex.js";
 import { resolveProviderQuotas } from "../ai/quota-service.js";
-import { type LLMRouter, getProviderRegistry } from "../ai/router.js";
-import type { UsageStats } from "../ai/types.js";
+import {
+	type LLMRouter,
+	getProviderRegistry,
+	resolveProviderConfig,
+} from "../ai/router.js";
+import type { ProviderConfig, UsageStats } from "../ai/types.js";
 import {
 	closeBrowserAuth,
 	getAuthResult,
@@ -43,6 +47,15 @@ import {
 	getCodexStatus,
 	startCodexLogin,
 } from "../auth/codex-oauth.js";
+import {
+	findGcloudBinary,
+	getActiveGcloudAccount,
+	getGcloudLoginStatus,
+	readAdcCredentials,
+	resetGcloudLoginSession,
+	resolveGcloudAccessToken,
+	spawnGcloudLogin,
+} from "../auth/gcloud-adc.js";
 import { prepareVertexProject } from "../auth/google-cloud.js";
 import {
 	createAuthorizationUrl,
@@ -808,6 +821,40 @@ export class TransportServer {
 					pathname === "/api/auth/google/vertex-setup"
 				) {
 					void this.handleGoogleVertexSetup(req, res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					pathname === "/api/auth/google/gcloud-login"
+				) {
+					this.handleGcloudLoginStart(res);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					pathname === "/api/auth/google/gcloud-status"
+				) {
+					this.handleGcloudLoginStatus(res);
+					return;
+				}
+				if (req.method === "POST" && pathname === "/api/auth/google/connect") {
+					void this.handleGoogleConnect(req, res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					/^\/api\/providers\/[a-z]+\/test$/.test(pathname)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleProviderTest(req, res, provider);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					/^\/api\/providers\/[a-z]+\/disconnect$/.test(pathname)
+				) {
+					const provider = pathname.split("/")[3];
+					void this.handleProviderDisconnect(req, res, provider);
 					return;
 				}
 
@@ -1773,6 +1820,8 @@ export class TransportServer {
 					mainRuntime?.getConfig().reasoningEffort ?? config.ai.thinking,
 				maxTokens: config.ai.maxTokens,
 				availableProviders: router?.getAvailableProviders() ?? [],
+				configuredProviders:
+					new ConfigLoader().getExplicitlyConfiguredProviderKeys(),
 				authStatus: router?.getAuthStatus() ?? {},
 				usage,
 				channels: enabledChannels,
@@ -2216,6 +2265,310 @@ export class TransportServer {
 			jsonRes(res, 500, {
 				error:
 					err instanceof Error ? err.message : "Google Vertex setup failed",
+			});
+		}
+	}
+
+	private handleGcloudLoginStart(res: ServerResponse): void {
+		try {
+			const result = spawnGcloudLogin();
+			jsonRes(res, result.ok ? 200 : 400, result);
+		} catch (err) {
+			jsonRes(res, 500, {
+				ok: false,
+				error:
+					err instanceof Error
+						? err.message
+						: "No se pudo iniciar el login de gcloud",
+			});
+		}
+	}
+
+	private handleGcloudLoginStatus(res: ServerResponse): void {
+		jsonRes(res, 200, {
+			...getGcloudLoginStatus(),
+			gcloudInstalled: findGcloudBinary() !== undefined,
+			adcPresent: readAdcCredentials() !== null,
+		});
+	}
+
+	/**
+	 * One-click Google Cloud connect via gcloud ADC. Probes gcloud + ADC,
+	 * exchanges the ADC refresh token for a cloud-platform access token, runs
+	 * prepareVertexProject with all defaults, then writes back the resulting
+	 * service-account key (runtime becomes self-contained via SA JWT — the
+	 * OAuth/ADC tokens are dropped so they never short-circuit SA JWT).
+	 */
+	private async handleGoogleConnect(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const gcloudBin = findGcloudBinary();
+			const creds = readAdcCredentials();
+			if (!gcloudBin && !creds) {
+				jsonRes(res, 200, {
+					ok: false,
+					code: "gcloud-missing",
+					installUrl: "https://cloud.google.com/sdk/docs/install",
+					error:
+						"No se encontró gcloud CLI ni credenciales ADC. Instala gcloud y reinicia Octopus AI.",
+				});
+				return;
+			}
+
+			// Prefer `gcloud auth print-access-token` (reliable — Google blocks
+			// third-party ADC refresh); fall back to a manual ADC refresh.
+			let accessToken: string | undefined;
+			let resolveError: unknown;
+			try {
+				accessToken = (await resolveGcloudAccessToken()).accessToken;
+			} catch (err) {
+				resolveError = err;
+			}
+			if (!accessToken) {
+				const msg =
+					resolveError instanceof Error
+						? resolveError.message
+						: "No se pudo obtener el token de acceso de Google";
+				// No ADC to fall back on -> user must log in (gcloud auth login).
+				if (!creds) {
+					jsonRes(res, 200, {
+						ok: false,
+						code: "needs-login",
+						error: `Ejecuta "gcloud auth login" y vuelve a intentar. ${msg}`,
+					});
+					return;
+				}
+				jsonRes(res, 200, {
+					ok: false,
+					code: "token-exchange-failed",
+					error: msg,
+				});
+				return;
+			}
+
+			// Optional overrides from the body. `projectId` lets the user reuse an
+			// EXISTING project that already has billing (e.g. on their Workspace
+			// account) instead of minting a new one.
+			let requestedLocation: string | undefined;
+			let requestedProjectId: string | undefined;
+			try {
+				const body = await readBody(req);
+				if (body.trim()) {
+					const parsed = JSON.parse(body) as {
+						location?: string;
+						projectId?: string;
+					};
+					requestedLocation = parsed.location?.trim() || undefined;
+					requestedProjectId = parsed.projectId?.trim() || undefined;
+				}
+			} catch {
+				// Body is optional; ignore parse failures.
+			}
+
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const configObj = config as unknown as Record<string, unknown>;
+			const providerConfig = (configObj.ai as Record<string, unknown>)
+				.providers as Record<string, unknown>;
+			const prov = (providerConfig.vertex as Record<string, unknown>) ?? {};
+
+			const result = await prepareVertexProject({
+				accessToken,
+				projectId: requestedProjectId,
+			});
+
+			prov.projectId = result.projectId;
+			// Force "global" on (re)connect — Gemini on Vertex requires the global
+			// location, and a stale "us-central1" from an older session must not win.
+			prov.location = requestedLocation || "global";
+
+			let credentialsFilePath: string | undefined;
+			if (result.serviceAccountKey) {
+				const credsDir = join(homedir(), ".octopus", "credentials");
+				if (!existsSync(credsDir)) mkdirSync(credsDir, { recursive: true });
+				credentialsFilePath = join(credsDir, "google-service-account.json");
+				writeFileSync(credentialsFilePath, result.serviceAccountKey, {
+					encoding: "utf-8",
+					mode: 0o600,
+				});
+				prov.credentialsFile = credentialsFilePath;
+				prov.credentialsJson = undefined;
+				// CRITICAL: clear OAuth/ADC access tokens so the provider uses the
+				// self-refreshing SA JWT path instead of a dying OAuth token.
+				prov.oauthAccessToken = undefined;
+				prov.accessToken = undefined;
+			}
+			providerConfig.vertex = prov;
+			loader.save(config);
+
+			if (this.system?.router) {
+				await this.system.router.reconfigure(config.ai);
+			}
+
+			resetGcloudLoginSession();
+
+			// Never echo the raw key JSON back to the client.
+			const { serviceAccountKey: _omitted, ...safeResult } = result;
+			const billingLinked = Boolean(result.linkedBillingAccount);
+			jsonRes(res, 200, {
+				ok: true,
+				...safeResult,
+				credentialsFile: credentialsFilePath,
+				account: getActiveGcloudAccount() ?? creds?.account,
+				billingLinked,
+				code: billingLinked ? undefined : "billing-warning",
+			});
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			const code = /billing/i.test(msg)
+				? "billing-error"
+				: /permission|forbidden|403/i.test(msg)
+					? "permission-denied"
+					: /quota/i.test(msg)
+						? "quota-exceeded"
+						: "unknown";
+			jsonRes(res, 500, { ok: false, code, error: msg });
+		}
+	}
+
+	/**
+	 * Validate a provider credential (API key or access token) WITHOUT persisting
+	 * it. The frontend calls this at "Conectar" time; it persists via PUT /api/config
+	 * only if verification succeeds.
+	 */
+	private async handleProviderTest(
+		req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): Promise<void> {
+		try {
+			const registry = getProviderRegistry();
+			if (!registry[provider]) {
+				jsonRes(res, 404, { ok: false, error: "Proveedor desconocido" });
+				return;
+			}
+			if (provider === "local") {
+				jsonRes(res, 200, { ok: true });
+				return;
+			}
+			if (provider === "vertex") {
+				jsonRes(res, 400, {
+					ok: false,
+					error:
+						"Vertex se valida al conectar con Google Cloud, no por API key.",
+				});
+				return;
+			}
+
+			let parsed: { apiKey?: string; accessToken?: string } = {};
+			try {
+				const body = await readBody(req);
+				parsed = body.trim() ? JSON.parse(body) : {};
+			} catch {
+				// empty/invalid body — validate whatever is already saved
+			}
+
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const providers = config.ai.providers as unknown as Record<
+				string,
+				Record<string, unknown>
+			>;
+			const saved = providers[provider] ?? {};
+			const merged: Record<string, unknown> = { ...saved };
+			if (typeof parsed.apiKey === "string" && parsed.apiKey.trim()) {
+				merged.apiKey = parsed.apiKey.trim();
+			}
+			if (typeof parsed.accessToken === "string" && parsed.accessToken.trim()) {
+				merged.accessToken = parsed.accessToken.trim();
+			}
+			// Resolve env+defaults exactly like the router, then instantiate ad-hoc.
+			const resolved = resolveProviderConfig(
+				provider,
+				merged as ProviderConfig,
+			);
+			const prov = registry[provider].factory(resolved);
+			const result = await prov.verifyKey();
+			jsonRes(res, 200, result);
+		} catch (err) {
+			jsonRes(res, 500, {
+				ok: false,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	/**
+	 * Wipe ALL credentials for a provider and reconfigure the router. For vertex
+	 * also deletes the canonical on-disk service-account key (a user-supplied
+	 * manual credentialsFile is left untouched).
+	 */
+	private async handleProviderDisconnect(
+		_req: IncomingMessage,
+		res: ServerResponse,
+		provider: string,
+	): Promise<void> {
+		try {
+			const registry = getProviderRegistry();
+			if (!registry[provider]) {
+				jsonRes(res, 404, { ok: false, error: "Proveedor desconocido" });
+				return;
+			}
+			if (provider === "local") {
+				jsonRes(res, 200, { ok: true });
+				return;
+			}
+
+			const loader = new ConfigLoader();
+			const config = loader.load();
+			const providers = config.ai.providers as unknown as Record<
+				string,
+				Record<string, unknown>
+			>;
+			const prov = providers[provider] ?? {};
+
+			if (provider === "vertex") {
+				const canonical = join(
+					homedir(),
+					".octopus",
+					"credentials",
+					"google-service-account.json",
+				);
+				if (
+					typeof prov.credentialsFile === "string" &&
+					resolve(prov.credentialsFile) === resolve(canonical) &&
+					existsSync(canonical)
+				) {
+					try {
+						unlinkSync(canonical);
+					} catch {
+						// best-effort
+					}
+				}
+				try {
+					resetGcloudLoginSession();
+				} catch {
+					// best-effort
+				}
+			}
+
+			clearProviderCredentials(prov, provider);
+			providers[provider] = prov;
+			loader.save(config);
+			// Update the in-memory config so /api/config reflects the disconnect
+			// immediately (not just the file on disk).
+			if (this.system) this.system.config = config;
+
+			if (this.system?.router) {
+				await this.system.router.reconfigure(config.ai);
+			}
+			jsonRes(res, 200, { ok: true });
+		} catch (err) {
+			jsonRes(res, 500, {
+				ok: false,
+				error: err instanceof Error ? err.message : String(err),
 			});
 		}
 	}
@@ -7194,4 +7547,44 @@ export class TransportServer {
 	onDisconnect(handler: (clientId: string) => void): void {
 		this.emitter.on("disconnect", handler);
 	}
+}
+
+/** Credential fields wiped by the disconnect endpoint for every provider. */
+const COMMON_CREDENTIAL_FIELDS = [
+	"apiKey",
+	"apiKeyEnv",
+	"accessToken",
+	"accessTokenEnv",
+	"oauthAccessToken",
+	"oauthRefreshToken",
+	"oauthClientId",
+	"oauthClientSecret",
+	"browserCookies",
+	"browserUserAgent",
+	"credentialsJson",
+	"accountId",
+] as const;
+
+/** Extra fields wiped for vertex (location is kept — it's a preference). */
+const VERTEX_ONLY_FIELDS = ["credentialsFile", "projectId"] as const;
+
+/**
+ * Mutate `prov` in place, clearing every stored credential field for the given
+ * provider. Exported for unit tests. oauthExpiresAt is deleted (it's a number,
+ * not a string) and authMode is reset to the provider's default.
+ */
+export function clearProviderCredentials(
+	prov: Record<string, unknown>,
+	provider: string,
+): void {
+	const fields =
+		provider === "vertex"
+			? [...COMMON_CREDENTIAL_FIELDS, ...VERTEX_ONLY_FIELDS]
+			: COMMON_CREDENTIAL_FIELDS;
+	for (const f of fields) {
+		prov[f] = "";
+	}
+	prov.oauthExpiresAt = undefined;
+	if (provider === "openai") prov.authMode = "api-key";
+	else prov.authMode = undefined;
 }
