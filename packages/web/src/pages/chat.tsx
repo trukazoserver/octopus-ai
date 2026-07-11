@@ -213,6 +213,9 @@ interface WsPayload {
 	workflowRunId?: string;
 	done?: boolean;
 	cancelled?: boolean;
+	status?: ChatExecutionStatus;
+	completionReason?: ChatCompletionReason;
+	pendingAction?: ChatPendingAction;
 }
 
 interface WsMessage {
@@ -318,6 +321,32 @@ type ChatExecutionStatus =
 	| "cancelled"
 	| "interrupted";
 
+type ChatCompletionReason =
+	| "finished"
+	| "pending_action"
+	| "failed"
+	| "cancelled"
+	| "server_restart";
+
+interface ChatPendingAction {
+	kind: string;
+	summary: string;
+	resumable: boolean;
+	toolName?: string;
+}
+
+interface ChatToolActionWire {
+	id: string;
+	execution_id: string;
+	tool_name: string;
+	arguments_json: string;
+	status: "running" | "completed" | "failed" | "uncertain";
+	result_json?: string | null;
+	error?: string | null;
+	started_at: string;
+	completed_at?: string | null;
+}
+
 interface ChatExecutionActivityWire {
 	id: string;
 	status: string;
@@ -338,6 +367,8 @@ interface ChatExecution {
 	assistant_message_id?: string | null;
 	workflowRunId?: string | null;
 	error?: string | null;
+	completion_reason?: ChatCompletionReason | null;
+	pending_action?: string | null;
 	started_at?: string;
 	updated_at?: string;
 	completed_at?: string | null;
@@ -350,6 +381,8 @@ interface ConversationExecutionState {
 	activities: AgentActivity[];
 	workflowRunId?: string;
 	error?: string | null;
+	completionReason?: ChatCompletionReason | null;
+	pendingAction?: ChatPendingAction | null;
 	notified?: boolean;
 }
 
@@ -949,7 +982,28 @@ function executionStateFromRecord(
 		activities,
 		workflowRunId: extractWorkflowRunIdFromExecution(execution),
 		error: execution.error,
+		completionReason: execution.completion_reason,
+		pendingAction: parsePendingAction(execution.pending_action),
 	};
+}
+
+function parsePendingAction(value: unknown): ChatPendingAction | null {
+	if (!value) return null;
+	try {
+		const parsed = typeof value === "string" ? JSON.parse(value) : value;
+		if (!parsed || typeof parsed !== "object") return null;
+		const candidate = parsed as Record<string, unknown>;
+		if (typeof candidate.summary !== "string") return null;
+		return {
+			kind: typeof candidate.kind === "string" ? candidate.kind : "continue",
+			summary: candidate.summary,
+			resumable: candidate.resumable !== false,
+			toolName:
+				typeof candidate.toolName === "string" ? candidate.toolName : undefined,
+		};
+	} catch {
+		return null;
+	}
 }
 
 function isExecutionActive(state?: ConversationExecutionState): boolean {
@@ -2633,6 +2687,7 @@ export const ChatPage: React.FC<{
 	const [executionByConversation, setExecutionByConversation] = useState<
 		Record<string, ConversationExecutionState>
 	>({});
+	const [toolActions, setToolActions] = useState<ChatToolActionWire[]>([]);
 	const lastActivityKeyRef = useRef<string>("");
 	const lastResponseChunkAtRef = useRef(0);
 	const scrollRafRef = useRef<number | null>(null);
@@ -3505,12 +3560,20 @@ export const ChatPage: React.FC<{
 				}
 
 				if (msg.type === "response") {
+					const responseStatus =
+						(msg.payload?.status as ChatExecutionStatus | undefined) ??
+						"completed";
+					const completionReason = msg.payload
+						?.completionReason as ChatCompletionReason | undefined;
+					const pendingAction = parsePendingAction(msg.payload?.pendingAction);
 					updateConversationExecution(conversationId, (prev) => ({
 						executionId: executionId ?? prev?.executionId ?? msg.id,
-						status: "completed",
+						status: responseStatus,
 						currentStatus: "idle",
 						activities: prev?.activities ?? [],
 						workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
+						completionReason,
+						pendingAction,
 					}));
 					resetAgentTrace();
 					const assistantContent = getPayloadText(msg.payload);
@@ -3547,8 +3610,16 @@ export const ChatPage: React.FC<{
 						!notifiedExecutionRef.current.has(executionId)
 					) {
 						notifiedExecutionRef.current.add(executionId);
-						showToast("success", "El agente terminó una tarea en otro chat.");
-						if (Notification.permission === "granted") {
+						showToast(
+							responseStatus === "interrupted" ? "warning" : "success",
+							responseStatus === "interrupted"
+								? "El agente dejó una acción pendiente en otro chat."
+								: "El agente terminó una tarea en otro chat.",
+						);
+						if (
+							responseStatus !== "interrupted" &&
+							Notification.permission === "granted"
+						) {
 							new Notification("Octopus AI", {
 								body: "El agente terminó una tarea en otro chat.",
 							});
@@ -3610,13 +3681,21 @@ export const ChatPage: React.FC<{
 						});
 					}
 				} else if (msg.type === "stream_end") {
+					const streamEndStatus =
+						(msg.payload?.status as ChatExecutionStatus | undefined) ??
+						(msg.payload?.cancelled ? "cancelled" : "completed");
+					const completionReason = msg.payload
+						?.completionReason as ChatCompletionReason | undefined;
+					const pendingAction = parsePendingAction(msg.payload?.pendingAction);
 					updateConversationExecution(conversationId, (prev) => ({
 						executionId: executionId ?? prev?.executionId ?? msg.id,
-						status: msg.payload?.cancelled ? "cancelled" : "completed",
+						status: streamEndStatus,
 						currentStatus: "idle",
 						activities: prev?.activities ?? [],
 						workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
 						error: msg.payload?.error ?? null,
+						completionReason,
+						pendingAction,
 					}));
 					if (
 						!isActiveConversation &&
@@ -3625,13 +3704,18 @@ export const ChatPage: React.FC<{
 					) {
 						notifiedExecutionRef.current.add(executionId);
 						showToast(
-							msg.payload?.cancelled ? "warning" : "success",
+							msg.payload?.cancelled || streamEndStatus === "interrupted"
+								? "warning"
+								: "success",
 							msg.payload?.cancelled
 								? "Una tarea del agente fue detenida."
+								: streamEndStatus === "interrupted"
+									? "El agente dejó una acción pendiente en otro chat."
 								: "El agente terminó una tarea en otro chat.",
 						);
 						if (
 							!msg.payload?.cancelled &&
+							streamEndStatus !== "interrupted" &&
 							Notification.permission === "granted"
 						) {
 							new Notification("Octopus AI", {
@@ -3795,6 +3879,28 @@ export const ChatPage: React.FC<{
 		: agentActivity;
 	const shouldShowAgentActivity = hasActiveWork && !isActivelyReceivingResponse;
 	const activeWorkflowRunId = activeExecution?.workflowRunId;
+
+	useEffect(() => {
+		if (!activeConversationId) {
+			setToolActions([]);
+			return;
+		}
+		const executionQuery = activeExecution?.executionId
+			? `&executionId=${encodeURIComponent(activeExecution.executionId)}`
+			: "";
+		const phaseQuery = activeExecution?.status
+			? `&phase=${encodeURIComponent(activeExecution.status)}`
+			: "";
+		apiGet<{ actions: ChatToolActionWire[] }>(
+			`/api/conversations/${encodeURIComponent(activeConversationId)}/tool-actions?limit=30${executionQuery}${phaseQuery}`,
+		)
+			.then((response) => setToolActions(response.actions ?? []))
+			.catch(() => setToolActions([]));
+	}, [
+		activeConversationId,
+		activeExecution?.executionId,
+		activeExecution?.status,
+	]);
 
 	useEffect(() => {
 		if (!hasActiveWork) return;
@@ -5313,6 +5419,80 @@ export const ChatPage: React.FC<{
 										</>
 									);
 								})()}
+								{activeExecution?.completionReason === "pending_action" &&
+									activeExecution.pendingAction && (
+										<div
+											style={{
+												margin: "14px 0",
+												padding: "14px 16px",
+												borderRadius: 12,
+												border: "1px solid #854d0e",
+												background: "rgba(120, 53, 15, 0.18)",
+												color: "#fde68a",
+											}}
+										>
+											<strong>Acción pendiente</strong>
+											<div style={{ marginTop: 6, color: "#fef3c7" }}>
+												{activeExecution.pendingAction.summary}
+											</div>
+											{activeExecution.pendingAction.resumable && (
+												<button
+													type="button"
+													onClick={() => {
+														setInput("continúa");
+														inputRef.current?.focus();
+													}}
+													style={{
+														marginTop: 10,
+														padding: "7px 12px",
+														borderRadius: 8,
+														border: "1px solid #f59e0b",
+														background: "transparent",
+														color: "#fbbf24",
+														cursor: "pointer",
+													}}
+												>
+													Preparar continuación
+												</button>
+											)}
+										</div>
+									)}
+								{toolActions.length > 0 && (
+									<details
+										style={{
+											margin: "12px 0",
+											padding: "10px 14px",
+											border: "1px solid #3f3f46",
+											borderRadius: 10,
+											background: "#18181b",
+										}}
+									>
+										<summary style={{ cursor: "pointer", color: "#d4d4d8" }}>
+											Acciones de herramientas ({toolActions.length})
+										</summary>
+										<div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+											{toolActions.map((action) => (
+												<details key={action.id} style={{ color: "#a1a1aa" }}>
+													<summary style={{ cursor: "pointer" }}>
+														<strong style={{ color: "#e4e4e7" }}>
+															{action.tool_name}
+														</strong>{" "}
+														· {action.status === "uncertain" ? "por verificar" : action.status}
+													</summary>
+													<pre
+														style={{
+															whiteSpace: "pre-wrap",
+															wordBreak: "break-word",
+															fontSize: 12,
+														}}
+													>
+														{action.error ?? action.result_json ?? action.arguments_json}
+													</pre>
+												</details>
+											))}
+										</div>
+									</details>
+								)}
 								{shouldShowAgentActivity && (
 									<AgentActivityPanel
 										activities={visibleAgentActivity}

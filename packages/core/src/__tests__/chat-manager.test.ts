@@ -131,6 +131,111 @@ describe("ChatManager", () => {
 		expect(snapshot?.rolling_summary).toContain("14 complete");
 	});
 
+	it("persists completed tool-action receipts for safe continuation", async () => {
+		const conversation = await manager.createConversation({ title: "Tools" });
+		const execution = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		const action = await manager.createToolAction({
+			conversationId: conversation.id,
+			executionId: execution.id,
+			toolCallId: "call-image",
+			toolName: "generate_image",
+			argumentsJson: '{"prompt":"garden wedding"}',
+			argumentsHash: "hash-1",
+		});
+
+		await manager.completeToolAction(
+			action.id,
+			JSON.stringify({
+				success: true,
+				output: "/api/media/file/wedding.png",
+			}),
+		);
+
+		const reusable = await manager.findReusableToolAction({
+			conversationId: conversation.id,
+			executionId: "next-execution",
+			toolName: "generate_image",
+			argumentsHash: "hash-1",
+			includePreviousExecutions: true,
+		});
+		expect(reusable).toMatchObject({
+			id: action.id,
+			status: "completed",
+		});
+		expect(JSON.parse(reusable?.result_json ?? "{}")).toMatchObject({
+			success: true,
+			output: "/api/media/file/wedding.png",
+		});
+	});
+
+	it("marks in-flight tool actions uncertain after a restart", async () => {
+		const conversation = await manager.createConversation({ title: "Restart" });
+		const execution = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		await manager.createToolAction({
+			conversationId: conversation.id,
+			executionId: execution.id,
+			toolName: "generate_image",
+			argumentsJson: '{"prompt":"uncertain"}',
+			argumentsHash: "hash-uncertain",
+		});
+
+		await manager.markStaleExecutionsInterrupted();
+
+		const actions = await manager.listToolActions(conversation.id);
+		expect(actions[0]?.status).toBe("uncertain");
+	});
+
+	it("does not reuse failed tool actions", async () => {
+		const conversation = await manager.createConversation({ title: "Retry" });
+		const execution = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		const action = await manager.createToolAction({
+			conversationId: conversation.id,
+			executionId: execution.id,
+			toolName: "generate_image",
+			argumentsJson: '{"prompt":"retry me"}',
+			argumentsHash: "hash-failed",
+		});
+		await manager.failToolAction(action.id, "temporary provider error");
+
+		const reusable = await manager.findReusableToolAction({
+			conversationId: conversation.id,
+			executionId: "next-execution",
+			toolName: "generate_image",
+			argumentsHash: "hash-failed",
+			includePreviousExecutions: true,
+		});
+		expect(reusable).toBeNull();
+	});
+
+	it("round-trips semantic execution outcomes", async () => {
+		const conversation = await manager.createConversation({ title: "Pending" });
+		const execution = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		await manager.updateExecution(execution.id, {
+			status: "interrupted",
+			completionReason: "pending_action",
+			pendingAction: {
+				kind: "retry_tool_call",
+				summary: "Execute the promised search",
+				resumable: true,
+			},
+		});
+
+		const saved = await manager.getExecution(execution.id);
+		expect(saved?.completion_reason).toBe("pending_action");
+		expect(JSON.parse(saved?.pending_action ?? "{}")).toMatchObject({
+			kind: "retry_tool_call",
+			resumable: true,
+		});
+	});
+
 	it("stores new secrets with authenticated encryption and reads legacy base64 secrets", async () => {
 		const env = new EnvVarManager(db, { encryptionKey: "test-encryption-key" });
 		await env.set("GEMINI_API_KEY", "secret-value", { isSecret: true });

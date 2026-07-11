@@ -1,3 +1,8 @@
+import { randomBytes } from "node:crypto";
+import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import sharp from "sharp";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	AgentRuntime,
@@ -310,6 +315,102 @@ describe("AgentRuntime", () => {
 			);
 			expect(userMessages[0].content).not.toContain("[ZAI VISION REQUIRED]");
 			expect(userMessages[0].content).not.toContain("must be inspected");
+		});
+
+		it("attaches a generated image to the current user turn for native vision", async () => {
+			const filename = `runtime-vision-${Date.now()}.png`;
+			const mediaDir = join(homedir(), ".octopus", "media");
+			const mediaPath = join(mediaDir, filename);
+			mkdirSync(mediaDir, { recursive: true });
+			writeFileSync(mediaPath, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+			try {
+				mockSTM.add({
+					role: "assistant",
+					content: `Generated image: ![Result](/api/media/file/${filename})`,
+					timestamp: new Date(),
+					metadata: { conversationId: "vision-review" },
+				});
+
+				await runtime.processMessage(
+					"Review that generated image",
+					"vision-review",
+				);
+
+				const request = mockLLMRouter.chat.mock.calls.at(-1)?.[0];
+				const historicalAssistant = request.messages.find(
+					(message) =>
+						message.role === "assistant" &&
+						typeof message.content === "string" &&
+						message.content.includes(filename),
+				);
+				expect(typeof historicalAssistant?.content).toBe("string");
+				const currentUser = [...request.messages]
+					.reverse()
+					.find((message) => message.role === "user");
+				expect(Array.isArray(currentUser?.content)).toBe(true);
+				expect(currentUser?.content).toEqual(
+					expect.arrayContaining([
+						expect.objectContaining({
+							type: "image_url",
+							image_url: expect.objectContaining({
+								url: expect.stringMatching(/^data:image\/png;base64,/),
+							}),
+						}),
+					]),
+				);
+			} finally {
+				rmSync(mediaPath, { force: true });
+			}
+		});
+
+		it("creates a sub-5MB analysis copy for Z.AI Vision MCP", async () => {
+			const filename = `runtime-zai-vision-${Date.now()}.png`;
+			const mediaDir = join(homedir(), ".octopus", "media");
+			const mediaPath = join(mediaDir, filename);
+			const optimizedPath = join(
+				homedir(),
+				".octopus",
+				"cache",
+				"vision",
+				filename.replace(/\.png$/, "-vision.jpg"),
+			);
+			mkdirSync(mediaDir, { recursive: true });
+			await sharp(randomBytes(1800 * 1800 * 3), {
+				raw: { width: 1800, height: 1800, channels: 3 },
+			})
+				.png({ compressionLevel: 0 })
+				.toFile(mediaPath);
+			try {
+				mockLLMRouter.supportsVisionForModel.mockReturnValue(false);
+				const glmRuntime = new AgentRuntime(
+					{ ...baseConfig, model: "zhipu/glm-5.2" },
+					mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+					mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+					mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+					mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+					mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+				);
+				mockSTM.add({
+					role: "assistant",
+					content: `Generated image: ![Result](/api/media/file/${filename})`,
+					timestamp: new Date(),
+					metadata: { conversationId: "zai-vision-review" },
+				});
+
+				await glmRuntime.processMessage(
+					"Review that generated image",
+					"zai-vision-review",
+				);
+
+				const request = mockLLMRouter.chat.mock.calls.at(-1)?.[0];
+				const serialized = JSON.stringify(request.messages);
+				expect(serialized).toContain("octopus-local-media-paths");
+				expect(serialized).toContain("-vision.jpg");
+				expect(statSync(optimizedPath).size).toBeLessThanOrEqual(4_500_000);
+			} finally {
+				rmSync(mediaPath, { force: true });
+				rmSync(optimizedPath, { force: true });
+			}
 		});
 
 		it("should add user and assistant turns to STM", async () => {
@@ -1026,7 +1127,8 @@ describe("AgentRuntime", () => {
 			);
 			expect(telemetryChunk).toBeDefined();
 			const encodedTelemetry = telemetryChunk
-				?.replace(/\x00/g, "")
+				?.split("\x00")
+				.join("")
 				.split(":")[4];
 			const telemetry = JSON.parse(
 				Buffer.from(encodedTelemetry ?? "", "base64").toString("utf8"),
@@ -1306,6 +1408,115 @@ describe("AgentRuntime", () => {
 				"Generé la siguiente imagen sin pedir confirmación.",
 			);
 			expect(output).not.toContain("Puedo continuar si me lo pides");
+		});
+
+		it("should reuse a tool that completed immediately before cancellation", async () => {
+			const toolCallResponse: LLMResponse = {
+				content: "",
+				model: "test-model",
+				usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+				finishReason: "tool_calls",
+				toolCalls: [
+					{
+						id: "call-image",
+						type: "function",
+						function: {
+							name: "nano-banana-generate",
+							arguments: '{"prompt":"garden wedding"}',
+						},
+					},
+				],
+			};
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chat
+				.mockResolvedValueOnce(toolCallResponse)
+				.mockResolvedValueOnce(toolCallResponse)
+				.mockResolvedValueOnce({
+					...toolCallResponse,
+					content: "Continuación terminada.",
+					finishReason: "stop",
+					toolCalls: undefined,
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "nano-banana-generate", description: "Generates images" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			const firstController = new AbortController();
+			mockExecutor.execute.mockImplementation(async () => {
+				firstController.abort();
+				return {
+					success: true,
+					output: "/api/media/file/wedding.png",
+				};
+			});
+			let completedResult: string | null = null;
+			const action = {
+				id: "action-1",
+				conversation_id: "conv-receipt",
+				execution_id: "execution-1",
+				tool_call_id: "call-image",
+				tool_name: "nano-banana-generate",
+				arguments_json: '{"prompt":"garden wedding"}',
+				arguments_hash: "stored-by-runtime",
+				status: "running",
+				result_json: null,
+				error: null,
+				started_at: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
+				completed_at: null,
+			};
+			const mockChatManager = {
+				listTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				searchTaskLedgerEntries: vi.fn().mockResolvedValue([]),
+				addTaskLedgerEntry: vi.fn(),
+				findReusableToolAction: vi.fn().mockImplementation((opts) => {
+					if (!opts.includePreviousExecutions || !completedResult) return null;
+					return {
+						...action,
+						status: "completed",
+						result_json: completedResult,
+					};
+				}),
+				createToolAction: vi.fn().mockResolvedValue(action),
+				completeToolAction: vi.fn().mockImplementation((_id, resultJson) => {
+					completedResult = resultJson;
+				}),
+				failToolAction: vi.fn(),
+			};
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+			runtime.setChatManager(mockChatManager as never);
+
+			await expect(
+				runtime.processMessage("genera la imagen", "conv-receipt", {
+					executionId: "execution-1",
+					signal: firstController.signal,
+				}),
+			).rejects.toThrow("Execution cancelled");
+			await runtime.processMessage("continúa", "conv-receipt", {
+				executionId: "execution-2",
+				resumeCompletedActions: true,
+			});
+
+			expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+			expect(mockChatManager.createToolAction).toHaveBeenCalledTimes(1);
+			expect(mockChatManager.completeToolAction).toHaveBeenCalledTimes(1);
+			expect(mockChatManager.findReusableToolAction).toHaveBeenLastCalledWith(
+				expect.objectContaining({
+					executionId: "execution-2",
+					includePreviousExecutions: true,
+				}),
+			);
 		});
 
 		it("should allow expensive tools when feedback asks for a more creative revision", async () => {
@@ -1750,6 +1961,208 @@ describe("AgentRuntime", () => {
 			);
 			expect(result).not.toContain("⚠️");
 			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
+		});
+
+		it("never yields a split future-action promise before its tool call exists", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chatStream = vi
+				.fn()
+				.mockImplementationOnce(async function* () {
+					yield { content: "Actividad actual: Iniciando " } satisfies LLMChunk;
+					yield {
+						content: "búsqueda de música instrumental en la web.",
+						finishReason: "stop",
+					} satisfies LLMChunk;
+				})
+				.mockImplementationOnce(async function* () {
+					yield {
+						toolCalls: {
+							id: "search-1",
+							type: "function" as const,
+							function: {
+								name: "web_search_prime",
+								arguments: '{"search_query":"wedding piano"}',
+							},
+						},
+						finishReason: "tool_calls",
+					} satisfies LLMChunk;
+				})
+				.mockImplementationOnce(async function* () {
+					yield {
+						content: "La búsqueda devolvió opciones verificadas.",
+						finishReason: "stop",
+					} satisfies LLMChunk;
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const mockRegistry = createMockToolRegistry([
+				{ name: "web_search_prime", description: "Searches the web" },
+			]);
+			const mockExecutor = createMockToolExecutor();
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				mockExecutor as unknown as ToolExecutor,
+			);
+
+			const chunks: string[] = [];
+			for await (const chunk of runtime.processMessageStream(
+				"busca música",
+				"conv-stream-terminal",
+				{ disableOrchestrator: true },
+			)) {
+				chunks.push(chunk);
+			}
+
+			const output = chunks.join("");
+			expect(output).not.toContain("Actividad actual");
+			expect(output).toContain("La búsqueda devolvió opciones verificadas.");
+			expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe("tool billing classification", () => {
+		it("does not block execute_code when successful script output mentions HTTP 403", () => {
+			const internal = runtime as unknown as {
+				recordToolResultForBilling(name: string, result: ToolResult): void;
+				isToolBillingBlocked(name: string): boolean;
+			};
+			for (let attempt = 0; attempt < 4; attempt++) {
+				internal.recordToolResultForBilling("execute_code", {
+					success: true,
+					output: "Failed to download remote audio. Status code: 403",
+				});
+			}
+			expect(internal.isToolBillingBlocked("execute_code")).toBe(false);
+		});
+
+		it("skips only a provider tool after repeated genuine billing failures", () => {
+			const internal = runtime as unknown as {
+				recordToolResultForBilling(name: string, result: ToolResult): void;
+				isToolBillingBlocked(name: string): boolean;
+				createEvidenceLedger(message: string): unknown;
+				decideBeforeToolCall(
+					name: string,
+					params: Record<string, unknown>,
+					ledger: unknown,
+					remaining: number,
+				): { action: string; reason?: string };
+			};
+			for (let attempt = 0; attempt < 3; attempt++) {
+				internal.recordToolResultForBilling("image-provider", {
+					success: false,
+					error: "403 PERMISSION_DENIED: billing required",
+				});
+			}
+			expect(internal.isToolBillingBlocked("image-provider")).toBe(true);
+			const decision = internal.decideBeforeToolCall(
+				"image-provider",
+				{},
+				internal.createEvidenceLedger("generate an image"),
+				10,
+			);
+			expect(decision.action).toBe("skip");
+		});
+
+		it("replaces a terminal future-action promise with verified fallback text", async () => {
+			mockLLMRouter.chatStream = vi.fn().mockImplementation(async function* () {
+				yield {
+					content:
+						"Actividad actual: Iniciando búsqueda de música instrumental en la web.",
+				};
+			});
+			const internal = runtime as unknown as {
+				createEvidenceLedger(message: string): unknown;
+				streamFinalResponse(
+					messages: unknown[],
+					ledger: unknown,
+					reason: string,
+				): AsyncIterable<string>;
+			};
+			const chunks: string[] = [];
+			for await (const chunk of internal.streamFinalResponse(
+				[],
+				internal.createEvidenceLedger("find wedding music"),
+				"tool unavailable",
+			)) {
+				chunks.push(chunk);
+			}
+			const output = chunks.join("");
+			expect(output).not.toContain("Iniciando búsqueda");
+			expect(output).toContain("Detuve las herramientas");
+		});
+
+		it("rejects future-action promises from non-stream finalization", async () => {
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content: "Voy a ejecutar la descarga ahora.",
+				model: "test-model",
+				usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+				finishReason: "stop",
+			});
+			const internal = runtime as unknown as {
+				createEvidenceLedger(message: string): unknown;
+				generateFinalResponse(
+					messages: unknown[],
+					ledger: unknown,
+					reason: string,
+				): Promise<string>;
+			};
+
+			const output = await internal.generateFinalResponse(
+				[],
+				internal.createEvidenceLedger("download music"),
+				"tool unavailable",
+			);
+
+			expect(output).not.toContain("Voy a ejecutar");
+			expect(output).toContain("Detuve las herramientas");
+		});
+	});
+
+	describe("semantic completion outcomes", () => {
+		it("reports incomplete terminal text as a pending action", async () => {
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content: "Queda pendiente descargar el archivo de música.",
+				model: "test-model",
+				usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+				finishReason: "stop",
+			});
+			const onCompletionOutcome = vi.fn();
+
+			await runtime.processMessage("resuelve la música", "conversation", {
+				disableOrchestrator: true,
+				onCompletionOutcome,
+			});
+
+			expect(onCompletionOutcome).toHaveBeenCalledOnce();
+			expect(onCompletionOutcome).toHaveBeenCalledWith(
+				expect.objectContaining({
+					reason: "pending_action",
+					pendingAction: expect.objectContaining({ resumable: true }),
+				}),
+			);
+		});
+
+		it("reports a complete answer as finished", async () => {
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content: "La explicación está completa.",
+				model: "test-model",
+				usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+				finishReason: "stop",
+			});
+			const onCompletionOutcome = vi.fn();
+
+			await runtime.processMessage("explica el resultado", "conversation", {
+				disableOrchestrator: true,
+				onCompletionOutcome,
+			});
+
+			expect(onCompletionOutcome).toHaveBeenCalledWith({ reason: "finished" });
 		});
 	});
 

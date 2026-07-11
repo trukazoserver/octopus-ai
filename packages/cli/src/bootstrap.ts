@@ -17,7 +17,7 @@ import {
 	ArtifactVerifier,
 	AutomationManager,
 	AutomationRunner,
-	BrowserTool,
+	BrowserSessionPool,
 	ChatManager,
 	CodeExecutor,
 	ConfigLoader,
@@ -89,6 +89,7 @@ import {
 	getZaiMCPConfigs,
 	handleProviderResponseHeaders,
 	refreshCodexToken,
+	resolveZaiMCPAuth,
 } from "@octopus-ai/core";
 import type {
 	AgentConfig,
@@ -146,7 +147,7 @@ export interface OctopusSystem {
 	automationRunner: AutomationRunner;
 	systemScheduler: Scheduler;
 	mcpManager: MCPManager;
-	browserTool: BrowserTool | null;
+	browserTool: BrowserSessionPool | null;
 	refreshBrowserTools: (nextConfig?: OctopusConfig) => Promise<boolean>;
 	refreshEmbeddingProvider: (nextConfig?: OctopusConfig) => Promise<boolean>;
 	reloadDynamicTool: (name: string) => Promise<boolean>;
@@ -1910,7 +1911,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		}
 	}
 
-	let browserTool: BrowserTool | null = null;
+	let browserTool: BrowserSessionPool | null = null;
 	const refreshBrowserTools = async (
 		nextConfig?: OctopusConfig,
 	): Promise<boolean> => {
@@ -2025,7 +2026,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		if (browserTool) {
 			await browserTool.updateConfig(toolConfig);
 		} else {
-			browserTool = new BrowserTool(toolConfig);
+			browserTool = new BrowserSessionPool(toolConfig);
 			for (const tool of browserTool.createTools()) {
 				registerSystemTool(tool);
 			}
@@ -2245,21 +2246,13 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 				mode?: string;
 		  }
 		| undefined;
-	const isZhipuCodingMode =
-		zhipuProvider?.mode === "coding-plan" ||
-		zhipuProvider?.mode === "coding-global";
-	const zhipuApiKey = firstNonEmpty(
-		isZhipuCodingMode ? zhipuProvider?.codingApiKey : zhipuProvider?.apiKey,
-		zhipuProvider?.codingApiKey,
-		zhipuProvider?.apiKey,
-		readConfiguredEnv(zhipuProvider?.apiKeyEnv),
-		process.env.ZHIPU_API_KEY,
-		process.env.Z_AI_API_KEY,
-		process.env.ZAI_API_KEY,
-	);
+	const zaiMcpAuth = resolveZaiMCPAuth(zhipuProvider, process.env);
 	const mcpAutoDisabled = (config.mcp?.autoDisabled || []) as string[];
-	if (zhipuApiKey) {
-		const officialZaiConfigs = getZaiMCPConfigs(zhipuApiKey);
+	if (zaiMcpAuth) {
+		const officialZaiConfigs = getZaiMCPConfigs(
+			zaiMcpAuth.apiKey,
+			zaiMcpAuth.platform,
+		);
 		config.mcp = config.mcp ?? { servers: {}, autoDisabled: [] };
 		config.mcp.servers = config.mcp.servers ?? {};
 		// Force-enable every official Z.ai server each boot so "all MCPs
@@ -2286,9 +2279,9 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		);
 	}
 
-	if (zhipuApiKey) {
+	if (zaiMcpAuth) {
 		for (const [serverName, serverConfig] of Object.entries(
-			getZaiMCPConfigs(zhipuApiKey),
+			getZaiMCPConfigs(zaiMcpAuth.apiKey, zaiMcpAuth.platform),
 		)) {
 			if (mcpAutoDisabled.includes(serverName)) continue;
 			if (mcpManager.getServer(serverName)) continue;
@@ -2477,6 +2470,8 @@ Always be concise, helpful, and thorough.`,
 	agentRuntime.enableOrchestrator({
 		maxWorkers: config.orchestration?.maxArms ?? 8,
 		getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+		releaseWorkerResources: (workerId: string) =>
+			browserTool?.releaseWorker(workerId) ?? Promise.resolve(),
 		complexityThreshold: 5,
 		enableDynamicAssessment:
 			config.orchestration?.enableDynamicAssessment ?? false,
@@ -2637,6 +2632,8 @@ Always be concise, helpful, and thorough.`,
 		runtime.enableOrchestrator({
 			maxWorkers: config.orchestration?.maxArms ?? 8,
 			getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+			releaseWorkerResources: (workerId: string) =>
+				browserTool?.releaseWorker(workerId) ?? Promise.resolve(),
 			complexityThreshold: 5,
 			enableDynamicAssessment:
 				config.orchestration?.enableDynamicAssessment ?? false,
@@ -3008,6 +3005,7 @@ Always be concise, helpful, and thorough.`,
 			systemScheduler.cancel("workflow-resume");
 			systemScheduler.cancel("daily-memory-dump");
 			systemScheduler.cancel("web-tools-health");
+			await browserTool?.closeAll();
 			await mcpManager.shutdown();
 			connectionManager.shutdown();
 			await db.close();

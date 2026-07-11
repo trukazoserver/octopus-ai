@@ -93,10 +93,25 @@ export interface ToolDefinition {
 	) => Promise<ToolResult>;
 }
 
+export type ToolErrorCode =
+	| "TOOL_NOT_FOUND"
+	| "INVALID_ARGUMENTS"
+	| "ABORTED"
+	| "TIMEOUT"
+	| "SECURITY_BLOCKED"
+	| "PROVIDER_AUTH"
+	| "PROVIDER_PERMISSION"
+	| "PROVIDER_QUOTA"
+	| "PROVIDER_BILLING"
+	| "PROVIDER_UNAVAILABLE"
+	| "CIRCUIT_OPEN"
+	| "EXECUTION_FAILED";
+
 export interface ToolResult {
 	success: boolean;
 	output: string;
 	error?: string;
+	errorCode?: ToolErrorCode;
 	metadata?: Record<string, unknown>;
 }
 

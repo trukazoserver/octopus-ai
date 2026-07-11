@@ -329,6 +329,14 @@ export class MCPManager {
 								source: "mcp",
 								serverName: name,
 								originalToolName: tool.name,
+								statefulBrowser:
+									/puppeteer|playwright|chrome.?devtools|browser.?use/i.test(
+										name,
+									) ||
+									/^(?:puppeteer|playwright|chrome|browser)[_.-]/i.test(
+										tool.name,
+									),
+								workerIsolated: false,
 							},
 							parameters,
 							handler: async (params: Record<string, unknown>) => {

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { DatabaseAdapter } from "../storage/database.js";
 import {
 	ToolHealthManager,
 	type ToolHealthMcpCaller,
 } from "../tools/tool-health-manager.js";
-import type { DatabaseAdapter } from "../storage/database.js";
 
 /** Minimal in-memory DB that emulates the tool_health upsert + select. */
 function createMockDb(): DatabaseAdapter {
@@ -48,7 +48,9 @@ function createMockDb(): DatabaseAdapter {
 	return db;
 }
 
-function createMcp(overrides: Partial<ToolHealthMcpCaller> = {}): ToolHealthMcpCaller {
+function createMcp(
+	overrides: Partial<ToolHealthMcpCaller> = {},
+): ToolHealthMcpCaller {
 	return {
 		callTool: async () => ({ content: [{ text: "ok" }] }),
 		findServerForTool: (name: string) =>
@@ -121,6 +123,36 @@ describe("ToolHealthManager", () => {
 		const status = await mgr.getStatus("web_search");
 		// Authenticated endpoint, just bad params → quota is effectively fine.
 		expect(status?.status).toBe("ok");
+	});
+
+	it("classifies a missing probe tool as configuration error, not healthy", async () => {
+		const mcp = createMcp({
+			callTool: async () => {
+				throw new Error("Tool not found: webSearchPrime");
+			},
+		});
+		const mgr = makeManager(mcp);
+		await mgr.runProbe();
+		const status = await mgr.getStatus("web_search");
+		expect(status?.status).toBe("error");
+		expect(await mgr.getHealthSummary()).toBe("");
+	});
+
+	it("uses the tool name advertised by the connected MCP server", async () => {
+		const calls: Array<{ server: string; tool: string }> = [];
+		const mcp = createMcp({
+			getServer: () => ({ status: "connected", tools: ["web_search_prime"] }),
+			callTool: async (server, tool) => {
+				calls.push({ server, tool });
+				return { content: [{ text: "ok" }] };
+			},
+		});
+		const mgr = makeManager(mcp);
+		await mgr.runProbe();
+		expect(calls).toContainEqual({
+			server: "zai-web-search",
+			tool: "web_search_prime",
+		});
 	});
 
 	it("reports no_quota servers in the health summary", async () => {

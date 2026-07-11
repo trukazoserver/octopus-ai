@@ -1,4 +1,7 @@
-import type { SubtaskTracker, ReconciliationReport } from "./subtask-tracker.js";
+import type {
+	ReconciliationReport,
+	SubtaskTracker,
+} from "./subtask-tracker.js";
 
 export interface ContinuityGuardConfig {
 	enabled: boolean;
@@ -42,7 +45,18 @@ export interface StallDecision {
  * but did not emit the corresponding tool call. Bilingual ES/EN.
  */
 const ACTION_PROMISE_RE =
-	/(lo agrego|lo añado|voy a (editar|agreg|añad|modific|cambi|cre|actualiz)|déjame.*?(editar|agreg|añad|modific|leer y .*?agreg|leer y .*?añad)|ahora:|let me (edit|add|update|modify|write|apply|read.*?(?:and|y).*?(?:edit|add|update|modify|write|apply))|i'?ll (edit|add|update|modify|write|apply)|adding now|applying now|updating now)/i;
+	/(lo agrego|lo añado|(?:voy a|proceder[eé] a|procedo a)(?:\s+proceder a)?\s+(?:editar|agreg|añad|modific|cambi|cre|actualiz|buscar|naveg|descarg|ejecut|prob|abr|revis|usar|utiliz|inici|solucion)|déjame.*?(?:editar|agreg|añad|modific|buscar|naveg|descarg|ejecut|prob|abr|leer y .*?agreg|leer y .*?añad)|actividad actual:\s*(?:iniciando|buscando|navegando|descargando|ejecutando)|\biniciando\s+(?:la\s+)?(?:búsqueda|busqueda|navegación|navegacion|descarga|ejecución|ejecucion)|let me (?:edit|add|update|modify|write|apply|search|browse|download|run|test|open|read.*?(?:and|y).*?(?:edit|add|update|modify|write|apply))|i'?ll (?:edit|add|update|modify|write|apply|search|browse|download|run|test|open)|(?:adding|applying|updating|searching|browsing|downloading|starting) now)/i;
+
+/**
+ * Claims that external work was already completed. These need the same guard as
+ * future-tense promises because, without a tool call, the claimed artifact is
+ * unverified. Keep the verb and artifact checks separate to avoid flagging
+ * harmless conclusions such as "ya terminé el análisis".
+ */
+const COMPLETED_ACTION_RE =
+	/(he (?:generado|creado|editado|modificado|actualizado|reemplazado|añadido|agregado)|(?:generé|creé|edité|modifiqué|actualicé|reemplacé|añadí|agregué)|i (?:generated|created|edited|modified|updated|replaced|added)|i'?ve (?:generated|created|edited|modified|updated|replaced|added))/i;
+const ACTION_ARTIFACT_RE =
+	/(archivo|código|script|html|css|imagen|foto|captura|banner|diseño|invitación|página|componente|configuración|audio|música|mp3|file|code|script|image|photo|screenshot|design|page|component|config|audio|music)/i;
 
 /**
  * Signals that the stalled text described an edit/write to a file (so the
@@ -96,7 +110,8 @@ export class ContinuityGuard {
 		inlineRunId?: string;
 	}): boolean {
 		if (!this.config.enabled) return false;
-		if (this.state.continuationCount >= this.config.maxAutoContinuations) return false;
+		if (this.state.continuationCount >= this.config.maxAutoContinuations)
+			return false;
 
 		const reason = options.finishReason ?? "stop";
 
@@ -106,7 +121,10 @@ export class ContinuityGuard {
 		}
 
 		// Case 2: Hit iteration limit but had tool calls (work was in progress)
-		if (options.iterationCount >= options.maxIterations && options.hasToolCalls) {
+		if (
+			options.iterationCount >= options.maxIterations &&
+			options.hasToolCalls
+		) {
 			return true;
 		}
 
@@ -142,6 +160,23 @@ export class ContinuityGuard {
 		return ACTION_PROMISE_RE.test(content);
 	}
 
+	hasPendingAction(content: string): boolean {
+		return this.hasActionPromise(content);
+	}
+
+	hasUnverifiedExternalClaim(
+		content: string,
+		hasToolProgress: boolean,
+	): boolean {
+		return !hasToolProgress && this.hasUnverifiedCompletedAction(content);
+	}
+
+	private hasUnverifiedCompletedAction(content: string): boolean {
+		return (
+			COMPLETED_ACTION_RE.test(content) && ACTION_ARTIFACT_RE.test(content)
+		);
+	}
+
 	/**
 	 * Decide whether a turn that ended without tool calls should be forced into a
 	 * retry because the model promised an action it did not perform, or repeated
@@ -151,6 +186,7 @@ export class ContinuityGuard {
 	shouldForceActOnStall(
 		content: string,
 		finishReason: string | undefined,
+		hasToolProgress = false,
 	): StallDecision {
 		const reason = finishReason ?? "stop";
 		const noSignal: StallDecision = {
@@ -171,22 +207,34 @@ export class ContinuityGuard {
 			return { ...noSignal, reason: "empty" };
 		}
 
-		const exhausted = this.state.stallForceCount >= this.config.maxStallForcings;
+		const exhausted =
+			this.state.stallForceCount >= this.config.maxStallForcings;
 		if (exhausted) {
-			return { force: false, reason: "exhausted", repeated: false, exhausted: true };
+			return {
+				force: false,
+				reason: "exhausted",
+				repeated: false,
+				exhausted: true,
+			};
 		}
 
 		const signature = this.normalizeForSignature(content);
 		const repeated = this.state.recentStallSignatures.includes(signature);
 		const promised = this.hasActionPromise(content);
+		const claimedCompleted =
+			!hasToolProgress && this.hasUnverifiedCompletedAction(content);
 
-		if (!promised && !repeated) {
+		if (!promised && !claimedCompleted && !repeated) {
 			return noSignal;
 		}
 
 		return {
 			force: true,
-			reason: repeated ? "repeated-text-no-action" : "promised-action-no-toolcall",
+			reason: repeated
+				? "repeated-text-no-action"
+				: claimedCompleted
+					? "claimed-action-no-toolcall"
+					: "promised-action-no-toolcall",
 			repeated,
 			exhausted: false,
 		};
@@ -196,7 +244,10 @@ export class ContinuityGuard {
 	recordStall(content: string): void {
 		const signature = this.normalizeForSignature(content);
 		this.state.recentStallSignatures.push(signature);
-		while (this.state.recentStallSignatures.length > this.config.stallSignatureHistory) {
+		while (
+			this.state.recentStallSignatures.length >
+			this.config.stallSignatureHistory
+		) {
 			this.state.recentStallSignatures.shift();
 		}
 		this.state.stallForceCount++;
@@ -219,12 +270,15 @@ export class ContinuityGuard {
 	): string {
 		const attempt = opts?.attempt ?? 1;
 		const editIntent = opts?.content ? this.hasEditIntent(opts.content) : false;
+		const claimedCompleted = stallReason === "claimed-action-no-toolcall";
 		const lines: string[] = [
 			"# PENDING ACTION — EXECUTE NOW",
 			"",
 			repeated
 				? "Your previous turns REPEATED the same intention/analysis without emitting any tool call. Repeating intent without acting is blocked."
-				: 'Your previous turn stated an intention to act (e.g. "lo agrego ahora" / "voy a editar" / "let me edit") but emitted NO tool call. Stating intent without acting is blocked.',
+				: claimedCompleted
+					? "Your previous turn claimed that files or media had already been created or modified, but emitted NO tool call. The claimed work is unverified and must not be presented as completed."
+					: 'Your previous turn stated an intention to act (e.g. "lo agrego ahora" / "voy a editar" / "let me edit") but emitted NO tool call. Stating intent without acting is blocked.',
 			"",
 			"IMMEDIATELY emit the exact tool call you described. Do NOT re-explain, re-analyze, restate intent, quote the plan again, or produce another preamble.",
 		];
@@ -277,7 +331,9 @@ export class ContinuityGuard {
 			parts.push("");
 		}
 
-		parts.push("Continue from where you left off. Do NOT repeat work that was already completed. Be concise - focus on remaining tasks only.");
+		parts.push(
+			"Continue from where you left off. Do NOT repeat work that was already completed. Be concise - focus on remaining tasks only.",
+		);
 
 		return parts.join("\n");
 	}

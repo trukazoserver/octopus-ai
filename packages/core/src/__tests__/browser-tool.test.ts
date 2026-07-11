@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BrowserTool } from "../tools/browser.js";
+import { BrowserTool, waitForPageReady } from "../tools/browser.js";
 
 describe("BrowserTool local file preview", () => {
 	let tempDir: string;
@@ -34,17 +34,22 @@ describe("BrowserTool local file preview", () => {
 			init: () => Promise<void>;
 			page: typeof page;
 			buildSnapshotWithUidMap: () => Promise<{ output: string }>;
+			preparePage: () => Promise<unknown>;
+			formatPageReadiness: () => string;
 		};
 		browserInternals.init = vi.fn(async () => {});
 		browserInternals.page = page;
 		browserInternals.buildSnapshotWithUidMap = vi.fn(async () => ({
 			output: "Hero",
 		}));
+		browserInternals.preparePage = vi.fn(async () => ({}));
+		browserInternals.formatPageReadiness = vi.fn(() => "Render stable.");
 		const tool = browser
 			.createTools()
 			.find((candidate) => candidate.name === "browser_open_file");
 		expect(tool).toBeDefined();
-		return { tool: tool!, page };
+		if (!tool) throw new Error("browser_open_file tool missing");
+		return { tool, page };
 	}
 
 	it("opens an existing local file with a file URL", async () => {
@@ -93,8 +98,9 @@ describe("BrowserTool local file preview", () => {
 			.createTools()
 			.find((candidate) => candidate.name === "browser_navigate");
 		expect(tool).toBeDefined();
+		if (!tool) throw new Error("browser_navigate tool missing");
 
-		const result = await tool!.handler(
+		const result = await tool.handler(
 			{ url: pathToFileURL(htmlPath).href },
 			{} as never,
 		);
@@ -102,5 +108,68 @@ describe("BrowserTool local file preview", () => {
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("browser_open_file");
 		expect(browserInternals.init).not.toHaveBeenCalled();
+	});
+});
+
+describe("waitForPageReady", () => {
+	it("traverses lazy height growth and restores the original scroll position", async () => {
+		let scrollY = 120;
+		let height = 1_600;
+		let imageCount = 2;
+		let grew = false;
+		const scrollTargets: number[] = [];
+		const page = {
+			waitForLoadState: vi.fn(async () => undefined),
+			waitForTimeout: vi.fn(async () => undefined),
+			evaluate: vi.fn(async (fn: unknown, arg?: unknown) => {
+				const source = String(fn);
+				if (typeof arg === "number") {
+					scrollY = arg;
+					scrollTargets.push(arg);
+					if (!grew && scrollY >= 800) {
+						grew = true;
+						height = 2_400;
+						imageCount = 4;
+					}
+					return undefined;
+				}
+				if (arg && typeof arg === "object" && "y" in (arg as object)) {
+					scrollY = Number((arg as { y: number }).y);
+					return undefined;
+				}
+				if (source.includes("scrollingElement")) {
+					return {
+						x: 0,
+						y: scrollY,
+						height,
+						viewport: 600,
+						imageCount,
+					};
+				}
+				if (source.includes("naturalWidth")) {
+					return {
+						total: imageCount,
+						loaded: imageCount,
+						broken: 0,
+						pending: 0,
+					};
+				}
+				if (source.includes("window.scrollX")) return { x: 0, y: scrollY };
+				return undefined;
+			}),
+		};
+
+		const result = await waitForPageReady(page as never, {
+			autoScroll: true,
+			restorePosition: true,
+			settleMs: 1,
+			timeoutMs: 2_000,
+		});
+
+		expect(result.scrollSteps).toBeGreaterThan(0);
+		expect(result.finalHeight).toBe(2_400);
+		expect(result.images.loaded).toBe(4);
+		expect(scrollTargets.some((target) => target >= 800)).toBe(true);
+		expect(scrollY).toBe(120);
 	});
 });

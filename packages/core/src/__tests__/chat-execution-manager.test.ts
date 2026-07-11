@@ -140,4 +140,101 @@ describe("ChatExecutionManager", () => {
 		const conversations = await chatManager.listConversations({ limit: 10 });
 		expect(conversations[0]?.agent_id).toBe("arm-bibi");
 	});
+
+	it("enables completed-action reuse only for an explicit continuation", async () => {
+		let resolveDone!: () => void;
+		const done = new Promise<void>((resolve) => {
+			resolveDone = resolve;
+		});
+		const processMessageStream = vi.fn(async function* () {
+			yield "continuado";
+		});
+		const runtime = {
+			stm: { clear: vi.fn(), add: vi.fn() },
+			processMessageStream,
+			runConsolidation: vi.fn(async () => undefined),
+		};
+		const manager = new ChatExecutionManager({
+			chatManager,
+			conversationHistoryLimit: 20,
+			streamCheckpointIntervalMs: 0,
+			getAgentRuntime: () => runtime as never,
+			emit: (event) => {
+				if (event.type === "stream_end") resolveDone();
+			},
+		});
+
+		const execution = await manager.start({
+			message: "continúa",
+			stream: true,
+		});
+		await done;
+
+		expect(processMessageStream).toHaveBeenCalledWith(
+			"continúa",
+			expect.any(String),
+			expect.objectContaining({
+				executionId: execution.id,
+				resumeCompletedActions: true,
+			}),
+		);
+	});
+
+	it("persists a pending runtime outcome as interrupted instead of completed", async () => {
+		let resolveDone!: () => void;
+		const done = new Promise<void>((resolve) => {
+			resolveDone = resolve;
+		});
+		const events: Array<{ type: string; payload: Record<string, unknown> }> =
+			[];
+		const runtime = {
+			stm: { clear: vi.fn(), add: vi.fn() },
+			processMessageStream: async function* (
+				_message: string,
+				_channelId: string,
+				options: {
+					onCompletionOutcome?: (outcome: Record<string, unknown>) => void;
+				},
+			) {
+				yield "Queda una acción pendiente.";
+				options.onCompletionOutcome?.({
+					reason: "pending_action",
+					pendingAction: {
+						kind: "continue",
+						summary: "Descargar la música",
+						resumable: true,
+					},
+				});
+			},
+			runConsolidation: vi.fn(async () => undefined),
+		};
+		const manager = new ChatExecutionManager({
+			chatManager,
+			conversationHistoryLimit: 20,
+			streamCheckpointIntervalMs: 0,
+			getAgentRuntime: () => runtime as never,
+			emit: (event) => {
+				events.push({ type: event.type, payload: event.payload });
+				if (event.type === "stream_end") resolveDone();
+			},
+		});
+
+		const execution = await manager.start({
+			message: "continúa",
+			stream: true,
+		});
+		await done;
+
+		const saved = await chatManager.getExecution(execution.id);
+		expect(saved?.status).toBe("interrupted");
+		expect(saved?.completion_reason).toBe("pending_action");
+		expect(JSON.parse(saved?.pending_action ?? "{}")).toMatchObject({
+			kind: "continue",
+			resumable: true,
+		});
+		expect(events.at(-1)?.payload).toMatchObject({
+			status: "interrupted",
+			completionReason: "pending_action",
+		});
+	});
 });

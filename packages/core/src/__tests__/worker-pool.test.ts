@@ -71,6 +71,7 @@ describe("WorkerPool", () => {
 		const getAgentRuntime = vi.fn((agentId: string) =>
 			agentId === "arm-ari" ? armRuntime : undefined,
 		);
+		const releaseWorkerResources = vi.fn(async () => undefined);
 		const pool = new WorkerPool(
 			{ chat } as never,
 			registry,
@@ -84,7 +85,7 @@ describe("WorkerPool", () => {
 				model: "test-model",
 			},
 			2,
-			{ getAgentRuntime },
+			{ getAgentRuntime, releaseWorkerResources },
 		);
 
 		const result = await pool.executeWorker(
@@ -108,13 +109,18 @@ describe("WorkerPool", () => {
 		expect(armRuntime.processMessageStream).toHaveBeenCalledWith(
 			expect.stringContaining("Subtarea asignada por Octavio"),
 			"conversation-1",
-			expect.objectContaining({
+				expect.objectContaining({
 				signal: expect.any(AbortSignal),
 				disableOrchestrator: true,
-				disableDelegation: true,
-			}),
+					disableDelegation: true,
+					delegationContext: expect.objectContaining({
+						taskId: "task_1",
+						role: "engineer",
+					}),
+				}),
 		);
 		expect(chat).not.toHaveBeenCalled();
+		expect(releaseWorkerResources).toHaveBeenCalledOnce();
 		expect(result).toBe("runtime result");
 		expect(
 			eventStream.query({ taskId: "task_1" }).some((event) =>

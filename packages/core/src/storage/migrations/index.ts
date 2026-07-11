@@ -18,6 +18,8 @@ import * as migration016 from "./016_task_model_column.js";
 import * as migration017 from "./017_tool_health.js";
 import * as migration018 from "./018_ai_usage_and_agent_model_profiles.js";
 import * as migration019 from "./019_provider_quota_cache.js";
+import * as migration020 from "./020_chat_tool_actions.js";
+import * as migration021 from "./021_chat_execution_outcomes.js";
 
 export interface Migration {
 	version: number;
@@ -45,4 +47,6 @@ export const migrations: Migration[] = [
 	{ version: 17, up: migration017.up, down: migration017.down },
 	{ version: 18, up: migration018.up, down: migration018.down },
 	{ version: 19, up: migration019.up, down: migration019.down },
+	{ version: 20, up: migration020.up, down: migration020.down },
+	{ version: 21, up: migration021.up, down: migration021.down },
 ];

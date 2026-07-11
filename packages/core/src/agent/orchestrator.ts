@@ -74,6 +74,7 @@ export interface OrchestratorConfig {
 	maxWorkers: number;
 	workerConfig: Partial<WorkerConfig>;
 	getAgentRuntime?: (agentId: string) => LiveAgentRuntime | undefined;
+	releaseWorkerResources?: (workerId: string) => Promise<void>;
 	/** Umbral mínimo de complejidad para activar multi-agent (1-10) */
 	complexityThreshold: number;
 	/** Modelo específico para la descomposición (puede ser diferente al de los workers) */
@@ -339,7 +340,8 @@ Reglas:
 5. Los toolScopes posibles incluyen: shell, read_file, write_file, browser_navigate, browser_click, browser_read_page, browser_screenshot, browser_observe, browser_snapshot, browser_eval, execute_code, web_search, save_media.
 6. toolScope es una recomendación de herramientas prioritarias para cada worker, NO una restricción. Todos los workers tendrán acceso completo a las herramientas registradas, MCPs, memoria, skills y contexto compartido disponibles en el sistema.
 7. Para subtareas de generación programática de imágenes/audio/video, incluye SIEMPRE execute_code en toolScope. execute_code auto-guarda archivos media generados si el worker los escribe en el directorio actual del script; save_media solo es necesario para payloads pequeños que ya vienen en base64 desde una API externa. Nunca conviertas archivos o URLs de media de Octopus a base64.
-8. Un máximo de MAX_WORKERS subtareas paralelas.`;
+8. Un máximo de MAX_WORKERS subtareas paralelas.
+9. Para investigaciones independientes, crea una subtarea por fuente/tema cuando acelere el trabajo e incluye browser_* en cada toolScope que necesite navegación. Cada worker recibe automáticamente una sesión nativa aislada; nunca diseñes dos workers para compartir pestañas, UIDs o estado mutable del navegador.`;
 
 const ASSESSMENT_PROMPT = `Decides si la petición del usuario se beneficia de ejecutarse con múltiples agentes en paralelo.
 
@@ -376,7 +378,10 @@ export class OctopusOrchestrator {
 			this.eventStream,
 			baseConfig,
 			this.config.maxWorkers,
-			{ getAgentRuntime: this.config.getAgentRuntime },
+			{
+				getAgentRuntime: this.config.getAgentRuntime,
+				releaseWorkerResources: this.config.releaseWorkerResources,
+			},
 		);
 		this.coordinationBus = new AgentCoordinationBus();
 		this.crossReviewEngine = new CrossReviewEngine(

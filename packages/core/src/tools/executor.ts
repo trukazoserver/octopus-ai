@@ -10,6 +10,7 @@ import { ToolRateLimiter } from "./rate-limiter.js";
 import type { ToolRateLimitConfig } from "./rate-limiter.js";
 import type { ToolContext, ToolDefinition, ToolResult } from "./registry.js";
 import type { ToolRegistry } from "./registry.js";
+import { classifyToolError } from "./tool-errors.js";
 import type { ToolHealthManager } from "./tool-health-manager.js";
 
 const DEFAULT_TOOL_TIMEOUT_MS = 45_000;
@@ -57,6 +58,10 @@ export interface ToolExecutionContext {
 	role?: string;
 	channelId?: string;
 	runId?: string;
+	executionId?: string;
+	actionId?: string;
+	/** Stable request key that provider-backed tools may forward upstream. */
+	idempotencyKey?: string;
 	toolScope?: string[];
 	fileScope?: string[];
 	abortSignal?: AbortSignal;
@@ -536,6 +541,7 @@ export class ToolExecutor {
 				success: false,
 				output: "",
 				error: `Tool ${toolName} aborted before execution`,
+				errorCode: "ABORTED",
 			};
 		}
 		const tool = this.registry.get(toolName);
@@ -544,6 +550,7 @@ export class ToolExecutor {
 				success: false,
 				output: "",
 				error: `Tool not found: ${toolName}`,
+				errorCode: "TOOL_NOT_FOUND",
 			};
 		}
 
@@ -553,6 +560,7 @@ export class ToolExecutor {
 				success: false,
 				output: "",
 				error: `Missing required parameters: ${validation.missing.join(", ")}`,
+				errorCode: "INVALID_ARGUMENTS",
 			};
 		}
 
@@ -565,6 +573,7 @@ export class ToolExecutor {
 						success: false,
 						output: "",
 						error: error instanceof Error ? error.message : String(error),
+						errorCode: "SECURITY_BLOCKED",
 					};
 				}
 			}
@@ -577,6 +586,7 @@ export class ToolExecutor {
 					success: false,
 					output: "",
 					error: decision.reason ?? "Command blocked by security policy",
+					errorCode: "SECURITY_BLOCKED",
 				};
 			}
 		}
@@ -598,6 +608,7 @@ export class ToolExecutor {
 					error: `${toolName} no está disponible (sin saldo de API, verificado ${when}).${
 						alt ? ` Usa ${alt} en su lugar.` : ""
 					}`,
+					errorCode: "PROVIDER_QUOTA",
 				};
 			}
 			const circuit = this.health.isCircuitOpen(toolName);
@@ -606,6 +617,7 @@ export class ToolExecutor {
 					success: false,
 					output: "",
 					error: `${toolName} tiene el cortacircuitos abierto tras ${circuit.failures} fallos consecutivos. Última causa: ${circuit.lastError || "desconocida"}. Usa una alternativa.`,
+					errorCode: "CIRCUIT_OPEN",
 				};
 			}
 		}
@@ -644,7 +656,14 @@ export class ToolExecutor {
 						executionContext?.abortSignal,
 					),
 			);
-			const normalized = await this.normalizeMediaOutput(toolName, result);
+			const normalized = await this.normalizeMediaOutput(toolName, {
+				...result,
+				errorCode:
+					result.errorCode ??
+					(!result.success && result.error
+						? classifyToolError(result.error)
+						: undefined),
+			});
 			this.health?.recordOutcome(
 				toolName,
 				normalized.success,
@@ -658,6 +677,7 @@ export class ToolExecutor {
 				success: false,
 				output: "",
 				error: this.redactor.redactText(`Tool execution failed: ${message}`),
+				errorCode: classifyToolError(message),
 			};
 		}
 	}

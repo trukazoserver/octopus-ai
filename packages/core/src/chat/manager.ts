@@ -30,6 +30,28 @@ export type ChatExecutionStatus =
 	| "cancelled"
 	| "interrupted";
 
+export type ChatCompletionReason =
+	| "finished"
+	| "pending_action"
+	| "failed"
+	| "cancelled"
+	| "server_restart";
+
+export interface ChatPendingAction {
+	kind:
+		| "continue"
+		| "retry_tool_call"
+		| "verify_tool_action"
+		| "user_input"
+		| "manual_action"
+		| "background_work";
+	summary: string;
+	resumable: boolean;
+	toolActionId?: string;
+	toolName?: string;
+	workflowRunId?: string;
+}
+
 export interface ChatExecutionActivity {
 	id: string;
 	status: string;
@@ -49,6 +71,8 @@ export interface ChatExecution {
 	activities: string | null;
 	assistant_message_id: string | null;
 	error: string | null;
+	completion_reason: ChatCompletionReason | null;
+	pending_action: string | null;
 	started_at: string;
 	updated_at: string;
 	completed_at: string | null;
@@ -71,6 +95,28 @@ export interface ChatTaskLedgerEntry {
 	tool_names: string | null;
 	source_message_id: string | null;
 	created_at: string;
+	updated_at: string;
+	completed_at: string | null;
+}
+
+export type ChatToolActionStatus =
+	| "running"
+	| "completed"
+	| "failed"
+	| "uncertain";
+
+export interface ChatToolAction {
+	id: string;
+	conversation_id: string;
+	execution_id: string;
+	tool_call_id: string | null;
+	tool_name: string;
+	arguments_json: string;
+	arguments_hash: string;
+	status: ChatToolActionStatus;
+	result_json: string | null;
+	error: string | null;
+	started_at: string;
 	updated_at: string;
 	completed_at: string | null;
 }
@@ -266,8 +312,18 @@ export class ChatManager {
 	}
 
 	async deleteConversation(id: string): Promise<void> {
-		await this.db.run("DELETE FROM messages WHERE conversation_id = ?", [id]);
-		await this.db.run("DELETE FROM conversations WHERE id = ?", [id]);
+		await this.db.transaction(async () => {
+			await this.db.run(
+				"DELETE FROM chat_tool_actions WHERE conversation_id = ?",
+				[id],
+			);
+			await this.db.run(
+				"DELETE FROM chat_executions WHERE conversation_id = ?",
+				[id],
+			);
+			await this.db.run("DELETE FROM messages WHERE conversation_id = ?", [id]);
+			await this.db.run("DELETE FROM conversations WHERE id = ?", [id]);
+		});
 	}
 
 	async updateConversation(
@@ -484,8 +540,8 @@ export class ChatManager {
 		const status = opts.status ?? "queued";
 		await this.db.run(
 			`INSERT INTO chat_executions
-				(id, request_id, conversation_id, agent_id, status, current_status, activities, assistant_message_id, error, started_at, updated_at, completed_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				(id, request_id, conversation_id, agent_id, status, current_status, activities, assistant_message_id, error, completion_reason, pending_action, started_at, updated_at, completed_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				id,
 				opts.requestId ?? null,
@@ -494,6 +550,8 @@ export class ChatManager {
 				status,
 				null,
 				JSON.stringify([]),
+				null,
+				null,
 				null,
 				null,
 				now,
@@ -512,10 +570,140 @@ export class ChatManager {
 			activities: JSON.stringify([]),
 			assistant_message_id: null,
 			error: null,
+			completion_reason: null,
+			pending_action: null,
 			started_at: now,
 			updated_at: now,
 			completed_at: null,
 		};
+	}
+
+	async createToolAction(opts: {
+		conversationId: string;
+		executionId: string;
+		toolCallId?: string;
+		toolName: string;
+		argumentsJson: string;
+		argumentsHash: string;
+	}): Promise<ChatToolAction> {
+		const id = nanoid(16);
+		const now = new Date().toISOString();
+		await this.db.run(
+			`INSERT INTO chat_tool_actions
+				(id, conversation_id, execution_id, tool_call_id, tool_name, arguments_json, arguments_hash, status, result_json, error, started_at, updated_at, completed_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, ?, NULL)`,
+			[
+				id,
+				opts.conversationId,
+				opts.executionId,
+				opts.toolCallId ?? null,
+				opts.toolName,
+				opts.argumentsJson,
+				opts.argumentsHash,
+				now,
+				now,
+			],
+		);
+		await this.db.flush?.();
+		return {
+			id,
+			conversation_id: opts.conversationId,
+			execution_id: opts.executionId,
+			tool_call_id: opts.toolCallId ?? null,
+			tool_name: opts.toolName,
+			arguments_json: opts.argumentsJson,
+			arguments_hash: opts.argumentsHash,
+			status: "running",
+			result_json: null,
+			error: null,
+			started_at: now,
+			updated_at: now,
+			completed_at: null,
+		};
+	}
+
+	async completeToolAction(id: string, resultJson: string): Promise<void> {
+		const now = new Date().toISOString();
+		await this.db.run(
+			`UPDATE chat_tool_actions
+				SET status = 'completed', result_json = ?, error = NULL, updated_at = ?, completed_at = ?
+				WHERE id = ?`,
+			[resultJson, now, now, id],
+		);
+		await this.db.flush?.();
+	}
+
+	async failToolAction(id: string, error: string): Promise<void> {
+		const now = new Date().toISOString();
+		await this.db.run(
+			`UPDATE chat_tool_actions
+				SET status = 'failed', error = ?, updated_at = ?, completed_at = ?
+				WHERE id = ?`,
+			[error, now, now, id],
+		);
+		await this.db.flush?.();
+	}
+
+	async markToolActionUncertain(id: string, error: string): Promise<void> {
+		const now = new Date().toISOString();
+		await this.db.run(
+			`UPDATE chat_tool_actions
+				SET status = 'uncertain', error = ?, updated_at = ?, completed_at = NULL
+				WHERE id = ?`,
+			[error, now, id],
+		);
+		await this.db.flush?.();
+	}
+
+	async findReusableToolAction(opts: {
+		conversationId: string;
+		executionId: string;
+		toolName: string;
+		argumentsHash: string;
+		includePreviousExecutions: boolean;
+	}): Promise<ChatToolAction | null> {
+		const executionClause = opts.includePreviousExecutions
+			? ""
+			: "AND execution_id = ?";
+		const params: unknown[] = [
+			opts.conversationId,
+			opts.toolName,
+			opts.argumentsHash,
+		];
+		if (!opts.includePreviousExecutions) params.push(opts.executionId);
+		const action = await this.db.get<ChatToolAction>(
+			`SELECT * FROM chat_tool_actions
+				WHERE conversation_id = ? AND tool_name = ? AND arguments_hash = ?
+					AND status IN ('completed', 'running', 'uncertain') ${executionClause}
+				ORDER BY updated_at DESC LIMIT 1`,
+			params,
+		);
+		return action ?? null;
+	}
+
+	async listToolActions(
+		conversationId: string,
+		opts?: {
+			limit?: number;
+			executionId?: string;
+			status?: ChatToolActionStatus;
+		},
+	): Promise<ChatToolAction[]> {
+		const clauses = ["conversation_id = ?"];
+		const params: unknown[] = [conversationId];
+		if (opts?.executionId) {
+			clauses.push("execution_id = ?");
+			params.push(opts.executionId);
+		}
+		if (opts?.status) {
+			clauses.push("status = ?");
+			params.push(opts.status);
+		}
+		params.push(opts?.limit ?? 100);
+		return this.db.all<ChatToolAction>(
+			`SELECT * FROM chat_tool_actions WHERE ${clauses.join(" AND ")} ORDER BY updated_at DESC LIMIT ?`,
+			params,
+		);
 	}
 
 	async updateExecution(
@@ -526,6 +714,8 @@ export class ChatManager {
 			activities?: ChatExecutionActivity[];
 			assistantMessageId?: string | null;
 			error?: string | null;
+			completionReason?: ChatCompletionReason | null;
+			pendingAction?: ChatPendingAction | null;
 			completedAt?: string | null;
 		},
 	): Promise<void> {
@@ -539,6 +729,8 @@ export class ChatManager {
 				activities = ?,
 				assistant_message_id = ?,
 				error = ?,
+				completion_reason = ?,
+				pending_action = ?,
 				updated_at = ?,
 				completed_at = ?
 				WHERE id = ?`,
@@ -554,6 +746,14 @@ export class ChatManager {
 					? updates.assistantMessageId
 					: current.assistant_message_id,
 				updates.error !== undefined ? updates.error : current.error,
+				updates.completionReason !== undefined
+					? updates.completionReason
+					: current.completion_reason,
+				updates.pendingAction !== undefined
+					? updates.pendingAction
+						? JSON.stringify(updates.pendingAction)
+						: null
+					: current.pending_action,
 				now,
 				updates.completedAt !== undefined
 					? updates.completedAt
@@ -594,6 +794,17 @@ export class ChatManager {
 		return execution ?? null;
 	}
 
+	async getPreviousExecutionForConversation(
+		conversationId: string,
+		excludeExecutionId: string,
+	): Promise<ChatExecution | null> {
+		const execution = await this.db.get<ChatExecution>(
+			"SELECT * FROM chat_executions WHERE conversation_id = ? AND id <> ? ORDER BY updated_at DESC LIMIT 1",
+			[conversationId, excludeExecutionId],
+		);
+		return execution ?? null;
+	}
+
 	async listActiveExecutions(): Promise<ChatExecution[]> {
 		return this.db.all<ChatExecution>(
 			"SELECT * FROM chat_executions WHERE status IN ('queued', 'running') ORDER BY updated_at DESC",
@@ -604,9 +815,14 @@ export class ChatManager {
 		const now = new Date().toISOString();
 		await this.db.run(
 			`UPDATE chat_executions
-				SET status = 'interrupted', error = COALESCE(error, 'Server restarted while execution was active'), updated_at = ?, completed_at = ?
+				SET status = 'interrupted', completion_reason = 'server_restart', pending_action = NULL, error = COALESCE(error, 'Server restarted while execution was active'), updated_at = ?, completed_at = ?
 				WHERE status IN ('queued', 'running')`,
 			[now, now],
+		);
+		await this.db.run(
+			`UPDATE chat_tool_actions SET status = 'uncertain', updated_at = ?
+				WHERE status = 'running'`,
+			[now],
 		);
 		await this.db.flush?.();
 	}

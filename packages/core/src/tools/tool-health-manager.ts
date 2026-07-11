@@ -1,3 +1,4 @@
+import { SecretRedactor } from "../security/secret-redactor.js";
 /**
  * ToolHealthManager — cached health/quota status for external web tools.
  *
@@ -14,7 +15,7 @@
  * how the tool name was namespaced at registration.
  */
 import type { DatabaseAdapter } from "../storage/database.js";
-import { SecretRedactor } from "../security/secret-redactor.js";
+import { classifyToolError, isProviderAccessError } from "./tool-errors.js";
 
 export type ToolHealthStatus = "ok" | "no_quota" | "error" | "unknown";
 
@@ -51,12 +52,12 @@ export interface ToolHealthMcpCaller {
 		params: Record<string, unknown>,
 	): Promise<unknown>;
 	findServerForTool(toolName: string): string | undefined;
-	getServer?(name: string): { status?: string } | undefined;
+	getServer?(name: string): { status?: string; tools?: string[] } | undefined;
 }
 
 interface ProbeSpec {
-	/** MCP-side tool name to invoke for the canary call. */
-	tool: string;
+	/** Candidate MCP-side names; the connected server's advertised name wins. */
+	toolCandidates: string[];
 	/** Best-effort params; the classifier does not depend on these. */
 	probe: Record<string, unknown>;
 	/** Fallback hint shown to the model when this server is unavailable. */
@@ -66,12 +67,12 @@ interface ProbeSpec {
 /** Server -> how to probe it + which fallback to recommend. */
 const PROBE_SPECS: Record<string, ProbeSpec> = {
 	"zai-web-search": {
-		tool: "webSearchPrime",
+		toolCandidates: ["webSearchPrime", "web_search_prime", "web-search-prime"],
 		probe: { search_query: "octopus health check", count: 1 },
 		alternative: "browser_search (búsqueda por navegador)",
 	},
 	"zai-web-reader": {
-		tool: "webReader",
+		toolCandidates: ["webReader", "web_reader", "web-reader"],
 		probe: { url: "https://example.com" },
 		alternative: "pdf_read (para PDFs) o browser_navigate",
 	},
@@ -134,20 +135,42 @@ export class ToolHealthManager {
 		// configured) so we neither burn a failing call nor write spurious rows.
 		const managed = this.mcp.getServer?.(server);
 		if (!managed || managed.status !== "connected") return;
+		const advertised = managed.tools ?? [];
+		const normalizeName = (value: string) =>
+			value.toLowerCase().replace(/[^a-z0-9]/g, "");
+		const tool =
+			spec.toolCandidates.find((candidate) => advertised.includes(candidate)) ??
+			advertised.find((candidate) =>
+				spec.toolCandidates.some(
+					(expected) => normalizeName(expected) === normalizeName(candidate),
+				),
+			) ??
+			(advertised.length === 0 ? spec.toolCandidates[0] : undefined);
+		if (!tool) {
+			await this.persist(
+				server,
+				"error",
+				`Health probe tool not found. Expected one of: ${spec.toolCandidates.join(", ")}`,
+			);
+			return;
+		}
 		let status: ToolHealthStatus = "unknown";
 		let detail = "";
 
 		try {
-			const result = await this.mcp.callTool(server, spec.tool, spec.probe);
+			const result = await this.mcp.callTool(server, tool, spec.probe);
 			// A successful return (even empty) means auth + quota are fine.
 			status = "ok";
 			detail = this.describeResult(result);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			if (QUOTA_ERROR_RE.test(msg)) {
+			const errorCode = classifyToolError(msg);
+			if (isProviderAccessError(errorCode) && QUOTA_ERROR_RE.test(msg)) {
 				status = "no_quota";
 			} else if (TRANSIENT_ERROR_RE.test(msg)) {
 				status = "unknown";
+			} else if (errorCode === "TOOL_NOT_FOUND") {
+				status = "error";
 			} else {
 				// Validation / param / other non-auth 4xx: the call reached a
 				// working, authenticated endpoint, so quota is effectively fine.
@@ -163,7 +186,11 @@ export class ToolHealthManager {
 		if (result && typeof result === "object" && "content" in result) {
 			const content = (result as { content?: Array<{ text?: string }> })
 				.content;
-			const text = content?.map((c) => c.text || "").join(" ").trim() || "";
+			const text =
+				content
+					?.map((c) => c.text || "")
+					.join(" ")
+					.trim() || "";
 			return text ? `ok: ${text.slice(0, 80)}` : "ok";
 		}
 		return "ok";
@@ -182,7 +209,7 @@ export class ToolHealthManager {
 		const previous = this.cache.get(server);
 		// Failures from a prior probe do not carry over a fresh "ok".
 		const consecutiveFailures =
-			status === "ok" ? 0 : previous?.consecutiveFailures ?? 0;
+			status === "ok" ? 0 : (previous?.consecutiveFailures ?? 0);
 
 		await this.db.run(
 			`INSERT INTO tool_health (server, status, detail, checked_at, cache_until, consecutive_failures)
@@ -239,26 +266,20 @@ export class ToolHealthManager {
 	}
 
 	/** Record a tool execution outcome; drives the per-tool circuit breaker. */
-	recordOutcome(
-		toolName: string,
-		success: boolean,
-		errorMsg?: string,
-	): void {
+	recordOutcome(toolName: string, success: boolean, errorMsg?: string): void {
 		if (!this.config.enabled) return;
 		const server = this.mcp.findServerForTool(toolName);
 		if (!server || !PROBE_SPECS[server]) return; // only track web tools
 		if (success) {
-			this.breakers.delete(toolName);
+			this.breakers.delete(server);
 			return;
 		}
 		const now = Date.now();
 		const windowMs = this.config.breaker.windowMinutes * 60_000;
-		const prev = this.breakers.get(toolName);
+		const prev = this.breakers.get(server);
 		const withinWindow = prev && now - prev.firstFailureAt <= windowMs;
-		this.breakers.set(toolName, {
-			consecutiveFailures: withinWindow
-				? prev.consecutiveFailures + 1
-				: 1,
+		this.breakers.set(server, {
+			consecutiveFailures: withinWindow ? prev.consecutiveFailures + 1 : 1,
 			firstFailureAt: withinWindow ? prev.firstFailureAt : now,
 			lastError: (errorMsg || "").slice(0, 200),
 		});
@@ -267,7 +288,9 @@ export class ToolHealthManager {
 	/** Whether the circuit breaker is open for `toolName` (null if untracked). */
 	isCircuitOpen(toolName: string): ToolCircuitState | null {
 		if (!this.config.enabled) return null;
-		const state = this.breakers.get(toolName);
+		const server = this.mcp.findServerForTool(toolName);
+		if (!server) return null;
+		const state = this.breakers.get(server);
 		if (!state) return null;
 		const threshold = this.config.breaker.consecutiveFailures;
 		const windowMs = this.config.breaker.windowMinutes * 60_000;
@@ -288,7 +311,7 @@ export class ToolHealthManager {
 
 		for (const [server, spec] of Object.entries(PROBE_SPECS)) {
 			const rec = this.cache.get(server);
-			if (!rec || rec.status === "ok") continue; // only surface problems
+			if (!rec || isExpired(rec) || rec.status !== "no_quota") continue;
 			const time = rec.checkedAt
 				? new Date(rec.checkedAt).toLocaleTimeString()
 				: "";
@@ -297,11 +320,11 @@ export class ToolHealthManager {
 			);
 		}
 
-		for (const [toolName, state] of this.breakers) {
-			const threshold = this.config.breaker.consecutiveFailures;
-			if (state.consecutiveFailures >= threshold) {
+		for (const [server, state] of this.breakers) {
+			const circuit = this.isCircuitOpenForServer(server, state);
+			if (circuit.open) {
 				lines.push(
-					`- ${toolName}: fallando repetidamente (${state.consecutiveFailures}x consecutivas) → evítala y usa una alternativa.`,
+					`- ${server}: fallando repetidamente (${circuit.failures}x consecutivas) → usa una alternativa.`,
 				);
 			}
 		}
@@ -312,6 +335,22 @@ export class ToolHealthManager {
 			"Atención: las siguientes herramientas NO están disponibles ahora mismo. No pierdas tiempo intentándolas; ve directo a la alternativa indicada.",
 			...lines,
 		].join("\n");
+	}
+
+	private isCircuitOpenForServer(
+		_server: string,
+		state: BreakerState,
+	): ToolCircuitState {
+		const threshold = this.config.breaker.consecutiveFailures;
+		const windowMs = this.config.breaker.windowMinutes * 60_000;
+		return {
+			open:
+				Date.now() - state.firstFailureAt <= windowMs &&
+				state.consecutiveFailures >= threshold,
+			failures: state.consecutiveFailures,
+			threshold,
+			lastError: state.lastError,
+		};
 	}
 }
 

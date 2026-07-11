@@ -26,15 +26,36 @@ const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, "none">, number> = {
 	xhigh: 24576,
 };
 
-/**
- * Gemini 3.x attaches a `thoughtSignature` to each functionCall in the response.
- * When that functionCall is replayed in the conversation history (assistant
- * turn), Gemini REQUIRES the original thoughtSignature — omitting it causes a
- * 400 "Function call is missing a thought_signature". The internal LLMToolCall
- * type has no field for it, so we cache signatures by tool-call id (generated as
- * `vertex-tc-N`) at the module level and restore them when rebuilding history.
- */
+interface VertexPart {
+	text?: string;
+	thought?: boolean;
+	thoughtSignature?: string;
+	functionCall?: { id?: string; name: string; args?: unknown };
+}
+
+interface VertexCandidate {
+	content?: { parts?: VertexPart[] };
+	finishReason?: string;
+}
+
+interface VertexPayload {
+	error?: { message?: string } | string;
+	candidates?: VertexCandidate[];
+	promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
+	usageMetadata?: {
+		promptTokenCount?: number;
+		candidatesTokenCount?: number;
+		thoughtsTokenCount?: number;
+		totalTokenCount?: number;
+	};
+}
+
+// Gemini requires the exact signature when a function call is replayed. Keep
+// IDs unique process-wide so signatures survive provider reconfiguration and
+// cannot be overwritten by a later tool call or concurrent conversation.
+let vertexToolCallCounter = 0;
 const thoughtSignatures = new Map<string, string>();
+const nativeVertexToolCallIds = new Map<string, string>();
 
 /**
  * Gemini's native API is stricter than OpenAI: every `type: "array"` property
@@ -46,8 +67,7 @@ function sanitizeSchemaForGemini(schema: unknown): unknown {
 	if (!schema || typeof schema !== "object") return schema;
 	const s = schema as Record<string, unknown>;
 	if (s.type === "array" && !s.items) s.items = {};
-	if (s.items && typeof s.items === "object")
-		sanitizeSchemaForGemini(s.items);
+	if (s.items && typeof s.items === "object") sanitizeSchemaForGemini(s.items);
 	if (s.properties && typeof s.properties === "object") {
 		for (const v of Object.values(s.properties)) {
 			sanitizeSchemaForGemini(v);
@@ -525,16 +545,25 @@ export class GoogleProvider extends BaseLLMProvider {
 			const text =
 				typeof message.content === "string"
 					? message.content
-					: JSON.stringify(message.content);
+					: message.content
+							.filter((part) => part.type === "text")
+							.map((part) => part.text)
+							.join("\n");
 			const name =
 				toolCallIdToName.get(message.toolCallId) ?? message.toolCallId;
+			const nativeId = nativeVertexToolCallIds.get(message.toolCallId);
 			return {
 				role: "user",
 				parts: [
 					{
 						functionResponse: {
+							...(nativeId ? { id: nativeId } : {}),
 							name,
-							response: { content: text },
+							response: {
+								content:
+									text ||
+									"Generated media is available at the saved media URL.",
+							},
 						},
 					},
 				],
@@ -542,7 +571,9 @@ export class GoogleProvider extends BaseLLMProvider {
 		}
 		const parts: Record<string, unknown>[] = [];
 		if (typeof message.content === "string") {
-			parts.push({ text: message.content });
+			if (message.content || !message.toolCalls?.length) {
+				parts.push({ text: message.content });
+			}
 		} else {
 			for (const p of message.content) {
 				if (p.type === "text") {
@@ -563,8 +594,13 @@ export class GoogleProvider extends BaseLLMProvider {
 					args = {};
 				}
 				// thoughtSignature is a SIBLING of functionCall in the part.
+				const nativeId = nativeVertexToolCallIds.get(tc.id);
 				const part: Record<string, unknown> = {
-					functionCall: { name: tc.function.name, args },
+					functionCall: {
+						...(nativeId ? { id: nativeId } : {}),
+						name: tc.function.name,
+						args,
+					},
 				};
 				const sig = thoughtSignatures.get(tc.id);
 				if (sig) part.thoughtSignature = sig;
@@ -636,24 +672,20 @@ export class GoogleProvider extends BaseLLMProvider {
 		return body;
 	}
 
-	private parseVertexCandidate(
-		parts: Array<{
-			text?: string;
-			thought?: boolean;
-			thoughtSignature?: string;
-			functionCall?: {
-				name: string;
-				args?: unknown;
-			};
-		}>,
-		tcCounter: { n: number },
-	): { text: string; thinking: string; toolCalls: LLMToolCall[] } {
+	private parseVertexCandidate(parts: VertexPart[]): {
+		text: string;
+		thinking: string;
+		toolCalls: LLMToolCall[];
+	} {
 		const texts: string[] = [];
 		const thinkingTexts: string[] = [];
 		const toolCalls: LLMToolCall[] = [];
 		for (const p of parts) {
 			if (p.functionCall) {
-				const id = `vertex-tc-${tcCounter.n++}`;
+				const id = `vertex-tc-${vertexToolCallCounter++}`;
+				if (p.functionCall.id) {
+					nativeVertexToolCallIds.set(id, p.functionCall.id);
+				}
 				// thoughtSignature is a SIBLING of functionCall in the part, not
 				// nested inside it. Cache it by tool-call id for history rebuild.
 				if (p.thoughtSignature) {
@@ -667,7 +699,7 @@ export class GoogleProvider extends BaseLLMProvider {
 						arguments: JSON.stringify(p.functionCall.args ?? {}),
 					},
 				});
-			} else if (p.text) {
+			} else if (typeof p.text === "string" && p.text) {
 				if (p.thought) thinkingTexts.push(p.text);
 				else texts.push(p.text);
 			}
@@ -677,6 +709,83 @@ export class GoogleProvider extends BaseLLMProvider {
 			thinking: thinkingTexts.join(""),
 			toolCalls,
 		};
+	}
+
+	private vertexChunksFromPayload(parsed: VertexPayload): LLMChunk[] {
+		if (parsed.error) {
+			throw new Error(
+				typeof parsed.error === "string"
+					? parsed.error
+					: parsed.error.message || JSON.stringify(parsed.error),
+			);
+		}
+		if (parsed.promptFeedback?.blockReason) {
+			throw new Error(
+				`Google Vertex blocked the prompt (${parsed.promptFeedback.blockReason})${
+					parsed.promptFeedback.blockReasonMessage
+						? `: ${parsed.promptFeedback.blockReasonMessage}`
+						: ""
+				}`,
+			);
+		}
+
+		const chunks: LLMChunk[] = [];
+		if (parsed.usageMetadata) {
+			const u = parsed.usageMetadata;
+			chunks.push({
+				usage: {
+					promptTokens: u.promptTokenCount ?? 0,
+					completionTokens: u.candidatesTokenCount ?? 0,
+					totalTokens:
+						u.totalTokenCount ??
+						(u.promptTokenCount ?? 0) + (u.candidatesTokenCount ?? 0),
+					...(u.thoughtsTokenCount
+						? { reasoningTokens: u.thoughtsTokenCount }
+						: {}),
+				},
+			});
+		}
+
+		const candidate = parsed.candidates?.[0];
+		if (!candidate) return chunks;
+		const { text, thinking, toolCalls } = this.parseVertexCandidate(
+			candidate.content?.parts ?? [],
+		);
+		if (thinking) chunks.push({ thinking });
+		if (text) chunks.push({ content: text });
+		for (const tc of toolCalls) chunks.push({ toolCalls: tc });
+		if (candidate.finishReason) {
+			chunks.push({ finishReason: candidate.finishReason });
+		}
+		return chunks;
+	}
+
+	private parseVertexSseEvent(event: string): {
+		chunks: LLMChunk[];
+		done: boolean;
+	} {
+		const payload = event
+			.split(/\r\n|\r|\n/)
+			.map((line) => line.trimStart())
+			.filter((line) => line.startsWith("data:"))
+			.map((line) => line.slice(5).trimStart())
+			.join("\n")
+			.trim();
+		if (!payload) return { chunks: [], done: false };
+		if (payload === "[DONE]") return { chunks: [], done: true };
+		try {
+			return {
+				chunks: this.vertexChunksFromPayload(
+					JSON.parse(payload) as VertexPayload,
+				),
+				done: false,
+			};
+		} catch (error) {
+			if (error instanceof SyntaxError) {
+				throw new Error("Google Vertex stream returned malformed JSON");
+			}
+			throw error;
+		}
 	}
 
 	private async chatVertex(request: LLMRequest): Promise<LLMResponse> {
@@ -693,28 +802,10 @@ export class GoogleProvider extends BaseLLMProvider {
 				`Google Vertex API error: ${response.status} ${await response.text()}`,
 			);
 		}
-		const data = (await response.json()) as {
-			candidates?: Array<{
-				content?: {
-					parts?: Array<{
-						text?: string;
-						thought?: boolean;
-						functionCall?: { name: string; args?: unknown };
-					}>;
-				};
-				finishReason?: string;
-			}>;
-			usageMetadata?: {
-				promptTokenCount?: number;
-				candidatesTokenCount?: number;
-				thoughtsTokenCount?: number;
-				totalTokenCount?: number;
-			};
-		};
+		const data = (await response.json()) as VertexPayload;
 		const candidate = data.candidates?.[0];
 		const { text, thinking, toolCalls } = this.parseVertexCandidate(
 			candidate?.content?.parts ?? [],
-			{ n: 0 },
 		);
 		const u = data.usageMetadata;
 		return {
@@ -759,7 +850,7 @@ export class GoogleProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
-		const tcCounter = { n: 0 };
+		let sawTerminalEvent = false;
 		const readNext = async () =>
 			readNextWithTimeout(
 				reader,
@@ -768,83 +859,39 @@ export class GoogleProvider extends BaseLLMProvider {
 			);
 
 		try {
-			while (true) {
+			streamLoop: while (true) {
 				const { done, value } = await readNext();
-				if (done) break;
+				if (done) {
+					buffer += decoder.decode();
+					if (buffer.trim()) {
+						const event = this.parseVertexSseEvent(buffer);
+						for (const chunk of event.chunks) {
+							if (chunk.finishReason) sawTerminalEvent = true;
+							yield chunk;
+						}
+						if (event.done) sawTerminalEvent = true;
+					}
+					break;
+				}
 				buffer += decoder.decode(value, { stream: true });
-				const parts = buffer.split(/\r?\n\r?\n/);
+				const parts = buffer.split(/(?:(?:\r\n)|\r|\n){2}/);
 				buffer = parts.pop() ?? "";
 				for (const part of parts) {
-					const lines = part.split(/\r?\n/);
-					for (const line of lines) {
-						const trimmed = line.trim();
-						if (!trimmed.startsWith("data: ")) continue;
-						const payload = trimmed.slice(6).trim();
-						if (!payload || payload === "[DONE]") continue;
-						let parsed: {
-							error?: { message?: string } | string;
-							candidates?: Array<{
-								content?: {
-									parts?: Array<{
-										text?: string;
-										thought?: boolean;
-										functionCall?: {
-										name: string;
-										args?: unknown;
-										thoughtSignature?: string;
-									};
-									}>;
-								};
-								finishReason?: string;
-							}>;
-							usageMetadata?: {
-								promptTokenCount?: number;
-								candidatesTokenCount?: number;
-								thoughtsTokenCount?: number;
-								totalTokenCount?: number;
-							};
-						};
-						try {
-							parsed = JSON.parse(payload) as typeof parsed;
-						} catch {
-							continue; // ignore malformed chunks
-						}
-						if (parsed.error) {
-							throw new Error(
-								typeof parsed.error === "string"
-									? parsed.error
-									: parsed.error.message || JSON.stringify(parsed.error),
-							);
-						}
-						if (parsed.usageMetadata) {
-							const u = parsed.usageMetadata;
-							yield {
-								usage: {
-									promptTokens: u.promptTokenCount ?? 0,
-									completionTokens: u.candidatesTokenCount ?? 0,
-									totalTokens:
-										u.totalTokenCount ??
-										(u.promptTokenCount ?? 0) + (u.candidatesTokenCount ?? 0),
-									...(u.thoughtsTokenCount
-										? { reasoningTokens: u.thoughtsTokenCount }
-										: {}),
-								},
-							};
-						}
-						const candidate = parsed.candidates?.[0];
-						if (!candidate) continue;
-						const { text, thinking, toolCalls } =
-							this.parseVertexCandidate(
-								candidate.content?.parts ?? [],
-								tcCounter,
-							);
-						if (thinking) yield { thinking };
-						if (text) yield { content: text };
-						for (const tc of toolCalls) yield { toolCalls: tc };
-						if (candidate.finishReason)
-							yield { finishReason: candidate.finishReason };
+					const event = this.parseVertexSseEvent(part);
+					for (const chunk of event.chunks) {
+						if (chunk.finishReason) sawTerminalEvent = true;
+						yield chunk;
+					}
+					if (event.done) {
+						sawTerminalEvent = true;
+						break streamLoop;
 					}
 				}
+			}
+			if (!sawTerminalEvent) {
+				throw new Error(
+					"Google Vertex stream closed before completion (network: connection dropped)",
+				);
 			}
 		} finally {
 			await reader.cancel().catch(() => {});

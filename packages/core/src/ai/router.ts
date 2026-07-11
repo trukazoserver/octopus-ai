@@ -29,6 +29,71 @@ import type { UsageSink } from "./usage-store.js";
 const logger = createLogger("llm-router");
 const DEFAULT_PROVIDER_RETRIES = 2;
 const DEFAULT_PROVIDER_RETRY_BASE_DELAY_MS = 1500;
+const TOOL_MEDIA_DATA_URI_RE =
+	/data:[a-z0-9.+-]+\/[a-z0-9.+-]+(?:;[a-z0-9.+-]+=[^;,]*)*;base64,[a-z0-9+/=]+/gi;
+const KEYED_BASE64_RE =
+	/((?:["']?(?:data|base64|image_base64|audio_base64|video_base64)["']?)\s*[:=]\s*["']?)[a-z0-9+/]{4096,}={0,2}/gi;
+const LONG_BASE64_RUN_RE = /[a-z0-9+/]{65_536,}={0,2}/gi;
+const MAX_TOOL_RESULT_TRANSPORT_CHARS = 100_000;
+const MAX_TOTAL_TOOL_RESULT_TRANSPORT_CHARS = 200_000;
+const OMITTED_TOOL_MEDIA =
+	"[Generated media bytes omitted; use the saved media URL from the tool result.]";
+
+function sanitizeToolResultText(text: string): string {
+	let sanitized = text
+		.replace(TOOL_MEDIA_DATA_URI_RE, OMITTED_TOOL_MEDIA)
+		.replace(KEYED_BASE64_RE, `$1${OMITTED_TOOL_MEDIA}`)
+		.replace(LONG_BASE64_RUN_RE, OMITTED_TOOL_MEDIA);
+	if (sanitized.length > MAX_TOOL_RESULT_TRANSPORT_CHARS) {
+		const omitted = sanitized.length - MAX_TOOL_RESULT_TRANSPORT_CHARS;
+		sanitized = `${sanitized.slice(0, 75_000)}\n\n[...${omitted} tool-result characters omitted for provider safety...]\n\n${sanitized.slice(-25_000)}`;
+	}
+	return sanitized.trim() || OMITTED_TOOL_MEDIA;
+}
+
+/**
+ * Tool protocols correlate results through text plus a call id. Multimodal
+ * image blocks are either invalid in that role or are tokenized as giant JSON
+ * strings by compatible APIs. Keep user attachments untouched, but guarantee
+ * that generated media bytes never cross the shared provider boundary.
+ */
+export function sanitizeToolResultMedia(request: LLMRequest): LLMRequest {
+	let changed = false;
+	let remainingToolChars = MAX_TOTAL_TOOL_RESULT_TRANSPORT_CHARS;
+	const messages = request.messages.map((message) => {
+		if (message.role !== "tool") return message;
+
+		const text =
+			typeof message.content === "string"
+				? message.content
+				: message.content
+						.flatMap((part) => {
+							if (part.type === "text") return [part.text];
+							const url = part.image_url.url;
+							return url.startsWith("data:") ? [] : [`Media: ${url}`];
+						})
+						.join("\n");
+		let sanitized = sanitizeToolResultText(text);
+		if (remainingToolChars <= 0) {
+			sanitized =
+				"[Tool result omitted: aggregate provider safety limit reached.]";
+		} else if (sanitized.length > remainingToolChars) {
+			const headLength = Math.max(0, remainingToolChars - 100);
+			sanitized = `${sanitized.slice(0, headLength)}\n[Tool result truncated: aggregate provider safety limit reached.]`;
+		}
+		remainingToolChars -= Math.min(sanitized.length, remainingToolChars);
+		if (typeof message.content === "string" && sanitized === message.content) {
+			return message;
+		}
+		changed = true;
+		return {
+			...message,
+			content: sanitized,
+		};
+	});
+
+	return changed ? { ...request, messages } : request;
+}
 
 function getPositiveIntEnv(name: string, fallback: number): number {
 	const raw = process.env[name];
@@ -628,6 +693,25 @@ export function getProviderRegistry() {
 	return PROVIDER_REGISTRY;
 }
 
+export function providerModelSupportsNativeVision(
+	providerName: string,
+	modelName: string,
+	providerDefault: boolean,
+): boolean {
+	const model = modelName.toLowerCase();
+	if (providerName === "zhipu" || providerName === "deepseek") return false;
+	// These adapters do not currently translate image parts to their native wire
+	// formats. Route through Z.AI Vision instead of silently dropping the image.
+	if (providerName === "local" || providerName === "cohere") return false;
+	if (providerName === "mistral" && model.includes("codestral")) return false;
+	if (providerName === "openrouter") {
+		return /(gpt-(?:4o|4\.1|5)|claude-(?:3|4)|gemini|pixtral|qwen[^/]*(?:vl|vision)|llama[^/]*vision|gemma-3)/i.test(
+			model,
+		);
+	}
+	return providerDefault;
+}
+
 export class LLMRouter {
 	private providers: Map<string, BaseLLMProvider> = new Map();
 	private config: LLMRouterConfig;
@@ -822,8 +906,12 @@ export class LLMRouter {
 	 */
 	supportsVisionForModel(model: string): boolean {
 		try {
-			const { providerName } = this.resolveProvider(model);
-			return PROVIDER_REGISTRY[providerName]?.supportsVision ?? false;
+			const { providerName, modelName } = this.resolveProvider(model);
+			return providerModelSupportsNativeVision(
+				providerName,
+				modelName,
+				PROVIDER_REGISTRY[providerName]?.supportsVision ?? false,
+			);
 		} catch {
 			return false;
 		}
@@ -989,7 +1077,7 @@ export class LLMRouter {
 	}
 
 	async chat(request: LLMRequest): Promise<LLMResponse> {
-		const enriched = this.injectReasoning(request);
+		const enriched = sanitizeToolResultMedia(this.injectReasoning(request));
 		const { provider, modelName, providerName } = this.resolveProvider(
 			enriched.model,
 		);
@@ -1068,7 +1156,7 @@ export class LLMRouter {
 	}
 
 	async *chatStream(request: LLMRequest): AsyncIterable<LLMChunk> {
-		const enriched = this.injectReasoning(request);
+		const enriched = sanitizeToolResultMedia(this.injectReasoning(request));
 		const { provider, modelName, providerName } = this.resolveProvider(
 			enriched.model,
 		);

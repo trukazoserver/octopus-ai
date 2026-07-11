@@ -64,6 +64,7 @@ describe("ToolExecutor", () => {
 			const result = await executor.execute("nonexistent", {});
 			expect(result.success).toBe(false);
 			expect(result.error).toContain("Tool not found: nonexistent");
+			expect(result.errorCode).toBe("TOOL_NOT_FOUND");
 		});
 
 		it("should execute a registered tool and return its result", async () => {
@@ -158,6 +159,7 @@ describe("ToolExecutor", () => {
 			expect(result.success).toBe(false);
 			expect(result.error).toContain("Missing required parameters");
 			expect(result.error).toContain("input");
+			expect(result.errorCode).toBe("INVALID_ARGUMENTS");
 		});
 
 		it("should not require optional parameters", async () => {
@@ -185,6 +187,7 @@ describe("ToolExecutor", () => {
 			});
 			expect(result.success).toBe(false);
 			expect(result.error).toContain("outside allowed paths");
+			expect(result.errorCode).toBe("SECURITY_BLOCKED");
 		});
 
 		it("should allow paths within allowed paths", async () => {
@@ -313,6 +316,7 @@ describe("ToolExecutor", () => {
 			expect(result.success).toBe(false);
 			expect(result.error).toContain("Tool execution failed");
 			expect(result.error).toContain("Handler blew up");
+			expect(result.errorCode).toBe("EXECUTION_FAILED");
 		});
 
 		it("should handle non-Error throws from handler", async () => {

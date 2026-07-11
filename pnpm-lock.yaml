@@ -175,6 +175,9 @@ importers:
       puppeteer-extra-plugin-stealth:
         specifier: ^2.11.2
         version: 2.11.2(playwright-extra@4.3.6(playwright-core@1.59.1)(playwright@1.59.1))(puppeteer-extra@3.3.6(puppeteer-core@24.40.0))
+      sharp:
+        specifier: ^0.34.5
+        version: 0.34.5
       sql.js:
         specifier: 1.12.0
         version: 1.12.0

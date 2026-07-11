@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -50,6 +51,10 @@ import {
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
+import {
+	classifyToolError,
+	isProviderAccessError,
+} from "../tools/tool-errors.js";
 import type { ToolHealthManager } from "../tools/tool-health-manager.js";
 import { getOctopusArmProfile } from "./arm-profiles.js";
 import { routeTaskToArm } from "./arm-router.js";
@@ -186,6 +191,39 @@ export interface AgentProcessOptions {
 	selectedAgentContext?: RuntimeSelectedAgentContext | null;
 	disableOrchestrator?: boolean;
 	disableDelegation?: boolean;
+	/** Durable chat execution identity used for per-tool action receipts. */
+	executionId?: string;
+	/** Reuse identical completed actions from earlier executions in this conversation. */
+	resumeCompletedActions?: boolean;
+	onCompletionOutcome?: (outcome: RuntimeCompletionOutcome) => void;
+	delegationContext?: {
+		workerId: string;
+		taskId: string;
+		role?: string;
+		runId?: string;
+		toolScope?: string[];
+		fileScope?: string[];
+	};
+}
+
+export interface RuntimePendingAction {
+	kind:
+		| "continue"
+		| "retry_tool_call"
+		| "verify_tool_action"
+		| "user_input"
+		| "manual_action"
+		| "background_work";
+	summary: string;
+	resumable: boolean;
+	toolActionId?: string;
+	toolName?: string;
+	workflowRunId?: string;
+}
+
+export interface RuntimeCompletionOutcome {
+	reason: "finished" | "pending_action";
+	pendingAction?: RuntimePendingAction;
 }
 
 export interface RuntimeSelectedAgentContext {
@@ -964,12 +1002,123 @@ export class AgentRuntime {
 		return !this.shouldUseZaiVisionToolsForImages();
 	}
 
-	private getToolExecutionContext(): ToolExecutionContext {
+	private getToolExecutionContext(
+		options?: AgentProcessOptions,
+	): ToolExecutionContext {
 		return {
 			agentId: this.config.id,
 			model: this.config.model,
 			usesZaiVisionToolForImages: this.shouldUseZaiVisionToolsForImages(),
+			...options?.delegationContext,
 		};
+	}
+
+	private toolArgumentsHash(toolName: string, argumentsJson: string): string {
+		return createHash("sha256")
+			.update(`${toolName}\0${argumentsJson}`)
+			.digest("hex");
+	}
+
+	/**
+	 * Execute a tool behind a durable receipt. Completed identical calls are
+	 * reusable during an explicit continuation, and uncertain prior calls are
+	 * never repeated blindly.
+	 */
+	private async executeToolWithReceipt(input: {
+		toolName: string;
+		params: Record<string, unknown>;
+		toolCallId?: string;
+		channelId?: string;
+		options: AgentProcessOptions;
+		execute: (actionId?: string) => Promise<ToolResult>;
+	}): Promise<{ result: ToolResult; reused: boolean }> {
+		const { toolName, params, toolCallId, channelId, options, execute } = input;
+		if (!this.chatManager || !channelId || !options.executionId) {
+			return { result: await execute(), reused: false };
+		}
+
+		const argumentsJson = this.stableJson(params);
+		const argumentsHash = this.toolArgumentsHash(toolName, argumentsJson);
+		try {
+			const previous = await this.chatManager.findReusableToolAction({
+				conversationId: channelId,
+				executionId: options.executionId,
+				toolName,
+				argumentsHash,
+				includePreviousExecutions: options.resumeCompletedActions === true,
+			});
+			if (previous?.status === "completed" && previous.result_json) {
+				const result = JSON.parse(previous.result_json) as ToolResult;
+				return { result, reused: true };
+			}
+			if (
+				previous &&
+				(previous.status === "running" || previous.status === "uncertain")
+			) {
+				return {
+					result: {
+						success: false,
+						output: "",
+						error: `An identical ${toolName} action from the interrupted execution has uncertain completion status. Do not repeat it automatically. Verify existing artifacts or ask the user before regenerating.`,
+					},
+					reused: true,
+				};
+			}
+		} catch (error) {
+			console.error("Failed to inspect durable tool receipt:", error);
+		}
+
+		let actionId: string | undefined;
+		try {
+			const action = await this.chatManager.createToolAction({
+				conversationId: channelId,
+				executionId: options.executionId,
+				toolCallId,
+				toolName,
+				argumentsJson,
+				argumentsHash,
+			});
+			actionId = action.id;
+		} catch (error) {
+			console.error("Failed to create durable tool receipt:", error);
+		}
+
+		try {
+			const result = await execute(actionId);
+			if (actionId) {
+				try {
+					if (result.success) {
+						await this.chatManager.completeToolAction(
+							actionId,
+							JSON.stringify(result),
+						);
+					} else {
+						await this.chatManager.failToolAction(
+							actionId,
+							result.error ?? "Tool returned an unsuccessful result",
+						);
+					}
+				} catch (error) {
+					console.error("Failed to complete durable tool receipt:", error);
+				}
+			}
+			return { result, reused: false };
+		} catch (error) {
+			if (actionId) {
+				try {
+					const message =
+						error instanceof Error ? error.message : String(error);
+					if (options.signal?.aborted || /abort|cancel/i.test(message)) {
+						await this.chatManager.markToolActionUncertain(actionId, message);
+					} else {
+						await this.chatManager.failToolAction(actionId, message);
+					}
+				} catch (persistError) {
+					console.error("Failed to fail durable tool receipt:", persistError);
+				}
+			}
+			throw error;
+		}
 	}
 
 	private async startDelegateWorkflow(
@@ -1229,6 +1378,7 @@ export class AgentRuntime {
 			} catch {
 				/* use raw filename */
 			}
+			if (path.basename(filename) !== filename) continue;
 			localPaths.add(path.join(os.homedir(), ".octopus", "media", filename));
 		}
 		return Array.from(localPaths);
@@ -1318,6 +1468,55 @@ export class AgentRuntime {
 			}
 		}
 		return parts;
+	}
+
+	private async prepareZaiVisionMediaPath(localPath: string): Promise<string> {
+		const maxBytes = 4_500_000;
+		try {
+			const sourceStat = fs.statSync(localPath);
+			if (sourceStat.size <= maxBytes) return localPath;
+
+			const cacheDir = path.join(os.homedir(), ".octopus", "cache", "vision");
+			fs.mkdirSync(cacheDir, { recursive: true });
+			const parsed = path.parse(localPath);
+			const outputPath = path.join(cacheDir, `${parsed.name}-vision.jpg`);
+			if (fs.existsSync(outputPath)) {
+				const outputStat = fs.statSync(outputPath);
+				if (
+					outputStat.size <= maxBytes &&
+					outputStat.mtimeMs >= sourceStat.mtimeMs
+				) {
+					return outputPath;
+				}
+			}
+
+			const { default: sharp } = await import("sharp");
+			await sharp(localPath, { animated: false })
+				.rotate()
+				.resize({
+					width: 2048,
+					height: 2048,
+					fit: "inside",
+					withoutEnlargement: true,
+				})
+				.jpeg({ quality: 82, mozjpeg: true })
+				.toFile(outputPath);
+			if (fs.statSync(outputPath).size <= maxBytes) return outputPath;
+
+			await sharp(localPath, { animated: false })
+				.rotate()
+				.resize({
+					width: 1600,
+					height: 1600,
+					fit: "inside",
+					withoutEnlargement: true,
+				})
+				.jpeg({ quality: 70, mozjpeg: true })
+				.toFile(outputPath);
+			return fs.statSync(outputPath).size <= maxBytes ? outputPath : localPath;
+		} catch {
+			return localPath;
+		}
 	}
 
 	/**
@@ -2240,17 +2439,25 @@ export class AgentRuntime {
 		toolName: string,
 		toolResult: ToolResult,
 	): void {
-		const text = `${toolResult.error ?? ""} ${toolResult.output ?? ""}`;
-		if (
-			/403|billing|permission.?denied|requires billing|enabled billing/i.test(
-				text,
-			)
-		) {
+		if (toolResult.success) {
+			this.toolBillingFailures.delete(toolName);
+			return;
+		}
+		// Generic execution/browser tools can legitimately inspect a remote HTTP
+		// 403. That is data produced by the script or page, not evidence that the
+		// local tool itself lacks billing or permission.
+		if (/^(?:execute_code|run_shell|run_command|browser_)/i.test(toolName)) {
+			this.toolBillingFailures.delete(toolName);
+			return;
+		}
+		const errorCode =
+			toolResult.errorCode ?? classifyToolError(toolResult.error ?? "");
+		if (isProviderAccessError(errorCode)) {
 			this.toolBillingFailures.set(
 				toolName,
 				(this.toolBillingFailures.get(toolName) ?? 0) + 1,
 			);
-		} else if (toolResult.success) {
+		} else {
 			this.toolBillingFailures.delete(toolName);
 		}
 	}
@@ -2263,7 +2470,7 @@ export class AgentRuntime {
 	): ToolDecision {
 		if (this.isToolBillingBlocked(toolName)) {
 			return {
-				action: "stop",
+				action: "skip",
 				reason: `La herramienta '${toolName}' está temporalmente desactivada: falló varias veces seguidas por falta de facturación/permisos (HTTP 403). Habilita la facturación del proveedor o corrige los permisos y vuelve a intentarlo; no la reintentes hasta entonces.`,
 			};
 		}
@@ -2434,11 +2641,18 @@ export class AgentRuntime {
 		const sanitized = messages.filter(
 			(msg) => msg.role !== "tool" && !msg.toolCalls,
 		);
+		const toolEvidence = ledger.toolHistory
+			.slice(-8)
+			.map(
+				(entry) =>
+					`- ${entry.name}: ${entry.success ? "success" : "error"} — ${entry.summary}`,
+			)
+			.join("\n");
 		return [
 			...sanitized,
 			{
 				role: "system",
-				content: `Runtime decision gate stopped further tool use. Reason: ${reason}\n\nUse the evidence below to answer the user now. Do not call tools. If something is missing, state exactly what is available and what could not be confirmed.\n\n${this.evidenceSummary(ledger)}`,
+				content: `Runtime decision gate stopped further tool use. Reason: ${reason}\n\nThis is a terminal response and no tools are available in this finalization call. Do not announce, promise, start, or describe any future action. Do not say "voy a", "iniciando", "I'll", or "starting". Report only verified completed work, the exact blocker, and any already obtained results. If something is missing, state what could not be confirmed.\n\nVerified tool history:\n${toolEvidence || "- No verified tool results."}\n\n${this.evidenceSummary(ledger)}`,
 			},
 		];
 	}
@@ -2488,12 +2702,26 @@ export class AgentRuntime {
 		return lines.join("\n");
 	}
 
+	private isInvalidTerminalCandidate(
+		content: string,
+		hasVerifiedToolProgress: boolean,
+	): boolean {
+		return (
+			!content.trim() ||
+			this.continuityGuard.hasPendingAction(content) ||
+			this.continuityGuard.hasUnverifiedExternalClaim(
+				content,
+				hasVerifiedToolProgress,
+			)
+		);
+	}
+
 	private async *streamFinalResponse(
 		messages: LLMMessage[],
 		ledger: EvidenceLedger,
 		reason: string,
 	): AsyncIterable<string> {
-		let yielded = false;
+		let finalText = "";
 		const sanitizer = this.createAssistantOutputStreamSanitizer();
 		try {
 			const request: LLMRequest = {
@@ -2509,27 +2737,23 @@ export class AgentRuntime {
 				if (!chunk.content) continue;
 				const visibleContent = sanitizer.push(chunk.content);
 				if (!visibleContent) continue;
-				yielded = true;
-				yield visibleContent;
+				finalText += visibleContent;
 			}
 			const tail = sanitizer.flush();
-			if (tail) {
-				yielded = true;
-				yield tail;
-			}
+			if (tail) finalText += tail;
 		} catch (err) {
-			if (yielded) {
-				yield `\n\nLa respuesta se interrumpió mientras cerraba la tarea. Estado actual: ${reason}.`;
-				const fallback = this.buildFallbackFinalResponse(ledger, reason);
-				if (fallback.trim()) yield `\n\n${fallback}`;
-				console.error(
-					"Final response stream failed after partial output:",
-					err,
-				);
-				return;
-			}
+			console.error("Final response stream failed:", err);
 		}
-		if (!yielded) yield this.buildFallbackFinalResponse(ledger, reason);
+		if (
+			!this.isInvalidTerminalCandidate(
+				finalText,
+				ledger.toolHistory.some((entry) => entry.success),
+			)
+		) {
+			yield finalText;
+			return;
+		}
+		yield this.buildFallbackFinalResponse(ledger, reason);
 	}
 
 	private async generateFinalResponse(
@@ -2547,7 +2771,13 @@ export class AgentRuntime {
 				metadata: this.requestMetadata(),
 			});
 			const content = this.sanitizeAssistantOutput(response.content);
-			if (content.trim()) return content;
+			if (
+				!this.isInvalidTerminalCandidate(
+					content,
+					ledger.toolHistory.some((entry) => entry.success),
+				)
+			)
+				return content;
 		} catch {
 			/* fallback below */
 		}
@@ -2621,7 +2851,8 @@ export class AgentRuntime {
 				DELEGATE_SYNTHESIS_TIMEOUT_MS,
 			);
 			const content = this.sanitizeAssistantOutput(response.content);
-			if (content.trim()) return content;
+			if (content.trim() && !this.continuityGuard.hasPendingAction(content))
+				return content;
 		} catch {
 			/* fallback below */
 		}
@@ -2646,6 +2877,8 @@ export class AgentRuntime {
 		options: AgentProcessOptions = {},
 	): Promise<string> {
 		const startedAt = Date.now();
+		this.toolBillingFailures.clear();
+		this.continuityGuard.reset(message);
 		throwIfAborted(options.signal);
 		const userTurn: ConversationTurn = {
 			role: "user",
@@ -2714,6 +2947,7 @@ export class AgentRuntime {
 								startedAt,
 								metadata: { mode: "multi-agent" },
 							});
+							this.reportCompletionOutcome(options, safeSynthesisResult);
 							return safeSynthesisResult;
 						}
 					}
@@ -2784,6 +3018,7 @@ export class AgentRuntime {
 			})),
 			skillsUsed: this.toSkillTrace(skills),
 		});
+		this.reportCompletionOutcome(options, safeResponseContent);
 
 		return safeResponseContent;
 	}
@@ -2838,6 +3073,7 @@ export class AgentRuntime {
 		options: AgentProcessOptions = {},
 	): AsyncIterable<string> {
 		const startedAt = Date.now();
+		this.toolBillingFailures.clear();
 		throwIfAborted(options.signal);
 		const userTurn: ConversationTurn = {
 			role: "user",
@@ -2918,6 +3154,7 @@ export class AgentRuntime {
 											workers: decomposition.subtasks.length,
 										},
 									});
+									this.reportCompletionOutcome(options, safeResult);
 									return;
 								}
 								default:
@@ -2927,7 +3164,8 @@ export class AgentRuntime {
 									break;
 							}
 						}
-						return; // Multi-agent completado
+						this.reportCompletionOutcome(options, "");
+						return;
 					}
 				}
 			} catch (err) {
@@ -3038,11 +3276,6 @@ export class AgentRuntime {
 							if (visibleContent) {
 								chunkContent += visibleContent;
 								hasContent = true;
-								if (!hasYieldedResponding) {
-									yield "\x00STATUS:responding\x00";
-									hasYieldedResponding = true;
-								}
-								yield visibleContent;
 							}
 						}
 						if (chunk.toolCalls) {
@@ -3073,17 +3306,9 @@ export class AgentRuntime {
 					if (visibleTail) {
 						chunkContent += visibleTail;
 						hasContent = true;
-						if (!hasYieldedResponding) {
-							yield "\x00STATUS:responding\x00";
-							hasYieldedResponding = true;
-						}
-						yield visibleTail;
 					}
 				} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
-					if (chunkContent) {
-						fullResponse += chunkContent;
-					}
 					if (ledger.usefulResults > 0) {
 						fullResponse += this.buildContinuationCheckpoint(
 							ledger,
@@ -3219,7 +3444,14 @@ export class AgentRuntime {
 								continuityGuard.buildContinuePrompt(reconciliationReport);
 							messages.push({ role: "assistant", content: chunkContent || "" });
 							messages.push({ role: "system", content: continuePrompt });
-							if (chunkContent) fullResponse += chunkContent;
+							if (chunkContent) {
+								if (!hasYieldedResponding) {
+									yield "\x00STATUS:responding\x00";
+									hasYieldedResponding = true;
+								}
+								fullResponse += chunkContent;
+								yield chunkContent;
+							}
 							fullResponse += "\n\n[Auto-continuing...]\n\n";
 							yield "\n\n[Auto-continuing...]\n\n";
 							continue; // Continue the while loop for another LLM call
@@ -3234,6 +3466,7 @@ export class AgentRuntime {
 						const stall = continuityGuard.shouldForceActOnStall(
 							chunkContent,
 							streamFinishReason,
+							toolTrace.length > 0,
 						);
 						if (stall.force) {
 							continuityGuard.recordStall(chunkContent);
@@ -3265,9 +3498,22 @@ export class AgentRuntime {
 						}
 					}
 					if (chunkContent) {
+						if (!hasYieldedResponding) {
+							yield "\x00STATUS:responding\x00";
+							hasYieldedResponding = true;
+						}
 						fullResponse += chunkContent;
+						yield chunkContent;
 					}
 					break;
+				}
+
+				if (chunkContent) {
+					if (!hasYieldedResponding) {
+						yield "\x00STATUS:responding\x00";
+						hasYieldedResponding = true;
+					}
+					yield chunkContent;
 				}
 
 				messages.push({
@@ -3427,7 +3673,7 @@ export class AgentRuntime {
 								"delegate_task",
 								task.parsedParams.params,
 								{
-									...this.getToolExecutionContext(),
+									...this.getToolExecutionContext(options),
 									abortSignal: options.signal,
 								},
 							);
@@ -3507,7 +3753,7 @@ export class AgentRuntime {
 									"delegate_task",
 									task.parsedParams.params,
 									{
-										...this.getToolExecutionContext(),
+										...this.getToolExecutionContext(options),
 										abortSignal: options.signal,
 									},
 								);
@@ -3654,6 +3900,7 @@ export class AgentRuntime {
 
 					let toolResult: ToolResult;
 					let skipped = false;
+					let reusedToolResult = false;
 					let paramsSignature = "";
 					if (parsedParams.error) {
 						skipped = true;
@@ -3745,16 +3992,27 @@ export class AgentRuntime {
 											resolveNext = null;
 										}
 									};
-									const execPromise = this.toolExecutor.execute(
-										toolCall.function.name,
+									const execPromise = this.executeToolWithReceipt({
+										toolName: toolCall.function.name,
 										params,
-										{
-											...this.getToolExecutionContext(),
-											channelId,
-											abortSignal: options.signal,
-											onProgress,
-										},
-									);
+										toolCallId: toolCall.id,
+										channelId,
+										options,
+										execute: (actionId) =>
+											this.toolExecutor?.execute(
+												toolCall.function.name,
+												params,
+												{
+													...this.getToolExecutionContext(options),
+													channelId,
+													executionId: options.executionId,
+													actionId,
+													idempotencyKey: actionId,
+													abortSignal: options.signal,
+													onProgress,
+												},
+											) as Promise<ToolResult>,
+									});
 									while (true) {
 										const raced = await Promise.race([
 											execPromise.then((result) => ({
@@ -3772,7 +4030,8 @@ export class AgentRuntime {
 										}
 										throwIfAborted(options.signal);
 										if (raced.done) {
-											toolResult = raced.result;
+											toolResult = raced.result.result;
+											reusedToolResult = raced.result.reused;
 											break;
 										}
 									}
@@ -3783,11 +4042,27 @@ export class AgentRuntime {
 										options.signal,
 									);
 								} else {
-									toolResult = await this.toolExecutor.execute(
-										toolCall.function.name,
+									const executed = await this.executeToolWithReceipt({
+										toolName: toolCall.function.name,
 										params,
-										this.getToolExecutionContext(),
-									);
+										toolCallId: toolCall.id,
+										channelId,
+										options,
+										execute: (actionId) =>
+											this.toolExecutor?.execute(
+												toolCall.function.name,
+												params,
+												{
+													...this.getToolExecutionContext(options),
+													channelId,
+													executionId: options.executionId,
+													actionId,
+													idempotencyKey: actionId,
+												},
+											) as Promise<ToolResult>,
+									});
+									toolResult = executed.result;
+									reusedToolResult = executed.reused;
 									throwIfAborted(options.signal);
 									yield* this.maybeStreamCreatedWorkflow(
 										toolCall,
@@ -3886,6 +4161,8 @@ export class AgentRuntime {
 							resultContentStr.replace(/^Error:\s*/, ""),
 						);
 						yield `\x00STATUS:tool_skipped:${toolCall.function.name}::${skippedDetail}\x00`;
+					} else if (toolResult.success && reusedToolResult) {
+						yield `\x00STATUS:tool_reused:${toolCall.function.name}:\x00`;
 					} else if (toolResult.success) {
 						yield `\x00STATUS:tool_done:${toolCall.function.name}:\x00`;
 					} else {
@@ -3992,6 +4269,7 @@ export class AgentRuntime {
 				toolIterations: iterations,
 			},
 		});
+		this.reportCompletionOutcome(options, safeFullResponse);
 	}
 
 	private async executeWithTools(
@@ -4133,11 +4411,22 @@ export class AgentRuntime {
 									.resultContent,
 							};
 						} else {
-							toolResult = await this.toolExecutor?.execute(
-								toolCall.function.name,
+							const executed = await this.executeToolWithReceipt({
+								toolName: toolCall.function.name,
 								params,
-								this.getToolExecutionContext(),
-							);
+								toolCallId: toolCall.id,
+								channelId,
+								options,
+								execute: (actionId) =>
+									this.toolExecutor?.execute(toolCall.function.name, params, {
+										...this.getToolExecutionContext(options),
+										channelId,
+										executionId: options.executionId,
+										actionId,
+										idempotencyKey: actionId,
+									}) as Promise<ToolResult>,
+							});
+							toolResult = executed.result;
 							throwIfAborted(options.signal);
 						}
 					}
@@ -4223,6 +4512,7 @@ export class AgentRuntime {
 					const stall = guard.shouldForceActOnStall(
 						stallContent,
 						response.finishReason,
+						toolCallsExecuted.length > 0,
 					);
 					if (stall.force) {
 						guard.recordStall(stallContent);
@@ -4297,6 +4587,33 @@ export class AgentRuntime {
 		return /\b(puedo continuar|puedo seguir|contin[uú]o si|si me lo pides|se alcanz[oó] el l[ií]mite|l[ií]mite m[aá]ximo|faltan?|quedan?|missing|remaining|pendiente|incomplet[oa]|parcial|partial|blocked|bloquead[oa]|no pude|no se pudo|could not|couldn['’]?t|unable to|failed to)\b/i.test(
 			content,
 		);
+	}
+
+	private reportCompletionOutcome(
+		options: AgentProcessOptions,
+		content: string,
+	): void {
+		if (!options.onCompletionOutcome) return;
+		const normalized = content.replace(/\s+/g, " ").trim();
+		const promisedAction = this.continuityGuard.hasPendingAction(content);
+		const pending =
+			!normalized ||
+			promisedAction ||
+			this.indicatesIncompleteOrContinuation(content);
+		if (!pending) {
+			options.onCompletionOutcome({ reason: "finished" });
+			return;
+		}
+		options.onCompletionOutcome({
+			reason: "pending_action",
+			pendingAction: {
+				kind: promisedAction || !normalized ? "retry_tool_call" : "continue",
+				summary: normalized
+					? normalized.slice(0, 500)
+					: "La ejecución terminó sin una respuesta final verificable.",
+				resumable: true,
+			},
+		});
 	}
 
 	private looksLikeCompletedAssistantState(content: string): boolean {
@@ -4766,7 +5083,7 @@ Your browser has PERSISTENT SESSIONS. Cookies and login state are automatically 
 1. **NEVER refuse to interact with logged-in websites.** If the user says "check my Facebook/Instagram/etc", DO IT. The session cookies are already saved from a previous login. Do NOT say you "cannot handle credentials" or "cannot log in" — you are NOT logging in, you are using an EXISTING session.
 2. **If a site requires login and no session exists**, tell the user: "I need you to log in manually first. I'll open the page, you enter your credentials, and I'll remember the session for next time." Do NOT refuse the task entirely.
 3. **Sessions persist for 7 days** across restarts. The user does not need to re-login every time.
-4. **You CAN perform all human actions**: click, type, scroll, like, comment, post, upload, download, navigate menus, etc. You are a full browser automation agent.
+4. **You CAN perform browser actions exposed by the current tool schemas**: click, type, scroll, navigate menus, upload, and interact with authenticated pages. Claim a download or tab action only when a dedicated available tool returns a verified artifact/state.
 5. **Use known user context before searching.** Known Facebook page for this user: Cuentos Mitologicos / Cuentos Mitológicos = https://www.facebook.com/cuentosmitologicos1/. If the user asks about that page, navigate directly there or use the already-open authenticated Facebook tab; do not search for it first.
 
 ## SPA HANDLING (Facebook, Instagram, TikTok, YouTube, Reddit, Discord, etc.)
@@ -4789,17 +5106,18 @@ Modern web apps (SPAs) use heavy JavaScript rendering. The accessibility tree (b
 Active model: ${activeModel}
 When using browser tools to navigate websites:
 
-### ACCESSIBILITY TREE NAVIGATION (PRIMARY METHOD)
-You MUST use the accessibility tree for all browser interactions. Follow this workflow:
-1. After any page load (browser_navigate, browser_click_text with waitForNavigation, etc.), ALWAYS call browser_snapshot to get the accessibility tree of the new page.
-2. Read the snapshot to understand what elements are available (buttons, links, inputs, headings, etc. with their UIDs).
-3. To interact with elements, use browser_click_uid (for clicking) or browser_fill_uid (for typing into inputs) with the UID from the snapshot.
-4. The UID tools use the cached snapshot first for speed and return an updated accessibility tree snapshot — use it to decide the next action.
-5. If a UID is no longer valid (page changed), run browser_snapshot again to get fresh UIDs.
+### BROWSER NAVIGATION CONTRACT
+1. Navigate or perform one interaction at a time. Inspect the newest accessibility snapshot returned by that tool; call browser_snapshot only when no fresh snapshot was returned, the page changed asynchronously, or a UID became stale.
+2. Use browser_click_uid/browser_fill_uid with UIDs from the newest snapshot. Never reuse a UID after navigation, submission, modal changes, rerendering scroll, or a stale-ref error.
+3. After every interaction verify the expected observable change in URL, title, text, controls, or state before continuing. Never infer success from the absence of an exception.
+4. browser_snapshot, browser_observe, browser_read_page and browser_extract_images perform a bounded render/lazy-load preparation. Use their readiness diagnostics; if images remain pending/broken, wait or retry once before claiming the page is complete.
+5. For lazy or infinite content, scroll and inspect until the target appears, actual scroll delta reaches 0, document height stabilizes, or the bounded readiness limit is reported. Do not loop indefinitely.
+6. Before screenshots, ensure expected content is present and loading indicators are gone. browser_screenshot defaults to full-page, traverses the page to trigger lazy content, waits for fonts/images/layout, restores scroll, disables animations for capture, and reports readiness. Use fullPage=false only for an intentional viewport capture.
+7. If the task is parallel research, each worker has an isolated native browser session. Use browser_* tools inside that worker; never assume another worker's tab, cookies, UIDs, or navigation state is shared.
 
 ### NAVIGATION PRIORITY
 1. Use browser_navigate with direct URLs when possible (e.g. a site's search URL with query parameters).
-2. After navigation, use browser_snapshot (NOT browser_read_page) to understand the page.
+2. Read the snapshot already returned by browser_navigate. Use browser_snapshot only to refresh asynchronous or stale page state.
 3. Use browser_click_uid and browser_fill_uid as the PRIMARY interaction methods.
 4. Only fall back to browser_click/browser_type with CSS selectors if browser_snapshot fails.
 5. Only use browser_read_page when you need the raw text content of the page (not for navigation decisions).
@@ -4822,7 +5140,7 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 17. browser_etsy_task is only a fallback if normal step-by-step navigation stalls repeatedly or the user explicitly requests a compact Etsy flow. Do not use it as the first/default action.
 18. For requests to show, list, retrieve, or capture multiple page/product images, optimize for direct extraction once on the product/page: use browser_extract_images before clicking thumbnails. Only use browser_eval if the specialized extractor misses data. Deduplicate URLs, prefer the highest-resolution candidates, track obtained/pending internally, and avoid recapturing images already found.
 19. Stop using browser tools as soon as requested data is available. If browser_extract_images returns images or the required screenshots/images are available, answer immediately with available screenshots/images instead of navigating again.
-20. Keep browser/tool work out of the final answer while acting. When helpful, provide one concise present-tense activity sentence immediately before a tool call (for example: "Ingresando la búsqueda en Etsy", "Tomando una captura", "Extrayendo URLs de imágenes"); the UI will show it as transient progress instead of final response text. Return a compact final result with ordered images/URLs, missing items, or blockers only.`;
+20. Keep browser/tool work out of the final answer while acting. A present-tense activity sentence is allowed only in the same turn as the real structured tool call. Return a compact final result with verified images/URLs, missing items, or blockers only.`;
 
 		if (contextParts.length > 0) {
 			systemContent += `\n\n${contextParts.join("\n\n")}`;
@@ -4957,6 +5275,30 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 		// ballooned the context (20K→40K tokens) during the visual self-review loop.
 		const RECENT_IMAGE_MESSAGES = 3;
 		const messageCount = messages.length;
+		const useZaiVision = this.shouldUseZaiVisionToolsForImages();
+		const zaiVisionPathMap = new Map<string, string>();
+		if (useZaiVision) {
+			const localPaths = new Set<string>();
+			for (const message of messages) {
+				if (typeof message.content !== "string") continue;
+				for (const localPath of this.getLocalMediaPathsFromContent(
+					message.content,
+				)) {
+					if (this.isImageMediaFilename(localPath)) localPaths.add(localPath);
+				}
+			}
+			await Promise.all(
+				[...localPaths].map(async (localPath) => {
+					zaiVisionPathMap.set(
+						localPath,
+						await this.prepareZaiVisionMediaPath(localPath),
+					);
+				}),
+			);
+		}
+
+		const nativeImageParts: ContentPart[] = [];
+		const seenNativeImages = new Set<string>();
 		const parsedMessages = messages.map((msg, idx) => {
 			if (typeof msg.content === "string") {
 				const imgRegex = /!\[.*?\]\(\/api\/media\/file\/([^)]+)\)/g;
@@ -4970,10 +5312,10 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 					// call analyze_image. Paths are cheap text (no base64), so this is
 					// allowed for every message — the agent always knows where each
 					// image lives, which is what we want.
-					if (this.shouldUseZaiVisionToolsForImages()) {
-						const localPaths = this.getLocalMediaPathsFromContent(
-							msg.content,
-						).filter((p) => this.isImageMediaFilename(p));
+					if (useZaiVision) {
+						const localPaths = this.getLocalMediaPathsFromContent(msg.content)
+							.filter((p) => this.isImageMediaFilename(p))
+							.map((p) => zaiVisionPathMap.get(p) ?? p);
 						return {
 							...msg,
 							content: this.appendZaiVisionHint(msg.content, localPaths),
@@ -4981,13 +5323,18 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 					}
 
 					// Native multimodal: embed the actual image bytes ONLY for the most
-					// recent captures (the ones being analyzed now). Older captures stay
-					// as path references to bound the context.
+					// recent captures (the ones being analyzed now). Attach them to the
+					// current user turn below; image blocks in historical assistant turns
+					// are rejected or ignored by several provider protocols.
 					if (isRecent && this.modelSeesImagesNatively()) {
-						return {
-							...msg,
-							content: this.toImageContentParts(msg.content),
-						};
+						for (const part of this.localMediaImageParts(msg.content)) {
+							if (part.type !== "image_url") continue;
+							const url = part.image_url.url;
+							if (seenNativeImages.has(url)) continue;
+							seenNativeImages.add(url);
+							nativeImageParts.push(part);
+						}
+						return msg;
 					}
 
 					return {
@@ -4998,6 +5345,21 @@ You MUST use the accessibility tree for all browser interactions. Follow this wo
 			}
 			return msg;
 		});
+		if (nativeImageParts.length > 0) {
+			for (let i = parsedMessages.length - 1; i >= 0; i--) {
+				const message = parsedMessages[i];
+				if (message.role !== "user") continue;
+				const contentParts: ContentPart[] =
+					typeof message.content === "string"
+						? [{ type: "text", text: message.content }]
+						: message.content;
+				parsedMessages[i] = {
+					...message,
+					content: [...contentParts, ...nativeImageParts],
+				};
+				break;
+			}
+		}
 
 		// Inline extracted text from non-image attachments (pdf, docs, sheets,
 		// code, ...) so the model can read them directly. Runs for every model.

@@ -96,7 +96,11 @@ describe("GoogleProvider Vertex native API", () => {
 					url,
 					body: init.body ? JSON.parse(init.body as string) : null,
 				});
-				return sseResponse(["data: \n\n"]);
+				return sseResponse([
+					`data: ${JSON.stringify({
+						candidates: [{ finishReason: "STOP" }],
+					})}\n\n`,
+				]);
 			}),
 		);
 
@@ -203,7 +207,7 @@ describe("GoogleProvider Vertex native API", () => {
 						},
 					],
 				},
-				{ role: "tool", content: "results", toolCallId: "search" },
+				{ role: "tool", content: "results", toolCallId: "call_1" },
 			],
 		});
 
@@ -221,11 +225,14 @@ describe("GoogleProvider Vertex native API", () => {
 		// tool turn has a functionResponse part on a user role
 		const tool = contents[2];
 		expect(tool.role).toBe("user");
-		expect(
-			(tool.parts as Array<Record<string, unknown>>).some(
-				(p) => p.functionResponse,
-			),
-		).toBe(true);
+		expect(tool.parts).toEqual([
+			{
+				functionResponse: {
+					name: "search",
+					response: { content: "results" },
+				},
+			},
+		]);
 	});
 
 	it("parses a non-stream Gemini response (content, toolCalls, usageMetadata)", async () => {
@@ -311,5 +318,306 @@ describe("GoogleProvider Vertex native API", () => {
 		const usage = out.find((c) => c.usage)?.usage;
 		expect(usage?.promptTokens).toBe(1);
 		expect(usage?.completionTokens).toBe(2);
+	});
+
+	it("parses a final tool call event without a trailing SSE delimiter", async () => {
+		const provider = new GoogleProvider({
+			authMode: "vertex",
+			accessToken: "tok",
+			projectId: "p",
+			location: "global",
+		});
+		const event = `data:${JSON.stringify({
+			candidates: [
+				{
+					content: {
+						parts: [
+							{
+								functionCall: {
+									name: "generate_image",
+									args: { width: 2048, height: 1152 },
+								},
+								thoughtSignature: "sig-image",
+							},
+						],
+					},
+					finishReason: "STOP",
+				},
+			],
+		})}`;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => sseResponse([event])),
+		);
+
+		const out: LLMChunk[] = [];
+		for await (const chunk of provider.chatStream({
+			model: "gemini-2.5-flash",
+			messages: [{ role: "user", content: "generate an image" }],
+		})) {
+			out.push(chunk);
+		}
+
+		expect(out.find((chunk) => chunk.toolCalls)?.toolCalls).toMatchObject({
+			function: {
+				name: "generate_image",
+				arguments: '{"width":2048,"height":1152}',
+			},
+		});
+		expect(out.some((chunk) => chunk.finishReason === "STOP")).toBe(true);
+	});
+
+	it("rejects a stream that closes before a terminal event", async () => {
+		const provider = new GoogleProvider({
+			authMode: "vertex",
+			accessToken: "tok",
+			projectId: "p",
+			location: "global",
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				sseResponse([
+					`data: ${JSON.stringify({
+						candidates: [{ content: { parts: [{ text: "partial" }] } }],
+					})}\n\n`,
+				]),
+			),
+		);
+
+		const consume = async () => {
+			for await (const _chunk of provider.chatStream({
+				model: "gemini-2.5-flash",
+				messages: [{ role: "user", content: "hi" }],
+			})) {
+				// Consume the complete stream to trigger the premature-close guard.
+			}
+		};
+
+		await expect(consume()).rejects.toThrow("stream closed before completion");
+	});
+
+	it("keeps thought signatures associated with unique sequential tool calls", async () => {
+		const provider = new GoogleProvider({
+			authMode: "vertex",
+			accessToken: "tok",
+			projectId: "p",
+			location: "global",
+		});
+		const responses = [
+			{
+				candidates: [
+					{
+						content: {
+							parts: [
+								{
+									functionCall: { name: "search", args: { q: "cats" } },
+									thoughtSignature: "sig-search",
+								},
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			},
+			{
+				candidates: [
+					{
+						content: {
+							parts: [
+								{
+									functionCall: { name: "download", args: { id: 1 } },
+									thoughtSignature: "sig-download",
+								},
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			},
+			{ candidates: [{ content: { parts: [{ text: "done" }] } }] },
+		];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_url: string, init: RequestInit) => {
+				calls.push({
+					url: String(_url),
+					body: init.body ? JSON.parse(init.body as string) : null,
+				});
+				return jsonResponse(responses[calls.length - 1]);
+			}),
+		);
+
+		const first = await provider.chat({
+			model: "gemini-2.5-flash",
+			messages: [{ role: "user", content: "start" }],
+		});
+		const firstCall = first.toolCalls?.[0];
+		expect(firstCall).toBeDefined();
+		if (!firstCall) throw new Error("Expected first tool call");
+		const secondMessages = [
+			{ role: "user" as const, content: "start" },
+			{
+				role: "assistant" as const,
+				content: "",
+				toolCalls: [firstCall],
+			},
+			{ role: "tool" as const, content: "found", toolCallId: firstCall.id },
+		];
+		const second = await provider.chat({
+			model: "gemini-2.5-flash",
+			messages: secondMessages,
+		});
+		const secondCall = second.toolCalls?.[0];
+		expect(secondCall).toBeDefined();
+		if (!secondCall) throw new Error("Expected second tool call");
+		expect(secondCall.id).not.toBe(firstCall.id);
+
+		const reconfiguredProvider = new GoogleProvider({
+			authMode: "vertex",
+			accessToken: "tok",
+			projectId: "p",
+			location: "global",
+		});
+		await reconfiguredProvider.chat({
+			model: "gemini-2.5-flash",
+			messages: [
+				...secondMessages,
+				{
+					role: "assistant",
+					content: "",
+					toolCalls: [secondCall],
+				},
+				{
+					role: "tool",
+					content: "downloaded",
+					toolCallId: secondCall.id,
+				},
+			],
+		});
+
+		const contents = (
+			calls[2].body as {
+				contents: Array<{ parts: Array<Record<string, unknown>> }>;
+			}
+		).contents;
+		const functionCallParts = contents.flatMap((content) =>
+			content.parts.filter((part) => part.functionCall),
+		);
+		expect(functionCallParts).toMatchObject([
+			{ thoughtSignature: "sig-search" },
+			{ thoughtSignature: "sig-download" },
+		]);
+	});
+
+	it("keeps native call ids and omits generated image bytes from function responses", async () => {
+		const provider = new GoogleProvider({
+			authMode: "vertex",
+			accessToken: "tok",
+			projectId: "p",
+			location: "global",
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn()
+				.mockImplementationOnce(async () =>
+					jsonResponse({
+						candidates: [
+							{
+								content: {
+									parts: [
+										{
+											functionCall: {
+												id: "server-call-7",
+												name: "nano-banana-generate",
+												args: { aspect_ratio: "16:9", resolution: "2K" },
+											},
+											thoughtSignature: "sig-image",
+										},
+									],
+								},
+								finishReason: "STOP",
+							},
+						],
+					}),
+				)
+				.mockImplementationOnce(async (url: string, init: RequestInit) => {
+					calls.push({
+						url,
+						body: init.body ? JSON.parse(init.body as string) : null,
+					});
+					return jsonResponse({
+						candidates: [{ content: { parts: [{ text: "Image ready" }] } }],
+					});
+				}),
+		);
+
+		const first = await provider.chat({
+			model: "gemini-3.1-flash-lite",
+			messages: [{ role: "user", content: "Generate an image" }],
+		});
+		const toolCall = first.toolCalls?.[0];
+		expect(toolCall?.id).toMatch(/^vertex-tc-/);
+		if (!toolCall) throw new Error("Expected image tool call");
+
+		const imageDataUrl = `data:image/png;base64,${"A".repeat(2_000_000)}`;
+		await provider.chat({
+			model: "gemini-3.1-flash-lite",
+			messages: [
+				{ role: "user", content: "Generate an image" },
+				{ role: "assistant", content: "", toolCalls: [toolCall] },
+				{
+					role: "tool",
+					toolCallId: toolCall.id,
+					content: [
+						{
+							type: "text",
+							text: "Generated: /api/media/file/cr7.png",
+						},
+						{ type: "image_url", image_url: { url: imageDataUrl } },
+					],
+				},
+			],
+		});
+
+		const serializedBody = JSON.stringify(calls[0].body);
+		expect(serializedBody.length).toBeLessThan(2_000);
+		expect(serializedBody).not.toContain("data:image/png;base64");
+		const contents = (
+			calls[0].body as {
+				contents: Array<{
+					role: string;
+					parts: Array<Record<string, unknown>>;
+				}>;
+			}
+		).contents;
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [
+				{
+					functionCall: {
+						id: "server-call-7",
+						name: "nano-banana-generate",
+						args: { aspect_ratio: "16:9", resolution: "2K" },
+					},
+					thoughtSignature: "sig-image",
+				},
+			],
+		});
+		expect(contents[2]).toEqual({
+			role: "user",
+			parts: [
+				{
+					functionResponse: {
+						id: "server-call-7",
+						name: "nano-banana-generate",
+						response: {
+							content: "Generated: /api/media/file/cr7.png",
+						},
+					},
+				},
+			],
+		});
 	});
 });

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium as nativeChromium } from "patchright";
+import { chromium as nativeChromium, type Page } from "patchright";
 import { chromium as stealthChromium } from "playwright-extra";
 import stealthPlugin from "puppeteer-extra-plugin-stealth";
 
@@ -32,6 +32,171 @@ const A11Y_TREE_MAX_TEXT_LENGTH = 300;
 const CAPTCHA_POLL_INTERVAL_MS = 5_000;
 const CAPTCHA_SOLVE_TIMEOUT_MS = 120_000;
 const DECODO_SCRAPE_URL = "https://scraper-api.decodo.com/v2/scrape";
+
+export interface PageReadyOptions {
+	timeoutMs?: number;
+	autoScroll?: boolean;
+	restorePosition?: boolean;
+	settleMs?: number;
+	maxScrollSteps?: number;
+}
+
+export interface PageReadyResult {
+	timedOut: boolean;
+	scrollSteps: number;
+	initialPosition: { x: number; y: number };
+	finalHeight: number;
+	images: { total: number; loaded: number; broken: number; pending: number };
+	warnings: string[];
+}
+
+/**
+ * Prepare a rendered page for inspection/capture. The bounded scroll pass
+ * triggers viewport-based lazy loaders, follows document-height growth, waits
+ * for fonts/image decoding and restores the caller's original position.
+ */
+export async function waitForPageReady(
+	page: Page,
+	options: PageReadyOptions = {},
+): Promise<PageReadyResult> {
+	const timeoutMs = Math.max(500, options.timeoutMs ?? 12_000);
+	const deadline = Date.now() + timeoutMs;
+	const settleMs = Math.max(25, options.settleMs ?? 140);
+	const maxScrollSteps = Math.max(1, options.maxScrollSteps ?? 100);
+	const warnings: string[] = [];
+	const remaining = (cap: number) => Math.max(1, Math.min(cap, deadline - Date.now()));
+	const initialPosition = await page
+		.evaluate(() => ({ x: window.scrollX, y: window.scrollY }))
+		.catch(() => ({ x: 0, y: 0 }));
+
+	const waitLoad = async (state: "domcontentloaded" | "load" | "networkidle") => {
+		if (Date.now() >= deadline) return;
+		try {
+			await page.waitForLoadState(state, { timeout: remaining(2_000) });
+		} catch {
+			warnings.push(`${state} timeout`);
+		}
+	};
+	const waitFonts = async () => {
+		if (Date.now() >= deadline) return;
+		await Promise.race([
+			page.evaluate(async () => {
+				if (document.fonts?.ready) await document.fonts.ready;
+			}),
+			new Promise((resolvePromise) =>
+				setTimeout(resolvePromise, remaining(2_000)),
+			),
+		]).catch(() => warnings.push("font readiness failed"));
+	};
+	const decodeImages = async () => {
+		if (Date.now() >= deadline) return;
+		await Promise.race([
+			page.evaluate(async () => {
+				const images = Array.from(document.images);
+				await Promise.allSettled(
+					images.map(async (image) => {
+						if (typeof image.decode === "function") await image.decode();
+					}),
+				);
+			}),
+			new Promise((resolvePromise) =>
+				setTimeout(resolvePromise, remaining(2_500)),
+			),
+		]).catch(() => warnings.push("image decode failed"));
+	};
+	const measure = () =>
+		page.evaluate(() => {
+			const root = document.scrollingElement ?? document.documentElement;
+			return {
+				x: window.scrollX,
+				y: root.scrollTop,
+				height: Math.max(root.scrollHeight, document.body?.scrollHeight ?? 0),
+				viewport: window.innerHeight,
+				imageCount: document.images.length,
+			};
+		});
+
+	let scrollSteps = 0;
+	let finalHeight = 0;
+	try {
+		await waitLoad("domcontentloaded");
+		await waitLoad("load");
+		await waitFonts();
+		await decodeImages();
+		await waitLoad("networkidle");
+
+		if (options.autoScroll) {
+			let stableBottomChecks = 0;
+			let previousHeight = -1;
+			let previousImageCount = -1;
+			while (Date.now() < deadline && scrollSteps < maxScrollSteps) {
+				const before = await measure();
+				const bottom = Math.max(0, before.height - before.viewport);
+				const nextY = Math.min(
+					bottom,
+					before.y + Math.max(400, Math.floor(before.viewport * 0.8)),
+				);
+				await page.evaluate((targetY: number) => {
+					window.scrollTo({ top: targetY, left: window.scrollX, behavior: "instant" });
+				}, nextY);
+				scrollSteps++;
+				await page.waitForTimeout(Math.min(settleMs, remaining(settleMs)));
+				await page.evaluate(
+					() => new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))),
+				);
+				await decodeImages();
+				const after = await measure();
+				const atBottom = after.y + after.viewport >= after.height - 2;
+				const stable =
+					after.height === previousHeight && after.imageCount === previousImageCount;
+				stableBottomChecks = atBottom && stable ? stableBottomChecks + 1 : 0;
+				previousHeight = after.height;
+				previousImageCount = after.imageCount;
+				if (stableBottomChecks >= 3) break;
+			}
+			if (scrollSteps >= maxScrollSteps) warnings.push("maximum scroll steps reached");
+		}
+
+		await waitLoad("networkidle");
+		await waitFonts();
+		await decodeImages();
+		finalHeight = (await measure()).height;
+	} finally {
+		if (options.restorePosition !== false) {
+			await page
+				.evaluate(({ x, y }: { x: number; y: number }) => {
+					window.scrollTo({ left: x, top: y, behavior: "instant" });
+				}, initialPosition)
+				.catch(() => {});
+			await page
+				.evaluate(
+					() => new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))),
+				)
+				.catch(() => {});
+		}
+	}
+
+	const images = await page
+		.evaluate(() => {
+			const all = Array.from(document.images);
+			return {
+				total: all.length,
+				loaded: all.filter((image) => image.complete && image.naturalWidth > 0).length,
+				broken: all.filter((image) => image.complete && image.naturalWidth === 0).length,
+				pending: all.filter((image) => !image.complete).length,
+			};
+		})
+		.catch(() => ({ total: 0, loaded: 0, broken: 0, pending: 0 }));
+
+	return {
+		timedOut: Date.now() >= deadline,
+		scrollSteps,
+		initialPosition,
+		finalHeight,
+		images,
+		warnings,
+	};
+}
 
 function isNavigationTimeoutError(error: unknown): boolean {
 	return /timeout|timed out/i.test(
@@ -749,6 +914,8 @@ export interface BrowserConfig {
 	blockTrackerDomains?: boolean;
 	humanBehavior?: boolean;
 	autoDismissPopups?: boolean;
+	/** Create a dedicated browser context/profile instead of adopting shared state. */
+	isolatedSession?: boolean;
 	urlPolicy?: UrlSafetyPolicyConfig;
 }
 
@@ -1266,6 +1433,19 @@ export class BrowserTool {
 				{ timeout: timeoutMs },
 			)
 			.catch(() => {});
+	}
+
+	private async preparePage(options: PageReadyOptions = {}): Promise<PageReadyResult> {
+		const result = await waitForPageReady(this.page, options);
+		this.invalidateSnapshotCache();
+		return result;
+	}
+
+	private formatPageReadiness(result: PageReadyResult): string {
+		const warning = result.warnings.length
+			? ` Warnings: ${result.warnings.join(", ")}.`
+			: "";
+		return `Render readiness: ${result.timedOut ? "bounded timeout" : "stable"}; lazy-scroll steps ${result.scrollSteps}; document height ${result.finalHeight}px; images ${result.images.loaded}/${result.images.total} loaded, ${result.images.broken} broken, ${result.images.pending} pending.${warning}`;
 	}
 
 	private resetImageNetworkIssues(): void {
@@ -3402,6 +3582,8 @@ export class BrowserTool {
 		const screenshot = await this.page.screenshot({
 			fullPage: options.fullPage === true,
 			type: "png",
+			animations: "disabled",
+			caret: "hide",
 		});
 		const mediaInfo = await context.media.save(
 			screenshot,
@@ -3485,7 +3667,9 @@ export class BrowserTool {
 				}
 
 				if (!this.context || !this.page) {
-					this.context = this.browser.contexts()[0];
+					this.context = this.config.isolatedSession
+						? null
+						: this.browser.contexts()[0];
 					if (!this.context) {
 						const fp = this.ensureFingerprint();
 						console.log(
@@ -3670,11 +3854,10 @@ export class BrowserTool {
 	}
 
 	async close(): Promise<void> {
-		if (this.context) {
-			await this.context.close().catch(() => {});
-		}
-		if (this.browser) {
-			await this.browser.close().catch(() => {});
+		try {
+			if (this.context) await this.context.close().catch(() => {});
+			if (this.browser) await this.browser.close().catch(() => {});
+		} finally {
 			this.browser = null;
 			this.context = null;
 			this.page = null;
@@ -4296,14 +4479,19 @@ export class BrowserTool {
 					try {
 						await this.init();
 						const blockDetection = await this.ensureNoBlock(context);
-						const blockOutput = blockDetection?.output
-							? `${blockDetection.output}\n\n`
-							: "";
-						const { output: snapshotOutput } =
-							await this.buildSnapshotWithUidMap();
-						return {
-							success: true,
-							output: `${blockOutput}Page observation:\n\nAccessibility tree:\n${snapshotOutput}\n\n---\n\nLegacy page state:\n${await this.getPageStateSummary()}`,
+					const blockOutput = blockDetection?.output
+						? `${blockDetection.output}\n\n`
+						: "";
+					const readiness = await this.preparePage({
+						autoScroll: true,
+						restorePosition: true,
+						timeoutMs: 8_000,
+					});
+					const { output: snapshotOutput } =
+						await this.buildSnapshotWithUidMap();
+					return {
+						success: true,
+						output: `${blockOutput}${this.formatPageReadiness(readiness)}\n\nPage observation:\n\nAccessibility tree:\n${snapshotOutput}\n\n---\n\nLegacy page state:\n${await this.getPageStateSummary()}`,
 						};
 					} catch (error) {
 						return {
@@ -4426,15 +4614,20 @@ export class BrowserTool {
 							};
 						}
 
-						const blockOutput = blockDetection?.output
+					const blockOutput = blockDetection?.output
 							? `\n\n${blockDetection.output}`
-							: "";
+						: "";
+					const readiness = await this.preparePage({
+						autoScroll: false,
+						restorePosition: true,
+						timeoutMs: 7_000,
+					});
 
-						const { output: snapshotOutput } =
+					const { output: snapshotOutput } =
 							await this.buildSnapshotWithUidMap();
 						return {
 							success: true,
-							output: `Successfully navigated. Page title: "${title}" | Current URL: ${finalUrl}${navigationWarning}${blockOutput}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
+						output: `Successfully navigated. Page title: "${title}" | Current URL: ${finalUrl}${navigationWarning}${blockOutput}\n${this.formatPageReadiness(readiness)}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
 						};
 					} catch (error) {
 						return {
@@ -4623,13 +4816,17 @@ export class BrowserTool {
 								error: `Local file navigation left the file URL and ended at ${finalUrl}.`,
 							};
 						}
-						await this.waitForImageElements();
-						const imageOutput = await this.summarizeImageElements();
+					const readiness = await this.preparePage({
+						autoScroll: true,
+						restorePosition: true,
+						timeoutMs: 12_000,
+					});
+					const imageOutput = await this.summarizeImageElements();
 						const { output: snapshotOutput } =
 							await this.buildSnapshotWithUidMap();
 						return {
 							success: true,
-							output: `Opened local file: ${resolved}\nPage title: "${title}" | Current URL: ${finalUrl}${navigationWarning}${imageOutput}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
+						output: `Opened local file: ${resolved}\nPage title: "${title}" | Current URL: ${finalUrl}${navigationWarning}${imageOutput}\n${this.formatPageReadiness(readiness)}\n\nAccessibility tree snapshot:\n${snapshotOutput}`,
 						};
 					} catch (error) {
 						return {
@@ -4641,15 +4838,15 @@ export class BrowserTool {
 				},
 			},
 			{
-				name: "browser_screenshot",
-				description:
-					"Take a screenshot of the current page and save it to the media system. Returns the saved media URL instead of a raw base64 string; use browser_read_page, the accessibility tree, or an available vision tool to inspect it.",
+			name: "browser_screenshot",
+			description:
+				"Prepare and capture the current page after DOM, fonts, images and layout settle. Full-page capture is the default and deterministically scrolls through the page first to trigger lazy-loaded content, then restores the original position. Set fullPage=false only for an intentional viewport-only capture.",
 				uiIcon: BROWSER_SVG,
 				parameters: {
 					fullPage: {
 						type: "boolean",
 						description:
-							"If true, capture the full scrollable page instead of only the viewport.",
+						"Capture the full scrollable page after lazy-load traversal. Defaults to true; set false only for the current viewport.",
 					},
 				},
 				handler: async (
@@ -4668,24 +4865,29 @@ export class BrowserTool {
 								output: blockDetection.output,
 							};
 						}
-						await this.waitForImageElements();
-						const imageOutput = await this.summarizeImageElements();
+					const fullPage = params.fullPage !== false;
+					const readiness = await this.preparePage({
+						autoScroll: fullPage,
+						restorePosition: true,
+						timeoutMs: fullPage ? 15_000 : 8_000,
+					});
+					const imageOutput = await this.summarizeImageElements();
 						const screenshotOutput = await this.captureScreenshotForAnalysis(
 							context,
-							params.fullPage === true
+						fullPage
 								? "Full page browser screenshot"
 								: "Browser screenshot",
-							params.fullPage === true
+						fullPage
 								? "Full page browser screenshot captured."
 								: "Browser screenshot captured.",
-							{ fullPage: params.fullPage === true },
+						{ fullPage },
 						);
 						const blockOutput = blockDetection?.output
 							? `${blockDetection.output}\n\n`
 							: "";
 						return {
 							success: true,
-							output: `${blockOutput}Successfully took a screenshot.${imageOutput} ${screenshotOutput}\n\nAccessibility tree at screenshot:\n${(await this.buildSnapshotWithUidMap()).output}`,
+						output: `${blockOutput}Successfully took a screenshot. ${this.formatPageReadiness(readiness)}${imageOutput} ${screenshotOutput}\n\nAccessibility tree at screenshot:\n${(await this.buildSnapshotWithUidMap()).output}`,
 						};
 					} catch (error) {
 						return {
@@ -4845,7 +5047,7 @@ export class BrowserTool {
 						const beforeScroll = await getScrollState();
 						const scrollPixels =
 							direction === "down" ? (amount as number) : -(amount as number);
-						if (
+					if (
 							this.config.humanBehavior !== false &&
 							Math.abs(scrollPixels) > 100
 						) {
@@ -5272,7 +5474,7 @@ export class BrowserTool {
 							BROWSER_EVAL_TIMEOUT_MS,
 							"browser_eval",
 						);
-						const blockOutput = blockDetection?.output
+					const blockOutput = blockDetection?.output
 							? `${blockDetection.output}\n\n`
 							: "";
 						const serialized =
@@ -5322,6 +5524,11 @@ export class BrowserTool {
 						) {
 							return { success: true, output: blockDetection.output };
 						}
+						await this.preparePage({
+							autoScroll: true,
+							restorePosition: true,
+							timeoutMs: 10_000,
+						});
 
 						const limit =
 							typeof params.limit === "number"
@@ -5583,11 +5790,16 @@ export class BrowserTool {
 						const blockOutput = blockDetection?.output
 							? `${blockDetection.output}\n\n`
 							: "";
+						const readiness = await this.preparePage({
+							autoScroll: true,
+							restorePosition: true,
+							timeoutMs: 9_000,
+						});
 
 						const { output } = await this.buildSnapshotWithUidMap();
 						return {
 							success: true,
-							output: `${blockOutput}Accessibility tree snapshot:\n${output}`,
+							output: `${blockOutput}${this.formatPageReadiness(readiness)}\n\nAccessibility tree snapshot:\n${output}`,
 						};
 					} catch (error) {
 						return {
@@ -5814,6 +6026,11 @@ export class BrowserTool {
 								output: blockDetection.output,
 							};
 						}
+						await this.preparePage({
+							autoScroll: true,
+							restorePosition: true,
+							timeoutMs: 10_000,
+						});
 						const text = await this.page.evaluate(`
 							(() => {
 								const clone = document.body.cloneNode(true);

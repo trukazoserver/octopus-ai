@@ -1,6 +1,7 @@
 export { ToolRegistry } from "./registry.js";
 export { ToolExecutor } from "./executor.js";
-export type { ToolDefinition, ToolResult } from "./registry.js";
+export type { ToolDefinition, ToolErrorCode, ToolResult } from "./registry.js";
+export { classifyToolError, isProviderAccessError } from "./tool-errors.js";
 export { ToolHealthManager } from "./tool-health-manager.js";
 export type {
 	ToolHealthStatus,
@@ -15,6 +16,13 @@ export { createFileSystemTools } from "./filesystem.js";
 export { createShellTool } from "./shell.js";
 export { DockerSandbox } from "./sandbox.js";
 export { BrowserTool } from "./browser.js";
+export type {
+	BrowserConfig,
+	PageReadyOptions,
+	PageReadyResult,
+} from "./browser.js";
+export { waitForPageReady } from "./browser.js";
+export { BrowserSessionPool } from "./browser-session-pool.js";
 export { CodeExecutor, createCodeTools } from "./code-executor.js";
 export type {
 	CodeExecutionResult,

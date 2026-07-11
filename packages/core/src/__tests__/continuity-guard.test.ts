@@ -48,6 +48,55 @@ describe("ContinuityGuard stall detection", () => {
 		expect(decision.reason).toBe("no-signal");
 	});
 
+	it("does not treat a descriptive 'ahora:' heading as an action promise", () => {
+		const guard = new ContinuityGuard();
+		const decision = guard.shouldForceActOnStall(
+			"Así luce el diseño completo ahora:",
+			"stop",
+		);
+		expect(decision.force).toBe(false);
+		expect(decision.reason).toBe("no-signal");
+	});
+
+	it("forces a retry when completed artifact work is claimed without a tool call", () => {
+		const guard = new ContinuityGuard();
+		const decision = guard.shouldForceActOnStall(
+			"He generado una imagen de los novios, reemplacé la ilustración y añadí el banner al HTML.",
+			"stop",
+		);
+		expect(decision.force).toBe(true);
+		expect(decision.reason).toBe("claimed-action-no-toolcall");
+	});
+
+	it("detects web-search activity text that ends without a tool call", () => {
+		const guard = new ContinuityGuard();
+		const decision = guard.shouldForceActOnStall(
+			"Para empezar, voy a buscar música instrumental. Actividad actual: Iniciando búsqueda de música instrumental en la web.",
+			"stop",
+		);
+		expect(decision.force).toBe(true);
+		expect(decision.reason).toBe("promised-action-no-toolcall");
+	});
+
+	it("accepts a completed artifact claim after verified tool progress", () => {
+		const guard = new ContinuityGuard();
+		const decision = guard.shouldForceActOnStall(
+			"Listo, edité el archivo correctamente.",
+			"stop",
+			true,
+		);
+		expect(decision.force).toBe(false);
+	});
+
+	it("does not confuse completed analysis with an external artifact change", () => {
+		const guard = new ContinuityGuard();
+		const decision = guard.shouldForceActOnStall(
+			"Ya terminé el análisis del problema y estas son mis conclusiones.",
+			"stop",
+		);
+		expect(decision.force).toBe(false);
+	});
+
 	it("leaves length-truncated responses to the length-continuation path", () => {
 		const guard = new ContinuityGuard();
 		const decision = guard.shouldForceActOnStall(
@@ -61,10 +110,14 @@ describe("ContinuityGuard stall detection", () => {
 	it("reports exhausted once the retry budget is spent", () => {
 		const guard = new ContinuityGuard({ maxStallForcings: 2 });
 		// First force + record
-		expect(guard.shouldForceActOnStall("Lo agrego ahora:", "stop").force).toBe(true);
+		expect(guard.shouldForceActOnStall("Lo agrego ahora:", "stop").force).toBe(
+			true,
+		);
 		guard.recordStall("Lo agrego ahora:");
 		// Second force + record (1 < 2)
-		expect(guard.shouldForceActOnStall("Lo agrego ahora:", "stop").force).toBe(true);
+		expect(guard.shouldForceActOnStall("Lo agrego ahora:", "stop").force).toBe(
+			true,
+		);
 		guard.recordStall("Lo agrego ahora:");
 		// Third attempt: budget spent (2 >= 2)
 		const decision = guard.shouldForceActOnStall("Lo agrego ahora:", "stop");
@@ -74,11 +127,15 @@ describe("ContinuityGuard stall detection", () => {
 
 	it("clearStall resets the retry budget and signatures", () => {
 		const guard = new ContinuityGuard({ maxStallForcings: 1 });
-		expect(guard.shouldForceActOnStall("Lo agrego ahora:", "stop").force).toBe(true);
+		expect(guard.shouldForceActOnStall("Lo agrego ahora:", "stop").force).toBe(
+			true,
+		);
 		guard.recordStall("Lo agrego ahora:");
 		expect(guard.stallForceCount).toBe(1);
 		// Budget spent
-		expect(guard.shouldForceActOnStall("Lo agrego ahora:", "stop").exhausted).toBe(true);
+		expect(
+			guard.shouldForceActOnStall("Lo agrego ahora:", "stop").exhausted,
+		).toBe(true);
 
 		guard.clearStall();
 		expect(guard.stallForceCount).toBe(0);
@@ -110,7 +167,10 @@ describe("ContinuityGuard stall detection", () => {
 
 	it("buildForceActPrompt is imperative and mentions the final-attempt caveat on repeats", () => {
 		const guard = new ContinuityGuard();
-		const once = guard.buildForceActPrompt("promised-action-no-toolcall", false);
+		const once = guard.buildForceActPrompt(
+			"promised-action-no-toolcall",
+			false,
+		);
 		expect(once).toContain("EXECUTE NOW");
 		expect(once).not.toContain("final forced attempt");
 
@@ -118,12 +178,27 @@ describe("ContinuityGuard stall detection", () => {
 		expect(again).toContain("final forced attempt");
 	});
 
+	it("corrects unverified completed-work claims in the forced prompt", () => {
+		const guard = new ContinuityGuard();
+		const prompt = guard.buildForceActPrompt(
+			"claimed-action-no-toolcall",
+			false,
+			{ content: "He generado la imagen y actualizado el HTML", attempt: 1 },
+		);
+		expect(prompt).toContain("claimed");
+		expect(prompt).toContain("unverified");
+		expect(prompt).toContain("must not be presented as completed");
+	});
+
 	it("injects a write_file scaffold when the stalled content signals edit intent", () => {
 		const guard = new ContinuityGuard();
 		const prompt = guard.buildForceActPrompt(
 			"promised-action-no-toolcall",
 			false,
-			{ content: "Voy a agregar veo-3.1-generate-001 al index.mjs", attempt: 1 },
+			{
+				content: "Voy a agregar veo-3.1-generate-001 al index.mjs",
+				attempt: 1,
+			},
 		);
 		expect(prompt).toContain("write_file");
 		expect(prompt).toContain('"path"');
@@ -143,11 +218,10 @@ describe("ContinuityGuard stall detection", () => {
 
 	it("escalates to a no-prose, tool-call-only demand on attempt >= 2", () => {
 		const guard = new ContinuityGuard();
-		const prompt = guard.buildForceActPrompt(
-			"repeated-text-no-action",
-			true,
-			{ content: "Lo agrego ahora:", attempt: 2 },
-		);
+		const prompt = guard.buildForceActPrompt("repeated-text-no-action", true, {
+			content: "Lo agrego ahora:",
+			attempt: 2,
+		});
 		expect(prompt).toContain("attempt #2");
 		expect(prompt).toContain("ONLY the tool call");
 	});

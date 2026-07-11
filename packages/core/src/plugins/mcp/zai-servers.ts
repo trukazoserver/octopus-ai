@@ -5,6 +5,68 @@ export interface ZaiMCPConfig {
 	enabledServers: string[];
 }
 
+export type ZaiMCPPlatform = "ZAI" | "ZHIPU";
+
+export interface ZaiProviderAuthConfig {
+	apiKey?: string;
+	codingApiKey?: string;
+	apiKeyEnv?: string;
+	mode?: string;
+}
+
+export function resolveZaiMCPAuth(
+	provider: ZaiProviderAuthConfig | undefined,
+	environment: Record<string, string | undefined> = process.env,
+): { apiKey: string; platform: ZaiMCPPlatform } | null {
+	const mode = provider?.mode ?? "coding-global";
+	const configuredPlatform: ZaiMCPPlatform =
+		mode === "coding-plan" || mode === "api" ? "ZHIPU" : "ZAI";
+	const configuredKey =
+		(mode === "coding-plan" || mode === "coding-global"
+			? provider?.codingApiKey
+			: provider?.apiKey) ??
+		provider?.codingApiKey ??
+		provider?.apiKey;
+	if (configuredKey?.trim()) {
+		return { apiKey: configuredKey.trim(), platform: configuredPlatform };
+	}
+
+	if (provider?.apiKeyEnv) {
+		const customKey = environment[provider.apiKeyEnv]?.trim();
+		if (customKey) {
+			return {
+				apiKey: customKey,
+				platform: provider.apiKeyEnv.toUpperCase().includes("ZHIPU")
+					? "ZHIPU"
+					: configuredPlatform,
+			};
+		}
+	}
+
+	const zaiCandidates: Array<{
+		apiKey: string | undefined;
+		platform: ZaiMCPPlatform;
+	}> = [
+		{ apiKey: environment.ZAI_CODING_API_KEY, platform: "ZAI" },
+		{ apiKey: environment.Z_AI_API_KEY, platform: "ZAI" },
+		{ apiKey: environment.ZAI_API_KEY, platform: "ZAI" },
+	];
+	const zhipuCandidates: typeof zaiCandidates = [
+		{ apiKey: environment.ZHIPU_CODING_API_KEY, platform: "ZHIPU" },
+		{ apiKey: environment.ZHIPU_API_KEY, platform: "ZHIPU" },
+	];
+	const candidates =
+		configuredPlatform === "ZHIPU"
+			? [...zhipuCandidates, ...zaiCandidates]
+			: [...zaiCandidates, ...zhipuCandidates];
+	for (const candidate of candidates) {
+		if (candidate.apiKey?.trim()) {
+			return { apiKey: candidate.apiKey.trim(), platform: candidate.platform };
+		}
+	}
+	return null;
+}
+
 export const ZAI_MCP_SERVERS = {
 	"web-reader": {
 		name: "Web Reader",
@@ -69,6 +131,7 @@ function createRemoteMCPConfig(url: string, apiKey: string): MCPServerConfig {
 
 export function getZaiMCPConfigs(
 	apiKey: string,
+	platform: ZaiMCPPlatform = "ZAI",
 ): Record<string, MCPServerConfig> {
 	const configs: Record<string, MCPServerConfig> = {};
 
@@ -92,7 +155,7 @@ export function getZaiMCPConfigs(
 		args: ["-y", "@z_ai/mcp-server@latest"],
 		env: {
 			Z_AI_API_KEY: apiKey,
-			Z_AI_MODE: "ZAI",
+			Z_AI_MODE: platform,
 		},
 	};
 

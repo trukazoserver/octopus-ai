@@ -76,7 +76,10 @@ import type {
 	MemoryRelationType,
 } from "../memory/types.js";
 import type { MCPManagedServer } from "../plugins/mcp/manager.js";
-import { getZaiMCPConfigs } from "../plugins/mcp/zai-servers.js";
+import {
+	getZaiMCPConfigs,
+	resolveZaiMCPAuth,
+} from "../plugins/mcp/zai-servers.js";
 import { SecretRedactor } from "../security/secret-redactor.js";
 import type { Skill } from "../skills/types.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
@@ -1185,6 +1188,18 @@ export class TransportServer {
 				if (
 					req.method === "GET" &&
 					pathname.startsWith("/api/conversations/") &&
+					pathname.endsWith("/tool-actions")
+				) {
+					const convId = pathname
+						.slice("/api/conversations/".length)
+						.replace(/\/tool-actions$/, "");
+					void this.handleGetConversationToolActions(res, convId, url);
+					return;
+				}
+
+				if (
+					req.method === "GET" &&
+					pathname.startsWith("/api/conversations/") &&
 					pathname.endsWith("/execution")
 				) {
 					const convId = pathname
@@ -2249,11 +2264,22 @@ export class TransportServer {
 				prov.oauthAccessToken = accessToken;
 			}
 			providerConfig.vertex = prov;
+			const embeddings = config.memory.embeddings;
+			if (
+				embeddings.provider === "google" &&
+				embeddings.authMode === "vertex"
+			) {
+				embeddings.projectId = String(prov.projectId ?? "");
+				embeddings.location = String(prov.location ?? "global");
+				embeddings.credentialsFile = String(prov.credentialsFile ?? "");
+				embeddings.credentialsJson = "";
+			}
 			loader.save(config);
 
 			if (this.system?.router) {
 				await this.system.router.reconfigure(config.ai);
 			}
+			await this.system?.refreshEmbeddingProvider?.(config);
 
 			// Never echo the raw key JSON back to the client.
 			const { serviceAccountKey: _omitted, ...safeResult } = result;
@@ -2401,11 +2427,22 @@ export class TransportServer {
 				prov.accessToken = undefined;
 			}
 			providerConfig.vertex = prov;
+			const embeddings = config.memory.embeddings;
+			if (
+				embeddings.provider === "google" &&
+				embeddings.authMode === "vertex"
+			) {
+				embeddings.projectId = String(prov.projectId ?? "");
+				embeddings.location = String(prov.location ?? "global");
+				embeddings.credentialsFile = String(prov.credentialsFile ?? "");
+				embeddings.credentialsJson = "";
+			}
 			loader.save(config);
 
 			if (this.system?.router) {
 				await this.system.router.reconfigure(config.ai);
 			}
+			await this.system?.refreshEmbeddingProvider?.(config);
 
 			resetGcloudLoginSession();
 
@@ -4713,9 +4750,12 @@ export class TransportServer {
 				if (!enabled) {
 					await this.system.mcpManager.removeServer(name);
 				} else {
-					const apiKey = config.ai?.providers?.zhipu?.apiKey;
-					if (apiKey) {
-						const zaiConfigs = getZaiMCPConfigs(apiKey);
+					const auth = resolveZaiMCPAuth(
+						config.ai?.providers?.zhipu,
+						process.env,
+					);
+					if (auth) {
+						const zaiConfigs = getZaiMCPConfigs(auth.apiKey, auth.platform);
 						const serverConfig = zaiConfigs[name];
 						if (serverConfig) {
 							await this.system.mcpManager.addServer(name, serverConfig);
@@ -5503,6 +5543,49 @@ export class TransportServer {
 				active ??
 				(await this.system.chatManager.getLatestExecutionForConversation(id));
 			jsonRes(res, 200, { execution: latest });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetConversationToolActions(
+		res: ServerResponse,
+		id: string,
+		url: URL,
+	): Promise<void> {
+		try {
+			if (!this.system?.chatManager) {
+				jsonRes(res, 503, { error: "Chat manager not available" });
+				return;
+			}
+			const requestedStatus = url.searchParams.get("status");
+			const validStatuses = [
+				"running",
+				"completed",
+				"failed",
+				"uncertain",
+			] as const;
+			if (
+				requestedStatus &&
+				!validStatuses.includes(
+					requestedStatus as (typeof validStatuses)[number],
+				)
+			) {
+				jsonRes(res, 400, { error: "Invalid tool action status" });
+				return;
+			}
+			const requestedLimit = Number(url.searchParams.get("limit") ?? 100);
+			const limit = Number.isFinite(requestedLimit)
+				? Math.max(1, Math.min(200, Math.trunc(requestedLimit)))
+				: 100;
+			const actions = await this.system.chatManager.listToolActions(id, {
+				limit,
+				executionId: url.searchParams.get("executionId") ?? undefined,
+				status: requestedStatus as (typeof validStatuses)[number] | undefined,
+			});
+			jsonRes(res, 200, { actions });
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),

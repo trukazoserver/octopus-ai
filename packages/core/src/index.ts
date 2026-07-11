@@ -333,6 +333,7 @@ export {
 	createShellTool,
 	DockerSandbox,
 	BrowserTool,
+	BrowserSessionPool,
 	CodeExecutor,
 	createCodeTools,
 	createCodexImageTools,
@@ -354,6 +355,7 @@ export {
 } from "./tools/index.js";
 export type {
 	ToolDefinition,
+	ToolErrorCode,
 	ToolResult,
 	ToolHealthStatus,
 	ToolHealthRecord,
@@ -502,7 +504,11 @@ export type {
 export type {
 	ChatExecution,
 	ChatExecutionActivity,
+	ChatCompletionReason,
+	ChatPendingAction,
 	ChatExecutionStatus,
+	ChatToolAction,
+	ChatToolActionStatus,
 	Conversation,
 	ChatMessage,
 } from "./chat/manager.js";
@@ -521,7 +527,10 @@ export type { EnvVar } from "./config/env-manager.js";
 
 export { MCPManager } from "./plugins/mcp/manager.js";
 export type { MCPManagedServer } from "./plugins/mcp/manager.js";
-export { getZaiMCPConfigs } from "./plugins/mcp/zai-servers.js";
+export {
+	getZaiMCPConfigs,
+	resolveZaiMCPAuth,
+} from "./plugins/mcp/zai-servers.js";
 
 export { ChannelManager } from "./channels/manager.js";
 export { TelegramChannel } from "./channels/telegram/index.js";

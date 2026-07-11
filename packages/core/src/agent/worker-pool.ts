@@ -42,6 +42,14 @@ export interface LiveAgentRuntime {
 			signal?: AbortSignal;
 			disableOrchestrator?: boolean;
 			disableDelegation?: boolean;
+			delegationContext?: {
+				workerId: string;
+				taskId: string;
+				role?: string;
+				runId?: string;
+				toolScope?: string[];
+				fileScope?: string[];
+			};
 		},
 	): AsyncIterable<string>;
 	processMessage?(
@@ -51,12 +59,21 @@ export interface LiveAgentRuntime {
 			signal?: AbortSignal;
 			disableOrchestrator?: boolean;
 			disableDelegation?: boolean;
+			delegationContext?: {
+				workerId: string;
+				taskId: string;
+				role?: string;
+				runId?: string;
+				toolScope?: string[];
+				fileScope?: string[];
+			};
 		},
 	): Promise<string>;
 }
 
 export interface WorkerPoolOptions {
 	getAgentRuntime?: (agentId: string) => LiveAgentRuntime | undefined;
+	releaseWorkerResources?: (workerId: string) => Promise<void>;
 }
 
 export interface SubTask {
@@ -233,6 +250,14 @@ export class WorkerPool {
 			signal: state.abortController.signal,
 			disableOrchestrator: true,
 			disableDelegation: true,
+			delegationContext: {
+				workerId: state.id,
+				taskId: task.id,
+				role: task.role,
+				runId: config.runId,
+				toolScope: task.toolScope,
+				fileScope: task.fileScope,
+			},
 		};
 		this.eventStream.append({
 			runId: config.runId,
@@ -340,6 +365,10 @@ export class WorkerPool {
 		const fileScope = task.fileScope?.length
 			? `\nSolo puedes operar en estos archivos/directorios: ${task.fileScope.join(", ")}.`
 			: "";
+		const usesBrowser =
+			task.role === "researcher" ||
+			task.role === "browser-navigator" ||
+			task.toolScope.some((tool) => tool.startsWith("browser_"));
 
 		return [
 			`Eres ${task.agentName ?? "un worker especializado"} con el rol de "${task.role}".`,
@@ -364,6 +393,9 @@ export class WorkerPool {
 			"- Reporta tu resultado de forma concisa cuando termines.",
 			`- Tienes un presupuesto máximo de ${config.maxToolIterations} iteraciones de herramientas.`,
 			"- Si encuentras un bloqueo que no puedes resolver, reporta el error inmediatamente.",
+			usesBrowser
+				? "- Tu navegador nativo está aislado para este worker. Navega, espera la preparación de render, usa siempre el snapshot más reciente, verifica cada cambio observable y toma capturas fullPage solo después de que lazy-load, fuentes e imágenes estén estables. No reutilices UIDs ni estado de navegador de otros workers."
+				: "",
 		].join("\n");
 	}
 
@@ -373,7 +405,14 @@ export class WorkerPool {
 	 */
 	private getScopedTools(_toolScope: string[]): ToolDefinition[] {
 		const allTools = this.toolRegistry.list();
-		return allTools.filter((tool) => tool.name !== "delegate_task");
+		return allTools.filter(
+			(tool) =>
+				tool.name !== "delegate_task" &&
+				!(
+					tool.metadata?.statefulBrowser === true &&
+					tool.metadata?.workerIsolated !== true
+				),
+		);
 	}
 
 	/**
@@ -517,6 +556,7 @@ export class WorkerPool {
 			return `Error en tarea "${task.description}": ${errorMsg}`;
 		} finally {
 			fullConfig.signal?.removeEventListener("abort", abortFromParent);
+			await this.options.releaseWorkerResources?.(workerId).catch(() => {});
 			this.workers.delete(workerId);
 		}
 	}
