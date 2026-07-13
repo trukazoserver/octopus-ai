@@ -36,7 +36,11 @@ describe("WorkflowScheduler", () => {
 
 		expect(result).toEqual({ claimed: 1, skipped: 0 });
 		await vi.waitFor(() => {
-			expect(resumeWorkflowRun).toHaveBeenCalledWith("wf-1", {}, { ownerId: "scheduler-test" });
+			expect(resumeWorkflowRun).toHaveBeenCalledWith(
+				"wf-1",
+				expect.objectContaining({ signal: expect.anything() }),
+				{ ownerId: "scheduler-test" },
+			);
 		});
 	});
 

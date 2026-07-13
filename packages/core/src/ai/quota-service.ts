@@ -225,9 +225,7 @@ export async function resolveProviderQuotas(
 					if (persisted) {
 						results.push(quotaFromCache(persisted, displayName, "codex"));
 					} else {
-						probed.detail =
-							(probed.detail ? probed.detail + " · " : "") +
-							"La cuota aparece tras el primer mensaje con este modelo (cabeceras x-codex-* en /responses).";
+						probed.detail = `${probed.detail ? `${probed.detail} · ` : ""}La cuota aparece tras el primer mensaje con este modelo (cabeceras x-codex-* en /responses).`;
 						results.push(probed);
 					}
 				}
@@ -278,7 +276,7 @@ async function probeCodex(
 		"session-id": randomUUID(),
 	};
 	const accountId = process.env.CODEX_ACCOUNT_ID;
-	if (accountId) headers["chatgpt_account_id"] = accountId;
+	if (accountId) headers.chatgpt_account_id = accountId;
 
 	// Minimal Responses API call: a trivial user turn, no tools, store:false,
 	// stream:true (the backend rejects stream:false). Body mirrors

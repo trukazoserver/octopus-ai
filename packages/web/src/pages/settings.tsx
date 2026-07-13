@@ -1290,7 +1290,7 @@ function OAuthLoginSection({
 function Spinner({ size = 16 }: { size?: number }) {
 	return (
 		<>
-			<style>{`@keyframes octo-spin { to { transform: rotate(360deg); } }`}</style>
+			<style>{"@keyframes octo-spin { to { transform: rotate(360deg); } }"}</style>
 			<span
 				aria-hidden
 				style={{

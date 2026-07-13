@@ -48,6 +48,8 @@ export class ExternalVectorStore extends VectorStore {
 	private lastRemoteFailureAt?: Date;
 	private lastRemoteError?: string;
 	private readonly targetId: string;
+	private reconciliationTimer?: ReturnType<typeof setInterval>;
+	private reconciliation?: Promise<number>;
 
 	constructor(
 		db: DatabaseAdapter,
@@ -66,6 +68,10 @@ export class ExternalVectorStore extends VectorStore {
 		if (this.dimension) await this.ensureRemoteCollection(this.dimension);
 		this.initialized = true;
 		await this.reconcilePendingWrites();
+		this.reconciliationTimer = setInterval(() => {
+			void this.reconcilePendingWrites().catch(() => {});
+		}, 30_000);
+		this.reconciliationTimer.unref?.();
 	}
 
 	async store(item: MemoryItem): Promise<void> {
@@ -165,6 +171,21 @@ export class ExternalVectorStore extends VectorStore {
 	}
 
 	async reconcilePendingWrites(memoryId?: string): Promise<number> {
+		if (this.reconciliation) return this.reconciliation;
+		this.reconciliation = this.performReconciliation(memoryId);
+		try {
+			return await this.reconciliation;
+		} finally {
+			this.reconciliation = undefined;
+		}
+	}
+
+	async close(): Promise<void> {
+		if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
+		this.reconciliationTimer = undefined;
+	}
+
+	private async performReconciliation(memoryId?: string): Promise<number> {
 		const now = new Date().toISOString();
 		const rows = await this.db.all<VectorOutboxRow>(
 			`SELECT memory_id, operation, attempt_count FROM memory_vector_outbox WHERE target_id = ? AND available_at <= ?${memoryId ? " AND memory_id = ?" : ""} ORDER BY created_at ASC LIMIT 100`,

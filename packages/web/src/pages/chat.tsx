@@ -5753,7 +5753,8 @@ export const ChatPage: React.FC<{
 																		flexShrink: 0,
 																		lineHeight: 0,
 																	}}
-																	dangerouslySetInnerHTML={{
+																// biome-ignore lint/security/noDangerouslySetInnerHtml: SVG values are generated locally and labels are XML-escaped.
+																dangerouslySetInnerHTML={{
 																		__html: fileIconSvg(badge.bg, badge.label, 42),
 																	}}
 																/>

@@ -3013,6 +3013,7 @@ Always be concise, helpful, and thorough.`,
 			await browserTool?.closeAll();
 			await mcpManager.shutdown();
 			connectionManager.shutdown();
+			await vectorStore.close();
 			await db.close();
 		},
 	};

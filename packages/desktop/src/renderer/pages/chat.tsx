@@ -114,6 +114,7 @@ export const Chat: React.FC = () => {
 	const [streaming, setStreaming] = useState(false);
 	const [streamEnabled, setStreamEnabled] = useState(true);
 	const wsRef = useRef<WebSocket | null>(null);
+	const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 
 	// biome-ignore lint: dependency is intentional to scroll on new messages
@@ -123,15 +124,30 @@ export const Chat: React.FC = () => {
 
 	useEffect(() => {
 		const connectWs = () => {
+			if (
+				wsRef.current?.readyState === WebSocket.OPEN ||
+				wsRef.current?.readyState === WebSocket.CONNECTING
+			) return;
+			if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+			reconnectTimerRef.current = null;
 			const ws = new WebSocket("ws://127.0.0.1:18789");
 			wsRef.current = ws;
 
-			ws.onopen = () => setConnected(true);
-			ws.onclose = () => {
-				setConnected(false);
-				setTimeout(connectWs, 3000);
+			ws.onopen = () => {
+				if (wsRef.current === ws) setConnected(true);
 			};
-			ws.onerror = () => setConnected(false);
+			ws.onclose = () => {
+				if (wsRef.current !== ws) return;
+				wsRef.current = null;
+				setConnected(false);
+				if (!reconnectTimerRef.current) {
+					reconnectTimerRef.current = setTimeout(() => {
+						reconnectTimerRef.current = null;
+						connectWs();
+					}, 3000);
+				}
+			};
+			ws.onerror = () => ws.close();
 
 			ws.onmessage = (event) => {
 				try {
@@ -190,7 +206,14 @@ export const Chat: React.FC = () => {
 
 		connectWs();
 		return () => {
-			wsRef.current?.close();
+			if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+			reconnectTimerRef.current = null;
+			const ws = wsRef.current;
+			wsRef.current = null;
+			if (ws) {
+				ws.onclose = null;
+				ws.close();
+			}
 		};
 	}, []);
 
@@ -218,18 +241,6 @@ export const Chat: React.FC = () => {
 				}),
 			);
 		} else {
-			fetch("http://127.0.0.1:18789/api/status")
-				.then(() => {
-					fetch("http://127.0.0.1:18789/api/code/execute", {
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ code: input, language: "text" }),
-					})
-						.then(() => {})
-						.catch(() => {});
-				})
-				.catch(() => {});
-
 			setTimeout(() => {
 				setMessages((prev) => [
 					...prev,

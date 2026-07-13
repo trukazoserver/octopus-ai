@@ -961,6 +961,7 @@ export class OctopusOrchestrator {
 			: await this.workflowManager.claimRunForExecution(workflowRunId);
 		if (!claimedRun) return;
 		if (ownership && claimedRun.owner_id !== ownership.ownerId) return;
+		const effectiveOwnerId = claimedRun.owner_id ?? ownership?.ownerId;
 
 		const snapshot = await this.workflowManager.getRunSnapshot(workflowRunId);
 		const storedEvents = snapshot.events as WorkflowEventRecord[];
@@ -1007,11 +1008,12 @@ export class OctopusOrchestrator {
 				{ ...decomposition, subtasks: allSubtasks },
 				storedResults,
 			);
-			await this.workflowManager.updateRunStatus(workflowRunId, final.status, {
+			const finalized = await this.workflowManager.updateRunStatus(workflowRunId, final.status, {
 				currentPhase: "synthesis",
 				metadata: { resumed: true, runId, ...final },
-				ownerId: ownership?.ownerId,
+				ownerId: effectiveOwnerId,
 			});
+			if (!finalized) return;
 			await this.workflowManager.recordEvent({
 				runId: workflowRunId,
 				agentId: this.baseConfig.id,
@@ -1210,9 +1212,9 @@ export class OctopusOrchestrator {
 			const synthesisMs = Date.now() - synthesisStartedAt;
 			const final = this.getFinalStatusFromSubtasks(allSubtasks);
 
-			await this.workflowManager.updateRunStatus(workflowRunId, final.status, {
+			const finalized = await this.workflowManager.updateRunStatus(workflowRunId, final.status, {
 				currentPhase: "synthesis",
-				ownerId: ownership?.ownerId,
+				ownerId: effectiveOwnerId,
 				metadata: {
 					orchestratorRunId: runId,
 					resumed: true,
@@ -1223,6 +1225,7 @@ export class OctopusOrchestrator {
 					cancelled: final.cancelled,
 				},
 			});
+			if (!finalized) return;
 			await this.workflowManager.recordEvent({
 				runId: workflowRunId,
 				agentId: this.baseConfig.id,

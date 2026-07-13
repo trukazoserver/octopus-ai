@@ -10,7 +10,7 @@
 	"scripts": {
 		"build": "tsc",
 		"dev": "tsc --watch",
-		"lint": "biome check src/",
+		"lint": "biome lint src/",
 		"test": "vitest run",
 		"typecheck": "tsc --noEmit",
 		"clean": "rimraf dist"

@@ -1100,6 +1100,7 @@ export const AgentsPage: React.FC = () => {
 						/>
 						<div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
 							<label
+								htmlFor="agent-reasoning-effort"
 								style={{
 									fontSize: "0.8rem",
 									color: "#a1a1aa",
@@ -1117,6 +1118,7 @@ export const AgentsPage: React.FC = () => {
 								return (
 									<>
 										<select
+											id="agent-reasoning-effort"
 											value={caps && !supports ? "none" : form.reasoningEffort}
 											disabled={!supports}
 											onChange={(e) =>

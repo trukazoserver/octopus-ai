@@ -76,6 +76,19 @@ describe("WorkflowManager recovery", () => {
 		expect(await manager.heartbeatRunLease(run.id, winner?.owner_id ?? "")).toBe(true);
 	});
 
+	it("fences terminal updates by owner and unexpired lease", async () => {
+		const run = await manager.createRun({ goal: "fenced finish" });
+		await manager.claimRunForExecution(run.id, { ownerId: "owner-a" });
+		expect(await manager.updateRunStatus(run.id, "done", { ownerId: "owner-b" })).toBe(false);
+		expect(await manager.updateRunStatus(run.id, "done", { ownerId: "owner-a" })).toBe(true);
+		expect(await manager.getRun(run.id)).toMatchObject({ status: "done", owner_id: null });
+
+		const expired = await manager.createRun({ goal: "expired finish" });
+		await manager.claimRunForExecution(expired.id, { ownerId: "owner-a" });
+		await db.run("UPDATE agent_workflow_runs SET lease_expires_at = ? WHERE id = ?", [new Date(0).toISOString(), expired.id]);
+		expect(await manager.updateRunStatus(expired.id, "done", { ownerId: "owner-a" })).toBe(false);
+	});
+
 	it("retryRun preserves done tasks and resets failed tasks", async () => {
 		const run = await manager.createRun({ goal: "retry workflow" });
 		const done = await manager.createTask({ runId: run.id, title: "done" });

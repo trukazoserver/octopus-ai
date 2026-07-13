@@ -66,20 +66,34 @@ export class WorkflowScheduler {
 	}
 
 	private async drainRun(run: WorkflowRunRecord): Promise<void> {
+		const controller = new AbortController();
+		let iterator: AsyncIterator<unknown> | undefined;
+		let heartbeatInFlight = false;
+		const loseLease = async (error?: unknown) => {
+			if (controller.signal.aborted) return;
+			controller.abort();
+			await iterator?.return?.();
+			if (error) this.options.onError?.(error, run);
+		};
 		const heartbeat = setInterval(() => {
-			void this.workflowManager.heartbeatRunLease(
-				run.id,
-				this.ownerId,
-				this.options.leaseTtlMs,
-			);
+			if (heartbeatInFlight || controller.signal.aborted) return;
+			heartbeatInFlight = true;
+			void this.workflowManager
+				.heartbeatRunLease(run.id, this.ownerId, this.options.leaseTtlMs)
+				.then((renewed) => (renewed ? undefined : loseLease()))
+				.catch((error) => loseLease(error))
+				.finally(() => {
+					heartbeatInFlight = false;
+				});
 		}, this.options.heartbeatIntervalMs ?? 30_000);
 		try {
 			const iterable = await this.resumer.resumeWorkflowRun(
 				run.id,
-				{},
+				{ signal: controller.signal },
 				{ ownerId: this.ownerId },
 			);
-			for await (const _event of iterable) {
+			iterator = iterable[Symbol.asyncIterator]();
+			for await (const _event of { [Symbol.asyncIterator]: () => iterator as AsyncIterator<unknown> }) {
 				/* durable events are persisted by the orchestrator */
 			}
 		} catch (error) {

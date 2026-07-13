@@ -376,12 +376,7 @@ export class PdfReader {
 							pages: params.pages ? String(params.pages) : undefined,
 							ocr,
 						});
-						const header =
-							`PDF read OK — ${result.totalPages} page(s) total, returned ${result.pages.length}.` +
-							(result.ocrUsed ? " OCR used on scanned page(s)." : "") +
-							(result.ocrSkippedReason
-								? ` OCR skipped: ${result.ocrSkippedReason}`
-								: "");
+						const header = `PDF read OK — ${result.totalPages} page(s) total, returned ${result.pages.length}.${result.ocrUsed ? " OCR used on scanned page(s)." : ""}${result.ocrSkippedReason ? ` OCR skipped: ${result.ocrSkippedReason}` : ""}`;
 						const text = result.text.trim();
 						if (!text) {
 							return {

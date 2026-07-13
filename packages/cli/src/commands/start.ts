@@ -16,7 +16,7 @@ import {
 	DiscordChannel,
 	SlackChannel,
 	TransportServer,
-	AgentRuntime,
+	type AgentRuntime,
 	createDeliveryContext,
 	mediaContext,
 } from "@octopus-ai/core";

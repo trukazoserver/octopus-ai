@@ -78,7 +78,7 @@
 	"scripts": {
 		"build": "tsc && npm run copy:assets",
 		"dev": "tsc --watch",
-		"lint": "biome check src/",
+		"lint": "biome lint src/",
 		"test": "vitest run",
 		"test:live": "vitest run src/__tests__/storage-postgres-live.test.ts src/__tests__/vector-store-live.test.ts src/__tests__/zhipu-live.test.ts src/__tests__/reasoning-live.test.ts",
 		"test:live:postgres": "vitest run src/__tests__/storage-postgres-live.test.ts",

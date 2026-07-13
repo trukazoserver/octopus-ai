@@ -12,10 +12,10 @@
 
 import type { LLMRouter } from "../ai/router.js";
 import { getOctopusArmProfile } from "./arm-profiles.js";
-import {
+import type {
 	AgentCoordinationBus,
-	type AgentArtifact,
-	type ArtifactReview,
+	AgentArtifact,
+	ArtifactReview,
 } from "./agent-coordination-bus.js";
 
 export interface CrossReviewConfig {

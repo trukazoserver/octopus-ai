@@ -765,8 +765,33 @@ export class MemoryOrchestrator {
 	async forget(memoryId: string, reason: string): Promise<void> {
 		await this.initialize();
 		const item = await this.deps.ltm.getById(memoryId);
-		if (!item) return;
+		const sourceRows = await this.deps.db.all<{ source_id: string }>(
+			"SELECT source_id FROM memory_source_links WHERE memory_id = ? UNION SELECT source_id FROM memory_evidence WHERE memory_id = ? AND source_id IS NOT NULL",
+			[memoryId, memoryId],
+		);
+		const nodeRows = await this.deps.db.all<{ node_id: string }>(
+			"SELECT node_id FROM memory_node_links WHERE memory_id = ?",
+			[memoryId],
+		);
+		const relations = await this.deps.db.all<{ id: string; metadata: string | null }>(
+			"SELECT id, metadata FROM memory_relations",
+		);
+		const ownedRelationIds = relations
+			.filter((relation) => {
+				try {
+					return JSON.parse(relation.metadata ?? "{}").memoryId === memoryId;
+				} catch {
+					return false;
+				}
+			})
+			.map((relation) => relation.id);
+
+		await this.deps.ltm.forget(memoryId);
 		await this.deps.db.transaction(async () => {
+			for (const relationId of ownedRelationIds) {
+				await this.deps.db.run("DELETE FROM memory_relation_sources WHERE edge_id = ?", [relationId]);
+				await this.deps.db.run("DELETE FROM memory_relations WHERE id = ?", [relationId]);
+			}
 			for (const statement of [
 				"DELETE FROM memory_evidence WHERE memory_id = ?",
 				"DELETE FROM memory_usage WHERE memory_id = ?",
@@ -781,8 +806,35 @@ export class MemoryOrchestrator {
 					statement.includes(" OR target_id") ? [memoryId, memoryId] : [memoryId],
 				);
 			}
-			await this.deps.ltm.forget(memoryId);
+			for (const { node_id: nodeId } of nodeRows) {
+				const referenced = await this.deps.db.get<{ id: string }>(
+					"SELECT memory_id AS id FROM memory_node_links WHERE node_id = ? LIMIT 1",
+					[nodeId],
+				);
+				if (referenced) continue;
+				const touching = await this.deps.db.all<{ id: string }>(
+					"SELECT id FROM memory_relations WHERE from_node_id = ? OR to_node_id = ?",
+					[nodeId, nodeId],
+				);
+				for (const relation of touching) {
+					await this.deps.db.run("DELETE FROM memory_relation_sources WHERE edge_id = ?", [relation.id]);
+					await this.deps.db.run("DELETE FROM memory_relations WHERE id = ?", [relation.id]);
+				}
+				await this.deps.db.run("DELETE FROM memory_nodes WHERE id = ?", [nodeId]);
+			}
+			for (const { source_id: sourceId } of sourceRows) {
+				const linked = await this.deps.db.get<{ id: string }>(
+					"SELECT memory_id AS id FROM memory_source_links WHERE source_id = ? LIMIT 1",
+					[sourceId],
+				);
+				const relationLinked = await this.deps.db.get<{ id: string }>(
+					"SELECT edge_id AS id FROM memory_relation_sources WHERE source_id = ? LIMIT 1",
+					[sourceId],
+				);
+				if (!linked && !relationLinked) await this.deps.db.run("DELETE FROM memory_sources WHERE id = ?", [sourceId]);
+			}
 		});
+		if (!item) return;
 		await this.recordAudit({
 			actorId: "user",
 			action: "forgotten",

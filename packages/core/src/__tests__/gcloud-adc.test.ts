@@ -278,8 +278,7 @@ describe("gcloud-adc", () => {
 			expect(getGcloudLoginStatus().status).toBe("idle");
 		});
 
-		it("short-circuits to ready when ADC already exists", () => {
-			// findGcloudBinary ok + ADC present.
+		it("starts login even when ADC exists so the user can select an account", () => {
 			setPlatform("linux");
 			mocks.cp.spawnSync.mockImplementation((cmd: string) =>
 				cmd.includes("command -v")
@@ -290,22 +289,21 @@ describe("gcloud-adc", () => {
 				(p: unknown) => String(p) === "/usr/bin/gcloud",
 			);
 			mocks.fs.readFileSync.mockReturnValue(ADC_JSON);
+			const child = makeFakeChild();
+			mocks.cp.spawn.mockReturnValue(child);
 			const r = spawnGcloudLogin();
 			expect(r.ok).toBe(true);
-			expect(mocks.cp.spawn).not.toHaveBeenCalled();
-			expect(getGcloudLoginStatus()).toMatchObject({
-				status: "ready",
-				account: "user@example.com",
-			});
+			expect(mocks.cp.spawn).toHaveBeenCalled();
+			expect(getGcloudLoginStatus()).toMatchObject({ status: "running" });
 		});
 
 		it("transitions running -> ready on exit(0) with ADC", () => {
 			setPlatform("linux");
-			mocks.cp.spawnSync.mockImplementation((cmd: string) =>
-				cmd.includes("command -v")
-					? { status: 0, stdout: "/usr/bin/gcloud\n" }
-					: { status: 1, stdout: "" },
-			);
+			mocks.cp.spawnSync.mockImplementation((cmd: string, args?: string[]) => {
+				if (cmd.includes("command -v")) return { status: 0, stdout: "/usr/bin/gcloud\n" };
+				if (args?.includes("get-value")) return { status: 0, stdout: "user@example.com\n" };
+				return { status: 1, stdout: "" };
+			});
 			mocks.fs.existsSync.mockImplementation(
 				(p: unknown) => String(p) === "/usr/bin/gcloud",
 			);

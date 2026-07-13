@@ -2071,15 +2071,10 @@ export class TransportServer {
 				jsonRes(res, 404, { error: `Key '${keyPath}' not found` });
 				return;
 			}
-			const keyLower = keyPath.toLowerCase();
-			const isSensitive =
-				keyLower.includes("apikey") || keyLower.includes("encryptionkey");
+			const redacted = API_CONFIG_REDACTOR.redact({ [keyPath]: value }) as Record<string, unknown>;
 			jsonRes(res, 200, {
 				key: keyPath,
-				value:
-					isSensitive && typeof value === "string" && value.length > 0
-						? `${value.slice(0, 4)}...${value.slice(-4)}`
-						: value,
+				value: redacted[keyPath],
 			});
 		} catch (err) {
 			jsonRes(res, 500, {

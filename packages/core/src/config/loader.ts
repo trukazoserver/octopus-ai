@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getDefaults } from "./defaults.js";
@@ -91,7 +91,11 @@ export class ConfigLoader {
 			mkdirSync(dir, { recursive: true });
 		}
 
-		writeFileSync(this.configPath, JSON.stringify(config, null, 2), "utf-8");
+		writeFileSync(this.configPath, JSON.stringify(config, null, 2), {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+		if (process.platform !== "win32") chmodSync(this.configPath, 0o600);
 	}
 
 	/**
@@ -147,7 +151,7 @@ export class ConfigLoader {
 			providers.vertex = { ...(providers.vertex ?? {}), ...vertexFields };
 		}
 
-		delete providers.google;
+		Reflect.deleteProperty(providers, "google");
 		return true;
 	}
 

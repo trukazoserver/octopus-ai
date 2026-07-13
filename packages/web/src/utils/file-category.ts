@@ -211,16 +211,12 @@ export function fileIconSvg(color: string, label: string, height = 32): string {
 	const width = Math.round((height * 40) / 48);
 	const len = label.length;
 	const fontSize = len > 3 ? 7.6 : len > 2 ? 8.4 : 9.2;
-	return (
-		`<svg viewBox="0 0 40 48" width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
-		// document body with folded top-right corner
-		`<path d="M8 4 h15 l9 9 v29 a3 3 0 0 1 -3 3 H8 a3 3 0 0 1 -3 -3 V7 a3 3 0 0 1 3 -3 z" fill="${color}"/>` +
-		// folded corner (depth)
-		`<path d="M23 4 l9 9 h-9 z" fill="#000000" fill-opacity="0.18"/>` +
-		// label band
-		`<rect x="6.5" y="27" width="24" height="12" rx="2.5" fill="#000000" fill-opacity="0.24"/>` +
-		// label text
-		`<text x="18.5" y="35.6" text-anchor="middle" font-family="ui-sans-serif,system-ui,'Segoe UI',Arial,sans-serif" font-size="${fontSize}" font-weight="800" fill="#ffffff" letter-spacing="0.4">${escapeXml(label)}</text>` +
-		`</svg>`
-	);
+	return [
+		`<svg viewBox="0 0 40 48" width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">`,
+		`<path d="M8 4 h15 l9 9 v29 a3 3 0 0 1 -3 3 H8 a3 3 0 0 1 -3 -3 V7 a3 3 0 0 1 3 -3 z" fill="${color}"/>`,
+		'<path d="M23 4 l9 9 h-9 z" fill="#000000" fill-opacity="0.18"/>',
+		'<rect x="6.5" y="27" width="24" height="12" rx="2.5" fill="#000000" fill-opacity="0.24"/>',
+		`<text x="18.5" y="35.6" text-anchor="middle" font-family="ui-sans-serif,system-ui,'Segoe UI',Arial,sans-serif" font-size="${fontSize}" font-weight="800" fill="#ffffff" letter-spacing="0.4">${escapeXml(label)}</text>`,
+		"</svg>",
+	].join("");
 }

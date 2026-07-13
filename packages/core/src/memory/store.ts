@@ -26,4 +26,6 @@ export abstract class VectorStore {
 	abstract update(item: MemoryItem): Promise<void>;
 	abstract delete(id: string): Promise<void>;
 	abstract count(): Promise<number>;
+
+	async close(): Promise<void> {}
 }

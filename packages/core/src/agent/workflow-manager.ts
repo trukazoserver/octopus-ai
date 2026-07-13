@@ -399,11 +399,11 @@ export class WorkflowManager {
 			metadata?: Record<string, unknown>;
 			ownerId?: string;
 		} = {},
-	): Promise<void> {
+	): Promise<boolean> {
 		const now = new Date().toISOString();
 		const terminal = TERMINAL_WORKFLOW_STATUSES.has(status) || ["interrupted", "timed_out"].includes(status);
-		await this.db.run(
-			`UPDATE agent_workflow_runs SET status = ?, current_phase = COALESCE(?, current_phase), updated_at = ?, completed_at = CASE WHEN ? IN ('done', 'failed', 'blocked', 'cancelled', 'partial', 'interrupted', 'timed_out') THEN ? ELSE completed_at END, metadata = COALESCE(?, metadata), owner_id = CASE WHEN ? THEN NULL ELSE owner_id END, lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END, last_heartbeat_at = CASE WHEN ? THEN NULL ELSE last_heartbeat_at END WHERE id = ?${options.ownerId ? " AND owner_id = ?" : ""}`,
+		const row = await this.db.get<{ id: string }>(
+			`UPDATE agent_workflow_runs SET status = ?, current_phase = COALESCE(?, current_phase), updated_at = ?, completed_at = CASE WHEN ? IN ('done', 'failed', 'blocked', 'cancelled', 'partial', 'interrupted', 'timed_out') THEN ? ELSE completed_at END, metadata = COALESCE(?, metadata), owner_id = CASE WHEN ? THEN NULL ELSE owner_id END, lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END, last_heartbeat_at = CASE WHEN ? THEN NULL ELSE last_heartbeat_at END WHERE id = ?${options.ownerId ? " AND owner_id = ? AND status = 'running' AND lease_expires_at >= ?" : ""} RETURNING id`,
 			[
 				status,
 				options.currentPhase ?? null,
@@ -415,9 +415,10 @@ export class WorkflowManager {
 				terminal ? 1 : 0,
 				terminal ? 1 : 0,
 				id,
-				...(options.ownerId ? [options.ownerId] : []),
+				...(options.ownerId ? [options.ownerId, now] : []),
 			],
 		);
+		return Boolean(row);
 	}
 
 	async getKanbanDispatcherState(): Promise<KanbanDispatcherPersistedState | null> {
@@ -917,12 +918,8 @@ export class WorkflowManager {
 		const leaseToken = nanoid(24);
 
 		return this.db.transaction(async () => {
-			const task = await this.getTask(input.taskId);
-			if (!task || task.status !== "ready") return null;
-			if (task.lease_expires_at && task.lease_expires_at >= nowIso) return null;
-
-			await this.db.run(
-				"UPDATE agent_workflow_tasks SET status = 'running', claimed_by_agent_id = ?, claimed_by_arm_key = ?, claim_token = ?, lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ? AND status = 'ready'",
+			const claimed = await this.db.get<WorkflowTaskRecord>(
+				"UPDATE agent_workflow_tasks SET status = 'running', claimed_by_agent_id = ?, claimed_by_arm_key = ?, claim_token = ?, lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ? AND status = 'ready' AND (lease_expires_at IS NULL OR lease_expires_at < ?) RETURNING *",
 				[
 					input.agentId,
 					input.armKey ?? null,
@@ -931,8 +928,10 @@ export class WorkflowManager {
 					nowIso,
 					nowIso,
 					input.taskId,
+					nowIso,
 				],
 			);
+			if (!claimed) return null;
 			await this.db.run(
 				"DELETE FROM agent_workflow_task_leases WHERE task_id = ?",
 				[input.taskId],
@@ -941,7 +940,7 @@ export class WorkflowManager {
 				"INSERT INTO agent_workflow_task_leases (task_id, run_id, agent_id, arm_key, lease_token, claimed_at, expires_at, last_heartbeat_at, heartbeat_count, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?)",
 				[
 					input.taskId,
-					task.run_id,
+					claimed.run_id,
 					input.agentId,
 					input.armKey ?? null,
 					leaseToken,
@@ -951,14 +950,13 @@ export class WorkflowManager {
 					input.metadata ? JSON.stringify(input.metadata) : null,
 				],
 			);
-			const claimed = (await this.getTask(input.taskId)) as WorkflowTaskRecord;
 			const lease = (await this.db.get<WorkflowTaskLeaseRecord>(
-				"SELECT * FROM agent_workflow_task_leases WHERE task_id = ?",
-				[input.taskId],
+				"SELECT * FROM agent_workflow_task_leases WHERE task_id = ? AND lease_token = ?",
+				[input.taskId, leaseToken],
 			)) as WorkflowTaskLeaseRecord;
 			await this.recordEvent({
-				runId: task.run_id,
-				taskId: task.id,
+				runId: claimed.run_id,
+				taskId: claimed.id,
 				agentId: input.agentId,
 				eventType: "task_claimed",
 				message: `Task claimed by ${input.armKey ?? input.agentId}.`,
@@ -978,20 +976,19 @@ export class WorkflowManager {
 		const expiresAt = new Date(
 			now.getTime() + Math.max(1, input.leaseTtlMs ?? 60_000),
 		).toISOString();
-		const lease = await this.db.get<WorkflowTaskLeaseRecord>(
-			"SELECT * FROM agent_workflow_task_leases WHERE task_id = ? AND lease_token = ? AND status = 'active'",
-			[input.taskId, input.leaseToken],
-		);
-		if (!lease) return false;
-		await this.db.run(
-			"UPDATE agent_workflow_task_leases SET expires_at = ?, last_heartbeat_at = ?, heartbeat_count = heartbeat_count + 1 WHERE task_id = ? AND lease_token = ?",
-			[expiresAt, nowIso, input.taskId, input.leaseToken],
-		);
-		await this.db.run(
-			"UPDATE agent_workflow_tasks SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ? AND claim_token = ?",
-			[expiresAt, nowIso, nowIso, input.taskId, input.leaseToken],
-		);
-		return true;
+		return this.db.transaction(async () => {
+			const lease = await this.db.get<{ task_id: string }>(
+				"UPDATE agent_workflow_task_leases SET expires_at = ?, last_heartbeat_at = ?, heartbeat_count = heartbeat_count + 1 WHERE task_id = ? AND lease_token = ? AND status = 'active' AND expires_at >= ? RETURNING task_id",
+				[expiresAt, nowIso, input.taskId, input.leaseToken, nowIso],
+			);
+			if (!lease) return false;
+			const task = await this.db.get<{ id: string }>(
+				"UPDATE agent_workflow_tasks SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ? AND claim_token = ? AND status = 'running' RETURNING id",
+				[expiresAt, nowIso, nowIso, input.taskId, input.leaseToken],
+			);
+			if (!task) throw new Error(`Task lease lost ownership: ${input.taskId}`);
+			return true;
+		});
 	}
 
 	async expireStaleLeases(

@@ -427,7 +427,7 @@ export class KnowledgeManager {
 		for (const paragraph of content.split(/\n{2,}/)) {
 			const cleaned = paragraph.trim();
 			if (!cleaned) continue;
-			if ((buffer + "\n\n" + cleaned).length > 1400 && buffer) {
+			if (`${buffer}\n\n${cleaned}`.length > 1400 && buffer) {
 				chunks.push(buffer);
 				buffer = cleaned;
 			} else {

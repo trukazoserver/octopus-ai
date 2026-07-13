@@ -197,7 +197,7 @@ export function createKanbanCommand(): Command {
 					console.log(JSON.stringify(finalSnapshot, null, 2));
 				} else {
 					console.log(
-						info(`\n📊 Final Board State:\n`),
+						info("\n📊 Final Board State:\n"),
 					);
 					console.log(formatBoard(finalSnapshot.tasks));
 					console.log(
