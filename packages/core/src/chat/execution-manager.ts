@@ -4,6 +4,7 @@ import type {
 	RuntimeCompletionOutcome,
 	RuntimeSelectedAgentContext,
 } from "../agent/runtime.js";
+import { isSimpleGreeting } from "../agent/runtime.js";
 import type { DeliveryContext } from "../delivery/context.js";
 import type {
 	ChatExecution,
@@ -194,6 +195,7 @@ export class ChatExecutionManager {
 		controller: AbortController,
 	): Promise<void> {
 		const conversationId = execution.conversation_id;
+		const simpleGreeting = isSimpleGreeting(input.message);
 		const targetAgent = this.opts.getAgentRuntime(input.agentId, conversationId);
 		const selectedAgentContext = this.opts.getSelectedAgentContext
 			? await this.opts.getSelectedAgentContext(input.agentId)
@@ -288,7 +290,7 @@ export class ChatExecutionManager {
 			}
 
 			// Reconcile interrupted runs and inject verified state into agent context
-			if (this.opts.reconciliationService) {
+			if (this.opts.reconciliationService && !simpleGreeting) {
 				try {
 					const report =
 						await this.opts.reconciliationService.reconcileOnResume({
@@ -305,30 +307,32 @@ export class ChatExecutionManager {
 					/* non-critical, continue without reconciliation */
 				}
 			}
-			// Auto-resume: detect interrupted/failed previous execution and inject pending-work hint
-			try {
-				const lastExec =
-					await this.opts.chatManager.getPreviousExecutionForConversation(
-						conversationId,
-						execution.id,
-					);
-				if (
-					lastExec &&
-					(lastExec.status === "interrupted" || lastExec.status === "failed")
-				) {
-					const resumeHint =
-						"[SESSION RESUME NOTICE] Previous execution was interrupted or failed. " +
-						"Check conversation history for what was completed and what remains. " +
-						"Use available tools to verify the state of any artifacts before continuing. " +
-						"Do NOT repeat work that was already completed successfully.";
-					targetAgent.stm.add({
-						role: "system",
-						content: resumeHint,
-						timestamp: new Date(),
-					});
+			// Auto-resume only explicit work requests, never standalone greetings.
+			if (!simpleGreeting) {
+				try {
+					const lastExec =
+						await this.opts.chatManager.getPreviousExecutionForConversation(
+							conversationId,
+							execution.id,
+						);
+					if (
+						lastExec &&
+						(lastExec.status === "interrupted" || lastExec.status === "failed")
+					) {
+						const resumeHint =
+							"[SESSION RESUME NOTICE] Previous execution was interrupted or failed. " +
+							"Check conversation history for what was completed and what remains. " +
+							"Use available tools to verify the state of any artifacts before continuing. " +
+							"Do NOT repeat work that was already completed successfully.";
+						targetAgent.stm.add({
+							role: "system",
+							content: resumeHint,
+							timestamp: new Date(),
+						});
+					}
+				} catch {
+					/* non-critical */
 				}
-			} catch {
-				/* non-critical */
 			}
 
 			if (input.stream !== false) {
@@ -481,9 +485,11 @@ export class ChatExecutionManager {
 				});
 			}
 
-			targetAgent
-				.runConsolidation()
-				.catch((e) => console.error("LTM consolidation error (web):", e));
+			if (!simpleGreeting) {
+				targetAgent
+					.runConsolidation()
+					.catch((e) => console.error("LTM consolidation error (web):", e));
+			}
 		} catch (err) {
 			const cancelled = controller.signal.aborted || isCancelledError(err);
 			const errorMessage = cancelled

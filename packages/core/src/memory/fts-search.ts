@@ -307,7 +307,8 @@ export class FTSSearchEngine {
 		}
 	}
 
-	private deserializeEmbedding(buffer: Buffer): number[] {
+	private deserializeEmbedding(buffer: Buffer | null): number[] {
+		if (!buffer) return [];
 		const float32 = new Float32Array(
 			buffer.buffer,
 			buffer.byteOffset,

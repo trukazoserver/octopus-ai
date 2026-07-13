@@ -88,6 +88,17 @@ import type { WorkflowManager } from "./workflow-manager.js";
 const DEFAULT_MAX_TOOL_ITERATIONS = 128;
 const MAX_TOOL_RESULT_CONTEXT_CHARS = 12000;
 const MAX_TOOL_RESULT_TOKENS = 4000;
+
+const ACKNOWLEDGMENT_PROMPT =
+	"Before using any tools, briefly state in 1-2 sentences what you are going to do to address this request. Reply directly without tools.";
+
+export function isSimpleGreeting(message: string): boolean {
+	const trimmed = message.trim();
+	if (trimmed.length === 0 || trimmed.length > 24 || trimmed.includes("?")) return false;
+	return /^(hola|buenas|buenos\s+d[ií]as|buenas\s+(tardes|noches)|hey|hi|hello)\s*[!.¡-]*$/i.test(
+		trimmed,
+	);
+}
 const MAX_TOOL_RESULT_STORED_CHARS = 2000;
 const DELEGATE_SYNTHESIS_TIMEOUT_MS = 10_000;
 const DELEGATE_SYNTHESIS_MAX_TOKENS = 1200;
@@ -2922,6 +2933,7 @@ export class AgentRuntime {
 		options: AgentProcessOptions = {},
 	): Promise<string> {
 		const startedAt = Date.now();
+		const simpleGreeting = isSimpleGreeting(message);
 		this.toolBillingFailures.clear();
 		this.continuityGuard.reset(message);
 		throwIfAborted(options.signal);
@@ -2937,7 +2949,7 @@ export class AgentRuntime {
 		this.workingMemory.updateFromUserMessage(message);
 
 		// === Auto-escalado a multi-agente ===
-		if (this.orchestrator && !options.disableOrchestrator) {
+		if (this.orchestrator && !options.disableOrchestrator && !simpleGreeting) {
 			try {
 				throwIfAborted(options.signal);
 				const assessment = await this.orchestrator.assessParallelism(message);
@@ -3010,16 +3022,42 @@ export class AgentRuntime {
 			await this.retrieveContextInputs(message);
 		throwIfAborted(options.signal);
 
-		const context = await this.buildContext(
-			memories,
-			skills,
-			message,
-			channelId,
-			learningInsights,
-			options.selectedAgentContext,
-			options.deliveryContext,
-		);
-		const tools = this.getAvailableTools(options);
+		const context = simpleGreeting
+			? this.buildSimpleGreetingContext(message)
+			: await this.buildContext(
+					memories,
+					skills,
+					message,
+					channelId,
+					learningInsights,
+					options.selectedAgentContext,
+					options.deliveryContext,
+				);
+		const tools = simpleGreeting ? [] : this.getAvailableTools(options);
+
+		let ackContent = "";
+		if (!simpleGreeting && tools.length > 0 && !this.isTrivialTurn(message) && AgentRuntime.isWorkRequest(message)) {
+			try {
+				throwIfAborted(options.signal);
+				const ackResponse = await this.llmRouter.chat({
+					model: this.config.model ?? "default",
+					messages: [
+						...context,
+						{ role: "user", content: ACKNOWLEDGMENT_PROMPT },
+					],
+					maxTokens: 200,
+					temperature: 0.3,
+					metadata: this.requestMetadata({ conversationId: channelId }),
+				});
+				throwIfAborted(options.signal);
+				ackContent = this.sanitizeAssistantOutput(ackResponse.content);
+				if (ackContent.trim()) {
+					context.push({ role: "assistant", content: ackContent });
+				}
+			} catch (err) {
+				if (options.signal?.aborted) throw err;
+			}
+		}
 
 		throwIfAborted(options.signal);
 		const response = await this.executeWithTools(
@@ -3029,7 +3067,9 @@ export class AgentRuntime {
 			channelId,
 		);
 		throwIfAborted(options.signal);
-		const safeResponseContent = this.sanitizeAssistantOutput(response.content);
+		const safeResponseContent = this.sanitizeAssistantOutput(
+			ackContent.trim() ? `${ackContent}\n\n${response.content}` : response.content,
+		);
 
 		const assistantTurn: ConversationTurn = {
 			role: "assistant",
@@ -3039,32 +3079,32 @@ export class AgentRuntime {
 		};
 		this.stm.add(assistantTurn);
 
-		this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
-		await this.recordTaskLedgerEntry({
-			userRequest: message,
-			assistantTurn,
-			channelId,
-			toolsUsed: response.toolCallsExecuted.map((tool) => ({
-				name: tool.name,
-				success: !tool.result.startsWith("Error:"),
-				summary: tool.result.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
-			})),
-		});
-
-		this.updateActiveTask(safeResponseContent);
-
-		this.recordLearningExperience({
-			userRequest: message,
-			finalResponse: safeResponseContent,
-			channelId,
-			startedAt,
-			toolsUsed: response.toolCallsExecuted.map((tool) => ({
-				name: tool.name,
-				success: !tool.result.startsWith("Error:"),
-				summary: tool.result.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
-			})),
-			skillsUsed: this.toSkillTrace(skills),
-		});
+		if (!simpleGreeting) {
+			this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
+			await this.recordTaskLedgerEntry({
+				userRequest: message,
+				assistantTurn,
+				channelId,
+				toolsUsed: response.toolCallsExecuted.map((tool) => ({
+					name: tool.name,
+					success: !tool.result.startsWith("Error:"),
+					summary: tool.result.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+				})),
+			});
+			this.updateActiveTask(safeResponseContent);
+			this.recordLearningExperience({
+				userRequest: message,
+				finalResponse: safeResponseContent,
+				channelId,
+				startedAt,
+				toolsUsed: response.toolCallsExecuted.map((tool) => ({
+					name: tool.name,
+					success: !tool.result.startsWith("Error:"),
+					summary: tool.result.slice(0, MAX_TOOL_RESULT_STORED_CHARS),
+				})),
+				skillsUsed: this.toSkillTrace(skills),
+			});
+		}
 		this.reportCompletionOutcome(options, safeResponseContent);
 
 		return safeResponseContent;
@@ -3114,12 +3154,32 @@ export class AgentRuntime {
 		);
 	}
 
+	/** Detects substantial work requests that warrant a pre-work acknowledgment. */
+	static isWorkRequest(message: string): boolean {
+		const lower = message.toLowerCase().trim();
+		if (lower.length < 20) return false;
+		return /\b(crea|crear|genera|generar|dise|construye|construir|desarrolla|desarrollar|implementa|implementar|investiga|investigar|redacta|redactar|elabora|elaborar|produce|producir|create|design|build|develop|implement|research|construct)\b/.test(
+			lower,
+		);
+	}
+
+	private buildSimpleGreetingContext(message: string): LLMMessage[] {
+		return [
+			{
+				role: "system",
+				content: `You are ${this.config.name}, a helpful assistant. The latest user message is only a social greeting. Reply warmly and briefly in the user's language. Do not mention, inspect, resume, verify, or infer prior tasks. Do not promise actions and do not use tools.`,
+			},
+			{ role: "user", content: message },
+		];
+	}
+
 	async *processMessageStream(
 		message: string,
 		channelId?: string,
 		options: AgentProcessOptions = {},
 	): AsyncIterable<string> {
 		const startedAt = Date.now();
+		const simpleGreeting = isSimpleGreeting(message);
 		this.toolBillingFailures.clear();
 		throwIfAborted(options.signal);
 		const userTurn: ConversationTurn = {
@@ -3137,7 +3197,7 @@ export class AgentRuntime {
 		yield "\x00STATUS:working\x00";
 
 		// === Auto-escalado a multi-agente ===
-		if (this.orchestrator && !options.disableOrchestrator) {
+		if (this.orchestrator && !options.disableOrchestrator && !simpleGreeting) {
 			try {
 				throwIfAborted(options.signal);
 				const assessment = await this.orchestrator.assessParallelism(message);
@@ -3226,11 +3286,11 @@ export class AgentRuntime {
 		}
 
 		// === Single-agent (flujo normal) ===
-		const continuityGuard = this.continuityGuard;
+		const continuityGuard = simpleGreeting ? undefined : this.continuityGuard;
 		if (continuityGuard) continuityGuard.reset(message);
 
 		let inlineRunId: string | undefined;
-		if (this.subtaskTracker && channelId) {
+		if (this.subtaskTracker && channelId && !simpleGreeting) {
 			try {
 				inlineRunId = await this.subtaskTracker.beginInlineRun({
 					conversationId: channelId,
@@ -3245,16 +3305,18 @@ export class AgentRuntime {
 			await this.retrieveContextInputs(message);
 		throwIfAborted(options.signal);
 
-		const context = await this.buildContext(
-			memories,
-			skills,
-			message,
-			channelId,
-			learningInsights,
-			options.selectedAgentContext,
-			options.deliveryContext,
-		);
-		const tools = this.getAvailableTools(options);
+		const context = simpleGreeting
+			? this.buildSimpleGreetingContext(message)
+			: await this.buildContext(
+					memories,
+					skills,
+					message,
+					channelId,
+					learningInsights,
+					options.selectedAgentContext,
+					options.deliveryContext,
+				);
+		const tools = simpleGreeting ? [] : this.getAvailableTools(options);
 
 		const messages = [...context];
 		let iterations = 0;
@@ -3266,6 +3328,32 @@ export class AgentRuntime {
 		let continueAfterToolLimit = true;
 		let streamErrorRetryCount = 0;
 		let emptyResponseRetryCount = 0;
+
+		if (!simpleGreeting && tools.length > 0 && !this.isTrivialTurn(message) && AgentRuntime.isWorkRequest(message)) {
+			try {
+				throwIfAborted(options.signal);
+				const ackResponse = await this.llmRouter.chat({
+					model: this.config.model ?? "default",
+					messages: [
+						...messages,
+						{ role: "user", content: ACKNOWLEDGMENT_PROMPT },
+					],
+					maxTokens: 200,
+					temperature: 0.3,
+					metadata: this.requestMetadata({ conversationId: channelId }),
+				});
+				throwIfAborted(options.signal);
+				const ackContent = this.sanitizeAssistantOutput(ackResponse.content);
+				if (ackContent.trim()) {
+					yield ackContent;
+					yield "\n\n";
+					fullResponse += `${ackContent}\n\n`;
+					messages.push({ role: "assistant", content: ackContent });
+				}
+			} catch (err) {
+				if (options.signal?.aborted) throw err;
+			}
+		}
 
 		while (continueAfterToolLimit && !stoppedByDecision) {
 			continueAfterToolLimit = false;
@@ -4254,7 +4342,7 @@ export class AgentRuntime {
 
 			if (!stoppedByDecision && this.hasReachedToolIterationLimit(iterations)) {
 				const autoContinuePrompt = await this.buildToolLimitAutoContinuePrompt({
-					guard: continuityGuard,
+					guard: continuityGuard ?? this.continuityGuard,
 					ledger,
 					toolsUsed: toolTrace,
 					iterations,
@@ -4295,13 +4383,15 @@ export class AgentRuntime {
 			metadata: channelId ? { conversationId: channelId } : undefined,
 		};
 		this.stm.add(assistantTurn);
-		this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
-		await this.recordTaskLedgerEntry({
-			userRequest: message,
-			assistantTurn,
-			channelId,
-			toolsUsed: toolTrace,
-		});
+		if (!simpleGreeting) {
+			this.recordAuxiliaryMemories(userTurn, assistantTurn, channelId);
+			await this.recordTaskLedgerEntry({
+				userRequest: message,
+				assistantTurn,
+				channelId,
+				toolsUsed: toolTrace,
+			});
+		}
 
 		// Complete inline run tracking
 		if (inlineRunId && this.subtaskTracker) {
@@ -4312,19 +4402,21 @@ export class AgentRuntime {
 			}
 		}
 
-		this.updateActiveTask(safeFullResponse);
-		this.recordLearningExperience({
-			userRequest: message,
-			finalResponse: safeFullResponse,
-			channelId,
-			startedAt,
-			toolsUsed: toolTrace,
-			skillsUsed: this.toSkillTrace(skills),
-			metadata: {
-				stoppedByDecision,
-				toolIterations: iterations,
-			},
-		});
+		if (!simpleGreeting) {
+			this.updateActiveTask(safeFullResponse);
+			this.recordLearningExperience({
+				userRequest: message,
+				finalResponse: safeFullResponse,
+				channelId,
+				startedAt,
+				toolsUsed: toolTrace,
+				skillsUsed: this.toSkillTrace(skills),
+				metadata: {
+					stoppedByDecision,
+					toolIterations: iterations,
+				},
+			});
+		}
 		this.reportCompletionOutcome(options, safeFullResponse);
 	}
 

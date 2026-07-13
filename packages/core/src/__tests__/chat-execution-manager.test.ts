@@ -145,6 +145,50 @@ describe("ChatExecutionManager", () => {
 		expect(conversations[0]?.agent_id).toBe("arm-bibi");
 	});
 
+	it("does not resume prior work or consolidate a simple greeting", async () => {
+		const conversation = await chatManager.createConversation({ title: "old work" });
+		await chatManager.createExecution({
+			conversationId: conversation.id,
+			status: "interrupted",
+		});
+		let resolveDone!: () => void;
+		const done = new Promise<void>((resolve) => {
+			resolveDone = resolve;
+		});
+		const stmAdd = vi.fn();
+		const runConsolidation = vi.fn(async () => undefined);
+		const runtime = {
+			stm: { clear: vi.fn(), add: stmAdd },
+			processMessageStream: async function* () {
+				yield "¡Hola!";
+			},
+			runConsolidation,
+		};
+		const manager = new ChatExecutionManager({
+			chatManager,
+			conversationHistoryLimit: 20,
+			streamCheckpointIntervalMs: 0,
+			getAgentRuntime: () => runtime as never,
+			emit: (event) => {
+				if (event.type === "stream_end") resolveDone();
+			},
+		});
+
+		await manager.start({
+			message: "hola",
+			conversationId: conversation.id,
+			stream: true,
+		});
+		await done;
+
+		expect(runConsolidation).not.toHaveBeenCalled();
+		expect(
+			stmAdd.mock.calls.some(([turn]) =>
+				String((turn as { content?: string }).content).includes("SESSION RESUME NOTICE"),
+			),
+		).toBe(false);
+	});
+
 	it("enables completed-action reuse only for an explicit continuation", async () => {
 		let resolveDone!: () => void;
 		const done = new Promise<void>((resolve) => {

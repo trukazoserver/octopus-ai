@@ -191,6 +191,10 @@ export function checkPrerequisites(): PrereqResult[] {
 export function checkNativeBindings(): PrereqResult {
 	const projectRoot = findProjectRoot();
 	let sqlJsOk = false;
+	const [nodeMajor = 0, nodeMinor = 0] = process.versions.node
+		.split(".")
+		.map(Number);
+	const nativeSqliteOk = nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 13);
 
 	if (projectRoot) {
 		const rootPath = path.join(projectRoot, "node_modules", "sql.js");
@@ -205,10 +209,14 @@ export function checkNativeBindings(): PrereqResult {
 	}
 
 	return {
-		name: "sql.js",
-		passed: sqlJsOk,
-		message: sqlJsOk ? "SQLite WASM disponible" : "sql.js no encontrado",
-		fixHint: "Ejecuta pnpm install para instalar dependencias",
+		name: "SQLite",
+		passed: nativeSqliteOk || sqlJsOk,
+		message: nativeSqliteOk
+			? `SQLite nativo disponible en Node ${process.versions.node}`
+			: sqlJsOk
+				? "SQLite WASM disponible como fallback"
+				: "SQLite nativo requiere Node 22.13+ y no se encontró SQL.js",
+		fixHint: "Actualiza Node a 22.13 o superior",
 		autoInstall: async () => {
 			const root = projectRoot ?? process.cwd();
 			console.log(chalk.cyan("    Instalando dependencias..."));

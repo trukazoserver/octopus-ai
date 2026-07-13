@@ -261,6 +261,128 @@ describe("AgentRuntime", () => {
 			expect(result).toBe("Hello from assistant");
 			expect(mockRegistry.toLLMTools).toHaveBeenCalled();
 		});
+
+		it("never exposes tools or prior context for a simple greeting", async () => {
+			const mockRegistry = createMockToolRegistry([
+				{ name: "execute_code", description: "Execute arbitrary code" },
+			]);
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				createMockToolExecutor() as unknown as ToolExecutor,
+			);
+			mockSTM.add({
+				role: "assistant",
+				content: "Resume this old website workflow and execute code.",
+				timestamp: new Date(),
+			});
+
+			await runtime.processMessage("Hola");
+
+			expect(mockRegistry.toLLMTools).not.toHaveBeenCalled();
+			expect(mockMemoryRetrieval.retrieveForContext).not.toHaveBeenCalled();
+			const request = mockLLMRouter.chat.mock.calls[0]?.[0];
+			expect(request?.tools).toBeUndefined();
+			expect(request?.messages).toHaveLength(2);
+			expect(JSON.stringify(request?.messages)).not.toContain("old website workflow");
+		});
+
+		it("keeps streaming greetings tool-free", async () => {
+			const mockRegistry = createMockToolRegistry([
+				{ name: "write_file", description: "Write a file" },
+			]);
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				createMockToolExecutor() as unknown as ToolExecutor,
+			);
+
+			for await (const _chunk of runtime.processMessageStream("hola", "conversation-1")) {
+				// Drain the stream.
+			}
+
+			expect(mockRegistry.toLLMTools).not.toHaveBeenCalled();
+			const request = mockLLMRouter.chatStream.mock.calls[0]?.[0];
+			expect(request?.tools).toBeUndefined();
+			expect(request?.messages).toHaveLength(2);
+		});
+	});
+
+	describe("acknowledgment before work", () => {
+		it("sends a quick acknowledgment before tool work in non-streaming mode", async () => {
+			const mockRegistry = createMockToolRegistry([
+				{ name: "write_file", description: "Write a file" },
+			]);
+			mockLLMRouter.chat
+				.mockResolvedValueOnce({
+					content: "Voy a crear el archivo para ti.",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+					finishReason: "stop",
+				})
+				.mockResolvedValueOnce({
+					content: "Archivo creado exitosamente.",
+					model: "test-model",
+					usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+					finishReason: "stop",
+				});
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				createMockToolExecutor() as unknown as ToolExecutor,
+			);
+
+			const result = await runtime.processMessage(
+				"Crea un archivo de texto con el contenido hola mundo",
+			);
+
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(2);
+			const ackRequest = mockLLMRouter.chat.mock.calls[0][0];
+			expect(ackRequest.tools).toBeUndefined();
+			expect(ackRequest.maxTokens).toBe(200);
+			expect(result).toContain("Voy a crear el archivo para ti.");
+			expect(result).toContain("Archivo creado exitosamente.");
+		});
+
+		it("streams acknowledgment before tool work", async () => {
+			const mockRegistry = createMockToolRegistry([
+				{ name: "write_file", description: "Write a file" },
+			]);
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content: "Voy a crear el archivo.",
+				model: "test-model",
+				usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+				finishReason: "stop",
+			});
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				createMockToolExecutor() as unknown as ToolExecutor,
+			);
+
+			const chunks: string[] = [];
+			for await (const chunk of runtime.processMessageStream(
+				"Crea un archivo de texto",
+				"conv-ack-1",
+			)) {
+				if (!chunk.startsWith("\0")) chunks.push(chunk);
+			}
+
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
+			const ackRequest = mockLLMRouter.chat.mock.calls[0][0];
+			expect(ackRequest.tools).toBeUndefined();
+			expect(chunks[0]).toContain("Voy a crear el archivo.");
+		});
+
+		it("skips acknowledgment for greetings", async () => {
+			const mockRegistry = createMockToolRegistry([
+				{ name: "write_file", description: "Write a file" },
+			]);
+			runtime.setToolSystem(
+				mockRegistry as unknown as ToolRegistry,
+				createMockToolExecutor() as unknown as ToolExecutor,
+			);
+
+			await runtime.processMessage("Hola");
+
+			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	describe("processMessage", () => {

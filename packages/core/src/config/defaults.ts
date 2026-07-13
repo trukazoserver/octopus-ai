@@ -271,6 +271,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 	},
 	storage: {
 		backend: "sqlite",
+		sqliteDriver: "native",
 		path: "~/.octopus/data/octopus.db",
 		connectionString: "",
 		ssl: false,

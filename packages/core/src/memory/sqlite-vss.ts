@@ -285,7 +285,8 @@ export class SqliteVectorStore extends VectorStore {
 		return Buffer.from(float32.buffer, float32.byteOffset, float32.byteLength);
 	}
 
-	private deserializeEmbedding(buffer: Buffer): number[] {
+	private deserializeEmbedding(buffer: Buffer | null): number[] {
+		if (!buffer) return [];
 		const float32 = new Float32Array(
 			buffer.buffer,
 			buffer.byteOffset,

@@ -4,9 +4,9 @@
 	"private": true,
 	"description": "Self-hosted AI assistant with persistent memory, continuous learning, automations, and auto-improvable skills",
 	"scripts": {
-		"start": "node packages/cli/dist/index.js start --no-choice",
-		"launch": "node packages/cli/dist/index.js --web",
-		"start:console": "node packages/cli/dist/index.js --console",
+		"start": "node --disable-warning=ExperimentalWarning packages/cli/dist/index.js start --no-choice",
+		"launch": "node --disable-warning=ExperimentalWarning packages/cli/dist/index.js --web",
+		"start:console": "node --disable-warning=ExperimentalWarning packages/cli/dist/index.js --console",
 		"start:web": "pnpm --filter @octopus-ai/web dev",
 		"start:desktop": "pnpm --filter @octopus-ai/desktop dev",
 		"install:octopus": "node scripts/install.mjs",
@@ -39,7 +39,7 @@
 	},
 	"packageManager": "pnpm@10.8.0",
 	"engines": {
-		"node": ">=22.0.0"
+		"node": ">=22.13.0"
 	},
 	"dependencies": {
 		"@google/genai": "^2.0.1",

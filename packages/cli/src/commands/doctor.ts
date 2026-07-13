@@ -79,6 +79,7 @@ async function runChecks(): Promise<CheckResult[]> {
 	}
 
 	let dbAccessible = false;
+	let sqliteDriver: string | undefined;
 	try {
 		const loader = new ConfigLoader();
 		const config = loader.load();
@@ -86,10 +87,14 @@ async function runChecks(): Promise<CheckResult[]> {
 			config.storage.backend as "sqlite" | "postgresql" | "mysql" | "mongodb",
 			{
 				path: config.storage.path,
+				sqliteDriver: config.storage.sqliteDriver,
 			},
 		);
 		await db.initialize();
 		await db.run("SELECT 1");
+		if ("getDriver" in db && typeof db.getDriver === "function") {
+			sqliteDriver = String(db.getDriver());
+		}
 		await db.close();
 		dbAccessible = true;
 	} catch (err) {
@@ -99,7 +104,7 @@ async function runChecks(): Promise<CheckResult[]> {
 		name: "Database",
 		passed: dbAccessible,
 		message: dbAccessible
-			? "SQLite database accessible"
+			? `SQLite database accessible${sqliteDriver ? ` (${sqliteDriver})` : ""}`
 			: "Cannot access database",
 	});
 

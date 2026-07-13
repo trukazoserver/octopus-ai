@@ -562,6 +562,10 @@ const PluginsSchema = Type.Object({
 
 const StorageSchema = Type.Object({
 	backend: Type.String({ default: "sqlite" }),
+	sqliteDriver: Type.Union(
+		[Type.Literal("auto"), Type.Literal("native"), Type.Literal("sqljs")],
+		{ default: "native" },
+	),
 	path: Type.String({ default: "~/.octopus/data/octopus.db" }),
 	connectionString: Type.String({ default: "" }),
 	ssl: Type.Boolean({ default: false }),

@@ -883,6 +883,7 @@ export async function bootstrap(options?: {
 		config.storage.backend as "sqlite" | "postgresql" | "mysql" | "mongodb",
 		{
 			path: config.storage.path,
+			sqliteDriver: config.storage.sqliteDriver,
 			connectionString: storageConnectionString,
 			options:
 				config.storage.ssl || process.env.OCTOPUS_POSTGRES_SSL === "true"
@@ -2349,9 +2350,15 @@ IMPORTANT - Tool Usage Guidelines:
 9. API keys, tokens, credentials JSON, private keys, proxy credentials, cookies, and passwords MUST be stored with manage_env using isSecret=true. Never print, summarize, or reveal secret values; report only whether they are configured.
 10. To preview an HTML file (or any local file) you created, use browser_open_file with the absolute file path as-is, not a hand-written file:/// URL. Treat the preview as successful only if the tool result shows Current URL starting with file:/// and the snapshot/read_page reflects the expected content. If the result is about:blank, File not found, or a URL safety error, report that exact blocker; do not infer that the sandbox has no filesystem or internet. Do not use browser_eval to paste or reconstruct the whole HTML document as a fallback.
 
+IMPORTANT - Respond Before Working:
+- For any task that requires tools or multi-step work, FIRST briefly tell the user what you are going to do (1-2 sentences). THEN proceed with tool execution.
+- For simple greetings or casual conversation, respond directly and quickly without mentioning tools or prior work.
+- Never start executing tools silently without first telling the user what you plan to do.
+
 IMPORTANT - Continuity & Reconnection:
 - Before replying, inspect the injected Task Ledger, Working Memory, and recent conversation context for active or recent work.
-- If the user says anything ambiguous such as "hola", "continua", "sigue", "donde ibamos", "se reconecto", or asks about prior progress, assume this may be a reconnection and verify continuity before responding.
+- A simple greeting such as "hola", "buenas", "hi", or "hello" is always a new social turn. Reply briefly and warmly without inspecting, resuming, verifying, or mentioning prior work, and without using tools.
+- Only treat explicit continuation requests such as "continua", "sigue", "donde ibamos", "se reconecto", or direct questions about prior progress as reconnection signals.
 - When active or recent work exists, do not answer with a generic greeting. First state the recovered status: what was in progress, what is already complete, and what remains.
 - For media-generation or file-output tasks, verify real artifacts with list_media or workspace tools before claiming counts, regenerating assets, or continuing.
 - If injected context is insufficient, call recall_conversation before giving a status answer.

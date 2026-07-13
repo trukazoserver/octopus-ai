@@ -1,5 +1,6 @@
 import { PostgresDatabase } from "./postgres.js";
 import { SqliteDatabase } from "./sqlite.js";
+import type { SQLiteDriver } from "./sqlite.js";
 
 export type DatabaseBackend = "sqlite" | "postgresql" | "mysql" | "mongodb";
 
@@ -18,6 +19,7 @@ export interface DatabaseConfig {
 	 * Database file path (for SQLite)
 	 */
 	path?: string;
+	sqliteDriver?: SQLiteDriver;
 	/**
 	 * Connection string (for PostgreSQL, MySQL, MongoDB)
 	 * @example "postgresql://user:password@localhost:5432/dbname"
@@ -59,7 +61,7 @@ export function createDatabaseAdapter(
 ): DatabaseAdapter {
 	switch (backend) {
 		case "sqlite":
-			return new SqliteDatabase(config.path ?? ":memory:");
+			return new SqliteDatabase(config.path ?? ":memory:", config.sqliteDriver ?? "native");
 
 		case "postgresql":
 			return new PostgresDatabase(config);
