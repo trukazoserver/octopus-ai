@@ -25,7 +25,7 @@ import type { LLMMessage } from "../ai/types.js";
 import type { ToolDefinition } from "./registry.js";
 
 export interface OrchestrationToolDeps {
-	orchestrator: OctopusOrchestrator;
+	getOrchestrator: (channelId?: string, agentId?: string) => OctopusOrchestrator | undefined;
 	kanbanPlanner?: KanbanPlanner;
 	rootAgentId: string;
 }
@@ -74,6 +74,10 @@ export function createOrchestrationTools(
 						: undefined;
 				const channelId = context.agent?.channelId;
 				const signal = context.agent?.abortSignal;
+				const orchestrator = deps.getOrchestrator(
+					channelId,
+					context.agent?.agentId,
+				);
 
 				if (!goal.trim()) {
 					return {
@@ -81,6 +85,9 @@ export function createOrchestrationTools(
 						output: "",
 						error: "orchestrate_parallel requiere un `goal` no vacío.",
 					};
+				}
+				if (!orchestrator) {
+					return { success: false, output: "", error: "No hay un orquestador disponible para esta conversación." };
 				}
 				if (signal?.aborted) {
 					return {
@@ -92,11 +99,11 @@ export function createOrchestrationTools(
 
 				// 1. Decompose (prefer Kanban planner; fall back to legacy LLM decompose).
 				const decomposition = deps.kanbanPlanner
-					? await deps.orchestrator.decomposeViaKanban(goal, {
+					? await orchestrator.decomposeViaKanban(goal, {
 							conversationId: channelId,
 							rootAgentId: deps.rootAgentId,
 						})
-					: await deps.orchestrator.decompose(goal);
+					: await orchestrator.decompose(goal);
 
 				// 2. Reject non-compound (mirror runtime's "Delegación omitida").
 				if (decomposition.subtasks.length <= 1) {
@@ -132,7 +139,7 @@ export function createOrchestrationTools(
 				let synthesisResult = "";
 				let telemetry: OrchestratorTelemetry | undefined;
 				try {
-					for await (const event of deps.orchestrator.executeParallel(
+					for await (const event of orchestrator.executeParallel(
 						{ ...decomposition, subtasks: effectiveSubtasks },
 						workerConfig,
 					)) {

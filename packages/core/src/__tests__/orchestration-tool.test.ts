@@ -54,7 +54,7 @@ function makeContext(overrides: Partial<ToolContext> = {}): ToolContext {
 
 function getTool(orchestrator: OctopusOrchestrator) {
 	const tools = createOrchestrationTools({
-		orchestrator,
+		getOrchestrator: () => orchestrator,
 		kanbanPlanner: {} as KanbanPlanner,
 		rootAgentId: "root",
 	});

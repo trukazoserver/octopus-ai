@@ -149,6 +149,10 @@ export class MCPClient {
 
 	public async connect(): Promise<void> {
 		if (this.config.url) {
+			const endpoint = new URL(this.config.url);
+			if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
+				throw new Error("Remote MCP URL must use HTTP or HTTPS");
+			}
 			await this.connectHttp();
 			return;
 		}
@@ -399,12 +403,20 @@ export class MCPClient {
 			},
 			body: JSON.stringify(message),
 			signal: AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS),
+			redirect: "error",
 		});
 
 		const sessionId = response.headers.get("mcp-session-id");
 		if (sessionId) this.httpSessionId = sessionId;
+		const contentLength = Number(response.headers.get("content-length") ?? 0);
+		if (contentLength > 10 * 1024 * 1024) {
+			throw new Error("MCP HTTP response exceeds 10 MB");
+		}
 
 		const text = await response.text();
+		if (Buffer.byteLength(text, "utf8") > 10 * 1024 * 1024) {
+			throw new Error("MCP HTTP response exceeds 10 MB");
+		}
 		if (!response.ok) {
 			throw new Error(
 				this.redactor.redactText(text || `MCP HTTP error ${response.status}`),

@@ -1,4 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Database, SqlJsStatic, Statement } from "sql.js";
@@ -224,7 +234,19 @@ export class SqliteDatabase implements DatabaseAdapter {
 		try {
 			const data = this.db.export();
 			const buffer = Buffer.from(data);
-			writeFileSync(this.dbPath, buffer);
+			const tempPath = `${this.dbPath}.${process.pid}.${Date.now()}.tmp`;
+			try {
+				writeFileSync(tempPath, buffer);
+				const fd = openSync(tempPath, "r+");
+				try {
+					fsyncSync(fd);
+				} finally {
+					closeSync(fd);
+				}
+				renameSync(tempPath, this.dbPath);
+			} finally {
+				if (existsSync(tempPath)) unlinkSync(tempPath);
+			}
 			this.dirty = false;
 		} catch (e) {
 			logger.warn(

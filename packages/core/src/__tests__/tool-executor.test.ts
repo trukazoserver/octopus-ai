@@ -86,6 +86,31 @@ describe("ToolExecutor", () => {
 			);
 		});
 
+		it("aborts the signal exposed to a tool when its timeout expires", async () => {
+			let observedSignal: AbortSignal | undefined;
+			registry.register(
+				createTestTool({
+					name: "slow-tool",
+					handler: async (_params, context) => {
+						observedSignal = context.agent?.abortSignal;
+						await new Promise<void>((resolve) =>
+							observedSignal?.addEventListener("abort", () => resolve(), { once: true }),
+						);
+						return { success: false, output: "", error: "aborted" };
+					},
+				}),
+			);
+			const executor = new ToolExecutor(registry, {
+				sandboxCommands: false,
+				allowedPaths: [],
+				timeouts: { defaultMs: 20 },
+			});
+			const result = await executor.execute("slow-tool", { input: "x" }, { agentId: "test" });
+			expect(result.success).toBe(false);
+			expect(result.error).toContain("timed out");
+			expect(observedSignal?.aborted).toBe(true);
+		});
+
 		it("should save media base64 returned by tools and hide raw payloads", async () => {
 			const imageBase64 = Buffer.alloc(100, 1).toString("base64");
 			const tool = createTestTool({

@@ -395,10 +395,19 @@ function jsonRes(res: ServerResponse, status: number, data: unknown): void {
 	res.end(JSON.stringify(data));
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes = 10 * 1024 * 1024): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
-		req.on("data", (c: Buffer) => chunks.push(c));
+		let total = 0;
+		req.on("data", (c: Buffer) => {
+			total += c.length;
+			if (total > maxBytes) {
+				reject(badRequest(`Request body exceeds ${maxBytes} bytes`));
+				req.destroy();
+				return;
+			}
+			chunks.push(c);
+		});
 		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
 		req.on("error", reject);
 	});
@@ -7508,6 +7517,20 @@ export class TransportServer {
 			const supportsRange =
 				resolved.item.mimetype.startsWith("video/") ||
 				resolved.item.mimetype.startsWith("audio/");
+			const activeContent = new Set([
+				"text/html",
+				"application/xhtml+xml",
+				"image/svg+xml",
+			]).has(resolved.item.mimetype.toLowerCase());
+			const securityHeaders = {
+				"X-Content-Type-Options": "nosniff",
+				"Content-Security-Policy": "default-src 'none'; sandbox",
+				...(activeContent
+					? {
+							"Content-Disposition": `attachment; filename="${basename(resolved.item.filename).replace(/["\r\n]/g, "_")}"`,
+						}
+					: {}),
+			};
 
 			if (range && supportsRange) {
 				const match = range.match(/^bytes=(\d*)-(\d*)$/);
@@ -7533,6 +7556,7 @@ export class TransportServer {
 					"Content-Range": `bytes ${start}-${end}/${resolved.size}`,
 					"Accept-Ranges": "bytes",
 					"Cache-Control": "public, max-age=86400",
+					...securityHeaders,
 				});
 				createReadStream(resolved.filePath, { start, end }).pipe(res);
 				return;
@@ -7544,6 +7568,7 @@ export class TransportServer {
 				"Content-Length": resolved.size,
 				"Accept-Ranges": supportsRange ? "bytes" : "none",
 				"Cache-Control": "public, max-age=86400",
+				...securityHeaders,
 			});
 			createReadStream(resolved.filePath).pipe(res);
 		} catch (err) {

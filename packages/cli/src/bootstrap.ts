@@ -2498,7 +2498,10 @@ Always be concise, helpful, and thorough.`,
 	const mainOrchestrator = agentRuntime.getOrchestrator();
 	if (mainOrchestrator) {
 		for (const tool of createOrchestrationTools({
-			orchestrator: mainOrchestrator,
+			getOrchestrator: (channelId, agentId) =>
+				agentManager
+					.getRuntime(agentId || agentConfig.id, channelId)
+					?.getOrchestrator() ?? mainOrchestrator,
 			kanbanPlanner,
 			rootAgentId: agentConfig.id,
 		})) {

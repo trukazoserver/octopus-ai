@@ -488,6 +488,7 @@ export class ToolExecutor {
 		timeoutMs: number,
 		label: string,
 		signal?: AbortSignal,
+		timeoutController?: AbortController,
 	): Promise<T> {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let abortHandler: (() => void) | undefined;
@@ -497,7 +498,10 @@ export class ToolExecutor {
 				operation,
 				new Promise<T>((_, reject) => {
 					timer = setTimeout(
-						() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+						() => {
+							timeoutController?.abort();
+							reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+						},
 						timeoutMs,
 					);
 					if (signal) {
@@ -646,7 +650,12 @@ export class ToolExecutor {
 				media: scopedMediaContext,
 				onProgress: executionContext?.onProgress,
 			};
-			if (executionContext) context.agent = executionContext;
+			const timeoutController = new AbortController();
+			const effectiveSignal = executionContext?.abortSignal
+				? AbortSignal.any([executionContext.abortSignal, timeoutController.signal])
+				: timeoutController.signal;
+			if (executionContext)
+				context.agent = { ...executionContext, abortSignal: effectiveSignal };
 			const result = await this.rateLimiter.run(
 				toolName,
 				this.isRateLimitedMediaTool(toolName),
@@ -656,6 +665,7 @@ export class ToolExecutor {
 						this.getTimeoutMs(toolName),
 						`Tool ${toolName}`,
 						executionContext?.abortSignal,
+						timeoutController,
 					),
 			);
 			const normalized = await this.normalizeMediaOutput(toolName, {

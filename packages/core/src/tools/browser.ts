@@ -944,6 +944,7 @@ export class BrowserTool {
 	private liveUserAgent: string | null = null;
 	private humanSim = new HumanBehavior();
 	private urlSafetyPolicy: UrlSafetyPolicy;
+	private allowedResourceOrigins = new Map<string, Promise<boolean>>();
 	private lastSnapshot: {
 		id: string;
 		url: string;
@@ -2393,6 +2394,7 @@ export class BrowserTool {
 		const previous = JSON.stringify(this.config);
 		this.config = { ...this.config, ...config };
 		this.urlSafetyPolicy = new UrlSafetyPolicy(this.config.urlPolicy);
+		this.allowedResourceOrigins.clear();
 		if (JSON.stringify(this.config) !== previous) {
 			await this.close();
 		}
@@ -2617,10 +2619,28 @@ export class BrowserTool {
 		if (!this.context) return;
 		const blockResources = this.config.blockResources || ["font"];
 		const blockTrackers = this.config.blockTrackerDomains !== false;
-		if (blockResources.length === 0 && !blockTrackers) return;
-
 		const blockedTypes = new Set(blockResources);
 		await this.context.route("**/*", async (route, request) => {
+			try {
+				const parsed = new URL(request.url());
+				if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+					let allowed = this.allowedResourceOrigins.get(parsed.origin);
+					if (!allowed) {
+						allowed = this.urlSafetyPolicy
+							.assertAllowedAsync(parsed.href, "Browser subresource")
+							.then(() => true)
+							.catch(() => false);
+						this.allowedResourceOrigins.set(parsed.origin, allowed);
+					}
+					if (!(await allowed)) {
+						await route.abort("blockedbyclient");
+						return;
+					}
+				}
+			} catch {
+				await route.abort("blockedbyclient");
+				return;
+			}
 			if (blockTrackers) {
 				const url = request.url().toLowerCase();
 				for (const domain of TRACKER_DOMAINS) {
@@ -3865,6 +3885,7 @@ export class BrowserTool {
 			this.fingerprint = null;
 			this.networkDiagnosticsAttached = false;
 			this.resetImageNetworkIssues();
+			this.allowedResourceOrigins.clear();
 		}
 	}
 

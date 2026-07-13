@@ -75,6 +75,7 @@ function isContinuationRequest(message: string): boolean {
 export class ChatExecutionManager {
 	private controllers = new Map<string, AbortController>();
 	private activeByConversation = new Map<string, string>();
+	private startLocks = new Map<string, Promise<ChatExecution>>();
 
 	constructor(private opts: ChatExecutionManagerOptions) {}
 
@@ -106,44 +107,35 @@ export class ChatExecutionManager {
 			}
 		}
 
-		const active =
-			await this.opts.chatManager.getActiveExecutionForConversation(
-				conversationId,
-			);
+		const locked = this.startLocks.get(conversationId);
+		if (locked) return await locked;
+		const operation = this.startResolvedConversation(input, conversationId);
+		this.startLocks.set(conversationId, operation);
+		try {
+			return await operation;
+		} finally {
+			if (this.startLocks.get(conversationId) === operation) {
+				this.startLocks.delete(conversationId);
+			}
+		}
+	}
+
+	private async startResolvedConversation(
+		input: ChatExecutionStartInput,
+		conversationId: string,
+	): Promise<ChatExecution> {
+		const active = await this.opts.chatManager.getActiveExecutionForConversation(conversationId);
 		if (active) return active;
-
-		await this.opts.chatManager.addMessage(
-			conversationId,
-			"user",
-			input.message,
-			input.messageMetadata ? { metadata: input.messageMetadata } : undefined,
-		);
-		const execution = await this.opts.chatManager.createExecution({
-			requestId: input.requestId,
-			conversationId,
-			agentId: input.agentId,
-			status: "queued",
-		});
-
+		await this.opts.chatManager.addMessage(conversationId, "user", input.message, input.messageMetadata ? { metadata: input.messageMetadata } : undefined);
+		const execution = await this.opts.chatManager.createExecution({ requestId: input.requestId, conversationId, agentId: input.agentId, status: "queued" });
 		const controller = new AbortController();
 		this.controllers.set(execution.id, controller);
 		this.activeByConversation.set(conversationId, execution.id);
-
-		this.emit({
-			type: "execution_started",
-			requestId: input.requestId,
-			executionId: execution.id,
-			conversationId,
-			payload: { execution, conversationId },
-		});
-
+		this.emit({ type: "execution_started", requestId: input.requestId, executionId: execution.id, conversationId, payload: { execution, conversationId } });
 		void this.runExecution(execution, input, controller).finally(() => {
 			this.controllers.delete(execution.id);
-			if (this.activeByConversation.get(conversationId) === execution.id) {
-				this.activeByConversation.delete(conversationId);
-			}
+			if (this.activeByConversation.get(conversationId) === execution.id) this.activeByConversation.delete(conversationId);
 		});
-
 		return execution;
 	}
 
