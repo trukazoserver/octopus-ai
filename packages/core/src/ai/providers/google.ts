@@ -403,6 +403,10 @@ export class GoogleProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const pendingToolCalls = new Map<
+			number,
+			{ id: string; name: string; arguments: string }
+		>();
 		const readNext = async () =>
 			readNextWithTimeout(
 				reader,
@@ -423,7 +427,12 @@ export class GoogleProvider extends BaseLLMProvider {
 						const trimmed = line.trim();
 						if (!trimmed.startsWith("data: ")) continue;
 						const payload = trimmed.slice(6);
-						if (payload === "[DONE]") return;
+						if (payload === "[DONE]") {
+							for (const call of pendingToolCalls.values()) {
+								if (call.id && call.name) yield { toolCalls: { id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } } };
+							}
+							return;
+						}
 						let parsed: {
 							error?: { message?: string } | string;
 							usage?: {
@@ -440,6 +449,7 @@ export class GoogleProvider extends BaseLLMProvider {
 									content?: string;
 									reasoning_content?: string;
 									tool_calls?: Array<{
+										index?: number;
 										id?: string;
 										function?: { name?: string; arguments?: string };
 									}>;
@@ -486,19 +496,22 @@ export class GoogleProvider extends BaseLLMProvider {
 						if (delta.delta?.reasoning_content)
 							chunk.thinking = delta.delta.reasoning_content;
 						if (delta.delta?.tool_calls) {
-							const tc = delta.delta.tool_calls[0];
-							if (tc) {
-								chunk.toolCalls = {
-									id: tc.id ?? "",
-									type: "function",
-									function: {
-										name: tc.function?.name ?? "",
-										arguments: tc.function?.arguments ?? "",
-									},
-								};
+							for (const tc of delta.delta.tool_calls) {
+								const index = tc.index ?? 0;
+								const current = pendingToolCalls.get(index) ?? { id: "", name: "", arguments: "" };
+								current.id = tc.id ?? current.id;
+								current.name = tc.function?.name ?? current.name;
+								current.arguments += tc.function?.arguments ?? "";
+								pendingToolCalls.set(index, current);
 							}
 						}
-						if (delta.finish_reason) chunk.finishReason = delta.finish_reason;
+						if (delta.finish_reason) {
+							for (const call of pendingToolCalls.values()) {
+								if (call.id && call.name) yield { toolCalls: { id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } } };
+							}
+							pendingToolCalls.clear();
+							chunk.finishReason = delta.finish_reason;
+						}
 
 						if (Object.keys(chunk).length > 0) {
 							yield chunk;

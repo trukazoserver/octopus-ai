@@ -260,6 +260,10 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 		const reader = bodyStream.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		const pendingToolCalls = new Map<
+			number,
+			{ id: string; name: string; arguments: string; type: "function" }
+		>();
 		const readNext = async () =>
 			readNextWithTimeout(
 				reader,
@@ -280,7 +284,12 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 						const trimmed = line.trim();
 						if (!trimmed.startsWith("data: ")) continue;
 						const payload = trimmed.slice(6);
-						if (payload === "[DONE]") return;
+						if (payload === "[DONE]") {
+							for (const call of pendingToolCalls.values()) {
+								if (call.id && call.name) yield { toolCalls: { ...call, function: { name: call.name, arguments: call.arguments } } };
+							}
+							return;
+						}
 						let parsed: {
 							error?: { message?: string } | string;
 							usage?: {
@@ -294,6 +303,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 									content?: string;
 									reasoning_content?: string;
 									tool_calls?: Array<{
+										index?: number;
 										id?: string;
 										type?: "function";
 										function?: { name?: string; arguments?: string };
@@ -342,23 +352,23 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 							chunk.content = delta.delta.reasoning_content;
 						}
 						if (delta.delta?.tool_calls) {
-							const tc = delta.delta.tool_calls[0];
-							if (tc) {
-								chunk.toolCalls = {
-									id: tc.id ?? "",
-									type: (tc.type as "function") ?? undefined,
-									function: {
-										name: tc.function?.name ?? "",
-										arguments: tc.function?.arguments ?? "",
-									},
-								};
+							for (const tc of delta.delta.tool_calls) {
+								const index = tc.index ?? 0;
+								const current = pendingToolCalls.get(index) ?? { id: "", name: "", arguments: "", type: "function" as const };
+								current.id = tc.id ?? current.id;
+								current.name = tc.function?.name ?? current.name;
+								current.arguments += tc.function?.arguments ?? "";
+								pendingToolCalls.set(index, current);
 							}
 						}
 						if (delta.finish_reason) {
+							for (const call of pendingToolCalls.values()) {
+								if (call.id && call.name) yield { toolCalls: { id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } } };
+							}
+							pendingToolCalls.clear();
 							chunk.finishReason = delta.finish_reason;
 						}
 						yield chunk;
-						if (chunk.finishReason) return;
 					}
 				}
 			}

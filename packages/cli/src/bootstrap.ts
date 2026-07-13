@@ -2469,7 +2469,8 @@ Always be concise, helpful, and thorough.`,
 	agentRuntime.setRequirementResolver(requirementResolver);
 	agentRuntime.enableOrchestrator({
 		maxWorkers: config.orchestration?.maxArms ?? 8,
-		getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+		getAgentRuntime: (agentId: string, conversationId?: string) =>
+			agentManager.getRuntime(agentId, conversationId),
 		releaseWorkerResources: (workerId: string) =>
 			browserTool?.releaseWorker(workerId) ?? Promise.resolve(),
 		complexityThreshold: 5,
@@ -2631,7 +2632,8 @@ Always be concise, helpful, and thorough.`,
 		runtime.setRequirementResolver(requirementResolver);
 		runtime.enableOrchestrator({
 			maxWorkers: config.orchestration?.maxArms ?? 8,
-			getAgentRuntime: (agentId: string) => agentManager.getRuntime(agentId),
+			getAgentRuntime: (agentId: string, conversationId?: string) =>
+				agentManager.getRuntime(agentId, conversationId),
 			releaseWorkerResources: (workerId: string) =>
 				browserTool?.releaseWorker(workerId) ?? Promise.resolve(),
 			complexityThreshold: 5,

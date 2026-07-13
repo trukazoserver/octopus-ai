@@ -170,6 +170,26 @@ describe("ChatManager", () => {
 		});
 	});
 
+	it("allows only one concurrent claimant for an identical tool action", async () => {
+		const conversation = await manager.createConversation({ title: "Atomic" });
+		const execution = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		const claims = await Promise.all(
+			Array.from({ length: 12 }, () =>
+				manager.claimToolAction({
+					conversationId: conversation.id,
+					executionId: execution.id,
+					toolName: "generate_image",
+					argumentsJson: '{"prompt":"same"}',
+					argumentsHash: "same-hash",
+				}),
+			),
+		);
+		expect(claims.filter((claim) => claim.claimed)).toHaveLength(1);
+		expect(new Set(claims.map((claim) => claim.action.id))).toHaveLength(1);
+	});
+
 	it("marks in-flight tool actions uncertain after a restart", async () => {
 		const conversation = await manager.createConversation({ title: "Restart" });
 		const execution = await manager.createExecution({

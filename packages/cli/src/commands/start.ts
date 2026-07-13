@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { Socket } from "node:net";
 import { platform as getPlatform } from "node:os";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import * as readline from "node:readline";
 import {
 	ChannelManager,
@@ -10,7 +12,12 @@ import {
 	InputFile,
 	MessageType,
 	TelegramChannel,
+	WhatsAppChannel,
+	DiscordChannel,
+	SlackChannel,
 	TransportServer,
+	AgentRuntime,
+	createDeliveryContext,
 	mediaContext,
 } from "@octopus-ai/core";
 import type {
@@ -18,6 +25,7 @@ import type {
 	ChannelMessage,
 	ChatExecutionEvent,
 	Conversation,
+	DeliveryChannel,
 } from "@octopus-ai/core";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -801,11 +809,12 @@ async function sendTelegramFinalResponse(opts: {
 		alt: string;
 		buffer?: Buffer;
 		mimeType?: string;
+		filename?: string;
 	}[] = [];
 
 	if (content.includes("/api/media/file/")) {
 		const imgRegex =
-			/!\[([^\]]*)\]\((https?:\/\/[^\s)]+|\/api\/media\/file\/[^\s)]+)\)/g;
+			/!?\[([^\]]*)\]\((https?:\/\/[^\s)]+|\/api\/media\/file\/[^\s)]+)\)/g;
 		let match: RegExpExecArray | null = imgRegex.exec(content);
 		while (match !== null) {
 			mediaUrls.push({ alt: match[1], url: match[2] });
@@ -819,6 +828,7 @@ async function sendTelegramFinalResponse(opts: {
 				const resolved = await mediaContext.resolve(media.url);
 				media.buffer = resolved.buffer;
 				media.mimeType = resolved.mimeType;
+				media.filename = media.url.split("/").pop();
 			} catch {
 				console.warn(`Could not resolve media url: ${media.url}`);
 			}
@@ -874,13 +884,23 @@ async function sendTelegramFinalResponse(opts: {
 				await opts.tgBot.api.sendVideo(opts.msg.senderId, inputFile, {
 					caption: media.alt,
 				});
-			} else {
+			} else if (media.mimeType?.startsWith("image/")) {
 				await opts.tgBot.api.sendPhoto(opts.msg.senderId, inputFile, {
 					caption: media.alt,
+				});
+			} else {
+				await opts.tgBot.api.sendDocument(opts.msg.senderId, inputFile, {
+					caption: media.alt || media.filename,
 				});
 			}
 		} catch (err) {
 			console.error("Error sending media to telegram", err);
+			await opts.tgBot.api
+				.sendMessage(
+					opts.msg.senderId,
+					`No pude adjuntar ${(media.filename ?? media.alt) || "el archivo"}. Puedes descargarlo aquí: ${media.url}`,
+				)
+				.catch(() => {});
 		}
 	}
 }
@@ -1032,6 +1052,30 @@ export async function runStart(options: StartOptions): Promise<void> {
 							chalk.yellow("  ⚠ Telegram enabled but no botToken configured"),
 						);
 					}
+				} else if (name === "whatsapp") {
+					const authPath = String(
+						(ch as Record<string, unknown>).authPath ??
+							join(homedir(), ".octopus", "channels", "whatsapp"),
+					);
+					activeChannelManager.register(new WhatsAppChannel("whatsapp", authPath));
+					console.log(chalk.green("  ✓ WhatsApp channel registered"));
+				} else if (name === "discord") {
+					const botToken = String((ch as Record<string, unknown>).botToken ?? "");
+					if (!botToken) throw new Error("Discord botToken is required");
+					activeChannelManager.register(new DiscordChannel("discord", botToken));
+					console.log(chalk.green("  ✓ Discord channel registered"));
+				} else if (name === "slack") {
+					const config = ch as Record<string, unknown>;
+					const botToken = String(config.botToken ?? "");
+					const signingSecret = String(config.signingSecret ?? "");
+					const appToken = String(config.appToken ?? "");
+					if (!botToken || !signingSecret || !appToken) {
+						throw new Error("Slack botToken, signingSecret and appToken are required");
+					}
+					activeChannelManager.register(
+						new SlackChannel("slack", botToken, signingSecret, appToken),
+					);
+					console.log(chalk.green("  ✓ Slack channel registered"));
 				} else {
 					system.connectionManager.registerChannel(name);
 				}
@@ -1043,20 +1087,26 @@ export async function runStart(options: StartOptions): Promise<void> {
 		}
 
 		const channelExecutionSessions = new Map<string, ChannelExecutionSession>();
+		const mainConversationRuntimes = new Map<string, AgentRuntime>();
 		const chatExecutionManager = new ChatExecutionManager({
 			chatManager: system.chatManager,
 			conversationHistoryLimit: CONVERSATION_HISTORY_LIMIT,
 			streamCheckpointIntervalMs: STREAM_CHECKPOINT_INTERVAL_MS,
-			getAgentRuntime: (agentId?: string) => {
+			getAgentRuntime: (agentId: string | undefined, conversationId: string) => {
 				if (!system) throw new Error("System not initialized");
 				// Execute the selected agent's runtime when available; fall back to
 				// the main Octavio runtime otherwise. This is what makes per-agent
 				// model/reasoning selection actually take effect at run time.
 				if (agentId && system.agentManager) {
-					const runtime = system.agentManager.getRuntime(agentId);
+					const runtime = system.agentManager.getRuntime(agentId, conversationId);
 					if (runtime) return runtime;
 				}
-				return system.agentRuntime;
+				let runtime = mainConversationRuntimes.get(conversationId);
+				if (!runtime) {
+					runtime = system.agentRuntime.createConversationScope();
+					mainConversationRuntimes.set(conversationId, runtime);
+				}
+				return runtime;
 			},
 			getSelectedAgentContext: async (agentId?: string) => {
 				if (!agentId || !system?.agentManager) return null;
@@ -1118,6 +1168,20 @@ export async function runStart(options: StartOptions): Promise<void> {
 			const chatManager = system.chatManager;
 			const channel = activeChannelManager.get(msg.channelId);
 			const channelLabel = channel?.type ?? msg.channelId;
+			const metadata = msg.metadata ?? {};
+			const actorId = String(
+				metadata.fromId ??
+					metadata.participant ??
+					metadata.authorId ??
+					metadata.user ??
+					msg.senderId,
+			);
+			const configuredOwnerIds = (process.env.OCTOPUS_OWNER_IDS ?? "")
+				.split(",")
+				.map((value) => value.trim())
+				.filter(Boolean);
+			const ownerVerified =
+				configuredOwnerIds.length === 0 || configuredOwnerIds.includes(actorId);
 			const queueKey = `${channelLabel}:${msg.senderId}`;
 			const previousProcessing =
 				channelProcessingQueues.get(queueKey) ?? Promise.resolve();
@@ -1201,6 +1265,18 @@ export async function runStart(options: StartOptions): Promise<void> {
 						senderId: msg.senderId,
 						senderName: msg.senderName,
 					},
+					deliveryContext: createDeliveryContext({
+						channel: channelLabel as DeliveryChannel,
+						principalId: ownerVerified ? "owner" : `channel:${actorId}`,
+						ownerVerified,
+						destinationId: msg.senderId,
+						actorId,
+						inboundMessageId: msg.id,
+						threadId:
+							typeof metadata.threadId === "string"
+								? metadata.threadId
+								: undefined,
+					}),
 				});
 				executionStarted = true;
 				if (execution.request_id !== requestId) {
@@ -1349,6 +1425,12 @@ export async function runStart(options: StartOptions): Promise<void> {
 						stream: payload.stream,
 						conversationId: payload.conversationId,
 						agentId: payload.agentId,
+						deliveryContext: createDeliveryContext({
+							channel: "web",
+							principalId: "owner",
+							ownerVerified: true,
+							destinationId: payload.conversationId,
+						}),
 					});
 					server.subscribeConversation(clientId, execution.conversation_id);
 					server.send(clientId, {

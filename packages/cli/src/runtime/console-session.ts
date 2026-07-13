@@ -3,6 +3,7 @@ import {
 	type Skill,
 	type ToolDefinition,
 	TransportClient,
+	createDeliveryContext,
 	type UsageStats,
 	getProviderRegistry,
 } from "@octopus-ai/core";
@@ -332,6 +333,13 @@ export function createLocalConsoleSession(
 				for await (const chunk of system.agentRuntime.processMessageStream(
 					input,
 					conversationId,
+					{
+						deliveryContext: createDeliveryContext({
+							channel: "cli",
+							principalId: "owner",
+							ownerVerified: true,
+						}),
+					},
 				)) {
 					const statusMatch = chunk.match(STATUS_RE);
 					if (statusMatch) {

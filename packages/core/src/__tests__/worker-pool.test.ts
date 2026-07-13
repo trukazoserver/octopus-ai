@@ -105,7 +105,10 @@ describe("WorkerPool", () => {
 			{ channelId: "conversation-1", maxToolIterations: 1, timeoutMs: 10_000 },
 		);
 
-		expect(getAgentRuntime).toHaveBeenCalledWith("arm-ari");
+		expect(getAgentRuntime).toHaveBeenCalledWith(
+			"arm-ari",
+			"conversation-1",
+		);
 		expect(armRuntime.processMessageStream).toHaveBeenCalledWith(
 			expect.stringContaining("Subtarea asignada por Octavio"),
 			"conversation-1",

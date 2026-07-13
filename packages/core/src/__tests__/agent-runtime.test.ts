@@ -58,6 +58,7 @@ function createMockSTM() {
 		}),
 		setScratchPad: vi.fn(),
 		getScratchPad: vi.fn(),
+		createEmptySibling: vi.fn(() => createMockSTM()),
 		clear: vi.fn(() => {
 			turns.length = 0;
 			activeTask = null;
@@ -1485,7 +1486,7 @@ describe("AgentRuntime", () => {
 						result_json: completedResult,
 					};
 				}),
-				createToolAction: vi.fn().mockResolvedValue(action),
+				claimToolAction: vi.fn().mockResolvedValue({ action, claimed: true }),
 				completeToolAction: vi.fn().mockImplementation((_id, resultJson) => {
 					completedResult = resultJson;
 				}),
@@ -1509,7 +1510,7 @@ describe("AgentRuntime", () => {
 			});
 
 			expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
-			expect(mockChatManager.createToolAction).toHaveBeenCalledTimes(1);
+			expect(mockChatManager.claimToolAction).toHaveBeenCalledTimes(1);
 			expect(mockChatManager.completeToolAction).toHaveBeenCalledTimes(1);
 			expect(mockChatManager.findReusableToolAction).toHaveBeenLastCalledWith(
 				expect.objectContaining({
@@ -2163,6 +2164,18 @@ describe("AgentRuntime", () => {
 			});
 
 			expect(onCompletionOutcome).toHaveBeenCalledWith({ reason: "finished" });
+		});
+	});
+
+	describe("conversation runtime scopes", () => {
+		it("creates independent mutable STM state while sharing runtime services", () => {
+			const first = runtime.createConversationScope();
+			const second = runtime.createConversationScope();
+			expect(first).not.toBe(second);
+			expect(first.stm).not.toBe(second.stm);
+			first.stm.add({ role: "user", content: "private-to-first", timestamp: new Date() });
+			expect(first.stm.getRelevant("private", 1000)).toHaveLength(1);
+			expect(second.stm.getRelevant("private", 1000)).toHaveLength(0);
 		});
 	});
 

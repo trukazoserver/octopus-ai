@@ -8,13 +8,20 @@ const pgMock = vi.hoisted(() => ({
 		connect: ReturnType<typeof vi.fn>;
 		query: ReturnType<typeof vi.fn>;
 		end: ReturnType<typeof vi.fn>;
+		transactionQuery: ReturnType<typeof vi.fn>;
+		release: ReturnType<typeof vi.fn>;
 	}>,
 }));
 
 vi.mock("pg", () => ({
-	Client: class {
+	Pool: class {
 		config: unknown;
-		connect = vi.fn(async () => undefined);
+		transactionQuery = vi.fn(async () => ({ rows: [] }));
+		release = vi.fn();
+		connect = vi.fn(async () => ({
+			query: this.transactionQuery,
+			release: this.release,
+		}));
 		query = vi.fn(async (sql: string) => {
 			if (sql.includes("SELECT version FROM _migrations")) return { rows: [] };
 			if (sql.includes("information_schema.columns")) return { rows: [] };
@@ -57,7 +64,7 @@ describe("PostgresDatabase", () => {
 			connectionString: "postgresql://user:pass@localhost/octopus",
 			application_name: "octopus-test",
 		});
-		expect(client?.connect).toHaveBeenCalledOnce();
+		expect(client?.connect).not.toHaveBeenCalled();
 		expect(
 			client?.query.mock.calls.some((call) =>
 				String(call[0]).includes("CREATE TABLE IF NOT EXISTS _migrations"),
@@ -130,10 +137,11 @@ describe("PostgresDatabase", () => {
 			await db.run("UPDATE demo SET a = ?", ["value"]);
 		});
 
-		expect(client?.query.mock.calls.map((call) => call[0])).toEqual([
+		expect(client?.transactionQuery.mock.calls.map((call) => call[0])).toEqual([
 			"BEGIN",
 			"UPDATE demo SET a = $1",
 			"COMMIT",
 		]);
+		expect(client?.release).toHaveBeenCalledOnce();
 	});
 });

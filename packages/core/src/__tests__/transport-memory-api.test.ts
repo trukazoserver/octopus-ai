@@ -70,6 +70,26 @@ async function postJson(
 }
 
 describe("memory API endpoints", () => {
+	it("rejects hostile browser origins without blocking local owner requests", async () => {
+		const baseUrl = await startServer({});
+		const hostile = await fetch(`${baseUrl}/api/status`, {
+			headers: { Origin: "https://attacker.example" },
+		});
+		expect(hostile.status).toBe(403);
+		const local = await fetch(`${baseUrl}/api/status`, {
+			headers: { Origin: "http://localhost:3000" },
+		});
+		expect(local.status).toBe(200);
+	});
+
+	it("rejects encoded traversal in dynamic tool names", async () => {
+		const baseUrl = await startServer({});
+		const response = await fetch(
+			`${baseUrl}/api/tools/dynamic/..%2Fcredentials`,
+		);
+		expect(response.status).not.toBe(200);
+	});
+
 	it("lists and updates environment variables without exposing secret values", async () => {
 		const now = new Date(0).toISOString();
 		const safeSecret = {

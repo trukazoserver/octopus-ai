@@ -6,6 +6,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	realpathSync,
 	readdirSync,
 	statSync,
 	unlinkSync,
@@ -18,11 +19,12 @@ import {
 	createServer,
 } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "eventemitter3";
 import WebSocket, { WebSocketServer, type WebSocket as WSWebSocket } from "ws";
 import type { AgentReasoningEffort } from "../agent/types.js";
+import { assertSafeObjectKey, assertSafeObjectTree } from "../config/object-safety.js";
 import {
 	coerceReasoningEffort,
 	getModelCapabilities,
@@ -148,20 +150,6 @@ const MEMORY_RELATION_TYPES = new Set<MemoryRelationType>([
 	"updated",
 	"confirmed_by",
 ]);
-
-const SENSITIVE_API_PREFIXES = [
-	"/api/automations",
-	"/api/channels",
-	"/api/config",
-	"/api/env",
-	"/api/kanban",
-	"/api/learning",
-	"/api/mcp",
-	"/api/memory",
-	"/api/skills",
-	"/api/tasks",
-	"/api/workflows",
-];
 
 const CHANNEL_SECRET_CONFIG_KEYS = new Set([
 	"botToken",
@@ -523,12 +511,13 @@ function setNestedValue(
 	value: unknown,
 ): void {
 	const keys = keyPath.split(".");
+	for (const key of keys) assertSafeObjectKey(key);
 	let current: Record<string, unknown> = obj;
 	for (let i = 0; i < keys.length - 1; i++) {
 		const key = keys[i];
 		if (key === undefined) continue;
 		if (
-			!(key in current) ||
+			!Object.hasOwn(current, key) ||
 			typeof current[key] !== "object" ||
 			current[key] === null
 		) {
@@ -540,6 +529,28 @@ function setNestedValue(
 	if (lastKey !== undefined) {
 		current[lastKey] = value;
 	}
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+	const rel = relative(root, candidate);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function resolveDynamicToolDir(name: string): string {
+	if (!/^[a-z][a-z0-9-]{0,127}$/.test(name)) {
+		throw badRequest("Invalid dynamic tool name");
+	}
+	const root = resolve(homedir(), ".octopus", "tools");
+	const dir = resolve(root, name);
+	if (!isPathWithin(root, dir)) throw badRequest("Invalid dynamic tool path");
+	if (existsSync(dir)) {
+		const realRoot = existsSync(root) ? realpathSync(root) : root;
+		const realDir = realpathSync(dir);
+		if (!isPathWithin(realRoot, realDir)) {
+			throw badRequest("Dynamic tool path escapes tool root");
+		}
+	}
+	return dir;
 }
 
 function maskUrlCredentials(value: unknown, seen = new WeakSet()): unknown {
@@ -597,9 +608,13 @@ function isLoopbackHost(host: string): boolean {
 	);
 }
 
-function isSensitiveApiPath(pathname: string): boolean {
-	return SENSITIVE_API_PREFIXES.some(
-		(prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+function isLoopbackAddress(address: string | undefined): boolean {
+	if (!address) return false;
+	const normalized = address.toLowerCase();
+	return (
+		normalized === "127.0.0.1" ||
+		normalized === "::1" ||
+		normalized === "::ffff:127.0.0.1"
 	);
 }
 
@@ -726,6 +741,36 @@ export class TransportServer {
 		return false;
 	}
 
+	private isAllowedRequestOrigin(req: IncomingMessage): boolean {
+		const origin = headerValue(req.headers.origin).trim();
+		if (!origin) return true;
+		try {
+			const parsed = new URL(origin);
+			const requestHost = headerValue(req.headers.host).toLowerCase();
+			if (parsed.host.toLowerCase() === requestHost) return true;
+			return isLoopbackHost(parsed.hostname) && isLoopbackAddress(req.socket.remoteAddress);
+		} catch {
+			return false;
+		}
+	}
+
+	private authorizeApiRequest(req: IncomingMessage, res: ServerResponse): boolean {
+		if (!this.isAllowedRequestOrigin(req)) {
+			jsonRes(res, 403, { error: "Request origin is not allowed" });
+			return false;
+		}
+		const expectedKey = configuredApiKey(this.system?.config);
+		if (!isLoopbackHost(this.host) && !expectedKey) {
+			return this.authorizeSensitiveApiRequest(req, res);
+		}
+		if (
+			isLoopbackAddress(req.socket.remoteAddress) &&
+			!expectedKey
+		)
+			return true;
+		return this.authorizeSensitiveApiRequest(req, res);
+	}
+
 	async start(): Promise<void> {
 		this.httpServer = createServer(
 			(req: IncomingMessage, res: ServerResponse) => {
@@ -742,6 +787,10 @@ export class TransportServer {
 					`http://${req.headers.host ?? "localhost"}`,
 				);
 				const pathname = url.pathname;
+				if (!this.isAllowedRequestOrigin(req)) {
+					jsonRes(res, 403, { error: "Request origin is not allowed" });
+					return;
+				}
 
 				if (
 					req.method === "GET" &&
@@ -772,8 +821,9 @@ export class TransportServer {
 				}
 
 				if (
-					isSensitiveApiPath(pathname) &&
-					!this.authorizeSensitiveApiRequest(req, res)
+					pathname.startsWith("/api/") &&
+					pathname !== "/api/health" &&
+					!this.authorizeApiRequest(req, res)
 				) {
 					return;
 				}
@@ -1739,7 +1789,24 @@ export class TransportServer {
 			},
 		);
 
-		this.wss = new WebSocketServer({ server: this.httpServer });
+		this.wss = new WebSocketServer({
+			server: this.httpServer,
+			verifyClient: ({ req }, done) => {
+				if (!this.isAllowedRequestOrigin(req)) {
+					done(false, 403, "Origin not allowed");
+					return;
+				}
+				if (
+					isLoopbackAddress(req.socket.remoteAddress) &&
+					!configuredApiKey(this.system?.config)
+				) {
+					done(true);
+					return;
+				}
+				const expectedKey = configuredApiKey(this.system?.config);
+				done(timingSafeTokenEquals(extractApiKey(req), expectedKey), 401, "Unauthorized");
+			},
+		});
 
 		this.wss.on("connection", (ws: WSWebSocket) => {
 			const clientId = crypto.randomUUID();
@@ -2022,6 +2089,7 @@ export class TransportServer {
 			let parsed: { clientId?: string; clientSecret?: string };
 			try {
 				parsed = JSON.parse(body);
+				assertSafeObjectTree(parsed);
 			} catch {
 				jsonRes(res, 400, { error: "Invalid JSON body" });
 				return;
@@ -4658,7 +4726,7 @@ export class TransportServer {
 
 	private handleGetDynamicToolDetail(res: ServerResponse, name: string): void {
 		try {
-			const dir = join(homedir(), ".octopus", "tools", name);
+			const dir = resolveDynamicToolDir(name);
 			if (!existsSync(dir)) {
 				jsonRes(res, 404, { error: "Tool not found" });
 				return;
@@ -4688,7 +4756,7 @@ export class TransportServer {
 	): Promise<void> {
 		try {
 			const body = JSON.parse(await readBody(req));
-			const dir = join(homedir(), ".octopus", "tools", name);
+			const dir = resolveDynamicToolDir(name);
 			if (!existsSync(dir)) {
 				jsonRes(res, 404, { error: "Tool not found" });
 				return;
@@ -4947,7 +5015,7 @@ export class TransportServer {
 		toolName: string,
 	): Promise<void> {
 		try {
-			const dir = join(homedir(), ".octopus", "tools", toolName);
+			const dir = resolveDynamicToolDir(toolName);
 			if (!existsSync(dir)) {
 				jsonRes(res, 404, { error: `Tool '${toolName}' not found` });
 				return;
@@ -5474,6 +5542,7 @@ export class TransportServer {
 				return;
 			}
 			await this.system.chatManager.deleteConversation(id);
+			this.system.agentManager?.releaseConversation(id);
 			jsonRes(res, 200, { ok: true });
 		} catch (err) {
 			jsonRes(res, 500, {

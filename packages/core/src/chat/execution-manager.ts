@@ -4,6 +4,7 @@ import type {
 	RuntimeCompletionOutcome,
 	RuntimeSelectedAgentContext,
 } from "../agent/runtime.js";
+import type { DeliveryContext } from "../delivery/context.js";
 import type {
 	ChatExecution,
 	ChatExecutionActivity,
@@ -19,6 +20,7 @@ export interface ChatExecutionStartInput {
 	messageMetadata?: Record<string, unknown>;
 	conversationId?: string;
 	agentId?: string;
+	deliveryContext?: DeliveryContext;
 	stream?: boolean;
 }
 
@@ -38,7 +40,7 @@ export interface ChatExecutionEvent {
 
 export interface ChatExecutionManagerOptions {
 	chatManager: ChatManager;
-	getAgentRuntime(agentId?: string): AgentRuntime;
+	getAgentRuntime(agentId: string | undefined, conversationId: string): AgentRuntime;
 	getSelectedAgentContext?(
 		agentId?: string,
 	):
@@ -163,12 +165,16 @@ export class ChatExecutionManager {
 		if (!execution) return false;
 		controller?.abort();
 		const completedAt = new Date().toISOString();
-		await this.opts.chatManager.updateExecution(executionId, {
+		const transitioned = await this.opts.chatManager.updateExecution(executionId, {
 			status: "cancelled",
 			currentStatus: "cancelled",
 			completedAt,
 			error: "Cancelado por el usuario",
+			completionReason: "cancelled",
+			pendingAction: null,
+			onlyIfActive: true,
 		});
+		if (!transitioned) return false;
 		this.emit({
 			type: "stream_end",
 			requestId: execution.request_id ?? undefined,
@@ -194,7 +200,7 @@ export class ChatExecutionManager {
 		controller: AbortController,
 	): Promise<void> {
 		const conversationId = execution.conversation_id;
-		const targetAgent = this.opts.getAgentRuntime(input.agentId);
+		const targetAgent = this.opts.getAgentRuntime(input.agentId, conversationId);
 		const selectedAgentContext = this.opts.getSelectedAgentContext
 			? await this.opts.getSelectedAgentContext(input.agentId)
 			: null;
@@ -207,7 +213,7 @@ export class ChatExecutionManager {
 		const updateExecution = async (
 			updates: Parameters<ChatManager["updateExecution"]>[1],
 		) => {
-			await this.opts.chatManager.updateExecution(execution.id, updates);
+			return await this.opts.chatManager.updateExecution(execution.id, updates);
 		};
 
 		const saveAssistantCheckpoint = async (
@@ -340,6 +346,7 @@ export class ChatExecutionManager {
 						selectedAgentContext,
 						executionId: execution.id,
 						resumeCompletedActions: isContinuationRequest(input.message),
+						deliveryContext: input.deliveryContext,
 						onCompletionOutcome: (nextOutcome) => {
 							outcome = nextOutcome;
 						},
@@ -397,13 +404,15 @@ export class ChatExecutionManager {
 				const pending = outcome.reason === "pending_action";
 				const terminalStatus = pending ? "interrupted" : "completed";
 				await saveAssistantCheckpoint(terminalStatus, true);
-				await updateExecution({
+				const transitioned = await updateExecution({
 					status: terminalStatus,
 					completionReason: outcome.reason,
 					pendingAction: outcome.pendingAction ?? null,
 					currentStatus: null,
 					completedAt: new Date().toISOString(),
+					onlyIfActive: true,
 				});
+				if (!transitioned) return;
 				this.emit({
 					type: "stream_end",
 					requestId: execution.request_id ?? undefined,
@@ -428,6 +437,7 @@ export class ChatExecutionManager {
 						selectedAgentContext,
 						executionId: execution.id,
 						resumeCompletedActions: isContinuationRequest(input.message),
+						deliveryContext: input.deliveryContext,
 						onCompletionOutcome: (nextOutcome) => {
 							outcome = nextOutcome;
 						},
@@ -452,13 +462,15 @@ export class ChatExecutionManager {
 				);
 				assistantMessageId = assistantMessage.id;
 				await updateExecution({ assistantMessageId });
-				await updateExecution({
+				const transitioned = await updateExecution({
 					status: terminalStatus,
 					completionReason: outcome.reason,
 					pendingAction: outcome.pendingAction ?? null,
 					currentStatus: null,
 					completedAt: new Date().toISOString(),
+					onlyIfActive: true,
 				});
+				if (!transitioned) return;
 				this.emit({
 					type: "response",
 					requestId: execution.request_id ?? undefined,
@@ -498,14 +510,16 @@ export class ChatExecutionManager {
 					{ metadata: { status: "failed", executionId: execution.id } },
 				);
 			}
-			await updateExecution({
+			const transitioned = await updateExecution({
 				status: cancelled ? "cancelled" : "failed",
 				completionReason: cancelled ? "cancelled" : "failed",
 				pendingAction: null,
 				currentStatus: null,
 				error: errorMessage,
 				completedAt: new Date().toISOString(),
+				onlyIfActive: true,
 			});
+			if (!transitioned) return;
 			this.emit({
 				type: cancelled ? "stream_end" : "error",
 				requestId: execution.request_id ?? undefined,

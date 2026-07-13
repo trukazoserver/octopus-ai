@@ -1,7 +1,8 @@
-import { exec } from "node:child_process";
+import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface SandboxConfig {
 	/**
@@ -25,6 +26,40 @@ export interface SandboxConfig {
 	 * Whether to validate commands for dangerous patterns
 	 */
 	validateCommands?: boolean;
+}
+
+export function buildDockerArgs(options: {
+	command: string;
+	image: string;
+	memoryLimit: string;
+	mounts?: Array<{ host: string; container: string; readonly?: boolean }>;
+}): string[] {
+	if (
+		!options.image ||
+		options.image.startsWith("-") ||
+		/[\0\r\n]/.test(options.image)
+	) {
+		throw new Error("Invalid Docker image");
+	}
+	if (!/^\d+(?:\.\d+)?[bkmg]$/i.test(options.memoryLimit)) {
+		throw new Error("Invalid Docker memory limit");
+	}
+	const args = [
+		"run",
+		"--rm",
+		`--memory=${options.memoryLimit}`,
+		"--network=none",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges",
+	];
+	for (const mount of options.mounts ?? []) {
+		args.push(
+			"-v",
+			`${mount.host}:${mount.container}${mount.readonly ? ":ro" : ""}`,
+		);
+	}
+	args.push(options.image, "sh", "-c", options.command);
+	return args;
 }
 
 /**
@@ -134,31 +169,15 @@ export class DockerSandbox {
 		command: string,
 		mounts?: Array<{ host: string; container: string; readonly?: boolean }>,
 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-		const mountArgs = (mounts ?? [])
-			.map((m) => {
-				const readonlyFlag = m.readonly ? ":ro" : "";
-				return `-v "${m.host}:${m.container}${readonlyFlag}"`;
-			})
-			.join(" ");
-
-		// Security: isolate container with no network, memory limits, and remove after execution
-		const dockerCommand = [
-			"docker",
-			"run",
-			"--rm",
-			`--memory="${this.memoryLimit}"`,
-			"--network=none",
-			"--cap-drop=ALL",
-			"--security-opt=no-new-privileges",
-			mountArgs,
-			`"${this.image}"`,
-			"sh",
-			"-c",
-			JSON.stringify(command),
-		].join(" ");
+		const args = buildDockerArgs({
+			command,
+			image: this.image,
+			memoryLimit: this.memoryLimit,
+			mounts,
+		});
 
 		try {
-			const { stdout, stderr } = await execAsync(dockerCommand, {
+			const { stdout, stderr } = await execFileAsync("docker", args, {
 				timeout: this.timeout,
 				maxBuffer: 1024 * 1024 * 10,
 			});

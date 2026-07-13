@@ -458,7 +458,10 @@ export class CodexProvider extends BaseLLMProvider {
 					// the final value on the done item.
 					const accumulated = itemId ? state.argsByItem.get(itemId) : undefined;
 					const name = (item.name as string) || accumulated?.name || "";
-					const args = (item.arguments as string) ?? accumulated?.args ?? "";
+			const args =
+				accumulated?.args ||
+				(typeof item.arguments === "string" ? item.arguments : "");
+			if (state.toolCalls.some((call) => call.id === callId)) return null;
 					const toolCall: LLMToolCall = {
 						id: callId,
 						type: "function",

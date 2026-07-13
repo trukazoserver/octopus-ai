@@ -353,6 +353,17 @@ export {
 	ToolHealthManager,
 	PdfReader,
 } from "./tools/index.js";
+
+export {
+	asBackgroundDeliveryContext,
+	createDeliveryContext,
+} from "./delivery/context.js";
+export type {
+	DeliveryCapabilities,
+	DeliveryChannel,
+	DeliveryContext,
+	TrustProfile,
+} from "./delivery/context.js";
 export type {
 	ToolDefinition,
 	ToolErrorCode,
@@ -534,6 +545,9 @@ export {
 
 export { ChannelManager } from "./channels/manager.js";
 export { TelegramChannel } from "./channels/telegram/index.js";
+export { WhatsAppChannel } from "./channels/whatsapp/index.js";
+export { DiscordChannel } from "./channels/discord/index.js";
+export { SlackChannel } from "./channels/slack/index.js";
 export type { Channel, ChannelMessage } from "./channels/types.js";
 
 export { InputFile } from "grammy";

@@ -335,6 +335,10 @@ export class AnthropicProvider extends BaseLLMProvider {
 				"Anthropic",
 			);
 
+		const toolBlocks = new Map<
+			number,
+			{ id: string; name: string; arguments: string }
+		>();
 		try {
 			while (true) {
 				const { done, value } = await readNext();
@@ -351,6 +355,7 @@ export class AnthropicProvider extends BaseLLMProvider {
 						const payload = trimmed.slice(6);
 
 						let event: {
+							index?: number;
 							type?: string;
 							error?: { message?: string } | string;
 							delta?: {
@@ -392,33 +397,24 @@ export class AnthropicProvider extends BaseLLMProvider {
 								event.delta?.type === "input_json_delta") ||
 							(event.type === "tool_use_chunk" && event.delta?.partial_json)
 						) {
-							yield {
-								toolCalls: {
-									id: "", // anthropic only sends id at block_start
-									type: "function",
-									function: {
-										name: "",
-										arguments:
-											event.delta.partial_json ||
-											event.delta.partial_json ||
-											"",
-									},
-								},
-							};
+								const block = toolBlocks.get(event.index ?? 0);
+								if (block) block.arguments += event.delta.partial_json ?? "";
 						} else if (
 							event.type === "content_block_start" &&
 							event.content_block?.type === "tool_use"
 						) {
-							yield {
-								toolCalls: {
+								toolBlocks.set(event.index ?? 0, {
 									id: event.content_block.id ?? "",
-									type: "function",
-									function: {
-										name: event.content_block.name ?? "",
-										arguments: "",
-									},
-								},
-							};
+									name: event.content_block.name ?? "",
+									arguments: "",
+								});
+							} else if (event.type === "content_block_stop") {
+								const index = event.index ?? 0;
+								const block = toolBlocks.get(index);
+								if (block?.id && block.name) {
+									yield { toolCalls: { id: block.id, type: "function", function: { name: block.name, arguments: block.arguments } } };
+								}
+								toolBlocks.delete(index);
 						} else if (event.type === "message_delta") {
 							const hasStopReason = !!event.delta?.stop_reason;
 							const stopReason = event.delta?.stop_reason;

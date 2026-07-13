@@ -1,12 +1,13 @@
-import { Client, type QueryResult } from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { Pool, type PoolClient, type QueryResult } from "pg";
 import type { DatabaseAdapter, DatabaseConfig } from "./database.js";
 import { migrations } from "./migrations/index.js";
 
-type Queryable = Pick<Client, "query">;
+type Queryable = Pick<Pool | PoolClient, "query">;
 
 export class PostgresDatabase implements DatabaseAdapter {
-	private client: Client | null = null;
-	private transactionClient: Queryable | null = null;
+	private pool: Pool | null = null;
+	private readonly transactionContext = new AsyncLocalStorage<PoolClient>();
 
 	constructor(private config: DatabaseConfig) {}
 
@@ -17,18 +18,17 @@ export class PostgresDatabase implements DatabaseAdapter {
 				"PostgreSQL backend requires a connectionString in storage config.",
 			);
 		}
-		this.client = new Client({
+		this.pool = new Pool({
 			connectionString,
 			...(this.config.options ?? {}),
 		});
-		await this.client.connect();
 		await this.runMigrations();
 	}
 
 	async close(): Promise<void> {
-		if (!this.client) return;
-		await this.client.end();
-		this.client = null;
+		if (!this.pool) return;
+		await this.pool.end();
+		this.pool = null;
 	}
 
 	async run(sql: string, params?: unknown[]): Promise<void> {
@@ -46,19 +46,21 @@ export class PostgresDatabase implements DatabaseAdapter {
 	}
 
 	async transaction<T>(fn: () => Promise<T>): Promise<T> {
-		const client = this.ensureOpen();
-		if (this.transactionClient) return await fn();
-		this.transactionClient = client;
-		await client.query("BEGIN");
+		const pool = this.ensureOpen();
+		if (this.transactionContext.getStore()) return await fn();
+		const client = await pool.connect();
 		try {
-			const result = await fn();
-			await client.query("COMMIT");
-			return result;
-		} catch (err) {
-			await client.query("ROLLBACK");
-			throw err;
+			await client.query("BEGIN");
+			try {
+				const result = await this.transactionContext.run(client, fn);
+				await client.query("COMMIT");
+				return result;
+			} catch (err) {
+				await client.query("ROLLBACK");
+				throw err;
+			}
 		} finally {
-			this.transactionClient = null;
+			client.release();
 		}
 	}
 
@@ -92,16 +94,16 @@ export class PostgresDatabase implements DatabaseAdapter {
 		sql: string,
 		params?: unknown[],
 	): Promise<QueryResult<Record<string, unknown>>> {
-		const client = this.transactionClient ?? this.ensureOpen();
+		const client: Queryable = this.transactionContext.getStore() ?? this.ensureOpen();
 		const prepared = preparePostgresSql(sql, params ?? []);
 		return await client.query(prepared.sql, prepared.params);
 	}
 
-	private ensureOpen(): Client {
-		if (!this.client) {
+	private ensureOpen(): Pool {
+		if (!this.pool) {
 			throw new Error("Database is not initialized. Call initialize() first.");
 		}
-		return this.client;
+		return this.pool;
 	}
 }
 

@@ -1,6 +1,10 @@
 import { homedir } from "node:os";
 import * as readline from "node:readline";
-import { AgentRuntime, getProviderRegistry } from "@octopus-ai/core";
+import {
+	AgentRuntime,
+	createDeliveryContext,
+	getProviderRegistry,
+} from "@octopus-ai/core";
 import type { Skill, ToolDefinition } from "@octopus-ai/core";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -287,6 +291,13 @@ async function streamResponse(
 	for await (const chunk of system.agentRuntime.processMessageStream(
 		input,
 		"cli",
+		{
+			deliveryContext: createDeliveryContext({
+				channel: "cli",
+				principalId: "owner",
+				ownerVerified: true,
+			}),
+		},
 	)) {
 		const statusMatch = chunk.match(STATUS_RE);
 		if (statusMatch) {

@@ -73,7 +73,7 @@ export interface WorkerAgentMetadata {
 export interface OrchestratorConfig {
 	maxWorkers: number;
 	workerConfig: Partial<WorkerConfig>;
-	getAgentRuntime?: (agentId: string) => LiveAgentRuntime | undefined;
+	getAgentRuntime?: (agentId: string, conversationId?: string) => LiveAgentRuntime | undefined;
 	releaseWorkerResources?: (workerId: string) => Promise<void>;
 	/** Umbral mínimo de complejidad para activar multi-agent (1-10) */
 	complexityThreshold: number;

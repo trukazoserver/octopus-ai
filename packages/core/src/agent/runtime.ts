@@ -51,6 +51,7 @@ import {
 import type { ToolExecutionContext, ToolExecutor } from "../tools/executor.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/registry.js";
+import type { DeliveryContext } from "../delivery/context.js";
 import {
 	classifyToolError,
 	isProviderAccessError,
@@ -204,6 +205,7 @@ export interface AgentProcessOptions {
 		toolScope?: string[];
 		fileScope?: string[];
 	};
+	deliveryContext?: DeliveryContext;
 }
 
 export interface RuntimePendingAction {
@@ -307,6 +309,7 @@ export class AgentRuntime {
 	private chatManager?: ChatManager;
 	private workflowManager?: WorkflowManager;
 	private orchestrator?: OctopusOrchestrator;
+	private orchestratorConfig?: Partial<OrchestratorConfig>;
 	private kanbanPlanner?: KanbanPlanner;
 	private requirementResolver?: RequirementResolver;
 	private kanbanDispatcher?: KanbanDispatcher;
@@ -668,6 +671,7 @@ export class AgentRuntime {
 			);
 			return;
 		}
+		this.orchestratorConfig = config;
 		this.orchestrator = new OctopusOrchestrator(
 			this.llmRouter,
 			this.toolRegistry,
@@ -683,6 +687,34 @@ export class AgentRuntime {
 	 */
 	getOrchestrator(): OctopusOrchestrator | undefined {
 		return this.orchestrator;
+	}
+
+	createConversationScope(): AgentRuntime {
+		const scope = new AgentRuntime(
+			{ ...this.config },
+			this.llmRouter,
+			this.stm.createEmptySibling(),
+			this.memoryRetrieval,
+			this.memoryConsolidator,
+			this.skillLoader,
+		);
+		if (this.toolRegistry && this.toolExecutor) scope.setToolSystem(this.toolRegistry, this.toolExecutor);
+		if (this.toolHealth) scope.setToolHealthManager(this.toolHealth);
+		if (this.researcher) scope.setResearcher(this.researcher);
+		if (this.dailyMemory) scope.setDailyMemory(this.dailyMemory);
+		if (this.userProfileManager) scope.setUserProfileManager(this.userProfileManager);
+		if (this.memoryOrchestrator) scope.setMemoryOrchestrator(this.memoryOrchestrator);
+		if (this.contextAssembler) scope.setContextAssembler(this.contextAssembler);
+		if (this.learningEngine) scope.setLearningEngine(this.learningEngine);
+		if (this.chatManager) scope.setChatManager(this.chatManager);
+		if (this.workflowManager) scope.setWorkflowManager(this.workflowManager);
+		if (this.kanbanPlanner) scope.setKanbanPlanner(this.kanbanPlanner);
+		if (this.requirementResolver) scope.setRequirementResolver(this.requirementResolver);
+		if (this.kanbanDispatcher) scope.setKanbanDispatcher(this.kanbanDispatcher);
+		if (this.durableEventStream) scope.setDurableEventStream(this.durableEventStream);
+		if (this.subtaskTracker) scope.setSubtaskTracker(this.subtaskTracker);
+		if (this.orchestratorConfig) scope.enableOrchestrator(this.orchestratorConfig);
+		return scope;
 	}
 
 	setToolIterationLimit(
@@ -1010,6 +1042,7 @@ export class AgentRuntime {
 			model: this.config.model,
 			usesZaiVisionToolForImages: this.shouldUseZaiVisionToolsForImages(),
 			...options?.delegationContext,
+			deliveryContext: options?.deliveryContext,
 		};
 	}
 
@@ -1068,19 +1101,31 @@ export class AgentRuntime {
 			console.error("Failed to inspect durable tool receipt:", error);
 		}
 
-		let actionId: string | undefined;
-		try {
-			const action = await this.chatManager.createToolAction({
+		let actionId: string;
+		const claim = await this.chatManager.claimToolAction({
 				conversationId: channelId,
 				executionId: options.executionId,
 				toolCallId,
 				toolName,
 				argumentsJson,
 				argumentsHash,
-			});
-			actionId = action.id;
-		} catch (error) {
-			console.error("Failed to create durable tool receipt:", error);
+		});
+		actionId = claim.action.id;
+		if (!claim.claimed) {
+			if (claim.action.status === "completed" && claim.action.result_json) {
+				return {
+					result: JSON.parse(claim.action.result_json) as ToolResult,
+					reused: true,
+				};
+			}
+			return {
+				result: {
+					success: false,
+					output: "",
+					error: `An identical ${toolName} action is already running or has uncertain completion status. It was not executed again.`,
+				},
+				reused: true,
+			};
 		}
 
 		try {
@@ -2919,6 +2964,7 @@ export class AgentRuntime {
 							{
 								sharedContext,
 								channelId,
+								deliveryContext: options.deliveryContext,
 								signal: options.signal,
 								usesZaiVisionToolForImages:
 									this.shouldUseZaiVisionToolsForImages(),
@@ -2971,6 +3017,7 @@ export class AgentRuntime {
 			channelId,
 			learningInsights,
 			options.selectedAgentContext,
+			options.deliveryContext,
 		);
 		const tools = this.getAvailableTools(options);
 
@@ -3118,6 +3165,7 @@ export class AgentRuntime {
 							{
 								sharedContext,
 								channelId,
+								deliveryContext: options.deliveryContext,
 								signal: options.signal,
 								usesZaiVisionToolForImages:
 									this.shouldUseZaiVisionToolsForImages(),
@@ -3204,6 +3252,7 @@ export class AgentRuntime {
 			channelId,
 			learningInsights,
 			options.selectedAgentContext,
+			options.deliveryContext,
 		);
 		const tools = this.getAvailableTools(options);
 
@@ -3285,8 +3334,15 @@ export class AgentRuntime {
 								(t) => t.id === tc.id && tc.id !== "",
 							);
 							if (existing) {
-								existing.function.arguments += tcFn.arguments ?? "";
-								if (tcFn.name) existing.function.name = tcFn.name;
+								let alreadyComplete = false;
+								try {
+									JSON.parse(existing.function.arguments || "{}");
+									alreadyComplete = true;
+								} catch {}
+								if (!alreadyComplete) {
+									existing.function.arguments += tcFn.arguments ?? "";
+									if (tcFn.name) existing.function.name = tcFn.name;
+								}
 							} else {
 								toolCalls.push({
 									id: tc.id || `tc_${iterations}_${toolCalls.length}`,
@@ -4800,6 +4856,7 @@ export class AgentRuntime {
 		channelId?: string,
 		learningInsights: LearningInsight[] = [],
 		selectedAgent?: RuntimeSelectedAgentContext | null,
+		deliveryContext?: DeliveryContext,
 	): Promise<LLMMessage[]> {
 		const messages: LLMMessage[] = [];
 		const contextParts: string[] = [];
@@ -4808,6 +4865,10 @@ export class AgentRuntime {
 		let degradedMemorySections: string[] = [];
 
 		let systemContent = this.config.systemPrompt;
+		if (deliveryContext) {
+			const caps = deliveryContext.capabilities;
+			systemContent += `\n\n## DELIVERY CONTEXT (authoritative)\nChannel: ${deliveryContext.channel}\nTrust: ${deliveryContext.trustProfile}; owner verified: ${deliveryContext.ownerVerified}\nDelivery capabilities: markdown=${caps.markdown}, files=${caps.files}, images=${caps.images}, audio=${caps.audio}, video=${caps.video}, localPathsAccessible=${caps.localPathsAccessible}, maxTextChars=${caps.maxTextChars}, maxFileBytes=${caps.maxFileBytes}.\nAdapt the final response to this channel. Always return verified /api/media/file/... artifacts for created files. When native files/media are supported, the adapter will upload them; otherwise provide a concise downloadable link. Never tell a remote-channel user to open a local filesystem path. If local paths are accessible, include the absolute path plus a concise result. A verified owner retains the complete enabled tool surface: solve configuration, installation, coding, MCP, skill and automation work directly instead of delegating manual technical steps to the user.`;
+		}
 
 		// Fetch all independent async context sources IN PARALLEL (they used to run
 		// serially, blocking first-token by their combined latency). Each is

@@ -51,6 +51,17 @@ export class ShortTermMemory {
 		this.condensationFn = fn;
 	}
 
+	createEmptySibling(): ShortTermMemory {
+		const sibling = new ShortTermMemory({
+			maxTokens: this.maxTokens,
+			scratchPadSize: this.scratchPadSize,
+			autoEviction: this.autoEviction,
+			tokenCounter: this.tokenCounter,
+		});
+		if (this.condensationFn) sibling.setCondensationCallback(this.condensationFn);
+		return sibling;
+	}
+
 	add(turn: ConversationTurn): void {
 		this.workingContext.push(turn);
 		if (this.autoEviction) {

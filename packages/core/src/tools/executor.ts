@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import type { DeliveryContext } from "../delivery/context.js";
 import {
 	type CommandApprovalConfig,
 	CommandApprovalService,
@@ -62,6 +63,7 @@ export interface ToolExecutionContext {
 	actionId?: string;
 	/** Stable request key that provider-backed tools may forward upstream. */
 	idempotencyKey?: string;
+	deliveryContext?: DeliveryContext;
 	toolScope?: string[];
 	fileScope?: string[];
 	abortSignal?: AbortSignal;

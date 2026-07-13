@@ -10,6 +10,8 @@
 
 import type { LLMRouter } from "../ai/router.js";
 import type { LLMMessage, LLMRequest, LLMToolCall } from "../ai/types.js";
+import type { DeliveryContext } from "../delivery/context.js";
+import { asBackgroundDeliveryContext } from "../delivery/context.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ToolDefinition, ToolRegistry } from "../tools/registry.js";
 import type { AgentEvent, EventStream } from "./event-stream.js";
@@ -72,7 +74,7 @@ export interface LiveAgentRuntime {
 }
 
 export interface WorkerPoolOptions {
-	getAgentRuntime?: (agentId: string) => LiveAgentRuntime | undefined;
+	getAgentRuntime?: (agentId: string, conversationId?: string) => LiveAgentRuntime | undefined;
 	releaseWorkerResources?: (workerId: string) => Promise<void>;
 }
 
@@ -105,6 +107,7 @@ export interface WorkerConfig {
 	sharedContext?: LLMMessage[];
 	runId?: string;
 	channelId?: string;
+	deliveryContext?: DeliveryContext;
 	usesZaiVisionToolForImages?: boolean;
 	signal?: AbortSignal;
 	/**
@@ -258,6 +261,7 @@ export class WorkerPool {
 				toolScope: task.toolScope,
 				fileScope: task.fileScope,
 			},
+			deliveryContext: asBackgroundDeliveryContext(config.deliveryContext),
 		};
 		this.eventStream.append({
 			runId: config.runId,
@@ -459,7 +463,7 @@ export class WorkerPool {
 		});
 
 		const liveRuntime = task.agentId
-			? this.options.getAgentRuntime?.(task.agentId)
+			? this.options.getAgentRuntime?.(task.agentId, fullConfig.channelId)
 			: undefined;
 		const systemPrompt = liveRuntime
 			? ""
@@ -728,6 +732,9 @@ export class WorkerPool {
 								runId: config.runId,
 								toolScope: state.task.toolScope,
 								fileScope: state.task.fileScope,
+								deliveryContext: asBackgroundDeliveryContext(
+									config.deliveryContext,
+								),
 								abortSignal: state.abortController.signal,
 							},
 						);

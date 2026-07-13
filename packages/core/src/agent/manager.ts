@@ -15,6 +15,7 @@ import type {
 
 export class AgentManager {
 	private runtimes: Map<string, AgentRuntime> = new Map();
+	private conversationRuntimes = new Map<string, Map<string, AgentRuntime>>();
 
 	constructor(private db: DatabaseAdapter) {}
 
@@ -416,6 +417,7 @@ export class AgentManager {
 		if (existing.is_main) return false;
 		if (existing.is_builtin_arm === 1) return false;
 		this.runtimes.delete(id);
+		this.conversationRuntimes.delete(id);
 		await this.db.run("DELETE FROM agents WHERE id = ?", [id]);
 		return true;
 	}
@@ -472,14 +474,34 @@ export class AgentManager {
 
 	registerRuntime(agentId: string, runtime: AgentRuntime): void {
 		this.runtimes.set(agentId, runtime);
+		this.conversationRuntimes.delete(agentId);
 	}
 
 	unregisterRuntime(agentId: string): void {
 		this.runtimes.delete(agentId);
+		this.conversationRuntimes.delete(agentId);
 	}
 
-	getRuntime(agentId: string): AgentRuntime | undefined {
-		return this.runtimes.get(agentId);
+	getRuntime(agentId: string, conversationId?: string): AgentRuntime | undefined {
+		const base = this.runtimes.get(agentId);
+		if (!base || !conversationId) return base;
+		let scopes = this.conversationRuntimes.get(agentId);
+		if (!scopes) {
+			scopes = new Map();
+			this.conversationRuntimes.set(agentId, scopes);
+		}
+		let scope = scopes.get(conversationId);
+		if (!scope) {
+			scope = base.createConversationScope();
+			scopes.set(conversationId, scope);
+		}
+		return scope;
+	}
+
+	releaseConversation(conversationId: string): void {
+		for (const scopes of this.conversationRuntimes.values()) {
+			scopes.delete(conversationId);
+		}
 	}
 
 	// --- Per-agent, per-model reasoning profiles ---

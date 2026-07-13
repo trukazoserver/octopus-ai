@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getDefaults } from "./defaults.js";
+import { assertSafeObjectKey, assertSafeObjectTree } from "./object-safety.js";
 import type { OctopusConfig } from "./schema.js";
 import { ConfigValidator } from "./validator.js";
 
@@ -151,6 +152,7 @@ export class ConfigLoader {
 	}
 
 	private resolveEnvVars(obj: unknown): unknown {
+		assertSafeObjectTree(obj);
 		if (typeof obj === "string") {
 			return obj.replace(/\$\{([^}]+)\}/g, (_match, varName: string) => {
 				return process.env[varName] ?? "";
@@ -164,6 +166,7 @@ export class ConfigLoader {
 		if (obj !== null && typeof obj === "object") {
 			const result: Record<string, unknown> = {};
 			for (const [key, value] of Object.entries(obj)) {
+				assertSafeObjectKey(key);
 				result[key] = this.resolveEnvVars(value);
 			}
 			return result;
@@ -179,6 +182,7 @@ export class ConfigLoader {
 		const result = { ...target } as Record<string, unknown>;
 
 		for (const key of Object.keys(source as Record<string, unknown>)) {
+			assertSafeObjectKey(key);
 			const sourceValue = (source as Record<string, unknown>)[key];
 			const targetValue = result[key];
 

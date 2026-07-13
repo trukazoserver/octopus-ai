@@ -622,12 +622,58 @@ export class ChatManager {
 		};
 	}
 
+	async claimToolAction(opts: {
+		conversationId: string;
+		executionId: string;
+		toolCallId?: string;
+		toolName: string;
+		argumentsJson: string;
+		argumentsHash: string;
+	}): Promise<{ action: ChatToolAction; claimed: boolean }> {
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const id = nanoid(16);
+			const now = new Date().toISOString();
+			const inserted = await this.db.get<ChatToolAction>(
+				`INSERT INTO chat_tool_actions
+					(id, conversation_id, execution_id, tool_call_id, tool_name, arguments_json, arguments_hash, status, result_json, error, started_at, updated_at, completed_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, ?, NULL)
+					ON CONFLICT (execution_id, tool_name, arguments_hash)
+					WHERE status IN ('running', 'completed', 'uncertain')
+					DO NOTHING RETURNING *`,
+				[
+					id,
+					opts.conversationId,
+					opts.executionId,
+					opts.toolCallId ?? null,
+					opts.toolName,
+					opts.argumentsJson,
+					opts.argumentsHash,
+					now,
+					now,
+				],
+			);
+			if (inserted) {
+				await this.db.flush?.();
+				return { action: inserted, claimed: true };
+			}
+			const existing = await this.db.get<ChatToolAction>(
+				`SELECT * FROM chat_tool_actions
+					WHERE execution_id = ? AND tool_name = ? AND arguments_hash = ?
+						AND status IN ('running', 'completed', 'uncertain')
+					ORDER BY updated_at DESC, id DESC LIMIT 1`,
+				[opts.executionId, opts.toolName, opts.argumentsHash],
+			);
+			if (existing) return { action: existing, claimed: false };
+		}
+		throw new Error("Unable to claim durable tool action after concurrent retries");
+	}
+
 	async completeToolAction(id: string, resultJson: string): Promise<void> {
 		const now = new Date().toISOString();
 		await this.db.run(
 			`UPDATE chat_tool_actions
 				SET status = 'completed', result_json = ?, error = NULL, updated_at = ?, completed_at = ?
-				WHERE id = ?`,
+				WHERE id = ? AND status = 'running'`,
 			[resultJson, now, now, id],
 		);
 		await this.db.flush?.();
@@ -638,7 +684,7 @@ export class ChatManager {
 		await this.db.run(
 			`UPDATE chat_tool_actions
 				SET status = 'failed', error = ?, updated_at = ?, completed_at = ?
-				WHERE id = ?`,
+				WHERE id = ? AND status = 'running'`,
 			[error, now, now, id],
 		);
 		await this.db.flush?.();
@@ -649,7 +695,7 @@ export class ChatManager {
 		await this.db.run(
 			`UPDATE chat_tool_actions
 				SET status = 'uncertain', error = ?, updated_at = ?, completed_at = NULL
-				WHERE id = ?`,
+				WHERE id = ? AND status = 'running'`,
 			[error, now, id],
 		);
 		await this.db.flush?.();
@@ -717,12 +763,13 @@ export class ChatManager {
 			completionReason?: ChatCompletionReason | null;
 			pendingAction?: ChatPendingAction | null;
 			completedAt?: string | null;
+			onlyIfActive?: boolean;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		const current = await this.getExecution(id);
-		if (!current) return;
+		if (!current) return false;
 		const now = new Date().toISOString();
-		await this.db.run(
+		const transitioned = await this.db.get<{ id: string }>(
 			`UPDATE chat_executions SET
 				status = ?,
 				current_status = ?,
@@ -733,7 +780,8 @@ export class ChatManager {
 				pending_action = ?,
 				updated_at = ?,
 				completed_at = ?
-				WHERE id = ?`,
+				WHERE id = ?${updates.onlyIfActive ? " AND status IN ('queued', 'running')" : ""}
+				RETURNING id`,
 			[
 				updates.status ?? current.status,
 				updates.currentStatus !== undefined
@@ -762,6 +810,7 @@ export class ChatManager {
 			],
 		);
 		await this.db.flush?.();
+		return Boolean(transitioned);
 	}
 
 	async getExecution(id: string): Promise<ChatExecution | null> {

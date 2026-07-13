@@ -131,7 +131,10 @@ describe("ChatExecutionManager", () => {
 		});
 		await done;
 
-		expect(getAgentRuntime).toHaveBeenCalledWith("arm-bibi");
+		expect(getAgentRuntime).toHaveBeenCalledWith(
+			"arm-bibi",
+			expect.any(String),
+		);
 		expect(processMessageStream).toHaveBeenCalledWith(
 			"coordina",
 			expect.any(String),
