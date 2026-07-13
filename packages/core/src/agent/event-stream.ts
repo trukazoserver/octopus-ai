@@ -56,6 +56,8 @@ export class EventStream {
 	private subscribers: Map<string, EventSubscriber> = new Map();
 	private idCounter = 0;
 
+	constructor(private readonly maxEvents = 10_000) {}
+
 	/**
 	 * Append a new event to the stream.
 	 */
@@ -66,6 +68,9 @@ export class EventStream {
 			timestamp: Date.now(),
 		};
 		this.events.push(fullEvent);
+		if (this.events.length > this.maxEvents) {
+			this.events.splice(0, this.events.length - this.maxEvents);
+		}
 
 		// Notify all subscribers
 		for (const callback of this.subscribers.values()) {

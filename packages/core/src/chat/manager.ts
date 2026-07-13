@@ -292,6 +292,13 @@ export class ChatManager {
 		return { ...conv, messages };
 	}
 
+	async getConversationMetadata(id: string): Promise<Conversation | null> {
+		return (
+			(await this.db.get<Conversation>("SELECT * FROM conversations WHERE id = ?", [id])) ??
+			null
+		);
+	}
+
 	async listConversations(opts?: {
 		limit?: number;
 		offset?: number;

@@ -3006,6 +3006,7 @@ Always be concise, helpful, and thorough.`,
 		toolExecutor,
 		embedFn,
 		shutdown: async () => {
+			automationRunner.shutdown();
 			memoryRetentionScheduler.stop();
 			systemScheduler.cancel("workflow-resume");
 			systemScheduler.cancel("daily-memory-dump");

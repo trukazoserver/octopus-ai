@@ -11,13 +11,18 @@ export class WhatsAppChannel implements Channel {
 	private sock: ReturnType<typeof makeWASocket> | null = null;
 	private messageHandlers: Set<(msg: ChannelMessage) => void> = new Set();
 	private isConnected = false;
+	private desiredConnected = false;
+	private generation = 0;
 
 	constructor(
 		public readonly id: string,
 		private authPath: string,
 	) {}
 
-	public async connect(): Promise<void> {
+	public async connect(reconnecting = false): Promise<void> {
+		if (!reconnecting) this.desiredConnected = true;
+		if (!this.desiredConnected) return;
+		const generation = ++this.generation;
 		const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
 
 		this.sock = makeWASocket({
@@ -28,6 +33,7 @@ export class WhatsAppChannel implements Channel {
 		this.sock.ev.on("creds.update", saveCreds);
 
 		this.sock.ev.on("connection.update", (update) => {
+			if (generation !== this.generation) return;
 			const { connection, lastDisconnect } = update;
 			if (connection === "close") {
 				this.isConnected = false;
@@ -37,8 +43,8 @@ export class WhatsAppChannel implements Channel {
 							output?: { statusCode?: number };
 						}
 					)?.output?.statusCode !== DisconnectReason.loggedOut;
-				if (shouldReconnect) {
-					this.connect().catch(console.error);
+				if (shouldReconnect && this.desiredConnected) {
+					this.connect(true).catch(console.error);
 				}
 			} else if (connection === "open") {
 				this.isConnected = true;
@@ -90,6 +96,8 @@ export class WhatsAppChannel implements Channel {
 	}
 
 	public async disconnect(): Promise<void> {
+		this.desiredConnected = false;
+		this.generation++;
 		if (this.sock) {
 			this.sock.end(undefined);
 			this.sock = null;
@@ -115,7 +123,6 @@ export class WhatsAppChannel implements Channel {
 					? ({
 							key: { id: options.replyTo, remoteJid: jid },
 							message: { conversation: "" },
-							// biome-ignore lint/suspicious/noExplicitAny: <explanation>
 						} as any)
 					: undefined,
 			},

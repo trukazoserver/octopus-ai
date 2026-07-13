@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { type BrowserConfig, BrowserTool } from "./browser.js";
@@ -7,6 +8,7 @@ import type { ToolContext, ToolDefinition } from "./registry.js";
 interface BrowserSessionRecord {
 	browser: BrowserTool;
 	tools: Map<string, ToolDefinition>;
+	ephemeralDirs?: string[];
 }
 
 /** Routes native browser tools to an isolated BrowserTool for each parallel worker. */
@@ -61,6 +63,7 @@ export class BrowserSessionPool {
 			matching.map(async ([key, record]) => {
 				this.workerSessions.delete(key);
 				await record.browser.close();
+				await Promise.all((record.ephemeralDirs ?? []).map((dir) => rm(dir, { recursive: true, force: true }).catch(() => {})));
 			}),
 		);
 	}
@@ -71,7 +74,10 @@ export class BrowserSessionPool {
 			...Array.from(this.workerSessions.values()),
 		];
 		this.workerSessions.clear();
-		await Promise.all(sessions.map((session) => session.browser.close()));
+		await Promise.all(sessions.map(async (session) => {
+			await session.browser.close();
+			await Promise.all((session.ephemeralDirs ?? []).map((dir) => rm(dir, { recursive: true, force: true }).catch(() => {})));
+		}));
 	}
 
 	private getSession(context: ToolContext): BrowserSessionRecord {
@@ -89,13 +95,16 @@ export class BrowserSessionPool {
 			this.config.sessionStorageDir ??
 				join(homedir(), ".octopus", "browser-sessions"),
 		);
+		const userDataDir = join(profileRoot, "workers", hash);
+		const sessionStorageDir = join(sessionRoot, "workers", hash);
 		const record = this.createRecord({
 			...this.config,
 			isolatedSession: true,
 			persistCookies: false,
-			userDataDir: join(profileRoot, "workers", hash),
-			sessionStorageDir: join(sessionRoot, "workers", hash),
+			userDataDir,
+			sessionStorageDir,
 		});
+		record.ephemeralDirs = [userDataDir, sessionStorageDir];
 		this.workerSessions.set(key, record);
 		return record;
 	}

@@ -56,6 +56,17 @@ interface VertexPayload {
 let vertexToolCallCounter = 0;
 const thoughtSignatures = new Map<string, string>();
 const nativeVertexToolCallIds = new Map<string, string>();
+const MAX_TOOL_CALL_METADATA = 2_000;
+
+function setBoundedMetadata(cache: Map<string, string>, key: string, value: string): void {
+	cache.delete(key);
+	cache.set(key, value);
+	while (cache.size > MAX_TOOL_CALL_METADATA) {
+		const oldest = cache.keys().next().value;
+		if (!oldest) break;
+		cache.delete(oldest);
+	}
+}
 
 /**
  * Gemini's native API is stricter than OpenAI: every `type: "array"` property
@@ -697,12 +708,12 @@ export class GoogleProvider extends BaseLLMProvider {
 			if (p.functionCall) {
 				const id = `vertex-tc-${vertexToolCallCounter++}`;
 				if (p.functionCall.id) {
-					nativeVertexToolCallIds.set(id, p.functionCall.id);
+					setBoundedMetadata(nativeVertexToolCallIds, id, p.functionCall.id);
 				}
 				// thoughtSignature is a SIBLING of functionCall in the part, not
 				// nested inside it. Cache it by tool-call id for history rebuild.
 				if (p.thoughtSignature) {
-					thoughtSignatures.set(id, p.thoughtSignature);
+					setBoundedMetadata(thoughtSignatures, id, p.thoughtSignature);
 				}
 				toolCalls.push({
 					id,

@@ -35,7 +35,6 @@ export class STTEngine {
 						Authorization: `Bearer ${this.config.apiKey}`,
 						...formData.getHeaders(),
 					},
-					// biome-ignore lint/suspicious/noExplicitAny: form-data body
 					body: formData as any,
 				},
 			);

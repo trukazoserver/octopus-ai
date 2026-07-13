@@ -64,18 +64,26 @@ function ensureMediaDir(): void {
 	if (!existsSync(MEDIA_DIR)) mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
+let mediaMetaCache: MediaMetaItem[] | undefined;
+let mediaMetaIndex = new Map<string, MediaMetaItem>();
+
 function loadMediaMeta(): MediaMetaItem[] {
+	if (mediaMetaCache) return mediaMetaCache;
 	ensureMediaDir();
 	try {
 		const parsed = JSON.parse(readFileSync(MEDIA_META_PATH, "utf-8"));
-		return Array.isArray(parsed) ? (parsed as MediaMetaItem[]) : [];
+		mediaMetaCache = Array.isArray(parsed) ? (parsed as MediaMetaItem[]) : [];
 	} catch {
-		return [];
+		mediaMetaCache = [];
 	}
+	mediaMetaIndex = new Map(mediaMetaCache.flatMap((item) => [[item.id, item], [item.filename, item]]));
+	return mediaMetaCache;
 }
 
 function saveMediaMeta(items: MediaMetaItem[]): void {
 	ensureMediaDir();
+	mediaMetaCache = items;
+	mediaMetaIndex = new Map(items.flatMap((item) => [[item.id, item], [item.filename, item]]));
 	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
 }
 
@@ -182,11 +190,8 @@ export const mediaContext = {
 		}
 		const buffer = readFileSync(filePath);
 
-		const items = loadMediaMeta();
-		const item = items.find(
-			(i) =>
-				i.filename === filename || i.id === filename || urlStr.includes(i.id),
-		);
+		loadMediaMeta();
+		const item = mediaMetaIndex.get(filename) ?? mediaMetaIndex.get(filename.split(".")[0] ?? "");
 
 		return {
 			buffer,

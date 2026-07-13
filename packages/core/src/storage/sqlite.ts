@@ -218,10 +218,12 @@ export class SqliteDatabase implements DatabaseAdapter {
 
 		for (const migration of migrations) {
 			if (!appliedVersions.has(migration.version)) {
-				await migration.up(this);
-				await this.run("INSERT INTO _migrations (version) VALUES (?)", [
-					migration.version,
-				]);
+				await this.transaction(async () => {
+					await migration.up(this);
+					await this.run("INSERT INTO _migrations (version) VALUES (?)", [
+						migration.version,
+					]);
+				});
 			}
 		}
 

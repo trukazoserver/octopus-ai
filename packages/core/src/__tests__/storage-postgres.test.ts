@@ -132,6 +132,8 @@ describe("PostgresDatabase", () => {
 		await db.initialize();
 		const client = pgMock.instances[0];
 		client?.query.mockClear();
+		client?.transactionQuery.mockClear();
+		client?.release.mockClear();
 
 		await db.transaction(async () => {
 			await db.run("UPDATE demo SET a = ?", ["value"]);

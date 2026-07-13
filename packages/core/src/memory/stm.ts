@@ -27,6 +27,7 @@ export class ShortTermMemory {
 	private condensedHistory: string[] = [];
 	private condensationFn: CondensationCallback | null = null;
 	private condensing = false;
+	private generation = 0;
 
 	constructor(config: {
 		maxTokens: number;
@@ -123,10 +124,12 @@ export class ShortTermMemory {
 	}
 
 	clear(): void {
+		this.generation++;
 		this.workingContext = [];
 		this.scratchPad.clear();
 		this.activeTask = null;
 		this.condensedHistory = [];
+		this.condensing = false;
 	}
 
 	getLoad(): number {
@@ -171,37 +174,35 @@ export class ShortTermMemory {
 
 		// Generate condensed summary (async, non-blocking)
 		this.condensing = true;
+		const generation = this.generation;
 		if (this.condensationFn) {
 			this.condensationFn(toEvict)
 				.then((summary) => {
-					if (summary && summary.trim().length > 0) {
-						this.condensedHistory.push(summary);
-						// Keep max 5 condensed segments (~2500 tokens)
-						if (this.condensedHistory.length > 5) {
-							this.condensedHistory.shift();
-						}
-					}
+					if (generation === this.generation) this.addCondensedHistory(summary);
 				})
 				.catch(() => {
 					// Fallback: use heuristic
 					const fallback = this.heuristicCondensation(toEvict);
-					if (fallback) this.condensedHistory.push(fallback);
+					if (generation === this.generation) this.addCondensedHistory(fallback);
 				})
 				.finally(() => {
-					this.condensing = false;
+					if (generation === this.generation) this.condensing = false;
 				});
 		} else {
 			const fallback = this.heuristicCondensation(toEvict);
 			if (fallback) {
-				this.condensedHistory.push(fallback);
-				if (this.condensedHistory.length > 5) {
-					this.condensedHistory.shift();
-				}
+				this.addCondensedHistory(fallback);
 			}
 			this.condensing = false;
 		}
 
 		this.workingContext = toKeep;
+	}
+
+	private addCondensedHistory(summary: string | null | undefined): void {
+		if (!summary?.trim()) return;
+		this.condensedHistory.push(summary);
+		if (this.condensedHistory.length > 5) this.condensedHistory.splice(0, this.condensedHistory.length - 5);
 	}
 
 	/**

@@ -3729,6 +3729,12 @@ export class BrowserTool {
 				this.liveUserAgent = null;
 			}
 		} catch (error) {
+			try {
+				await this.context?.close();
+			} catch {}
+			try {
+				await this.browser?.close();
+			} catch {}
 			this.browser = null;
 			this.context = null;
 			this.page = null;

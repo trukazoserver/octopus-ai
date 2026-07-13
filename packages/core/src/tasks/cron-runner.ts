@@ -77,4 +77,8 @@ export class AutomationRunner {
 			this.scheduleAutomation(automation);
 		}
 	}
+
+	shutdown(): void {
+		this.scheduler.stopAll();
+	}
 }

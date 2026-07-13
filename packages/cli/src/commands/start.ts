@@ -1092,6 +1092,10 @@ export async function runStart(options: StartOptions): Promise<void> {
 			chatManager: system.chatManager,
 			conversationHistoryLimit: CONVERSATION_HISTORY_LIMIT,
 			streamCheckpointIntervalMs: STREAM_CHECKPOINT_INTERVAL_MS,
+			releaseConversationRuntime: (conversationId) => {
+				mainConversationRuntimes.delete(conversationId);
+				system?.agentManager?.releaseConversation(conversationId);
+			},
 			getAgentRuntime: (agentId: string | undefined, conversationId: string) => {
 				if (!system) throw new Error("System not initialized");
 				// Execute the selected agent's runtime when available; fall back to
@@ -1356,6 +1360,10 @@ export async function runStart(options: StartOptions): Promise<void> {
 							conversationId?: string;
 							executionId?: string;
 						};
+						if (payload.action === "unsubscribe" && payload.conversationId) {
+							server.unsubscribeConversation(clientId, payload.conversationId);
+							return;
+						}
 						if (payload.action === "subscribe" && payload.conversationId) {
 							server.subscribeConversation(clientId, payload.conversationId);
 							const active =

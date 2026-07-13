@@ -108,6 +108,7 @@ export class MCPManager {
 		name: string,
 		config: MCPServerConfig,
 	): Promise<MCPManagedServer> {
+		if (this.servers.has(name)) await this.removeServer(name);
 		const entry: MCPManagedServer = {
 			name,
 			config,
@@ -283,7 +284,12 @@ export class MCPManager {
 			{ envFilter: this.envFilter, redactor: this.redactor },
 		);
 
-		await client.connect();
+		try {
+			await client.connect();
+		} catch (error) {
+			await client.disconnect().catch(() => {});
+			throw error;
+		}
 		this.clients.set(name, client);
 		entry.status = "connected";
 		entry.error = undefined;

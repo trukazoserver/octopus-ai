@@ -51,6 +51,7 @@ export interface ChatExecutionManagerOptions {
 	conversationHistoryLimit: number;
 	streamCheckpointIntervalMs: number;
 	reconciliationService?: ReconciliationService;
+	releaseConversationRuntime?(conversationId: string): void;
 }
 
 function decodeStatusField(value: string | undefined): string | null {
@@ -97,7 +98,7 @@ export class ChatExecutionManager {
 			conversationId = conv.id;
 		} else {
 			const existing =
-				await this.opts.chatManager.getConversation(conversationId);
+				await this.opts.chatManager.getConversationMetadata(conversationId);
 			if (!existing) {
 				const conv = await this.opts.chatManager.createConversation({
 					agentId: input.agentId,
@@ -135,6 +136,7 @@ export class ChatExecutionManager {
 		void this.runExecution(execution, input, controller).finally(() => {
 			this.controllers.delete(execution.id);
 			if (this.activeByConversation.get(conversationId) === execution.id) this.activeByConversation.delete(conversationId);
+			this.opts.releaseConversationRuntime?.(conversationId);
 		});
 		return execution;
 	}
@@ -385,7 +387,6 @@ export class ChatExecutionManager {
 						conversationId,
 						payload: {
 							content: chunk,
-							fullContent: fullText,
 							conversationId,
 							executionId: execution.id,
 							assistantMessageId,

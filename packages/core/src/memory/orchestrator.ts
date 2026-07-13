@@ -200,6 +200,7 @@ export class MemoryOrchestrator {
 			)`,
 			`CREATE TABLE IF NOT EXISTS memory_relations (
 				id TEXT PRIMARY KEY,
+				owner_memory_id TEXT,
 				from_node_id TEXT NOT NULL,
 				edge_type TEXT NOT NULL,
 				to_node_id TEXT NOT NULL,
@@ -595,10 +596,11 @@ export class MemoryOrchestrator {
 			const now = new Date().toISOString();
 			await this.deps.db.run(
 				`INSERT INTO memory_relations
-					(id, from_node_id, edge_type, to_node_id, context, confidence, status, created_at, updated_at, last_validated_at, metadata)
-					VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+					(id, owner_memory_id, from_node_id, edge_type, to_node_id, context, confidence, status, created_at, updated_at, last_validated_at, metadata)
+					VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
 				[
 					nanoid(),
+					item.id,
 					from,
 					relation.type,
 					to,
@@ -773,21 +775,15 @@ export class MemoryOrchestrator {
 			"SELECT node_id FROM memory_node_links WHERE memory_id = ?",
 			[memoryId],
 		);
-		const relations = await this.deps.db.all<{ id: string; metadata: string | null }>(
-			"SELECT id, metadata FROM memory_relations",
-		);
-		const ownedRelationIds = relations
-			.filter((relation) => {
-				try {
-					return JSON.parse(relation.metadata ?? "{}").memoryId === memoryId;
-				} catch {
-					return false;
-				}
-			})
-			.map((relation) => relation.id);
+		const ownedRelationIds = (
+			await this.deps.db.all<{ id: string }>(
+				"SELECT id FROM memory_relations WHERE owner_memory_id = ?",
+				[memoryId],
+			)
+		).map((relation) => relation.id);
 
-		await this.deps.ltm.forget(memoryId);
 		await this.deps.db.transaction(async () => {
+			await this.deps.ltm.stageForget(memoryId);
 			for (const relationId of ownedRelationIds) {
 				await this.deps.db.run("DELETE FROM memory_relation_sources WHERE edge_id = ?", [relationId]);
 				await this.deps.db.run("DELETE FROM memory_relations WHERE id = ?", [relationId]);
@@ -833,21 +829,23 @@ export class MemoryOrchestrator {
 				);
 				if (!linked && !relationLinked) await this.deps.db.run("DELETE FROM memory_sources WHERE id = ?", [sourceId]);
 			}
+			if (item) {
+				await this.recordAudit({
+					actorId: "user",
+					action: "forgotten",
+					memoryId,
+					before: this.auditSnapshot(item),
+					after: { deleted: true },
+				});
+				await this.recordActionLog({
+					actionType: "memory.forget",
+					input: { memoryId, reasonCode: reason ? "user_requested" : "unspecified" },
+					output: { memoryId, localStatus: "deleted", remoteStatus: "queued" },
+					status: "completed",
+				});
+			}
 		});
-		if (!item) return;
-		await this.recordAudit({
-			actorId: "user",
-			action: "forgotten",
-			memoryId,
-			before: this.auditSnapshot(item),
-			after: { deleted: true },
-		});
-		await this.recordActionLog({
-			actionType: "memory.forget",
-			input: { memoryId, reasonCode: reason ? "user_requested" : "unspecified" },
-			output: { memoryId, status: "physically_deleted" },
-			status: "completed",
-		});
+		await this.deps.ltm.finalizeForget(memoryId).catch(() => {});
 	}
 
 	async recordUsage(record: MemoryUsageRecord): Promise<void> {

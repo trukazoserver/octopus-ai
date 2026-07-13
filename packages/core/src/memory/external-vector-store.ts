@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseAdapter } from "../storage/database.js";
 import { SqliteVectorStore } from "./sqlite-vss.js";
 import { VectorStore } from "./store.js";
@@ -24,6 +24,8 @@ type VectorOutboxRow = {
 	memory_id: string;
 	operation: "upsert" | "delete";
 	attempt_count: number;
+	revision: number;
+	lease_token: string;
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
@@ -50,6 +52,7 @@ export class ExternalVectorStore extends VectorStore {
 	private readonly targetId: string;
 	private reconciliationTimer?: ReturnType<typeof setInterval>;
 	private reconciliation?: Promise<number>;
+	private closing = false;
 
 	constructor(
 		db: DatabaseAdapter,
@@ -64,10 +67,11 @@ export class ExternalVectorStore extends VectorStore {
 
 	async initialize(): Promise<void> {
 		if (this.initialized) return;
+		this.closing = false;
 		await this.local.initialize();
 		if (this.dimension) await this.ensureRemoteCollection(this.dimension);
 		this.initialized = true;
-		await this.reconcilePendingWrites();
+		await this.reconcilePendingWrites().catch(() => 0);
 		this.reconciliationTimer = setInterval(() => {
 			void this.reconcilePendingWrites().catch(() => {});
 		}, 30_000);
@@ -149,9 +153,17 @@ export class ExternalVectorStore extends VectorStore {
 	async delete(id: string): Promise<void> {
 		await this.ensureInitialized();
 		await this.db.transaction(async () => {
-			await this.local.delete(id);
-			await this.enqueueRemoteWrite(id, "delete");
+			await this.stageDelete(id);
 		});
+		await this.finalizeDelete(id);
+	}
+
+	async stageDelete(id: string): Promise<void> {
+		await this.local.delete(id);
+		await this.enqueueRemoteWrite(id, "delete");
+	}
+
+	async finalizeDelete(id: string): Promise<void> {
 		await this.reconcilePendingWrites(id);
 	}
 
@@ -171,28 +183,42 @@ export class ExternalVectorStore extends VectorStore {
 	}
 
 	async reconcilePendingWrites(memoryId?: string): Promise<number> {
-		if (this.reconciliation) return this.reconciliation;
-		this.reconciliation = this.performReconciliation(memoryId);
-		try {
-			return await this.reconciliation;
-		} finally {
-			this.reconciliation = undefined;
-		}
+		if (this.closing) return 0;
+		const previous = this.reconciliation ?? Promise.resolve(0);
+		const run = previous.catch(() => 0).then(() => this.performReconciliation(memoryId));
+		this.reconciliation = run;
+		return run.finally(() => {
+			if (this.reconciliation === run) this.reconciliation = undefined;
+		});
 	}
 
 	async close(): Promise<void> {
+		this.closing = true;
 		if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
 		this.reconciliationTimer = undefined;
+		await this.reconciliation?.catch(() => 0);
+		this.initialized = false;
 	}
 
 	private async performReconciliation(memoryId?: string): Promise<number> {
 		const now = new Date().toISOString();
-		const rows = await this.db.all<VectorOutboxRow>(
-			`SELECT memory_id, operation, attempt_count FROM memory_vector_outbox WHERE target_id = ? AND available_at <= ?${memoryId ? " AND memory_id = ?" : ""} ORDER BY created_at ASC LIMIT 100`,
-			memoryId ? [this.targetId, now, memoryId] : [this.targetId, now],
+		const candidates = await this.db.all<{ memory_id: string }>(
+			`SELECT memory_id FROM memory_vector_outbox WHERE target_id = ? AND available_at <= ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)${memoryId ? " AND memory_id = ?" : ""} ORDER BY created_at ASC LIMIT 100`,
+			memoryId ? [this.targetId, now, now, memoryId] : [this.targetId, now, now],
 		);
 		let completed = 0;
-		for (const row of rows) {
+		for (const candidate of candidates) {
+			const leaseToken = randomUUID();
+			const leaseExpiresAt = new Date(Date.now() + 300_000).toISOString();
+			await this.db.run(
+				"UPDATE memory_vector_outbox SET lease_token = ?, lease_expires_at = ? WHERE target_id = ? AND memory_id = ? AND available_at <= ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+				[leaseToken, leaseExpiresAt, this.targetId, candidate.memory_id, now, now],
+			);
+			const row = await this.db.get<VectorOutboxRow>(
+				"SELECT memory_id, operation, attempt_count, revision, lease_token FROM memory_vector_outbox WHERE target_id = ? AND memory_id = ? AND lease_token = ?",
+				[this.targetId, candidate.memory_id, leaseToken],
+			);
+			if (!row) continue;
 			try {
 				const item = row.operation === "upsert" ? await this.local.getById(row.memory_id) : undefined;
 				const operation = item ? () => this.upsertRemote(item) : () => this.deleteRemote(row.memory_id);
@@ -201,13 +227,17 @@ export class ExternalVectorStore extends VectorStore {
 					continue;
 				}
 				await this.db.run(
-					"DELETE FROM memory_vector_outbox WHERE target_id = ? AND memory_id = ? AND operation = ?",
-					[this.targetId, row.memory_id, row.operation],
+					"DELETE FROM memory_vector_outbox WHERE target_id = ? AND memory_id = ? AND revision = ? AND lease_token = ?",
+					[this.targetId, row.memory_id, row.revision, leaseToken],
 				);
 				completed++;
 			} catch (error) {
 				await this.deferRemoteWrite(row, error instanceof Error ? error.message : String(error));
-				throw error;
+			} finally {
+				await this.db.run(
+					"UPDATE memory_vector_outbox SET lease_token = NULL, lease_expires_at = NULL WHERE target_id = ? AND memory_id = ? AND lease_token = ?",
+					[this.targetId, row.memory_id, leaseToken],
+				);
 			}
 		}
 		return completed;
@@ -216,7 +246,7 @@ export class ExternalVectorStore extends VectorStore {
 	private async enqueueRemoteWrite(memoryId: string, operation: "upsert" | "delete"): Promise<void> {
 		const now = new Date().toISOString();
 		await this.db.run(
-			"INSERT INTO memory_vector_outbox (target_id, memory_id, operation, attempt_count, available_at, last_error, created_at, updated_at) VALUES (?, ?, ?, 0, ?, NULL, ?, ?) ON CONFLICT(target_id, memory_id) DO UPDATE SET operation = excluded.operation, attempt_count = 0, available_at = excluded.available_at, last_error = NULL, updated_at = excluded.updated_at",
+			"INSERT INTO memory_vector_outbox (target_id, memory_id, operation, attempt_count, available_at, last_error, created_at, updated_at, revision) VALUES (?, ?, ?, 0, ?, NULL, ?, ?, 1) ON CONFLICT(target_id, memory_id) DO UPDATE SET operation = excluded.operation, attempt_count = 0, available_at = excluded.available_at, last_error = NULL, updated_at = excluded.updated_at, revision = memory_vector_outbox.revision + 1",
 			[this.targetId, memoryId, operation, now, now, now],
 		);
 	}
@@ -225,8 +255,8 @@ export class ExternalVectorStore extends VectorStore {
 		const attempts = row.attempt_count + 1;
 		const delayMs = Math.min(300_000, 1_000 * 2 ** Math.min(attempts - 1, 8));
 		await this.db.run(
-			"UPDATE memory_vector_outbox SET attempt_count = ?, available_at = ?, last_error = ?, updated_at = ? WHERE target_id = ? AND memory_id = ? AND operation = ?",
-			[attempts, new Date(Date.now() + delayMs).toISOString(), error.slice(0, 2000), new Date().toISOString(), this.targetId, row.memory_id, row.operation],
+			"UPDATE memory_vector_outbox SET attempt_count = ?, available_at = ?, last_error = ?, updated_at = ?, lease_token = NULL, lease_expires_at = NULL WHERE target_id = ? AND memory_id = ? AND revision = ? AND lease_token = ?",
+			[attempts, new Date(Date.now() + delayMs).toISOString(), error.slice(0, 2000), new Date().toISOString(), this.targetId, row.memory_id, row.revision, row.lease_token],
 		);
 	}
 

@@ -3,6 +3,7 @@ import cron from "node-cron";
 export class Scheduler {
 	private tasks: Map<string, cron.ScheduledTask> = new Map();
 	private expressions: Map<string, string> = new Map();
+	private running = new Set<string>();
 
 	schedule(name: string, expression: string, task: () => Promise<void>): void {
 		if (this.tasks.has(name)) {
@@ -10,10 +11,14 @@ export class Scheduler {
 		}
 
 		const scheduledTask = cron.schedule(expression, async () => {
+			if (this.running.has(name)) return;
+			this.running.add(name);
 			try {
 				await task();
 			} catch (error) {
 				console.error(`Error executing scheduled task '${name}':`, error);
+			} finally {
+				this.running.delete(name);
 			}
 		});
 
@@ -27,6 +32,7 @@ export class Scheduler {
 			task.stop();
 			this.tasks.delete(name);
 			this.expressions.delete(name);
+			this.running.delete(name);
 		}
 	}
 
@@ -35,5 +41,9 @@ export class Scheduler {
 			name,
 			expression,
 		}));
+	}
+
+	stopAll(): void {
+		for (const name of Array.from(this.tasks.keys())) this.cancel(name);
 	}
 }

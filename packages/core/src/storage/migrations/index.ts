@@ -23,6 +23,8 @@ import * as migration021 from "./021_chat_execution_outcomes.js";
 import * as migration022 from "./022_atomic_chat_tool_actions.js";
 import * as migration023 from "./023_workflow_run_leases.js";
 import * as migration024 from "./024_memory_vector_outbox.js";
+import * as migration025 from "./025_memory_vector_outbox_leases.js";
+import * as migration026 from "./026_memory_relation_owner.js";
 
 export interface Migration {
 	version: number;
@@ -55,4 +57,6 @@ export const migrations: Migration[] = [
 	{ version: 22, up: migration022.up, down: migration022.down },
 	{ version: 23, up: migration023.up, down: migration023.down },
 	{ version: 24, up: migration024.up, down: migration024.down },
+	{ version: 25, up: migration025.up, down: migration025.down },
+	{ version: 26, up: migration026.up, down: migration026.down },
 ];

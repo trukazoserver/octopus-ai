@@ -1685,6 +1685,7 @@ function getVideoAspectCacheKey(src: string): string {
 // be embedded directly into the HTML — before paint, without relying on a
 // post-render useEffect that loses the race during agent re-renders.
 const VIDEO_AR_STORAGE_KEY = "octopus-video-aspect-cache-v1";
+const MAX_VIDEO_ASPECT_CACHE = 250;
 const videoAspectRatioCache: Map<
 	string,
 	{ aspectRatio: string; isVertical: boolean }
@@ -1698,7 +1699,7 @@ const videoAspectRatioCache: Map<
 			const parsed = JSON.parse(raw) as Array<
 				[string, { aspectRatio: string; isVertical: boolean }]
 			>;
-			return new Map(parsed);
+			return new Map(parsed.slice(-MAX_VIDEO_ASPECT_CACHE));
 		}
 	} catch {
 		// ignore corrupt cache
@@ -2111,10 +2112,17 @@ const ChatMessage = memo(function ChatMessage({
 			const isVertical = width < height;
 			const aspectRatio = `${width} / ${height}`;
 			if (src) {
-				videoAspectRatioCache.set(getVideoAspectCacheKey(src), {
+				const cacheKey = getVideoAspectCacheKey(src);
+				videoAspectRatioCache.delete(cacheKey);
+				videoAspectRatioCache.set(cacheKey, {
 					aspectRatio,
 					isVertical,
 				});
+				while (videoAspectRatioCache.size > MAX_VIDEO_ASPECT_CACHE) {
+					const oldest = videoAspectRatioCache.keys().next().value;
+					if (!oldest) break;
+					videoAspectRatioCache.delete(oldest);
+				}
 				persistVideoAspectRatioCache();
 			}
 			applyVideoAspectRatio(frame, thumbnail, aspectRatio, isVertical);
@@ -2975,6 +2983,19 @@ export const ChatPage: React.FC<{
 		);
 	}, []);
 
+	const unsubscribeConversation = useCallback((conversationId: string | null) => {
+		if (!conversationId || wsRef.current?.readyState !== WebSocket.OPEN) return;
+		wsRef.current.send(
+			JSON.stringify({
+				id: nanoid(),
+				type: "request",
+				channel: "chat.control",
+				payload: { action: "unsubscribe", conversationId },
+				timestamp: Date.now(),
+			}),
+		);
+	}, []);
+
 	const loadDashboardStats = useCallback(async () => {
 		try {
 			const [agents, mcp, memory] = await Promise.all([
@@ -3291,12 +3312,16 @@ export const ChatPage: React.FC<{
 		} else {
 			setMessages([]);
 		}
-		return () => controller.abort();
+		return () => {
+			controller.abort();
+			unsubscribeConversation(activeConversationId);
+		};
 	}, [
 		activeConversationId,
 		loadConversationMessages,
 		subscribeConversation,
 		syncConversationExecution,
+		unsubscribeConversation,
 	]);
 
 	const handleSelectConversation = useCallback(

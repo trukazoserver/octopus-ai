@@ -109,13 +109,22 @@ export class LongTermMemory {
 	}
 
 	async forget(itemId: string): Promise<void> {
-		await this.vectorStore.delete(itemId);
+		await this.db.transaction(async () => this.stageForget(itemId));
+		await this.finalizeForget(itemId);
+	}
+
+	async stageForget(itemId: string): Promise<void> {
+		await this.vectorStore.stageDelete(itemId);
 		await this.db
 			.run("DELETE FROM memory_associations WHERE source_id = ?", [itemId])
 			.catch(() => {});
 		await this.db
 			.run("DELETE FROM memory_associations WHERE target_id = ?", [itemId])
 			.catch(() => {});
+	}
+
+	async finalizeForget(itemId: string): Promise<void> {
+		await this.vectorStore.finalizeDelete(itemId);
 	}
 
 	async getById(id: string): Promise<MemoryItem | undefined> {

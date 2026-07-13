@@ -101,15 +101,24 @@ export class MCPClient {
 	 */
 	private waitForReady(timeout = 60_000): Promise<void> {
 		return new Promise((resolve) => {
-			if (this.isReady) {
+			let settled = false;
+			let onData: ((chunk: Buffer) => void) | undefined;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (onData) this.process?.stderr?.off("data", onData);
 				resolve();
-				return;
-			}
-
+			};
 			const timer = setTimeout(() => {
 				// Even if we didn't see the ready signal, try anyway after timeout
-				resolve();
+				finish();
 			}, timeout);
+
+			if (this.isReady) {
+				finish();
+				return;
+			}
 
 			// Check if args contain "mcp-remote" — only wait for proxy servers
 			const args = this.config.args || [];
@@ -118,31 +127,29 @@ export class MCPClient {
 			);
 
 			if (!isMcpRemote) {
-				clearTimeout(timer);
-				resolve();
+				finish();
 				return;
 			}
 
 			// Listen on stderr for "Proxy established" or "Local STDIO server running"
 			if (this.process?.stderr) {
 				let stderrBuffer = "";
-				this.process.stderr.on("data", (chunk: Buffer) => {
-					stderrBuffer += chunk.toString("utf-8");
+				onData = (chunk: Buffer) => {
+					stderrBuffer = `${stderrBuffer}${chunk.toString("utf-8")}`.slice(-16_384);
 					if (
 						stderrBuffer.includes("Proxy established") ||
 						stderrBuffer.includes("Local STDIO server running") ||
 						stderrBuffer.includes("Connected to remote server")
 					) {
 						this.isReady = true;
-						clearTimeout(timer);
 						// Give it a small extra moment to fully stabilize
-						setTimeout(() => resolve(), 500);
+						setTimeout(finish, 500);
 					}
-				});
+				};
+				this.process.stderr.on("data", onData);
 			} else {
-				clearTimeout(timer);
 				// No stderr available, just wait 5 seconds for mcp-remote to start
-				setTimeout(() => resolve(), 5000);
+				setTimeout(finish, 5000);
 			}
 		});
 	}
@@ -203,6 +210,10 @@ export class MCPClient {
 				if (this.process.stdout) {
 					this.process.stdout.on("data", (chunk: Buffer) => {
 						this.buffer += chunk.toString("utf-8");
+						if (Buffer.byteLength(this.buffer, "utf8") > 10 * 1024 * 1024) {
+							void this.disconnect();
+							return;
+						}
 						this.processBuffer();
 					});
 				}

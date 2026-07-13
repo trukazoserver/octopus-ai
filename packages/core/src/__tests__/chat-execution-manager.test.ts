@@ -35,11 +35,13 @@ describe("ChatExecutionManager", () => {
 			},
 			runConsolidation: vi.fn(async () => undefined),
 		};
+		const releaseConversationRuntime = vi.fn();
 		const manager = new ChatExecutionManager({
 			chatManager,
 			conversationHistoryLimit: 20,
 			streamCheckpointIntervalMs: 0,
 			getAgentRuntime: () => runtime as never,
+			releaseConversationRuntime,
 			emit: (event) => {
 				events.push({ type: event.type, payload: event.payload });
 				if (event.type === "stream_end") resolveDone();
@@ -68,16 +70,15 @@ describe("ChatExecutionManager", () => {
 		expect(streamEvents).toHaveLength(2);
 		expect(streamEvents[0]?.payload).toMatchObject({
 			content: "Hola",
-			fullContent: "Hola",
 			executionId: execution.id,
 			assistantMessageId: updatedExecution?.assistant_message_id,
 		});
 		expect(streamEvents[1]?.payload).toMatchObject({
 			content: " mundo",
-			fullContent: "Hola mundo",
 			executionId: execution.id,
 			assistantMessageId: updatedExecution?.assistant_message_id,
 		});
+		await vi.waitFor(() => expect(releaseConversationRuntime).toHaveBeenCalledTimes(1));
 		expect(events.at(-1)?.payload).toMatchObject({
 			done: true,
 			executionId: execution.id,

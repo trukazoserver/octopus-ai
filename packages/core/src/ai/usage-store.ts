@@ -19,7 +19,6 @@ export interface UsageEvent {
 	totalTokens: number;
 	estimatedCost: number;
 }
-
 export interface UsageSink {
 	record(event: UsageEvent): void;
 }
@@ -48,19 +47,6 @@ export interface UsageQueryFilters {
 	to?: string;
 	agentId?: string;
 	provider?: string;
-}
-
-interface UsageEventRow {
-	created_at: string;
-	provider: string;
-	model: string | null;
-	agent_id: string | null;
-	conversation_id: string | null;
-	prompt_tokens: number;
-	completion_tokens: number;
-	reasoning_tokens: number;
-	total_tokens: number;
-	estimated_cost: number;
 }
 
 const EMPTY_AGGREGATE: UsageAggregate = {
@@ -121,13 +107,25 @@ export class UsageStore implements UsageSink {
 	}
 
 	async aggregate(filters: UsageQueryFilters = {}): Promise<UsageAggregate> {
-		const { where, params } = buildWhere(filters);
-		const rows = await this.db.all<UsageEventRow>(
-			`SELECT provider, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, estimated_cost
-			 FROM ai_usage_events ${where}`,
-			params,
-		);
-		return reduceAggregate(rows);
+		const providers = await this.byProvider(filters);
+		const aggregate: UsageAggregate = { ...EMPTY_AGGREGATE, byProvider: {} };
+		for (const row of providers) {
+			aggregate.totalTokens += Number(row.tokens) || 0;
+			aggregate.promptTokens += Number(row.promptTokens) || 0;
+			aggregate.completionTokens += Number(row.completionTokens) || 0;
+			aggregate.reasoningTokens += Number(row.reasoningTokens) || 0;
+			aggregate.totalCost += Number(row.cost) || 0;
+			aggregate.requests += Number(row.requests) || 0;
+			aggregate.byProvider[row.provider] = {
+				tokens: Number(row.tokens) || 0,
+				promptTokens: Number(row.promptTokens) || 0,
+				completionTokens: Number(row.completionTokens) || 0,
+				reasoningTokens: Number(row.reasoningTokens) || 0,
+				cost: Number(row.cost) || 0,
+				requests: Number(row.requests) || 0,
+			};
+		}
+		return aggregate;
 	}
 
 	async byProvider(filters: UsageQueryFilters = {}): Promise<
@@ -254,42 +252,4 @@ function buildWhere(filters: UsageQueryFilters): {
 		where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
 		params,
 	};
-}
-
-function reduceAggregate(rows: UsageEventRow[]): UsageAggregate {
-	if (!rows.length) return { ...EMPTY_AGGREGATE, byProvider: {} };
-	const agg: UsageAggregate = {
-		totalTokens: 0,
-		promptTokens: 0,
-		completionTokens: 0,
-		reasoningTokens: 0,
-		totalCost: 0,
-		requests: 0,
-		byProvider: {},
-	};
-	for (const row of rows) {
-		agg.totalTokens += row.total_tokens ?? 0;
-		agg.promptTokens += row.prompt_tokens ?? 0;
-		agg.completionTokens += row.completion_tokens ?? 0;
-		agg.reasoningTokens += row.reasoning_tokens ?? 0;
-		agg.totalCost += row.estimated_cost ?? 0;
-		agg.requests += 1;
-		const slice =
-			agg.byProvider[row.provider] ?? {
-				tokens: 0,
-				promptTokens: 0,
-				completionTokens: 0,
-				reasoningTokens: 0,
-				cost: 0,
-				requests: 0,
-			};
-		slice.tokens += row.total_tokens ?? 0;
-		slice.promptTokens += row.prompt_tokens ?? 0;
-		slice.completionTokens += row.completion_tokens ?? 0;
-		slice.reasoningTokens += row.reasoning_tokens ?? 0;
-		slice.cost += row.estimated_cost ?? 0;
-		slice.requests += 1;
-		agg.byProvider[row.provider] = slice;
-	}
-	return agg;
 }

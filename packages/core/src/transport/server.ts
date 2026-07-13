@@ -108,9 +108,7 @@ export interface TransportServerOptions {
 type SystemContext = {
 	config: OctopusConfig;
 	router?: LLMRouter;
-	// biome-ignore lint/suspicious/noExplicitAny: <explanation>
 	embedFn?: any;
-	// biome-ignore lint/suspicious/noExplicitAny: <explanation>
 	[key: string]: any;
 };
 
@@ -719,6 +717,8 @@ export class TransportServer {
 	private emitter = new EventEmitter<ServerEvents>();
 	private clients = new Map<string, WSWebSocket>();
 	private conversationSubscriptions = new Map<string, Set<string>>();
+	private liveSockets = new WeakSet<WSWebSocket>();
+	private heartbeatTimer?: ReturnType<typeof setInterval>;
 	private system: SystemContext | null = null;
 
 	constructor(opts: TransportServerOptions = {}) {
@@ -1820,6 +1820,8 @@ export class TransportServer {
 		this.wss.on("connection", (ws: WSWebSocket) => {
 			const clientId = crypto.randomUUID();
 			this.clients.set(clientId, ws);
+			this.liveSockets.add(ws);
+			ws.on("pong", () => this.liveSockets.add(ws));
 
 			ws.on("message", (raw: Buffer) => {
 				try {
@@ -1847,6 +1849,17 @@ export class TransportServer {
 
 			this.emitter.emit("connect", clientId);
 		});
+		this.heartbeatTimer = setInterval(() => {
+			for (const ws of this.clients.values()) {
+				if (!this.liveSockets.has(ws)) {
+					ws.terminate();
+					continue;
+				}
+				this.liveSockets.delete(ws);
+				ws.ping();
+			}
+		}, 30_000);
+		this.heartbeatTimer.unref?.();
 
 		this.httpServer.requestTimeout = 600_000;
 		this.httpServer.headersTimeout = 120_000;
@@ -3358,7 +3371,6 @@ export class TransportServer {
 		}
 		try {
 			let results: unknown[] = [];
-			// biome-ignore lint/suspicious/noExplicitAny: memory orchestrator is injected by the CLI runtime.
 			let memoryPack: any = null;
 			if (this.system?.memoryOrchestrator?.read) {
 				memoryPack = await this.system.memoryOrchestrator.read(
@@ -4412,7 +4424,6 @@ export class TransportServer {
 			jsonRes(res, 200, {
 				directories: config.plugins.directories,
 				builtin: config.plugins.builtin,
-				// biome-ignore lint/suspicious/noExplicitAny: Required for arbitrary plugin shapes
 				loaded: plugins.map((p: any) => ({
 					name: p?.manifest?.name ?? "unknown",
 					version: p?.manifest?.version ?? "0.0.0",
@@ -7275,6 +7286,12 @@ export class TransportServer {
 		res: ServerResponse,
 	): Promise<void> {
 		try {
+			const maxUploadBytes = 10 * 1024 * 1024;
+			const declaredLength = Number(req.headers["content-length"] ?? 0);
+			if (declaredLength > maxUploadBytes) {
+				jsonRes(res, 413, { error: "Media upload exceeds 10 MB" });
+				return;
+			}
 			const boundary = (req.headers["content-type"] ?? "").split(
 				"boundary=",
 			)[1];
@@ -7283,8 +7300,17 @@ export class TransportServer {
 				return;
 			}
 			const chunks: Buffer[] = [];
+			let receivedBytes = 0;
 			await new Promise<void>((resolve, reject) => {
-				req.on("data", (c: Buffer) => chunks.push(c));
+				req.on("data", (c: Buffer) => {
+					receivedBytes += c.length;
+					if (receivedBytes > maxUploadBytes) {
+						req.pause();
+						reject(Object.assign(new Error("Media upload exceeds 10 MB"), { code: "UPLOAD_TOO_LARGE" }));
+						return;
+					}
+					chunks.push(c);
+				});
 				req.on("end", resolve);
 				req.on("error", reject);
 			});
@@ -7362,7 +7388,7 @@ export class TransportServer {
 				);
 			}
 		} catch (err) {
-			jsonRes(res, 500, {
+			jsonRes(res, (err as { code?: string })?.code === "UPLOAD_TOO_LARGE" ? 413 : 500, {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
@@ -7614,6 +7640,8 @@ export class TransportServer {
 	}
 
 	async stop(): Promise<void> {
+		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+		this.heartbeatTimer = undefined;
 		const promises: Promise<void>[] = [];
 
 		for (const [, ws] of this.clients) {
@@ -7628,9 +7656,12 @@ export class TransportServer {
 				}),
 			);
 		}
+		await Promise.race([
+			Promise.all(promises),
+			new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+		]);
+		for (const ws of this.clients.values()) ws.terminate();
 		this.clients.clear();
-
-		await Promise.all(promises);
 
 		if (this.wss) {
 			await new Promise<void>((resolve) => this.wss?.close(() => resolve()));
@@ -7650,6 +7681,10 @@ export class TransportServer {
 		const raw = serializeMessage(msg);
 		for (const [, ws] of this.clients) {
 			if (ws.readyState === WebSocket.OPEN) {
+				if (ws.bufferedAmount > 16 * 1024 * 1024) {
+					ws.terminate();
+					continue;
+				}
 				ws.send(raw);
 			}
 		}
@@ -7692,6 +7727,11 @@ export class TransportServer {
 		for (const clientId of subscribers) {
 			const ws = this.clients.get(clientId);
 			if (ws?.readyState === WebSocket.OPEN) {
+				if (ws.bufferedAmount > 16 * 1024 * 1024) {
+					ws.terminate();
+					continue;
+				}
+				if (ws.bufferedAmount > 2 * 1024 * 1024 && message.type === "stream") continue;
 				ws.send(raw);
 			}
 		}
@@ -7700,6 +7740,10 @@ export class TransportServer {
 	send(clientId: string, message: ProtocolMessage<unknown>): boolean {
 		const ws = this.clients.get(clientId);
 		if (!ws || ws.readyState !== WebSocket.OPEN) {
+			return false;
+		}
+		if (ws.bufferedAmount > 16 * 1024 * 1024) {
+			ws.terminate();
 			return false;
 		}
 		ws.send(serializeMessage(message));

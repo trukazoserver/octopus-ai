@@ -14,6 +14,7 @@ interface ToolQueueState {
 	running: number;
 	lastFinishedAt: number;
 	queue: Array<() => void>;
+	cleanupTimer?: ReturnType<typeof setTimeout>;
 }
 
 const DEFAULT_RULE: ToolRateLimitRule = {
@@ -76,6 +77,10 @@ export class ToolRateLimiter {
 		rule: ToolRateLimitRule,
 	): Promise<() => void> {
 		const state = this.getState(toolName);
+		if (state.cleanupTimer) {
+			clearTimeout(state.cleanupTimer);
+			state.cleanupTimer = undefined;
+		}
 		const startedWaitingAt = Date.now();
 
 		while (true) {
@@ -89,6 +94,12 @@ export class ToolRateLimiter {
 					state.running = Math.max(0, state.running - 1);
 					state.lastFinishedAt = Date.now();
 					state.queue.shift()?.();
+					if (state.running === 0 && state.queue.length === 0) {
+						state.cleanupTimer = setTimeout(() => {
+							if (state.running === 0 && state.queue.length === 0) this.states.delete(toolName);
+						}, Math.max(1, rule.minIntervalMs));
+						state.cleanupTimer.unref?.();
+					}
 				};
 			}
 
@@ -99,11 +110,22 @@ export class ToolRateLimiter {
 			}
 
 			await new Promise<void>((resolve) => {
-				const timeout = setTimeout(resolve, Math.max(50, waitForInterval));
-				state.queue.push(() => {
+				let settled = false;
+				const wake = () => {
+					if (settled) return;
+					settled = true;
 					clearTimeout(timeout);
 					resolve();
-				});
+				};
+				const timeout = setTimeout(() => {
+					if (settled) return;
+					settled = true;
+					const index = state.queue.indexOf(wake);
+					if (index >= 0) state.queue.splice(index, 1);
+					resolve();
+				}, Math.max(50, waitForInterval));
+				state.queue.push(wake);
+				timeout.unref?.();
 			});
 		}
 	}
