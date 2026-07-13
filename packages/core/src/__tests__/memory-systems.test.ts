@@ -702,7 +702,7 @@ describe("non-learning memory systems", () => {
 		expect((await ltm.getById("other-tenant"))?.accessCount).toBe(0);
 	});
 
-	it("hides deleted and inactive memories from legacy read paths", async () => {
+	it("physically deletes forgotten memories from every read path", async () => {
 		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
 		await db.initialize();
 		const store = new SqliteVectorStore(db);
@@ -726,7 +726,14 @@ describe("non-learning memory systems", () => {
 
 		expect(await ltm.listRecent(10)).toHaveLength(0);
 		expect(await ltm.listAll(10)).toHaveLength(0);
-		expect(await ltm.listAll(10, { includeInactive: true })).toHaveLength(1);
+		expect(await ltm.listAll(10, { includeInactive: true })).toHaveLength(0);
+		expect(await ltm.getById(write.memoryId ?? "")).toBeUndefined();
+		expect(
+			await db.get("SELECT id FROM memory_versions WHERE memory_id = ?", [write.memoryId]),
+		).toBeUndefined();
+		expect(
+			await db.get("SELECT id FROM memory_evidence WHERE memory_id = ?", [write.memoryId]),
+		).toBeUndefined();
 		expect(await ltm.search("detalle privado borrar", embedFn)).toHaveLength(0);
 		const fts = new FTSSearchEngine(db);
 		await fts.initialize();

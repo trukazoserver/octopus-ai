@@ -191,9 +191,10 @@ describe("external vector stores", () => {
 		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
 		await db.initialize();
 		const item = createMemory();
+		let remoteFails = true;
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
 			const url = input.toString();
-			if (url.endsWith("/points") || url.endsWith("/points/delete")) {
+			if (remoteFails && (url.endsWith("/points") || url.endsWith("/points/delete"))) {
 				return new Response("temporary unavailable", { status: 503 });
 			}
 			return new Response(JSON.stringify({ result: true }), { status: 200 });
@@ -209,6 +210,12 @@ describe("external vector stores", () => {
 		await store.store(item);
 		expect(await store.getById(item.id)).toMatchObject({ id: item.id });
 		expect(store.getStatus()).toMatchObject({ state: "open" });
+		expect(
+			await db.get<{ operation: string }>(
+				"SELECT operation FROM memory_vector_outbox WHERE memory_id = ?",
+				[item.id],
+			),
+		).toMatchObject({ operation: "upsert" });
 
 		await store.delete(item.id);
 
@@ -217,6 +224,22 @@ describe("external vector stores", () => {
 			"http://qdrant.local/collections/memories/points/delete",
 			expect.objectContaining({ method: "POST" }),
 		);
+		expect(
+			await db.get<{ operation: string }>(
+				"SELECT operation FROM memory_vector_outbox WHERE memory_id = ?",
+				[item.id],
+			),
+		).toMatchObject({ operation: "delete" });
+
+		remoteFails = false;
+		await db.run(
+			"UPDATE memory_vector_outbox SET available_at = ? WHERE memory_id = ?",
+			[new Date(0).toISOString(), item.id],
+		);
+		expect(await store.reconcilePendingWrites()).toBe(1);
+		expect(
+			await db.get("SELECT operation FROM memory_vector_outbox WHERE memory_id = ?", [item.id]),
+		).toBeUndefined();
 	});
 
 	it("stores locally while using pgvector for vector upsert and search", async () => {

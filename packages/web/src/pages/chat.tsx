@@ -2605,6 +2605,7 @@ export const ChatPage: React.FC<{
 	const [isLoading, setIsLoading] = useState(false);
 	const [status, setStatus] = useState<StatusData | null>(null);
 	const wsRef = useRef<WebSocket | null>(null);
+	const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const messagesContainerRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -3174,11 +3175,13 @@ export const ChatPage: React.FC<{
 	}, [conversations, activeConversationId, conversationsLoaded]);
 
 	const loadConversationMessages = useCallback(
-		async (convId: string, options?: { merge?: boolean }) => {
+		async (convId: string, options?: { merge?: boolean; signal?: AbortSignal }) => {
 			try {
 				const raw = await apiGet<{ conversation: Conversation }>(
 					`/api/conversations/${convId}`,
+					{ signal: options?.signal },
 				);
+				if (options?.signal?.aborted || convId !== activeConvRef.current) return;
 				const conv = raw.conversation ?? (raw as unknown as Conversation);
 				const incoming = conv.messages?.map(toMessage) ?? [];
 				if (options?.merge) {
@@ -3186,19 +3189,21 @@ export const ChatPage: React.FC<{
 					return;
 				}
 				setMessages(incoming);
-			} catch {
-				if (!options?.merge) setMessages([]);
+			} catch (error) {
+				if (!options?.signal?.aborted && (!(error instanceof Error) || error.name !== "AbortError") && !options?.merge && convId === activeConvRef.current) setMessages([]);
 			}
 		},
 		[],
 	);
 
 	const syncConversationExecution = useCallback(
-		async (conversationId: string, options?: { reloadMessages?: boolean }) => {
+		async (conversationId: string, options?: { reloadMessages?: boolean; signal?: AbortSignal }) => {
 			try {
 				const { execution } = await apiGet<{ execution: ChatExecution | null }>(
 					`/api/conversations/${conversationId}/execution`,
+					{ signal: options?.signal },
 				);
+				if (options?.signal?.aborted) return;
 				if (!execution) {
 					updateConversationExecution(conversationId, () => undefined);
 					if (conversationId === activeConvRef.current) {
@@ -3209,7 +3214,7 @@ export const ChatPage: React.FC<{
 						lastActivityKeyRef.current = "";
 						pendingIdRef.current = "";
 						if (options?.reloadMessages)
-							void loadConversationMessages(conversationId, { merge: true });
+							void loadConversationMessages(conversationId, { merge: true, signal: options?.signal });
 					}
 					return;
 				}
@@ -3223,7 +3228,7 @@ export const ChatPage: React.FC<{
 					conversationId === activeConvRef.current &&
 					options?.reloadMessages
 				) {
-					void loadConversationMessages(conversationId, { merge: true });
+					void loadConversationMessages(conversationId, { merge: true, signal: options?.signal });
 				}
 				if (
 					conversationId === activeConvRef.current &&
@@ -3254,7 +3259,8 @@ export const ChatPage: React.FC<{
 					loadConversations();
 					inputRef.current?.focus();
 				}
-			} catch {
+			} catch (error) {
+				if (options?.signal?.aborted || (error instanceof Error && error.name === "AbortError")) return;
 				// Keep the local optimistic state if the recovery request fails.
 			}
 		},
@@ -3277,13 +3283,15 @@ export const ChatPage: React.FC<{
 		}
 
 		setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
+		const controller = new AbortController();
 		if (activeConversationId) {
 			subscribeConversation(activeConversationId);
-			void loadConversationMessages(activeConversationId);
-			void syncConversationExecution(activeConversationId);
+			void loadConversationMessages(activeConversationId, { signal: controller.signal });
+			void syncConversationExecution(activeConversationId, { signal: controller.signal });
 		} else {
 			setMessages([]);
 		}
+		return () => controller.abort();
 	}, [
 		activeConversationId,
 		loadConversationMessages,
@@ -3430,11 +3438,23 @@ export const ChatPage: React.FC<{
 	};
 
 	const connect = useCallback(() => {
-		if (wsRef.current?.readyState === WebSocket.OPEN) return;
+		if (
+			wsRef.current?.readyState === WebSocket.OPEN ||
+			wsRef.current?.readyState === WebSocket.CONNECTING
+		)
+			return;
+		if (reconnectTimerRef.current) {
+			clearTimeout(reconnectTimerRef.current);
+			reconnectTimerRef.current = null;
+		}
 
 		const ws = new WebSocket(WS_URL);
 
 		ws.onopen = () => {
+			if (reconnectTimerRef.current) {
+				clearTimeout(reconnectTimerRef.current);
+				reconnectTimerRef.current = null;
+			}
 			setIsConnected(true);
 			if (activeConvRef.current) {
 				const conversationId = activeConvRef.current;
@@ -3457,8 +3477,15 @@ export const ChatPage: React.FC<{
 		};
 
 		ws.onclose = () => {
+			if (wsRef.current !== ws) return;
+			wsRef.current = null;
 			setIsConnected(false);
-			setTimeout(connect, 3000);
+			if (!reconnectTimerRef.current) {
+				reconnectTimerRef.current = setTimeout(() => {
+					reconnectTimerRef.current = null;
+					connect();
+				}, 3000);
+			}
 		};
 
 		ws.onerror = () => {
@@ -3844,7 +3871,14 @@ export const ChatPage: React.FC<{
 	useEffect(() => {
 		connect();
 		return () => {
-			wsRef.current?.close();
+			if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+			reconnectTimerRef.current = null;
+			const ws = wsRef.current;
+			wsRef.current = null;
+			if (ws) {
+				ws.onclose = null;
+				ws.close();
+			}
 			clearPendingAttachments();
 		};
 	}, [connect, clearPendingAttachments]);
@@ -3891,11 +3925,18 @@ export const ChatPage: React.FC<{
 		const phaseQuery = activeExecution?.status
 			? `&phase=${encodeURIComponent(activeExecution.status)}`
 			: "";
+		const controller = new AbortController();
 		apiGet<{ actions: ChatToolActionWire[] }>(
 			`/api/conversations/${encodeURIComponent(activeConversationId)}/tool-actions?limit=30${executionQuery}${phaseQuery}`,
+			{ signal: controller.signal },
 		)
-			.then((response) => setToolActions(response.actions ?? []))
-			.catch(() => setToolActions([]));
+			.then((response) => {
+				if (!controller.signal.aborted) setToolActions(response.actions ?? []);
+			})
+			.catch((error) => {
+				if (!controller.signal.aborted && (!(error instanceof Error) || error.name !== "AbortError")) setToolActions([]);
+			});
+		return () => controller.abort();
 	}, [
 		activeConversationId,
 		activeExecution?.executionId,

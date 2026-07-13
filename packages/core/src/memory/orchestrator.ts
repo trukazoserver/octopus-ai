@@ -766,38 +766,34 @@ export class MemoryOrchestrator {
 		await this.initialize();
 		const item = await this.deps.ltm.getById(memoryId);
 		if (!item) return;
-		await this.deps.db.run(
-			`INSERT INTO memory_versions (id, memory_id, previous_content, change_reason, changed_by, changed_at)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			[
-				nanoid(),
-				memoryId,
-				this.protectMemoryText(item.content),
-				reason,
-				"user",
-				new Date().toISOString(),
-			],
-		);
-		const updated = {
-			...item,
-			metadata: {
-				...item.metadata,
-				status: "user_deleted",
-				deletedReason: reason,
-			},
-		};
-		await this.deps.ltm.update(updated);
+		await this.deps.db.transaction(async () => {
+			for (const statement of [
+				"DELETE FROM memory_evidence WHERE memory_id = ?",
+				"DELETE FROM memory_usage WHERE memory_id = ?",
+				"DELETE FROM memory_versions WHERE memory_id = ?",
+				"DELETE FROM memory_permissions WHERE memory_id = ?",
+				"DELETE FROM memory_source_links WHERE memory_id = ?",
+				"DELETE FROM memory_node_links WHERE memory_id = ?",
+				"DELETE FROM memory_edges WHERE source_id = ? OR target_id = ?",
+			]) {
+				await this.deps.db.run(
+					statement,
+					statement.includes(" OR target_id") ? [memoryId, memoryId] : [memoryId],
+				);
+			}
+			await this.deps.ltm.forget(memoryId);
+		});
 		await this.recordAudit({
 			actorId: "user",
 			action: "forgotten",
 			memoryId,
 			before: this.auditSnapshot(item),
-			after: this.auditSnapshot(updated),
+			after: { deleted: true },
 		});
 		await this.recordActionLog({
 			actionType: "memory.forget",
-			input: { memoryId, reason },
-			output: { memoryId, status: "user_deleted" },
+			input: { memoryId, reasonCode: reason ? "user_requested" : "unspecified" },
+			output: { memoryId, status: "physically_deleted" },
 			status: "completed",
 		});
 	}
@@ -883,7 +879,6 @@ export class MemoryOrchestrator {
 			case "explicit_delete":
 				nextConfidence = 0;
 				nextStatus = "user_deleted";
-				versionCreated = true;
 				break;
 			case "implicit_positive":
 				nextConfidence = Math.min(0.85, previousConfidence + 0.02);
@@ -893,6 +888,18 @@ export class MemoryOrchestrator {
 				break;
 			case "implicit_neutral":
 				break;
+		}
+
+		if (feedback.feedbackType === "explicit_delete") {
+			await this.forget(item.id, "explicit_delete");
+			return {
+				memoryId: item.id,
+				previousConfidence,
+				nextConfidence,
+				previousStatus,
+				nextStatus,
+				versionCreated: false,
+			};
 		}
 
 		await this.recordUsage(feedback);

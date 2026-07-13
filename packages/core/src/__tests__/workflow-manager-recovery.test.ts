@@ -62,6 +62,20 @@ describe("WorkflowManager recovery", () => {
 		expect(failedClaim).toBeNull();
 	});
 
+	it("atomically grants one leased owner for a resumable run", async () => {
+		const run = await manager.createRun({ goal: "single owner" });
+		const [first, second] = await Promise.all([
+			manager.claimRunForExecution(run.id, { ownerId: "owner-a" }),
+			manager.claimRunForExecution(run.id, { ownerId: "owner-b" }),
+		]);
+
+		const winner = first ?? second;
+		expect([first, second].filter(Boolean)).toHaveLength(1);
+		expect(winner?.owner_id).toMatch(/^owner-[ab]$/);
+		expect(await manager.heartbeatRunLease(run.id, "not-owner")).toBe(false);
+		expect(await manager.heartbeatRunLease(run.id, winner?.owner_id ?? "")).toBe(true);
+	});
+
 	it("retryRun preserves done tasks and resets failed tasks", async () => {
 		const run = await manager.createRun({ goal: "retry workflow" });
 		const done = await manager.createTask({ runId: run.id, title: "done" });

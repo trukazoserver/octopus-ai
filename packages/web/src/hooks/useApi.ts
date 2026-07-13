@@ -29,8 +29,8 @@ async function readApiError(res: Response): Promise<Error> {
 	return new Error(message);
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-	const res = await fetch(`${API_BASE}${path}`);
+export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
+	const res = await fetch(`${API_BASE}${path}`, init);
 	if (!res.ok) throw await readApiError(res);
 	return res.json();
 }

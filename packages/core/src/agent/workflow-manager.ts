@@ -63,6 +63,9 @@ export interface WorkflowRunRecord {
 	updated_at: string;
 	completed_at: string | null;
 	metadata: string | null;
+	owner_id: string | null;
+	lease_expires_at: string | null;
+	last_heartbeat_at: string | null;
 }
 
 export interface WorkflowTaskRecord {
@@ -347,27 +350,45 @@ export class WorkflowManager {
 		);
 	}
 
-	async claimRunForExecution(id: string): Promise<WorkflowRunRecord | null> {
-		const run = await this.getRun(id);
-		if (!run) throw new Error(`Workflow not found: ${id}`);
-		if (!AUTO_RESUMABLE_WORKFLOW_STATUSES.includes(run.status)) return null;
-
+	async claimRunForExecution(
+		id: string,
+		options: { ownerId?: string; leaseTtlMs?: number } = {},
+	): Promise<WorkflowRunRecord | null> {
 		const now = new Date().toISOString();
-		await this.db.run(
-			`UPDATE agent_workflow_runs SET status = 'running', current_phase = 'resume', updated_at = ?, completed_at = NULL WHERE id = ? AND status IN (${AUTO_RESUMABLE_WORKFLOW_STATUSES.map(() => "?").join(", ")})`,
-			[now, id, ...AUTO_RESUMABLE_WORKFLOW_STATUSES],
+		const ownerId = options.ownerId ?? nanoid();
+		const leaseExpiresAt = new Date(
+			Date.now() + Math.max(1_000, options.leaseTtlMs ?? 120_000),
+		).toISOString();
+		const claimed = await this.db.get<WorkflowRunRecord>(
+			`UPDATE agent_workflow_runs SET status = 'running', current_phase = 'resume', owner_id = ?, lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ?, completed_at = NULL WHERE id = ? AND status IN (${AUTO_RESUMABLE_WORKFLOW_STATUSES.map(() => "?").join(", ")}) RETURNING *`,
+			[ownerId, leaseExpiresAt, now, now, id, ...AUTO_RESUMABLE_WORKFLOW_STATUSES],
 		);
-		const claimed = await this.getRun(id);
-		if (!claimed || claimed.status !== "running") return null;
+		if (!claimed) return null;
 
 		await this.recordEvent({
 			runId: id,
 			agentId: claimed.root_agent_id ?? undefined,
 			eventType: "resume_claimed",
 			message: "Workflow was claimed for durable resume execution.",
-			metadata: { previousStatus: run.status },
+			metadata: { ownerId, leaseExpiresAt },
 		});
 		return claimed;
+	}
+
+	async heartbeatRunLease(
+		id: string,
+		ownerId: string,
+		leaseTtlMs = 120_000,
+	): Promise<boolean> {
+		const now = new Date().toISOString();
+		const leaseExpiresAt = new Date(
+			Date.now() + Math.max(1_000, leaseTtlMs),
+		).toISOString();
+		const row = await this.db.get<{ id: string }>(
+			"UPDATE agent_workflow_runs SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'running' AND lease_expires_at >= ? RETURNING id",
+			[leaseExpiresAt, now, now, id, ownerId, now],
+		);
+		return Boolean(row);
 	}
 
 	async updateRunStatus(
@@ -376,11 +397,13 @@ export class WorkflowManager {
 		options: {
 			currentPhase?: string | null;
 			metadata?: Record<string, unknown>;
+			ownerId?: string;
 		} = {},
 	): Promise<void> {
 		const now = new Date().toISOString();
+		const terminal = TERMINAL_WORKFLOW_STATUSES.has(status) || ["interrupted", "timed_out"].includes(status);
 		await this.db.run(
-			"UPDATE agent_workflow_runs SET status = ?, current_phase = COALESCE(?, current_phase), updated_at = ?, completed_at = CASE WHEN ? IN ('done', 'failed', 'blocked', 'cancelled', 'partial', 'interrupted', 'timed_out') THEN ? ELSE completed_at END, metadata = COALESCE(?, metadata) WHERE id = ?",
+			`UPDATE agent_workflow_runs SET status = ?, current_phase = COALESCE(?, current_phase), updated_at = ?, completed_at = CASE WHEN ? IN ('done', 'failed', 'blocked', 'cancelled', 'partial', 'interrupted', 'timed_out') THEN ? ELSE completed_at END, metadata = COALESCE(?, metadata), owner_id = CASE WHEN ? THEN NULL ELSE owner_id END, lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END, last_heartbeat_at = CASE WHEN ? THEN NULL ELSE last_heartbeat_at END WHERE id = ?${options.ownerId ? " AND owner_id = ?" : ""}`,
 			[
 				status,
 				options.currentPhase ?? null,
@@ -388,7 +411,11 @@ export class WorkflowManager {
 				status,
 				now,
 				options.metadata ? JSON.stringify(options.metadata) : null,
+				terminal ? 1 : 0,
+				terminal ? 1 : 0,
+				terminal ? 1 : 0,
 				id,
+				...(options.ownerId ? [options.ownerId] : []),
 			],
 		);
 	}
@@ -464,15 +491,22 @@ export class WorkflowManager {
 	): Promise<{ runs: number; tasks: number }> {
 		const staleAfterMs = Math.max(1, options.staleAfterMs ?? 60_000);
 		const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
+		const now = new Date().toISOString();
 		const staleRuns = await this.db.all<WorkflowRunRecord>(
-			"SELECT * FROM agent_workflow_runs WHERE status = 'running' AND updated_at < ? ORDER BY updated_at ASC",
-			[cutoff],
+			"SELECT * FROM agent_workflow_runs WHERE status = 'running' AND (lease_expires_at < ? OR (lease_expires_at IS NULL AND updated_at < ?)) ORDER BY updated_at ASC",
+			[now, cutoff],
 		);
 		if (staleRuns.length === 0) return { runs: 0, tasks: 0 };
 
 		let taskCount = 0;
-		const now = new Date().toISOString();
+		let runCount = 0;
 		for (const run of staleRuns) {
+			const interrupted = await this.db.get<{ id: string }>(
+				"UPDATE agent_workflow_runs SET status = 'interrupted', current_phase = COALESCE(current_phase, 'recovery'), owner_id = NULL, lease_expires_at = NULL, last_heartbeat_at = NULL, updated_at = ?, completed_at = NULL WHERE id = ? AND status = 'running' AND (lease_expires_at < ? OR (lease_expires_at IS NULL AND updated_at < ?)) RETURNING id",
+				[now, run.id, now, cutoff],
+			);
+			if (!interrupted) continue;
+			runCount++;
 			const runningTasks = await this.db.all<{ id: string }>(
 				"SELECT id FROM agent_workflow_tasks WHERE run_id = ? AND status = 'running'",
 				[run.id],
@@ -480,10 +514,6 @@ export class WorkflowManager {
 			taskCount += runningTasks.length;
 			await this.db.run(
 				"UPDATE agent_workflow_tasks SET status = 'ready', updated_at = ? WHERE run_id = ? AND status = 'running'",
-				[now, run.id],
-			);
-			await this.db.run(
-				"UPDATE agent_workflow_runs SET status = 'interrupted', current_phase = COALESCE(current_phase, 'recovery'), updated_at = ?, completed_at = NULL WHERE id = ?",
 				[now, run.id],
 			);
 			await this.recordEvent({
@@ -494,7 +524,7 @@ export class WorkflowManager {
 				metadata: { staleAfterMs, cutoff, recoveredTasks: runningTasks.length },
 			});
 		}
-		return { runs: staleRuns.length, tasks: taskCount };
+		return { runs: runCount, tasks: taskCount };
 	}
 
 	async retryRun(id: string): Promise<void> {

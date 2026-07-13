@@ -20,6 +20,11 @@ export interface ExternalVectorStoreConfig {
 
 type RemoteSearchResult = { memoryId: string; score: number };
 type RemoteCircuitState = "closed" | "open";
+type VectorOutboxRow = {
+	memory_id: string;
+	operation: "upsert" | "delete";
+	attempt_count: number;
+};
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_MAX_RETRIES = 2;
@@ -42,6 +47,7 @@ export class ExternalVectorStore extends VectorStore {
 	private remoteCircuitOpenUntil = 0;
 	private lastRemoteFailureAt?: Date;
 	private lastRemoteError?: string;
+	private readonly targetId: string;
 
 	constructor(
 		db: DatabaseAdapter,
@@ -49,6 +55,9 @@ export class ExternalVectorStore extends VectorStore {
 	) {
 		super(db);
 		this.local = new SqliteVectorStore(db);
+		this.targetId = createHash("sha256")
+			.update(`${config.backend}|${config.url.replace(/\/$/, "")}|${config.database ?? ""}|${config.collection}`)
+			.digest("hex");
 	}
 
 	async initialize(): Promise<void> {
@@ -56,12 +65,16 @@ export class ExternalVectorStore extends VectorStore {
 		await this.local.initialize();
 		if (this.dimension) await this.ensureRemoteCollection(this.dimension);
 		this.initialized = true;
+		await this.reconcilePendingWrites();
 	}
 
 	async store(item: MemoryItem): Promise<void> {
 		await this.ensureInitialized();
-		await this.local.store(item);
-		await this.writeRemote(() => this.upsertRemote(item));
+		await this.db.transaction(async () => {
+			await this.local.store(item);
+			await this.enqueueRemoteWrite(item.id, "upsert");
+		});
+		await this.reconcilePendingWrites(item.id);
 	}
 
 	async search(
@@ -120,14 +133,20 @@ export class ExternalVectorStore extends VectorStore {
 
 	async update(item: MemoryItem): Promise<void> {
 		await this.ensureInitialized();
-		await this.local.update(item);
-		await this.writeRemote(() => this.upsertRemote(item));
+		await this.db.transaction(async () => {
+			await this.local.update(item);
+			await this.enqueueRemoteWrite(item.id, "upsert");
+		});
+		await this.reconcilePendingWrites(item.id);
 	}
 
 	async delete(id: string): Promise<void> {
 		await this.ensureInitialized();
-		await this.local.delete(id);
-		await this.writeRemote(() => this.deleteRemote(id));
+		await this.db.transaction(async () => {
+			await this.local.delete(id);
+			await this.enqueueRemoteWrite(id, "delete");
+		});
+		await this.reconcilePendingWrites(id);
 	}
 
 	async count(): Promise<number> {
@@ -143,6 +162,51 @@ export class ExternalVectorStore extends VectorStore {
 			lastFailureAt: this.lastRemoteFailureAt,
 			lastError: this.lastRemoteError,
 		};
+	}
+
+	async reconcilePendingWrites(memoryId?: string): Promise<number> {
+		const now = new Date().toISOString();
+		const rows = await this.db.all<VectorOutboxRow>(
+			`SELECT memory_id, operation, attempt_count FROM memory_vector_outbox WHERE target_id = ? AND available_at <= ?${memoryId ? " AND memory_id = ?" : ""} ORDER BY created_at ASC LIMIT 100`,
+			memoryId ? [this.targetId, now, memoryId] : [this.targetId, now],
+		);
+		let completed = 0;
+		for (const row of rows) {
+			try {
+				const item = row.operation === "upsert" ? await this.local.getById(row.memory_id) : undefined;
+				const operation = item ? () => this.upsertRemote(item) : () => this.deleteRemote(row.memory_id);
+				if (!(await this.writeRemote(operation))) {
+					await this.deferRemoteWrite(row, this.lastRemoteError ?? "Transient remote failure");
+					continue;
+				}
+				await this.db.run(
+					"DELETE FROM memory_vector_outbox WHERE target_id = ? AND memory_id = ? AND operation = ?",
+					[this.targetId, row.memory_id, row.operation],
+				);
+				completed++;
+			} catch (error) {
+				await this.deferRemoteWrite(row, error instanceof Error ? error.message : String(error));
+				throw error;
+			}
+		}
+		return completed;
+	}
+
+	private async enqueueRemoteWrite(memoryId: string, operation: "upsert" | "delete"): Promise<void> {
+		const now = new Date().toISOString();
+		await this.db.run(
+			"INSERT INTO memory_vector_outbox (target_id, memory_id, operation, attempt_count, available_at, last_error, created_at, updated_at) VALUES (?, ?, ?, 0, ?, NULL, ?, ?) ON CONFLICT(target_id, memory_id) DO UPDATE SET operation = excluded.operation, attempt_count = 0, available_at = excluded.available_at, last_error = NULL, updated_at = excluded.updated_at",
+			[this.targetId, memoryId, operation, now, now, now],
+		);
+	}
+
+	private async deferRemoteWrite(row: VectorOutboxRow, error: string): Promise<void> {
+		const attempts = row.attempt_count + 1;
+		const delayMs = Math.min(300_000, 1_000 * 2 ** Math.min(attempts - 1, 8));
+		await this.db.run(
+			"UPDATE memory_vector_outbox SET attempt_count = ?, available_at = ?, last_error = ?, updated_at = ? WHERE target_id = ? AND memory_id = ? AND operation = ?",
+			[attempts, new Date(Date.now() + delayMs).toISOString(), error.slice(0, 2000), new Date().toISOString(), this.targetId, row.memory_id, row.operation],
+		);
 	}
 
 	private async ensureInitialized(): Promise<void> {
@@ -324,13 +388,15 @@ export class ExternalVectorStore extends VectorStore {
 		}
 	}
 
-	private async writeRemote(operation: () => Promise<void>): Promise<void> {
+	private async writeRemote(operation: () => Promise<void>): Promise<boolean> {
 		try {
 			await operation();
 			this.recordRemoteSuccess();
+			return true;
 		} catch (err) {
 			this.recordRemoteFailure(err);
 			if (!isTransientRemoteError(err)) throw err;
+			return false;
 		}
 	}
 

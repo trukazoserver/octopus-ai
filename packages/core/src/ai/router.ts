@@ -24,6 +24,32 @@ import type {
 	ReasoningEffort,
 	UsageStats,
 } from "./types.js";
+
+function mergeUsage(
+	current: LLMResponse["usage"] | undefined,
+	next: LLMResponse["usage"],
+): LLMResponse["usage"] {
+	const promptTokens = Math.max(current?.promptTokens ?? 0, next.promptTokens ?? 0);
+	const completionTokens = Math.max(
+		current?.completionTokens ?? 0,
+		next.completionTokens ?? 0,
+	);
+	const totalTokens = Math.max(
+		current?.totalTokens ?? 0,
+		next.totalTokens ?? 0,
+		promptTokens + completionTokens,
+	);
+	const reasoningTokens = Math.max(
+		current?.reasoningTokens ?? 0,
+		next.reasoningTokens ?? 0,
+	);
+	return {
+		promptTokens,
+		completionTokens,
+		totalTokens,
+		...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+	};
+}
 import type { UsageSink } from "./usage-store.js";
 
 const logger = createLogger("llm-router");
@@ -1172,16 +1198,16 @@ export class LLMRouter {
 				try {
 					this.trackRequest(providerName);
 					const stream = provider.chatStream(resolvedRequest);
-					for await (const chunk of stream) {
-						primaryYieldedAnyChunk = true;
-						if (chunk.usage)
-							this.trackUsage(
-								providerName,
-								chunk.usage,
-								resolvedRequest.model,
-								resolvedRequest.metadata,
-							);
-						yield chunk;
+					let finalUsage: LLMResponse["usage"] | undefined;
+					try {
+						for await (const chunk of stream) {
+							primaryYieldedAnyChunk = true;
+							if (chunk.usage) finalUsage = mergeUsage(finalUsage, chunk.usage);
+							yield chunk;
+						}
+					} finally {
+						if (finalUsage)
+							this.trackUsage(providerName, finalUsage, resolvedRequest.model, resolvedRequest.metadata);
 					}
 					return;
 				} catch (error) {
@@ -1222,15 +1248,15 @@ export class LLMRouter {
 					);
 					this.trackRequest(fallbackProviderName);
 					const fallbackStream = fallbackProvider.chatStream(fallbackResolved);
-					for await (const chunk of fallbackStream) {
-						if (chunk.usage)
-							this.trackUsage(
-								fallbackProviderName,
-								chunk.usage,
-								fallbackResolved.model,
-								fallbackResolved.metadata,
-							);
-						yield chunk;
+					let finalUsage: LLMResponse["usage"] | undefined;
+					try {
+						for await (const chunk of fallbackStream) {
+							if (chunk.usage) finalUsage = mergeUsage(finalUsage, chunk.usage);
+							yield chunk;
+						}
+					} finally {
+						if (finalUsage)
+							this.trackUsage(fallbackProviderName, finalUsage, fallbackResolved.model, fallbackResolved.metadata);
 					}
 					return;
 				} catch (fallbackError) {

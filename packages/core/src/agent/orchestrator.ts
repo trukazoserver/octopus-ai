@@ -950,14 +950,17 @@ export class OctopusOrchestrator {
 	async *resumeWorkflowRun(
 		workflowRunId: string,
 		workerConfig: Partial<WorkerConfig> = {},
+		ownership?: { ownerId: string },
 	): AsyncIterable<OrchestratorEvent> {
 		if (!this.workflowManager) {
 			throw new Error("WorkflowManager is required to resume workflow runs.");
 		}
 
-		const claimedRun =
-			await this.workflowManager.claimRunForExecution(workflowRunId);
+		const claimedRun = ownership
+			? await this.workflowManager.getRun(workflowRunId)
+			: await this.workflowManager.claimRunForExecution(workflowRunId);
 		if (!claimedRun) return;
+		if (ownership && claimedRun.owner_id !== ownership.ownerId) return;
 
 		const snapshot = await this.workflowManager.getRunSnapshot(workflowRunId);
 		const storedEvents = snapshot.events as WorkflowEventRecord[];
@@ -1007,6 +1010,7 @@ export class OctopusOrchestrator {
 			await this.workflowManager.updateRunStatus(workflowRunId, final.status, {
 				currentPhase: "synthesis",
 				metadata: { resumed: true, runId, ...final },
+				ownerId: ownership?.ownerId,
 			});
 			await this.workflowManager.recordEvent({
 				runId: workflowRunId,
@@ -1208,6 +1212,7 @@ export class OctopusOrchestrator {
 
 			await this.workflowManager.updateRunStatus(workflowRunId, final.status, {
 				currentPhase: "synthesis",
+				ownerId: ownership?.ownerId,
 				metadata: {
 					orchestratorRunId: runId,
 					resumed: true,
