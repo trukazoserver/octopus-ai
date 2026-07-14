@@ -1874,6 +1874,21 @@ const mediaRenderer = {
 
 marked.use({ renderer: mediaRenderer });
 
+const CONTINUATION_CHECKPOINT_RE =
+	/<!-- octopus-continuation-checkpoint[\s\S]*?-->\n?/g;
+const TOOL_RESULT_MARKER_RE = /<!-- tool:[\w.-]+:(?:ok|error) -->/g;
+
+// Strip internal agent markers (continuation checkpoints and tool-result HTML
+// comments) so they never reach the user. Mirrors cleanStreamText in the CLI.
+function stripInternalMarkers(raw: string): string {
+	if (!raw) return raw;
+	return raw
+		.replace(CONTINUATION_CHECKPOINT_RE, "")
+		.replace(TOOL_RESULT_MARKER_RE, "")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
 function renderMarkdown(
 	text: string,
 	compactImages = false,
@@ -1884,7 +1899,7 @@ function renderMarkdown(
 	renderCompactMediaImages = compactImages;
 	renderAgentMediaDownloads = showMediaDownloads;
 	try {
-		let processed = text;
+		let processed = stripInternalMarkers(text);
 		// Strip think tags so they aren't displayed in the text bubble
 		processed = processed.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
 
@@ -5527,7 +5542,9 @@ export const ChatPage: React.FC<{
 										>
 											<strong>Acción pendiente</strong>
 											<div style={{ marginTop: 6, color: "#fef3c7" }}>
-												{activeExecution.pendingAction.summary}
+												{stripInternalMarkers(
+												activeExecution.pendingAction.summary,
+											)}
 											</div>
 											{activeExecution.pendingAction.resumable && (
 												<button
