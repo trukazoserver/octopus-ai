@@ -3392,6 +3392,7 @@ export class AgentRuntime {
 				let hasContent = false;
 				let isThinking = false;
 				let hasYieldedResponding = false;
+				let liveStreamed = false;
 				let streamFinishReason: string | undefined;
 				const outputSanitizer = this.createAssistantOutputStreamSanitizer();
 
@@ -3411,8 +3412,14 @@ export class AgentRuntime {
 							}
 							const visibleContent = outputSanitizer.push(chunk.content);
 							if (visibleContent) {
+								if (!hasYieldedResponding) {
+									yield "\x00STATUS:responding\x00";
+									hasYieldedResponding = true;
+								}
 								chunkContent += visibleContent;
 								hasContent = true;
+								liveStreamed = true;
+								yield visibleContent;
 							}
 						}
 						if (chunk.toolCalls) {
@@ -3448,8 +3455,14 @@ export class AgentRuntime {
 					}
 					const visibleTail = outputSanitizer.flush();
 					if (visibleTail) {
+						if (!hasYieldedResponding) {
+							yield "\x00STATUS:responding\x00";
+							hasYieldedResponding = true;
+						}
 						chunkContent += visibleTail;
 						hasContent = true;
+						liveStreamed = true;
+						yield visibleTail;
 					}
 				} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
@@ -3589,12 +3602,14 @@ export class AgentRuntime {
 							messages.push({ role: "assistant", content: chunkContent || "" });
 							messages.push({ role: "system", content: continuePrompt });
 							if (chunkContent) {
-								if (!hasYieldedResponding) {
-									yield "\x00STATUS:responding\x00";
-									hasYieldedResponding = true;
+								if (!liveStreamed) {
+									if (!hasYieldedResponding) {
+										yield "\x00STATUS:responding\x00";
+										hasYieldedResponding = true;
+									}
+									yield chunkContent;
 								}
 								fullResponse += chunkContent;
-								yield chunkContent;
 							}
 							fullResponse += "\n\n[Auto-continuing...]\n\n";
 							yield "\n\n[Auto-continuing...]\n\n";
@@ -3614,6 +3629,9 @@ export class AgentRuntime {
 						);
 						if (stall.force) {
 							continuityGuard.recordStall(chunkContent);
+							if (chunkContent) {
+								fullResponse += chunkContent;
+							}
 							const forcePrompt = continuityGuard.buildForceActPrompt(
 								stall.reason,
 								stall.repeated,
@@ -3642,17 +3660,19 @@ export class AgentRuntime {
 						}
 					}
 					if (chunkContent) {
-						if (!hasYieldedResponding) {
-							yield "\x00STATUS:responding\x00";
-							hasYieldedResponding = true;
+						if (!liveStreamed) {
+							if (!hasYieldedResponding) {
+								yield "\x00STATUS:responding\x00";
+								hasYieldedResponding = true;
+							}
+							yield chunkContent;
 						}
 						fullResponse += chunkContent;
-						yield chunkContent;
 					}
 					break;
 				}
 
-				if (chunkContent) {
+				if (chunkContent && !liveStreamed) {
 					if (!hasYieldedResponding) {
 						yield "\x00STATUS:responding\x00";
 						hasYieldedResponding = true;

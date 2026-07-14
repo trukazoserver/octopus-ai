@@ -2086,7 +2086,7 @@ describe("AgentRuntime", () => {
 			expect(mockLLMRouter.chat).toHaveBeenCalledTimes(1);
 		});
 
-		it("never yields a split future-action promise before its tool call exists", async () => {
+		it("streams a future-action promise live, then forces the tool call", async () => {
 			mockLLMRouter = createMockLLMRouter();
 			mockLLMRouter.chatStream = vi
 				.fn()
@@ -2143,9 +2143,66 @@ describe("AgentRuntime", () => {
 			}
 
 			const output = chunks.join("");
-			expect(output).not.toContain("Actividad actual");
+			// With live streaming the promise text is shown immediately; the stall
+			// guard still forces the tool call, which runs and completes.
+			expect(output).toContain("Actividad actual");
 			expect(output).toContain("La búsqueda devolvió opciones verificadas.");
 			expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
+		});
+
+		it("streams assistant text deltas live as separate chunks", async () => {
+			mockLLMRouter = createMockLLMRouter();
+			mockLLMRouter.chatStream = vi
+				.fn()
+				.mockImplementationOnce(async function* () {
+					yield {
+						content: "The quick brown fox jumps over the lazy dog. ",
+					} satisfies LLMChunk;
+					yield {
+						content: "Pack my box with five dozen liquor jugs. ",
+					} satisfies LLMChunk;
+					yield {
+						content: "How vexingly quick daft zebras jump!",
+						finishReason: "stop",
+					} satisfies LLMChunk;
+				});
+			runtime = new AgentRuntime(
+				baseConfig,
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			runtime.setToolSystem(
+				createMockToolRegistry() as unknown as ToolRegistry,
+				createMockToolExecutor() as unknown as ToolExecutor,
+			);
+
+			const chunks: string[] = [];
+			for await (const chunk of runtime.processMessageStream(
+				"escribe un pangrama",
+				"conv-stream-live",
+				{ disableOrchestrator: true },
+			)) {
+				chunks.push(chunk);
+			}
+
+			// A STATUS:responding frame precedes the streamed text, so the UI can
+			// flip from "thinking" to "responding" as soon as the first token lands.
+			expect(chunks).toContain("\x00STATUS:responding\x00");
+
+			// The full visible text is the concatenation of every delta.
+			const visible = chunks.filter((c) => !c.startsWith("\x00")).join("");
+			expect(visible).toContain("The quick brown fox");
+			expect(visible).toContain("How vexingly quick daft zebras jump!");
+
+			// Live streaming: text arrives as more than one chunk instead of one
+			// monolithic end-of-turn yield.
+			const textChunks = chunks.filter(
+				(c) => c.length > 0 && !c.startsWith("\x00"),
+			);
+			expect(textChunks.length).toBeGreaterThan(1);
 		});
 	});
 

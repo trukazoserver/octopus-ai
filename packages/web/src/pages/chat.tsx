@@ -2700,6 +2700,8 @@ export const ChatPage: React.FC<{
 	const lastActivityKeyRef = useRef<string>("");
 	const lastResponseChunkAtRef = useRef(0);
 	const scrollRafRef = useRef<number | null>(null);
+	const pendingStreamDeltasRef = useRef<Map<string, string>>(new Map());
+	const streamFlushRafRef = useRef<number | null>(null);
 	const hydratedMultiAgentExecutionRef = useRef<string>("");
 	const notifiedExecutionRef = useRef<Set<string>>(new Set());
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
@@ -3517,6 +3519,38 @@ export const ChatPage: React.FC<{
 			ws.close();
 		};
 
+		// Coalesce streaming deltas into a single setState per animation frame so
+		// high token rates don't trigger one messages array map per token.
+		const flushStreamDeltas = () => {
+			streamFlushRafRef.current = null;
+			const deltas = pendingStreamDeltasRef.current;
+			if (deltas.size === 0) return;
+			pendingStreamDeltasRef.current = new Map();
+			setMessages((prev) => {
+				let next = prev;
+				for (const [streamId, delta] of deltas) {
+					const existing = next.find((m) => m.id === streamId);
+					const incomingContent = existing
+						? existing.content + delta
+						: delta;
+					const incoming: Message = {
+						id: streamId,
+						role: "assistant",
+						content: incomingContent,
+						timestamp: Date.now(),
+					};
+					next = existing
+						? next.map((m) =>
+								m.id === existing.id
+									? { ...preferRicherMessage(m, incoming), id: streamId }
+									: m,
+						)
+						: [...next, incoming];
+				}
+				return next;
+			});
+		};
+
 		ws.onmessage = (event) => {
 			try {
 				const msg: WsMessage = JSON.parse(event.data);
@@ -3689,7 +3723,6 @@ export const ChatPage: React.FC<{
 					setActivityClock(lastResponseChunkAtRef.current);
 					const fallbackStreamId = `stream-${executionId ?? msg.id}`;
 					const streamId = assistantMessageId ?? fallbackStreamId;
-					const fullContent = msg.payload?.fullContent;
 					updateConversationExecution(conversationId, (prev) => ({
 						executionId: executionId ?? prev?.executionId ?? msg.id,
 						status: "running",
@@ -3701,29 +3734,14 @@ export const ChatPage: React.FC<{
 					setIsStreaming(true);
 					setAgentStatus("responding");
 					addAgentActivity("responding");
-					setMessages((prev) => {
-						const existing =
-							prev.find((m) => m.id === streamId) ??
-							(assistantMessageId
-								? prev.find((m) => m.id === fallbackStreamId)
-								: undefined);
-						const incomingContent =
-							fullContent ?? (existing ? existing.content + chunk : chunk);
-						const incoming: Message = {
-							id: streamId,
-							role: "assistant",
-							content: incomingContent,
-							timestamp: Date.now(),
-						};
-						if (existing) {
-							return prev.map((m) =>
-								m.id === existing.id
-									? { ...preferRicherMessage(m, incoming), id: streamId }
-									: m,
-							);
-						}
-						return [...prev, incoming];
-					});
+					pendingStreamDeltasRef.current.set(
+						streamId,
+						(pendingStreamDeltasRef.current.get(streamId) ?? "") + chunk,
+					);
+					if (streamFlushRafRef.current == null) {
+						streamFlushRafRef.current =
+							requestAnimationFrame(flushStreamDeltas);
+					}
 					// Auto-scroll on each streaming chunk, but coalesce via rAF so we
 					// never force layout more than once per animation frame.
 					if (scrollRafRef.current == null) {
@@ -3779,6 +3797,11 @@ export const ChatPage: React.FC<{
 						loadConversations();
 						return;
 					}
+					if (streamFlushRafRef.current != null) {
+						cancelAnimationFrame(streamFlushRafRef.current);
+						streamFlushRafRef.current = null;
+					}
+					flushStreamDeltas();
 					setIsLoading(false);
 					setIsStreaming(false);
 					lastResponseChunkAtRef.current = 0;
@@ -3869,6 +3892,11 @@ export const ChatPage: React.FC<{
 						notifiedExecutionRef.current.add(executionId);
 						showToast("error", "Una tarea del agente falló en otro chat.");
 					}
+					if (streamFlushRafRef.current != null) {
+						cancelAnimationFrame(streamFlushRafRef.current);
+						streamFlushRafRef.current = null;
+					}
+					flushStreamDeltas();
 					setIsLoading(false);
 					setIsStreaming(false);
 					lastResponseChunkAtRef.current = 0;
