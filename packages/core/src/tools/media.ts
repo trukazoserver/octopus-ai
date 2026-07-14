@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+	closeSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
+	openSync,
 	readFileSync,
+	readSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
@@ -11,6 +14,7 @@ import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { PathSafetyPolicy } from "../security/path-safety-policy.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
+import { validateMediaBytes } from "./media-validation.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
@@ -154,6 +158,11 @@ export const mediaContext = {
 		const filePath = join(MEDIA_DIR, filename);
 		ensureMediaDir();
 
+		const check = validateMediaBytes(buffer, mimeType, filename);
+		if (!check.valid) {
+			throw new Error(check.reason ?? "Contenido de media no válido");
+		}
+
 		writeFileSync(filePath, buffer);
 
 		const items = loadMediaMeta();
@@ -278,6 +287,14 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 					ensureMediaDir();
 
 					const fileData = Buffer.from(normalizedData, "base64");
+					const check = validateMediaBytes(fileData, mimetype, filename);
+					if (!check.valid) {
+						return {
+							success: false,
+							output: "",
+							error: check.reason ?? "Contenido de media no válido",
+						};
+					}
 					writeFileSync(filePath, fileData);
 
 					const items = loadMediaMeta();
@@ -389,6 +406,26 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 						? String(params.mimetype)
 						: guessMime(displayName || sourcePath);
 					const ext = extname(displayName) || MIME_EXTENSIONS[mimetype] || "";
+
+					// Validate the source header before copying, so failed/partial
+					// generations or shell error output never reach the library.
+					const headBuf = Buffer.alloc(16);
+					const srcFd = openSync(sourcePath, "r");
+					const bytesRead = readSync(srcFd, headBuf, 0, 16, 0);
+					closeSync(srcFd);
+					const importCheck = validateMediaBytes(
+						headBuf.subarray(0, bytesRead),
+						mimetype,
+						displayName,
+					);
+					if (!importCheck.valid) {
+						return {
+							success: false,
+							output: "",
+							error: importCheck.reason ?? "Contenido de media no válido",
+						};
+					}
+
 					const id = randomUUID();
 					const storedName = id + ext;
 					const filePath = join(MEDIA_DIR, storedName);

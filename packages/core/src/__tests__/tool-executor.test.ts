@@ -4,6 +4,12 @@ import { ToolExecutor } from "../tools/executor.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { ToolDefinition, ToolResult } from "../tools/registry.js";
 
+// A real 1x1 PNG (valid magic bytes). The media library now rejects payloads
+// whose bytes don't match their declared media type, so image-generator tests
+// must use actual image bytes instead of arbitrary buffers.
+const VALID_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
 function createTestTool(overrides?: Partial<ToolDefinition>): ToolDefinition {
 	return {
 		name: "test-tool",
@@ -112,7 +118,7 @@ describe("ToolExecutor", () => {
 		});
 
 		it("should save media base64 returned by tools and hide raw payloads", async () => {
-			const imageBase64 = Buffer.alloc(100, 1).toString("base64");
+			const imageBase64 = VALID_PNG_BASE64;
 			const tool = createTestTool({
 				name: "image-generator",
 				handler: vi.fn().mockResolvedValue({
@@ -148,7 +154,7 @@ describe("ToolExecutor", () => {
 		});
 
 		it("should replace embedded data URLs with saved media URLs", async () => {
-			const imageBase64 = Buffer.alloc(100, 2).toString("base64");
+			const imageBase64 = VALID_PNG_BASE64;
 			const tool = createTestTool({
 				name: "inline-image-generator",
 				handler: vi.fn().mockResolvedValue({

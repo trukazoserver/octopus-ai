@@ -84,6 +84,7 @@ import {
 } from "../plugins/mcp/zai-servers.js";
 import { SecretRedactor } from "../security/secret-redactor.js";
 import type { Skill } from "../skills/types.js";
+import { validateMediaBytes } from "../tools/media-validation.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
 import { MCP_CATALOG } from "./mcp-catalog.js";
 import {
@@ -7347,6 +7348,15 @@ export class TransportServer {
 				jsonRes(res, 400, { error: "No file found in upload" });
 				return;
 			}
+			for (const part of parts) {
+				const upCheck = validateMediaBytes(part.data, part.mime, part.filename);
+				if (!upCheck.valid) {
+					jsonRes(res, 400, {
+						error: `Archivo rechazado "${part.filename}": ${upCheck.reason ?? "contenido no válido"}`,
+					});
+					return;
+				}
+			}
 			const items = loadMediaMeta();
 			const saved: MediaItem[] = [];
 			for (const part of parts) {
@@ -7423,6 +7433,13 @@ export class TransportServer {
 			const filePath = join(MEDIA_DIR, storedName);
 			ensureMediaDir();
 			const fileData = Buffer.from(normalizeBase64Data(parsed.data), "base64");
+			const saveCheck = validateMediaBytes(fileData, mime, parsed.filename);
+			if (!saveCheck.valid) {
+				jsonRes(res, 400, {
+					error: saveCheck.reason ?? "Contenido de media no válido",
+				});
+				return;
+			}
 			writeFileSync(filePath, fileData);
 			const items = loadMediaMeta();
 			const item: MediaItem = {
