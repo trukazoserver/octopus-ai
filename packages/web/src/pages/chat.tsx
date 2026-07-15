@@ -1875,7 +1875,7 @@ const mediaRenderer = {
 marked.use({ renderer: mediaRenderer });
 
 const CONTINUATION_CHECKPOINT_RE =
-	/<!-- octopus-continuation-checkpoint[\s\S]*?-->\n?/g;
+	/<!-- octopus-continuation-checkpoint[\s\S]*?(?:-->|$)\n?/g;
 const TOOL_RESULT_MARKER_RE = /<!-- tool:[\w.-]+:(?:ok|error) -->/g;
 
 // Strip internal agent markers (continuation checkpoints and tool-result HTML
@@ -1887,6 +1887,29 @@ function stripInternalMarkers(raw: string): string {
 		.replace(TOOL_RESULT_MARKER_RE, "")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
+}
+
+function stripMarkdownForDisplay(raw: string): string {
+	return stripInternalMarkers(raw)
+		.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+		.replace(/```[\w-]*\n?/g, "")
+		.replace(/[`*_~>#|]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function shouldDisplayPendingAction(raw: string): boolean {
+	const text = stripInternalMarkers(raw);
+	if (!text) return true;
+	return (
+		/\b(queda(?:n)? pendiente(?:s)?|a[uú]n (?:falta(?:n)?|queda(?:n)?)|todav[ií]a (?:falta(?:n)?|queda(?:n)?)|falta(?:n)? por (?:hacer|completar|terminar|resolver|confirmar|verificar)|(?:voy a|proceder[eé] a|procedo a) (?:editar|agregar|a[nñ]adir|modificar|cambiar|crear|actualizar|buscar|navegar|descargar|ejecutar|probar|abrir|revisar|usar|iniciar)|(?:tarea|trabajo|respuesta|ejecuci[oó]n) (?:est[aá] )?(?:incomplet[oa]|parcial|bloquead[oa])|no pude|no se pudo|sin una respuesta final verificable|could not|couldn['’]?t|unable to|failed to)\b/i.test(
+			text,
+		) ||
+		/(?:^|\n+|[.!?]\s+)(?:falta(?:n)?|queda(?:n)?|missing|remaining)\b/im.test(
+			text,
+		)
+	);
 }
 
 function renderMarkdown(
@@ -2719,6 +2742,8 @@ export const ChatPage: React.FC<{
 	const streamFlushRafRef = useRef<number | null>(null);
 	const hydratedMultiAgentExecutionRef = useRef<string>("");
 	const notifiedExecutionRef = useRef<Set<string>>(new Set());
+	const draftNewChatRef = useRef(false);
+	const markedRespondingRef = useRef<string>("");
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
 	const [visibleMessageCount, setVisibleMessageCount] = useState(
 		INITIAL_VISIBLE_MESSAGES,
@@ -3195,6 +3220,8 @@ export const ChatPage: React.FC<{
 	useEffect(() => {
 		// Don't auto-select until conversations have been loaded from the API
 		if (!conversationsLoaded) return;
+		// Don't clobber an explicit "new chat" (lazy draft) the user just opened
+		if (draftNewChatRef.current) return;
 
 		if (conversations.length === 0) {
 			if (activeConversationId !== null) {
@@ -3343,6 +3370,7 @@ export const ChatPage: React.FC<{
 
 	const handleSelectConversation = useCallback(
 		(convId: string) => {
+			draftNewChatRef.current = false;
 			const executionId = executionByConversation[convId]?.executionId;
 			if (executionId) notifiedExecutionRef.current.delete(executionId);
 			setWorkspaceView("chat");
@@ -3351,28 +3379,17 @@ export const ChatPage: React.FC<{
 		[executionByConversation],
 	);
 
-	const handleNewChat = useCallback(async () => {
+	const handleNewChat = useCallback(() => {
 		setWorkspaceView("chat");
-		try {
-			const body: Record<string, string> = {};
-			if (selectedAgentId) body.agentId = selectedAgentId;
-			const result = await apiPost("/api/conversations", body);
-			const created =
-				(result.conversation as Conversation | undefined) ??
-				(result as unknown as Conversation);
-			const newConv: Conversation = {
-				id: created.id || nanoid(),
-				title: created.title || "Nueva conversación",
-			};
-			setConversations((prev) => [newConv, ...prev]);
-			setActiveConversationId(newConv.id);
-			activeConvRef.current = newConv.id;
-			setMessages([]);
-		} catch {
-			setActiveConversationId(null);
-			setMessages([]);
-		}
-	}, [selectedAgentId]);
+		draftNewChatRef.current = true;
+		// Lazy creation: don't create the conversation in the backend yet. It is
+		// created server-side on the first sent message (the backend creates one
+		// when no conversationId is passed), so clicking "new chat" without
+		// writing anything no longer leaves an empty conversation behind.
+		setActiveConversationId(null);
+		activeConvRef.current = null;
+		setMessages([]);
+	}, []);
 
 	const handleDeleteConversation = useCallback(
 		async (convId: string) => {
@@ -3735,16 +3752,22 @@ export const ChatPage: React.FC<{
 				} else if (msg.type === "stream") {
 					const chunk = getPayloadText(msg.payload);
 					lastResponseChunkAtRef.current = Date.now();
-					setActivityClock(lastResponseChunkAtRef.current);
 					const fallbackStreamId = `stream-${executionId ?? msg.id}`;
 					const streamId = assistantMessageId ?? fallbackStreamId;
-					updateConversationExecution(conversationId, (prev) => ({
-						executionId: executionId ?? prev?.executionId ?? msg.id,
-						status: "running",
-						currentStatus: "responding",
-						activities: prev?.activities ?? [],
-						workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
-					}));
+					// Mark the execution as "responding" only on the first token of
+					// the turn; doing it per-token triggered a re-render of the whole
+					// chat tree on every delta and froze the UI (model switch, etc.).
+					// activityClock is already refreshed by the 400ms interval timer.
+					if (executionId && markedRespondingRef.current !== executionId) {
+						markedRespondingRef.current = executionId;
+						updateConversationExecution(conversationId, (prev) => ({
+							executionId: executionId ?? prev?.executionId ?? msg.id,
+							status: "running",
+							currentStatus: "responding",
+							activities: prev?.activities ?? [],
+							workflowRunId: payloadWorkflowRunId ?? prev?.workflowRunId,
+						}));
+					}
 					if (!isActiveConversation) return;
 					setIsStreaming(true);
 					setAgentStatus("responding");
@@ -3816,10 +3839,16 @@ export const ChatPage: React.FC<{
 						cancelAnimationFrame(streamFlushRafRef.current);
 						streamFlushRafRef.current = null;
 					}
-					flushStreamDeltas();
+					try {
+						flushStreamDeltas();
+					} catch {
+						// Never let a flush error block the streaming-state reset below,
+						// which would leave the UI stuck "loading" forever.
+					}
 					setIsLoading(false);
 					setIsStreaming(false);
 					lastResponseChunkAtRef.current = 0;
+					markedRespondingRef.current = "";
 					resetAgentTrace();
 					pendingIdRef.current = "";
 					if (conversationId)
@@ -3827,6 +3856,7 @@ export const ChatPage: React.FC<{
 					loadConversations();
 					inputRef.current?.focus();
 				} else if (msg.type === "event") {
+					lastResponseChunkAtRef.current = Date.now();
 					const agentStatus = msg.payload?.agentStatus;
 					if (agentStatus && AGENT_ACTIVITY_STATUSES.has(agentStatus)) {
 						const nextStatus = agentStatus as AgentActivityStatus;
@@ -3911,7 +3941,11 @@ export const ChatPage: React.FC<{
 						cancelAnimationFrame(streamFlushRafRef.current);
 						streamFlushRafRef.current = null;
 					}
-					flushStreamDeltas();
+					try {
+						flushStreamDeltas();
+					} catch {
+						// Never let a flush error block the streaming-state reset below.
+					}
 					setIsLoading(false);
 					setIsStreaming(false);
 					lastResponseChunkAtRef.current = 0;
@@ -4030,8 +4064,12 @@ export const ChatPage: React.FC<{
 	);
 
 	useEffect(() => {
-		const needsRecovery =
-			activeBusy || isLoading || isStreaming || agentStatus !== "idle";
+		// The recovery poll should only run while an execution is genuinely
+		// active (running/queued). Driving it off isLoading/isStreaming/
+		// agentStatus kept it polling forever after a task finished, whenever one
+		// of those didn't fully reset — reloading the whole conversation every 5s
+		// and freezing the UI (model switch, image upload, etc.).
+		const needsRecovery = activeBusy;
 		if (!activeConversationId || !needsRecovery) return;
 		const timer = window.setInterval(() => {
 			void syncConversationExecution(activeConversationId, {
@@ -4061,6 +4099,23 @@ export const ChatPage: React.FC<{
 			activeExecution.activities.length > 0 ? activeExecution.activities : prev,
 		);
 	}, [activeExecution, isLoading, isStreaming]);
+
+	// Watchdog: if the backend goes silent mid-stream for more than 90s (event
+	// loop blocked by ffmpeg/image-gen so stream_end never arrives), release the
+	// UI instead of leaving the input disabled forever.
+	useEffect(() => {
+		if (!isStreaming && !activeBusy) return;
+		const id = setInterval(() => {
+			const last = lastResponseChunkAtRef.current;
+			if (last > 0 && Date.now() - last > 90000) {
+				setIsStreaming(false);
+				setIsLoading(false);
+				setAgentStatus("idle");
+				lastResponseChunkAtRef.current = 0;
+			}
+		}, 5000);
+		return () => clearInterval(id);
+	}, [isStreaming, activeBusy]);
 
 	useEffect(() => {
 		if (!activeExecution || !isExecutionActive(activeExecution)) {
@@ -4175,6 +4230,7 @@ export const ChatPage: React.FC<{
 	}, []);
 
 	const handleSend = () => {
+		draftNewChatRef.current = false;
 		const text = input.trim();
 		if (
 			(!text && pendingAttachments.length === 0) ||
@@ -5529,7 +5585,10 @@ export const ChatPage: React.FC<{
 									);
 								})()}
 								{activeExecution?.completionReason === "pending_action" &&
-									activeExecution.pendingAction && (
+									activeExecution.pendingAction &&
+									shouldDisplayPendingAction(
+										activeExecution.pendingAction.summary,
+									) && (
 										<div
 											style={{
 												margin: "14px 0",
@@ -5542,9 +5601,9 @@ export const ChatPage: React.FC<{
 										>
 											<strong>Acción pendiente</strong>
 											<div style={{ marginTop: 6, color: "#fef3c7" }}>
-												{stripInternalMarkers(
-												activeExecution.pendingAction.summary,
-											)}
+												{stripMarkdownForDisplay(
+													activeExecution.pendingAction.summary,
+												)}
 											</div>
 											{activeExecution.pendingAction.resumable && (
 												<button

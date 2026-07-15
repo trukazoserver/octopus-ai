@@ -4,7 +4,11 @@ import { EnvironmentFilter } from "../../security/environment-filter.js";
 import { SecretRedactor } from "../../security/secret-redactor.js";
 import type { MCPServerConfig } from "../types.js";
 
-const MCP_REQUEST_TIMEOUT_MS = 45_000;
+// Vision/analysis tools (e.g. Z.ai glm-4.6v analyzing a 2K/4K image) can take
+// 60-90s to respond. 45s aborted those calls mid-flight (the agent reported
+// "the analysis timed out" while the MCP process kept running and finished
+// later). 120s leaves headroom without hanging forever on a dead server.
+const MCP_REQUEST_TIMEOUT_MS = 120_000;
 
 export interface MCPSpawnCommand {
 	command: string;

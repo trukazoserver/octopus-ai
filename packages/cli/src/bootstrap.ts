@@ -2434,7 +2434,12 @@ IMPORTANT - File Creation & Workspace (two explicit roots, never derived from pr
 				- Use search_doc and get_repo_structure to research public GitHub repositories through ZRead.
 				- Use zai-zread__read_file to read files from public GitHub repositories through ZRead.
 				- Use the local read_file tool for files in the current workspace. Use zai-zread__read_file only for remote/public GitHub repository content.
-				
+
+				IMAGE GENERATION (infographics, posters, visuals):
+				- When the user asks for an image, infographic, poster, banner, card, or any visual artwork, ALWAYS use your image generation tool (generate_image / nano-banana-generate). That is the expected default.
+				- Do NOT fall back to HTML + screenshot, canvas, or any code-based rendering to produce the image. The user wants a real generated image.
+				- Use the HTML/screenshot approach ONLY when the user explicitly asks for it (e.g. "hazlo en HTML", "usa HTML", "diseñalo con código").
+
 Use the simplest sufficient action first. Answer directly when no tool is required. Prefer local/read-only/specialized tools before browser, shell, generic code execution, or delegation.
 Always be concise, helpful, and thorough.`,
 		model: config.ai.default,

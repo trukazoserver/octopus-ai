@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as crypto from "node:crypto";
 import { randomUUID } from "node:crypto";
 import {
@@ -292,6 +292,20 @@ function loadMediaMeta(): MediaItem[] {
 function saveMediaMeta(items: MediaItem[]): void {
 	ensureMediaDir();
 	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
+}
+
+// Run a child process without blocking the event loop (unlike spawnSync, which
+// freezes the whole server while ffmpeg extracts a video poster).
+function runSpawn(
+	cmd: string,
+	args: string[],
+	opts: { stdio: "ignore" },
+): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(cmd, args, opts);
+		child.on("error", reject);
+		child.on("close", (code) => resolve(code ?? -1));
+	});
 }
 
 function mediaCreatedAtMs(item: MediaItem): number {
@@ -1689,7 +1703,7 @@ export class TransportServer {
 					pathname.startsWith("/api/media/thumbnail/")
 				) {
 					const mediaId = pathname.slice("/api/media/thumbnail/".length);
-					this.handleServeMediaThumbnail(res, mediaId);
+					void this.handleServeMediaThumbnail(res, mediaId);
 					return;
 				}
 				if (req.method === "GET" && pathname.startsWith("/api/media/file/")) {
@@ -7479,7 +7493,10 @@ export class TransportServer {
 		return { item, pureId, filePath, size: statSync(filePath).size };
 	}
 
-	private handleServeMediaThumbnail(res: ServerResponse, id: string): void {
+	private async handleServeMediaThumbnail(
+		res: ServerResponse,
+		id: string,
+	): Promise<void> {
 		try {
 			const resolved = this.resolveMediaFile(id);
 			if (!resolved) {
@@ -7500,7 +7517,7 @@ export class TransportServer {
 				return;
 			}
 			if (!existsSync(posterPath)) {
-				const result = spawnSync(
+				const code = await runSpawn(
 					"ffmpeg",
 					[
 						"-y",
@@ -7518,7 +7535,7 @@ export class TransportServer {
 					],
 					{ stdio: "ignore" },
 				);
-				if (result.status !== 0 || !existsSync(posterPath)) {
+				if (code !== 0 || !existsSync(posterPath)) {
 					jsonRes(res, 404, { error: "Video thumbnail unavailable" });
 					return;
 				}

@@ -1547,29 +1547,27 @@ export class AgentRuntime {
 			}
 
 			const { default: sharp } = await import("sharp");
-			await sharp(localPath, { animated: false })
-				.rotate()
-				.resize({
-					width: 2048,
-					height: 2048,
-					fit: "inside",
-					withoutEnlargement: true,
-				})
-				.jpeg({ quality: 82, mozjpeg: true })
-				.toFile(outputPath);
-			if (fs.statSync(outputPath).size <= maxBytes) return outputPath;
-
-			await sharp(localPath, { animated: false })
-				.rotate()
-				.resize({
-					width: 1600,
-					height: 1600,
-					fit: "inside",
-					withoutEnlargement: true,
-				})
-				.jpeg({ quality: 70, mozjpeg: true })
-				.toFile(outputPath);
-			return fs.statSync(outputPath).size <= maxBytes ? outputPath : localPath;
+			const attempts = [
+				{ size: 2048, quality: 82 },
+				{ size: 1600, quality: 70 },
+				{ size: 1280, quality: 60 },
+				{ size: 1024, quality: 50 },
+				{ size: 768, quality: 40 },
+			];
+			for (const attempt of attempts) {
+				await sharp(localPath, { animated: false })
+					.rotate()
+					.resize({
+						width: attempt.size,
+						height: attempt.size,
+						fit: "inside",
+						withoutEnlargement: true,
+					})
+					.jpeg({ quality: attempt.quality, mozjpeg: true })
+					.toFile(outputPath);
+				if (fs.statSync(outputPath).size <= maxBytes) return outputPath;
+			}
+			return localPath;
 		} catch {
 			return localPath;
 		}
@@ -1773,9 +1771,9 @@ export class AgentRuntime {
 		return this.truncateForContext(content.replace(TOOL_IMAGE_RE, "").trim());
 	}
 
-	private formatToolResultForModel(
+	private async formatToolResultForModel(
 		resultContent: string,
-	): string | ContentPart[] {
+	): Promise<string | ContentPart[]> {
 		MEDIA_FILE_RE.lastIndex = 0;
 		const hasInlineImage = TOOL_IMAGE_RE.test(resultContent);
 		const hasMediaRef = MEDIA_FILE_RE.test(resultContent);
@@ -1792,10 +1790,14 @@ export class AgentRuntime {
 					? resultContent.replace(TOOL_IMAGE_RE, "")
 					: resultContent,
 			);
-			return this.appendZaiVisionHint(
-				textContent || "Image data.",
-				this.getLocalMediaPathsFromContent(resultContent),
+			const localPaths = await Promise.all(
+				this.getLocalMediaPathsFromContent(resultContent).map((localPath) =>
+					this.isImageMediaFilename(localPath)
+						? this.prepareZaiVisionMediaPath(localPath)
+						: Promise.resolve(localPath),
+				),
 			);
+			return this.appendZaiVisionHint(textContent || "Image data.", localPaths);
 		}
 
 		// Native multimodal models: embed the actual image bytes as content parts
@@ -2518,6 +2520,24 @@ export class AgentRuntime {
 		}
 	}
 
+	private isImageBrowserPreviewAttempt(
+		toolName: string,
+		params: Record<string, unknown>,
+	): boolean {
+		if (!this.shouldUseZaiVisionToolsForImages()) return false;
+		if (toolName === "browser_navigate" && typeof params.url === "string") {
+			return /\/api\/media\/file\/[^?#\s)]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico)(?:[?#]|$)/i.test(
+				params.url,
+			);
+		}
+		if (toolName === "browser_open_file" && typeof params.path === "string") {
+			return /\.(?:png|jpe?g|gif|webp|svg|bmp|ico)(?:[?#]|$)/i.test(
+				params.path.trim(),
+			);
+		}
+		return false;
+	}
+
 	private decideBeforeToolCall(
 		toolName: string,
 		params: Record<string, unknown>,
@@ -2528,6 +2548,13 @@ export class AgentRuntime {
 			return {
 				action: "skip",
 				reason: `La herramienta '${toolName}' está temporalmente desactivada: falló varias veces seguidas por falta de facturación/permisos (HTTP 403). Habilita la facturación del proveedor o corrige los permisos y vuelve a intentarlo; no la reintentes hasta entonces.`,
+			};
+		}
+		if (this.isImageBrowserPreviewAttempt(toolName, params)) {
+			return {
+				action: "skip",
+				reason:
+					"No abras imágenes adjuntas con el navegador. Usa directamente `analyze_image` o la herramienta especializada de Z.AI Vision con la ruta local `octopus-local-media-paths`; esa ruta ya apunta a una copia optimizada por debajo del límite de 5 MB cuando es necesario.",
 			};
 		}
 		if (
@@ -4337,7 +4364,9 @@ export class AgentRuntime {
 <!-- tool:${toolCall.function.name}:${toolResult.success ? "ok" : "error"} -->
 `;
 
-					const parsedContent = this.formatToolResultForModel(resultContentStr);
+					const parsedContent = await this.formatToolResultForModel(
+						resultContentStr,
+					);
 
 					messages.push({
 						role: "tool",
@@ -4633,7 +4662,7 @@ export class AgentRuntime {
 						}
 					}
 
-					const parsedContent = this.formatToolResultForModel(resultContent);
+					const parsedContent = await this.formatToolResultForModel(resultContent);
 
 					toolResults.push({
 						toolCallId: toolCall.id,
@@ -4757,17 +4786,64 @@ export class AgentRuntime {
 		);
 	}
 
+	private indicatesPendingCompletion(content: string): boolean {
+		return (
+			/\b(puedo continuar|puedo seguir|contin[uú]o si|si me lo pides|se alcanz[oó] el l[ií]mite|l[ií]mite m[aá]ximo|queda(?:n)? pendiente(?:s)?|a[uú]n (?:falta(?:n)?|queda(?:n)?)|todav[ií]a (?:falta(?:n)?|queda(?:n)?)|falta(?:n)? por (?:hacer|completar|terminar|resolver|confirmar|verificar)|(?:tarea|trabajo|respuesta|ejecuci[oó]n) (?:est[aá] )?(?:incomplet[oa]|parcial|bloquead[oa])|(?:task|work|response|execution) (?:is )?(?:incomplete|partial|blocked)|no pude|no se pudo|could not|couldn['’]?t|unable to|failed to)\b/i.test(
+				content,
+			) ||
+			/(?:^|\n+|[.!?]\s+)(?:falta(?:n)?|queda(?:n)?|missing|remaining)\b/im.test(
+				content,
+			)
+		);
+	}
+
+	private cleanCompletionContent(content: string): string {
+		return content
+			.replace(/<!-- octopus-continuation-checkpoint[\s\S]*?(?:-->|$)\n?/g, "")
+			.replace(/<!-- tool:[\w.-]+:(?:ok|error) -->/g, "")
+			.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
+			.trim();
+	}
+
+	private summarizePendingAction(content: string): string {
+		const cleaned = this.cleanCompletionContent(content);
+		const candidates = cleaned
+			.split(/\n+|(?<=[.!?])\s+/)
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const actionable = candidates.find(
+			(part) =>
+				this.continuityGuard.hasPendingAction(part) ||
+				this.indicatesPendingCompletion(part),
+		);
+		const plainText = (actionable ?? cleaned)
+			.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+			.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+			.replace(/```[\w-]*\n?/g, "")
+			.replace(/[`*_~>#|]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!plainText) {
+			return "La ejecución terminó sin una respuesta final verificable.";
+		}
+		if (plainText.length <= 500) return plainText;
+		const truncated = plainText.slice(0, 497);
+		const lastSpace = truncated.lastIndexOf(" ");
+		return `${truncated.slice(0, lastSpace > 400 ? lastSpace : 497)}...`;
+	}
+
 	private reportCompletionOutcome(
 		options: AgentProcessOptions,
 		content: string,
 	): void {
 		if (!options.onCompletionOutcome) return;
-		const normalized = content.replace(/\s+/g, " ").trim();
-		const promisedAction = this.continuityGuard.hasPendingAction(content);
+		const cleaned = this.cleanCompletionContent(content);
+		const normalized = cleaned.replace(/\s+/g, " ").trim();
+		const promisedAction = this.continuityGuard.hasPendingAction(cleaned);
 		const pending =
 			!normalized ||
 			promisedAction ||
-			this.indicatesIncompleteOrContinuation(content);
+			this.indicatesPendingCompletion(cleaned);
 		if (!pending) {
 			options.onCompletionOutcome({ reason: "finished" });
 			return;
@@ -4776,9 +4852,7 @@ export class AgentRuntime {
 			reason: "pending_action",
 			pendingAction: {
 				kind: promisedAction || !normalized ? "retry_tool_call" : "continue",
-				summary: normalized
-					? normalized.slice(0, 500)
-					: "La ejecución terminó sin una respuesta final verificable.",
+				summary: this.summarizePendingAction(cleaned),
 				resumable: true,
 			},
 		});
@@ -5238,6 +5312,10 @@ export class AgentRuntime {
 				"\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
 			systemContent +=
 				"\n\nMANDATORY MEDIA OUTPUT RULE (PERSISTENT, NON-NEGOTIABLE): Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description, metadata)`), the `save_media` tool ONLY for small base64 payloads that already come from an external API, or `import_media_file` for any existing local file and any large output such as ffmpeg videos. If a file already exists on disk, NEVER convert it to base64; ALWAYS call `import_media_file` with the local path. For user-attached images or Octopus media URLs, pass the existing `/api/media/file/...` URL directly to tools that accept image URLs. For `nano-banana-generate`, use attached/reference images directly in `reference_images` as `/api/media/file/...`, http(s)://, or gs:// URLs; NEVER call or invent an image-to-base64 conversion step and NEVER pass `data:image/...;base64` as a tool argument. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. For multi-step media workflows, every saved item MUST have a semantic description and metadata such as `workflowId`, `imageNumber`/`sceneNumber`, `stage`, `role`, `prompt`, and `parentMediaIds` so later steps can identify the correct file. Example description: `Construction timelapse Img 03 - sobre-cimientos final keyframe`; example metadata: `{ workflowId: 'construction-house-timelapse', imageNumber: 3, stage: 'sobre-cimientos', role: 'video-keyframe' }`. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
+			if (this.shouldUseZaiVisionToolsForImages()) {
+				systemContent +=
+					"\n\nATTACHED IMAGE ANALYSIS ROUTING (MANDATORY): `/api/media/file/...` is an Octopus attachment reference, not a web page. NEVER use `browser_navigate`, `browser_open_file`, or `browser_screenshot` to inspect an attached/local image. Call `analyze_image` or the matching specialized Z.AI Vision tool directly with the path from `octopus-local-media-paths`. Runtime has already replaced oversized inputs with an analysis copy capped at 4,500,000 bytes, so do not resize, convert, reopen, or screenshot it first. Browser tools remain appropriate only for actual web pages and their visual state.";
+			}
 			systemContent +=
 				"\n\nLONG MEDIA WORKFLOW AUTONOMY RULE: For numbered or multi-batch image/video/audio workflows, keep progressing until the original requested deliverables are complete. If a provider, tool, or execution segment reaches a per-task, per-batch, generation, timeout, or iteration limit but completed artifacts and pending items are clear, immediately continue from the first missing item using the existing `/api/media/file/...` URLs and metadata. Do not ask the user to type 'continua', 'sigue', or confirm continuation just because a batch ended. Stop only when every deliverable is complete or when a missing credential/reference, safety issue, unrecoverable repeated tool failure, or external manual action truly blocks progress.";
 			systemContent +=

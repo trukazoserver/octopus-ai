@@ -536,6 +536,280 @@ describe("AgentRuntime", () => {
 			}
 		});
 
+		it("blocks browser previews of attached images for GLM", () => {
+			const glmRuntime = new AgentRuntime(
+				{ ...baseConfig, model: "zhipu/glm-5.2" },
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			const internal = glmRuntime as unknown as {
+				createEvidenceLedger(message: string): unknown;
+				decideBeforeToolCall(
+					name: string,
+					params: Record<string, unknown>,
+					ledger: unknown,
+					remaining: number,
+				): { action: string; reason?: string };
+			};
+			const ledger = internal.createEvidenceLedger("describe la imagen adjunta");
+
+			const mediaUrlDecision = internal.decideBeforeToolCall(
+				"browser_navigate",
+				{ url: "http://localhost:3000/api/media/file/example.png" },
+				ledger,
+				10,
+			);
+			const localFileDecision = internal.decideBeforeToolCall(
+				"browser_open_file",
+				{ path: "C:\\Users\\test\\.octopus\\cache\\vision\\example.jpg" },
+				ledger,
+				10,
+			);
+			const webPageDecision = internal.decideBeforeToolCall(
+				"browser_navigate",
+				{ url: "https://example.com/gallery" },
+				ledger,
+				10,
+			);
+
+			expect(mediaUrlDecision).toMatchObject({
+				action: "skip",
+				reason: expect.stringContaining("analyze_image"),
+			});
+			expect(localFileDecision).toMatchObject({
+				action: "skip",
+				reason: expect.stringContaining("5 MB"),
+			});
+			expect(webPageDecision).toEqual({ action: "execute" });
+		});
+
+		it("instructs GLM to analyze attachments without browser round-trips", async () => {
+			const glmRuntime = new AgentRuntime(
+				{ ...baseConfig, model: "zhipu/glm-5.2" },
+				mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+				mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+				mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+				mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+				mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+			);
+			glmRuntime.setToolSystem(
+				createMockToolRegistry([
+					{ name: "browser_navigate", description: "Navigate to a web page" },
+					{ name: "analyze_image", description: "Analyze an image" },
+				]) as unknown as ToolRegistry,
+				createMockToolExecutor() as unknown as ToolExecutor,
+			);
+
+			await glmRuntime.processMessage(
+				"Describe ![Image](/api/media/file/example.png)",
+			);
+
+			const request = mockLLMRouter.chat.mock.calls.at(-1)?.[0];
+			const systemMessage = request.messages.find(
+				(message: { role: string }) => message.role === "system",
+			);
+			expect(systemMessage?.content).toContain(
+				"ATTACHED IMAGE ANALYSIS ROUTING",
+			);
+			expect(systemMessage?.content).toContain(
+				"NEVER use `browser_navigate`",
+			);
+			expect(systemMessage?.content).toContain("4,500,000 bytes");
+		});
+
+		it("prepares a newly generated image for direct same-turn Vision analysis", async () => {
+			const filename = `runtime-generated-vision-${Date.now()}.png`;
+			const mediaDir = join(homedir(), ".octopus", "media");
+			const mediaPath = join(mediaDir, filename);
+			const optimizedPath = join(
+				homedir(),
+				".octopus",
+				"cache",
+				"vision",
+				filename.replace(/\.png$/, "-vision.jpg"),
+			);
+			mkdirSync(mediaDir, { recursive: true });
+			await sharp(randomBytes(1800 * 1800 * 3), {
+				raw: { width: 1800, height: 1800, channels: 3 },
+			})
+				.png({ compressionLevel: 0 })
+				.toFile(mediaPath);
+			try {
+				const glmRuntime = new AgentRuntime(
+					{ ...baseConfig, model: "zhipu/glm-5.2" },
+					mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+					mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+					mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+					mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+					mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+				);
+				const internal = glmRuntime as unknown as {
+					formatToolResultForModel(result: string): Promise<string>;
+					createEvidenceLedger(message: string): unknown;
+					decideBeforeToolCall(
+						name: string,
+						params: Record<string, unknown>,
+						ledger: unknown,
+						remaining: number,
+					): { action: string; reason?: string };
+				};
+
+				const formatted = await internal.formatToolResultForModel(
+					`Generated image: ![Result](/api/media/file/${filename})`,
+				);
+				const browserDecision = internal.decideBeforeToolCall(
+					"browser_navigate",
+					{ url: `http://localhost/api/media/file/${filename}` },
+					internal.createEvidenceLedger("genera y analiza la imagen"),
+					10,
+				);
+
+				expect(formatted).toContain("octopus-local-media-paths");
+				expect(formatted).toContain("-vision.jpg");
+				expect(statSync(optimizedPath).size).toBeLessThanOrEqual(4_500_000);
+				expect(browserDecision).toMatchObject({
+					action: "skip",
+					reason: expect.stringContaining("analyze_image"),
+				});
+			} finally {
+				rmSync(mediaPath, { force: true });
+				rmSync(optimizedPath, { force: true });
+			}
+		});
+
+		it("routes generated-image review to Vision without executing the browser", async () => {
+			const filename = `runtime-direct-vision-${Date.now()}.png`;
+			const mediaDir = join(homedir(), ".octopus", "media");
+			const mediaPath = join(mediaDir, filename);
+			mkdirSync(mediaDir, { recursive: true });
+			await sharp({
+				create: {
+					width: 64,
+					height: 64,
+					channels: 3,
+					background: "#336699",
+				},
+			})
+				.png()
+				.toFile(mediaPath);
+			try {
+				mockLLMRouter.chat
+					.mockResolvedValueOnce({
+						content: "Preparando la generación y revisión.",
+						model: "test-model",
+						usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+						finishReason: "stop",
+					})
+					.mockResolvedValueOnce({
+						content: "",
+						model: "test-model",
+						usage: { promptTokens: 5, completionTokens: 1, totalTokens: 6 },
+						finishReason: "tool_calls",
+						toolCalls: [
+							{
+								id: "generate-call",
+								type: "function",
+								function: {
+									name: "nano-banana-generate",
+									arguments: '{"prompt":"blue square"}',
+								},
+							},
+						],
+					})
+					.mockResolvedValueOnce({
+						content: "",
+						model: "test-model",
+						usage: { promptTokens: 5, completionTokens: 1, totalTokens: 6 },
+						finishReason: "tool_calls",
+						toolCalls: [
+							{
+								id: "browser-call",
+								type: "function",
+								function: {
+									name: "browser_navigate",
+									arguments: `{"url":"http://localhost/api/media/file/${filename}"}`,
+								},
+							},
+						],
+					})
+					.mockResolvedValueOnce({
+						content: "",
+						model: "test-model",
+						usage: { promptTokens: 5, completionTokens: 1, totalTokens: 6 },
+						finishReason: "tool_calls",
+						toolCalls: [
+							{
+								id: "vision-call",
+								type: "function",
+								function: {
+									name: "analyze_image",
+									arguments: JSON.stringify({ image_source: mediaPath }),
+								},
+							},
+						],
+					})
+					.mockResolvedValueOnce({
+						content: "La imagen generada contiene un cuadrado azul.",
+						model: "test-model",
+						usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+						finishReason: "stop",
+					});
+				const glmRuntime = new AgentRuntime(
+					{ ...baseConfig, model: "zhipu/glm-5.2" },
+					mockLLMRouter as unknown as Parameters<typeof AgentRuntime>[1],
+					mockSTM as unknown as Parameters<typeof AgentRuntime>[2],
+					mockMemoryRetrieval as unknown as Parameters<typeof AgentRuntime>[3],
+					mockConsolidator as unknown as Parameters<typeof AgentRuntime>[4],
+					mockSkillLoader as unknown as Parameters<typeof AgentRuntime>[5],
+				);
+				const registry = createMockToolRegistry([
+					{ name: "nano-banana-generate", description: "Generate an image" },
+					{ name: "browser_navigate", description: "Navigate a web page" },
+					{ name: "analyze_image", description: "Analyze an image" },
+				]);
+				const executor = createMockToolExecutor();
+				executor.execute.mockImplementation(async (name: string) => {
+					if (name === "nano-banana-generate") {
+						return {
+							success: true,
+							output: `![Generated](/api/media/file/${filename})`,
+						};
+					}
+					if (name === "analyze_image") {
+						return { success: true, output: "Vision detected a blue square." };
+					}
+					throw new Error(`Unexpected tool execution: ${name}`);
+				});
+				glmRuntime.setToolSystem(
+					registry as unknown as ToolRegistry,
+					executor as unknown as ToolExecutor,
+				);
+
+				const result = await glmRuntime.processMessage(
+					"genera una imagen y luego analiza el resultado",
+					"generated-vision-flow",
+					{ disableOrchestrator: true },
+				);
+				const executedNames = executor.execute.mock.calls.map(([name]) => name);
+
+				expect(executedNames).toEqual([
+					"nano-banana-generate",
+					"analyze_image",
+				]);
+				expect(executor.execute).toHaveBeenCalledWith(
+					"analyze_image",
+					expect.objectContaining({ image_source: mediaPath }),
+					expect.any(Object),
+				);
+				expect(result).toContain("cuadrado azul");
+			} finally {
+				rmSync(mediaPath, { force: true });
+			}
+		});
+
 		it("should add user and assistant turns to STM", async () => {
 			await runtime.processMessage("Hello");
 			expect(mockSTM.add).toHaveBeenCalledTimes(2);
@@ -2307,7 +2581,8 @@ describe("AgentRuntime", () => {
 	describe("semantic completion outcomes", () => {
 		it("reports incomplete terminal text as a pending action", async () => {
 			mockLLMRouter.chat.mockResolvedValueOnce({
-				content: "Queda pendiente descargar el archivo de música.",
+				content:
+					"El análisis está listo.\n\nQueda pendiente **descargar** el archivo de música.",
 				model: "test-model",
 				usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
 				finishReason: "stop",
@@ -2323,9 +2598,48 @@ describe("AgentRuntime", () => {
 			expect(onCompletionOutcome).toHaveBeenCalledWith(
 				expect.objectContaining({
 					reason: "pending_action",
-					pendingAction: expect.objectContaining({ resumable: true }),
+					pendingAction: expect.objectContaining({
+						resumable: true,
+						summary: "Queda pendiente descargar el archivo de música.",
+					}),
 				}),
 			);
+		});
+
+		it("ignores historical incompleteness discussed in a complete answer", async () => {
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content:
+					'## Fiestas Patrias que estuvieron incompletas en mi análisis de "fechas que faltan"\n\nGracias por la corrección. El calendario corregido está completo.',
+				model: "test-model",
+				usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+				finishReason: "stop",
+			});
+			const onCompletionOutcome = vi.fn();
+
+			await runtime.processMessage("corrige el calendario", "conversation", {
+				disableOrchestrator: true,
+				onCompletionOutcome,
+			});
+
+			expect(onCompletionOutcome).toHaveBeenCalledWith({ reason: "finished" });
+		});
+
+		it("ignores internal continuation checkpoint language", async () => {
+			mockLLMRouter.chat.mockResolvedValueOnce({
+				content:
+					"La tarea está completa.\n<!-- octopus-continuation-checkpoint\nInstruction: resume from the first missing requirement.\n-->",
+				model: "test-model",
+				usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+				finishReason: "stop",
+			});
+			const onCompletionOutcome = vi.fn();
+
+			await runtime.processMessage("completa la tarea", "conversation", {
+				disableOrchestrator: true,
+				onCompletionOutcome,
+			});
+
+			expect(onCompletionOutcome).toHaveBeenCalledWith({ reason: "finished" });
 		});
 
 		it("reports a complete answer as finished", async () => {
