@@ -3027,6 +3027,7 @@ Always be concise, helpful, and thorough.`,
 			await mcpManager.shutdown();
 			connectionManager.shutdown();
 			await vectorStore.close();
+			await learningEngine.flush();
 			await db.close();
 		},
 	};

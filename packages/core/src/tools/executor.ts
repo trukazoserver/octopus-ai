@@ -33,6 +33,31 @@ const MEDIA_MIME_RE = /^(image|audio|video)\//i;
 const DOCUMENT_MIME_RE =
 	/^(application\/(?:pdf|zip|json|msword|vnd\.|octet-stream)|text\/(?:plain|csv|markdown|html))/i;
 
+// Tools that return ready-made /api/media/file/ URLs without base64 payloads
+// (e.g. dynamic tools like veo-video-generator) bypass the guidance appended in
+// normalizeMediaOutput's sanitize branch. Without explicit guidance the model
+// tends to "fix" the relative media URL by fabricating an absolute host for it
+// (e.g. github.com/user-attachments/<uuid> lifted from the real filename). The
+// guardian appends a "use verbatim" instruction to any such result that lacks one.
+const MEDIA_FILE_URL_RE = /\/api\/media\/(?:file|thumbnail)\//;
+const MEDIA_URL_GUIDANCE_PRESENT_RE =
+	/use these urls directly|use the (?:exact )?url|urls? verbatim|exactly as given|do not (?:rewrite|invent|fabricate|substitute|change|modify|shorten)/i;
+const MEDIA_URL_GUIDANCE =
+	"Use any /api/media/file/ URL above verbatim in your reply as markdown, e.g. ![description](URL); the chat renders it as the media player. The URL is RELATIVE (starts with /api/media/file/) — paste it EXACTLY as given, including the leading slash. Do NOT prepend http://, https://, or any host/domain, do NOT turn it into https://api.media/file/..., and never invent or substitute a different URL (such as github.com/user-attachments/...).";
+
+function appendMediaUrlGuidance(rawOutput: unknown): unknown {
+	const text =
+		typeof rawOutput === "string"
+			? rawOutput
+			: rawOutput == null || rawOutput === ""
+				? null
+				: JSON.stringify(rawOutput, null, 2);
+	if (text == null) return rawOutput;
+	if (!MEDIA_FILE_URL_RE.test(text)) return rawOutput;
+	if (MEDIA_URL_GUIDANCE_PRESENT_RE.test(text)) return rawOutput;
+	return `${text}\n\n${MEDIA_URL_GUIDANCE}`;
+}
+
 interface SavedToolMedia {
 	filename: string;
 	url: string;
@@ -442,8 +467,18 @@ export class ToolExecutor {
 			"metadata",
 		);
 
-		if (!output.changed && !metadata.changed)
-			return this.redactToolResult(result);
+		if (!output.changed && !metadata.changed) {
+			// Systemic guardian: tools returning ready-made /api/media/file/ URLs
+			// (no base64 to sanitize) get verbatim-usage guidance appended so the
+			// model emits the real URL instead of fabricating an absolute host.
+			const guardedOutput = appendMediaUrlGuidance(result.output);
+			if (guardedOutput === result.output)
+				return this.redactToolResult(result);
+			return this.redactToolResult({
+				...result,
+				output: guardedOutput as ToolResult["output"],
+			});
+		}
 
 		const mediaSummary = savedMedia
 			.map(

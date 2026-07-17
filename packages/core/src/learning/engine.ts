@@ -93,8 +93,43 @@ export class LearningEngine {
 	}
 
 	private consolidateCounter = 0;
+	/**
+	 * recordExperience is dispatched fire-and-forget by the runtime
+	 * (recordLearningExperience). Without draining, shutdown() closes the
+	 * database while a write is still in flight and the write later throws
+	 * "SQLite is not initialized". Every invocation is tracked here and drained
+	 * by flush() before the storage layer closes.
+	 */
+	private readonly pendingExperienceWrites = new Set<Promise<unknown>>();
 
-	async recordExperience(
+	recordExperience(input: ExperienceRecordInput): Promise<ExperienceRecord> {
+		const work = this.doRecordExperience(input);
+		this.pendingExperienceWrites.add(work);
+		void work.finally(() => {
+			this.pendingExperienceWrites.delete(work);
+		});
+		return work;
+	}
+
+	/**
+	 * Wait for in-flight recordExperience writes to settle, bounded by timeoutMs
+	 * so shutdown can never hang on a stuck learning write. Call before closing
+	 * the database.
+	 */
+	async flush(timeoutMs = 10_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (this.pendingExperienceWrites.size > 0) {
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) return;
+			const snapshot = [...this.pendingExperienceWrites];
+			await Promise.race([
+				Promise.allSettled(snapshot),
+				new Promise<void>((resolve) => setTimeout(resolve, remaining)),
+			]);
+		}
+	}
+
+	private async doRecordExperience(
 		input: ExperienceRecordInput,
 	): Promise<ExperienceRecord> {
 		await this.ensureTables();
