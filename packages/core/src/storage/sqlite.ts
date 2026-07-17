@@ -63,6 +63,10 @@ export class SqliteDatabase implements DatabaseAdapter {
 		return this.ensureDelegate().transaction(fn);
 	}
 
+	currentTime(): Promise<Date> {
+		return this.ensureDelegate().currentTime();
+	}
+
 	async flush(): Promise<void> {
 		await this.ensureDelegate().flush?.();
 	}

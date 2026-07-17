@@ -1,20 +1,27 @@
 import { createHash } from "node:crypto";
 import { nanoid } from "nanoid";
-import type { DatabaseAdapter } from "../storage/database.js";
+import { createDatabaseAdapter, type DatabaseAdapter } from "../storage/database.js";
 import { decrypt, encrypt } from "../utils/crypto.js";
 import { isAssistantMemoryDenialEcho } from "./denial-echo.js";
+import { MemoryBenchmarkStore, type MemoryBenchmarkFormat } from "./benchmark.js";
 import { FTSSearchEngine } from "./fts-search.js";
 import { MemoryIntegrityLayer } from "./integrity.js";
-import type { LongTermMemory } from "./ltm.js";
+import { LongTermMemory } from "./ltm.js";
+import { SqliteVectorStore } from "./sqlite-vss.js";
 import type {
 	ActiveForgettingOptions,
 	ActiveForgettingReport,
+	EmbeddingDescriptor,
 	EmbeddingFunction,
+	EmbeddingReindexReport,
+	LegacyClaimBackfillReport,
 	MemoryActionLogEntry,
 	MemoryAuditEntry,
 	MemoryAuditIntegrityReport,
 	MemoryBackfillReport,
 	MemoryCandidate,
+	MemoryClaimInput,
+	MemoryClaimRecord,
 	MemoryCoverageSnapshot,
 	MemoryExplanation,
 	MemoryFeedbackInput,
@@ -24,9 +31,16 @@ import type {
 	MemoryGraphTraversalOptions,
 	MemoryItem,
 	MemoryLogIntegrityResult,
+	MemoryMetricsSnapshot,
+	MemoryOperationCreateInput,
+	MemoryOperationListOptions,
+	MemoryOperationRecord,
+	MemoryOperationStatus,
+	MemoryOperationType,
 	MemoryPack,
 	MemoryPermissions,
 	MemoryReadContext,
+	MemoryReadOptions,
 	MemoryRelationType,
 	MemorySensitivity,
 	MemorySource,
@@ -68,6 +82,25 @@ export interface MemoryOrchestratorDeps {
 	uncertaintyEstimator?: UncertaintyEstimator;
 	config?: MemoryOrchestratorConfig;
 }
+
+type MemoryOperationRow = {
+	id: string;
+	type: MemoryOperationType;
+	status: MemoryOperationStatus;
+	target_descriptor: string | null;
+	cursor: string | null;
+	request: string;
+	progress: string;
+	lease_token: string | null;
+	lease_expires_at: string | null;
+	control_action: "run" | "pause" | "cancel";
+	fence_version: number;
+	last_error: string | null;
+	attempt_count: number;
+	created_at: string;
+	updated_at: string;
+	completed_at: string | null;
+};
 
 export class MemoryOrchestrator {
 	private initialized = false;
@@ -298,12 +331,21 @@ export class MemoryOrchestrator {
 
 		const normalized = validation.candidate;
 		const now = new Date();
-		const embedding = await this.deps.embeddingFn(
-			normalized.content,
-			"document",
+		const versionedEmbedding = this.deps.embeddingFn.embedVersioned
+			? await this.deps.embeddingFn.embedVersioned(normalized.content, "document")
+			: {
+					values: await this.deps.embeddingFn(normalized.content, "document"),
+					descriptor: this.deps.embeddingFn.getDescriptor?.(),
+				};
+		const embedding = versionedEmbedding.values;
+		const embeddingDescriptor = versionedEmbedding.descriptor;
+		const duplicate = await this.findDuplicate(
+			normalized,
+			embedding,
+			embeddingDescriptor,
 		);
-		const duplicate = await this.findDuplicate(normalized, embedding);
 		if (duplicate) {
+			const stagedMemoryIds = new Set<string>();
 			const duplicateConfidence = Number(duplicate.metadata.confidence ?? 0.5);
 			const duplicateExpiresAt = this.computeExpiresAt(normalized);
 			const reinforced: MemoryItem = {
@@ -330,36 +372,46 @@ export class MemoryOrchestrator {
 						Number(duplicate.metadata.duplicateReinforcementCount ?? 0) + 1,
 				},
 			};
-			await this.deps.ltm.update(reinforced);
-			await this.recordEvidence(duplicate.id, normalized);
-			await this.recordStructuredSource(
-				duplicate.id,
-				normalized,
-				this.normalizeSource(normalized.source, normalized),
-			);
-			await this.recordPermissions(
-				duplicate.id,
-				normalized.permissions,
-				duplicateExpiresAt ?? duplicate.metadata.expiresAt,
-			);
-			await this.upsertEntitiesAndRelations(reinforced, normalized);
-			await this.applyDeclaredRelations(reinforced, normalized);
-			await this.updateCoverage(normalized, reinforced);
-			await this.recordAudit({
-				actorId: normalized.scope.userId ?? "system",
-				action: "duplicate_reinforced",
-				memoryId: duplicate.id,
-				before: this.auditSnapshot(duplicate),
-				after: this.auditSnapshot(reinforced),
+			await this.deps.db.transaction(async () => {
+				await this.stageMemoryItem(reinforced, stagedMemoryIds);
+				await this.recordEvidence(duplicate.id, normalized);
+				await this.recordStructuredSource(
+					duplicate.id,
+					normalized,
+					this.normalizeSource(normalized.source, normalized),
+				);
+				await this.recordPermissions(
+					duplicate.id,
+					normalized.permissions,
+					duplicateExpiresAt ?? duplicate.metadata.expiresAt,
+				);
+				await this.upsertEntitiesAndRelations(reinforced, normalized);
+				await this.applyDeclaredRelations(
+					reinforced,
+					normalized,
+					stagedMemoryIds,
+				);
+				await this.updateCoverage(normalized, reinforced);
+				await this.recordAudit({
+					actorId: normalized.scope.userId ?? "system",
+					action: "duplicate_reinforced",
+					memoryId: duplicate.id,
+					before: this.auditSnapshot(duplicate),
+					after: this.auditSnapshot(reinforced),
+				});
+				await this.recordActionLog({
+					sessionId: normalized.scope.sessionId,
+					agentId: normalized.scope.agentRole,
+					actionType: "memory.write",
+					input: { type: normalized.type, duplicate: true },
+					output: {
+						memoryId: duplicate.id,
+						reason: "duplicate_reinforced",
+					},
+					status: "completed",
+				});
 			});
-			await this.recordActionLog({
-				sessionId: normalized.scope.sessionId,
-				agentId: normalized.scope.agentRole,
-				actionType: "memory.write",
-				input: { type: normalized.type, duplicate: true },
-				output: { memoryId: duplicate.id, reason: "duplicate_reinforced" },
-				status: "completed",
-			});
+			await this.finalizeMemoryItems(stagedMemoryIds);
 			return {
 				accepted: true,
 				memoryId: duplicate.id,
@@ -382,10 +434,35 @@ export class MemoryOrchestrator {
 			source: this.normalizeSource(normalized.source, normalized),
 			metadata: {
 				...normalized.metadata,
+				...(normalized.claim
+					? {
+						claimEntity: normalized.claim.entity,
+						claimKey: normalized.claim.key,
+						claimValue: normalized.claim.value,
+						claimValidFrom: this.claimDate(
+							normalized.claim.validFrom,
+							now,
+						).toISOString(),
+						claimValidTo: normalized.claim.validTo
+							? this.claimDate(normalized.claim.validTo, now).toISOString()
+							: undefined,
+					}
+					: {}),
+				...(embeddingDescriptor
+					? {
+						embeddingProvider: embeddingDescriptor.provider,
+						embeddingModel: embeddingDescriptor.model,
+						embeddingDimensions: embeddingDescriptor.dimensions,
+						embeddingVersion: embeddingDescriptor.version,
+						embeddingQuality: embeddingDescriptor.quality,
+					}
+					: {}),
 				tenantId: normalized.scope.tenantId,
 				userId: normalized.scope.userId,
 				projectId: normalized.scope.projectId,
 				agentRole: normalized.scope.agentRole,
+				sessionId: normalized.scope.sessionId,
+				taskId: normalized.scope.taskId,
 				sourceTrust: normalized.sourceTrust,
 				confidence: normalized.confidence ?? validation.confidenceCap,
 				status: "active",
@@ -395,28 +472,37 @@ export class MemoryOrchestrator {
 			},
 		};
 
-		await this.deps.ltm.store(item);
-		await this.recordEvidence(memoryId, normalized);
-		await this.recordStructuredSource(memoryId, normalized, item.source);
-		await this.recordPermissions(memoryId, normalized.permissions, expiresAt);
-		await this.upsertEntitiesAndRelations(item, normalized);
-		await this.applyDeclaredRelations(item, normalized);
-		item = await this.detectStructuredContradictions(item, normalized);
-		await this.updateCoverage(normalized, item);
-		await this.recordAudit({
-			actorId: normalized.scope.userId ?? "system",
-			action: "created",
-			memoryId,
-			after: this.auditSnapshot(item),
+		const stagedMemoryIds = new Set<string>();
+		await this.deps.db.transaction(async () => {
+			await this.stageMemoryItem(item, stagedMemoryIds);
+			await this.recordEvidence(memoryId, normalized);
+			await this.recordTemporalClaim(memoryId, normalized, now);
+			await this.recordStructuredSource(memoryId, normalized, item.source);
+			await this.recordPermissions(memoryId, normalized.permissions, expiresAt);
+			await this.upsertEntitiesAndRelations(item, normalized);
+			await this.applyDeclaredRelations(item, normalized, stagedMemoryIds);
+			item = await this.detectStructuredContradictions(
+				item,
+				normalized,
+				stagedMemoryIds,
+			);
+			await this.updateCoverage(normalized, item);
+			await this.recordAudit({
+				actorId: normalized.scope.userId ?? "system",
+				action: "created",
+				memoryId,
+				after: this.auditSnapshot(item),
+			});
+			await this.recordActionLog({
+				sessionId: normalized.scope.sessionId,
+				agentId: normalized.scope.agentRole,
+				actionType: "memory.write",
+				input: { type: normalized.type },
+				output: { memoryId },
+				status: "completed",
+			});
 		});
-		await this.recordActionLog({
-			sessionId: normalized.scope.sessionId,
-			agentId: normalized.scope.agentRole,
-			actionType: "memory.write",
-			input: { type: normalized.type },
-			output: { memoryId },
-			status: "completed",
-		});
+		await this.finalizeMemoryItems(stagedMemoryIds);
 		return {
 			accepted: true,
 			memoryId,
@@ -655,6 +741,7 @@ export class MemoryOrchestrator {
 		query: string,
 		context: MemoryReadContext,
 		budgetTokens: number,
+		options: MemoryReadOptions = {},
 	): Promise<MemoryPack> {
 		await this.initialize();
 		const startedAt = Date.now();
@@ -665,7 +752,14 @@ export class MemoryOrchestrator {
 			normalizedContext.userId,
 			topicLabel,
 		);
-		const embedding = await this.deps.embeddingFn(query, "query");
+		const versionedQuery = this.deps.embeddingFn.embedVersioned
+			? await this.deps.embeddingFn.embedVersioned(query, "query")
+			: {
+					values: await this.deps.embeddingFn(query, "query"),
+					descriptor: this.deps.embeddingFn.getDescriptor?.(),
+				};
+		const embedding = versionedQuery.values;
+		const queryEmbeddingDescriptor = versionedQuery.descriptor;
 		const retrieved = await this.deps.ltm.retrieveByEmbedding(embedding, {
 			maxResults: this.config.maxReadCandidates,
 			maxTokens: Math.max(64, budgetTokens),
@@ -673,25 +767,45 @@ export class MemoryOrchestrator {
 			recencyWeight: 0.18,
 			frequencyWeight: 0.12,
 			relevanceWeight: 0.7,
-			filter: (item) => this.matchesContext(item, normalizedContext),
+			constraints: {
+				scope: normalizedContext,
+				embedding: queryEmbeddingDescriptor,
+			},
+			filter: (item) =>
+				this.matchesContext(item, normalizedContext) &&
+				this.matchesEmbeddingDescriptor(item, queryEmbeddingDescriptor),
 			updateAccess: false,
 		});
-		const hybridResults = await this.retrieveHybrid(query, retrieved, (item) =>
-			this.matchesContext(item, normalizedContext),
-		);
-		const filtered = this.deduplicateScoredMemories([
-			...hybridResults.filter((memory) =>
-				this.matchesContext(memory.item, normalizedContext),
-			),
-			...(await this.retrieveExactIdentifierMatches(query, normalizedContext)),
-		]);
-		const enriched = await this.applyRetrievalSignals(
+		const exactMatches = await this.retrieveExactIdentifierMatches(
 			query,
+			normalizedContext,
+		);
+		const filtered = await this.retrieveHybrid(
+			query,
+			retrieved,
+			exactMatches,
+			(item) => this.matchesContext(item, normalizedContext),
+		);
+		const expanded = await this.expandCandidatesByEdges(
 			filtered,
 			normalizedContext,
 		);
-		const uncertainty = this.uncertaintyEstimator.estimate(enriched, coverage);
-		const selected = this.applyTokenBudget(enriched, budgetTokens);
+		const temporallyValid = await this.filterTemporalClaimMemories(
+			expanded,
+			normalizedContext,
+		);
+		const enriched = await this.applyRetrievalSignals(
+			query,
+			temporallyValid,
+			normalizedContext,
+		);
+		const diversified = this.applyMmr(enriched, this.config.maxReadCandidates);
+		const uncertainty = this.uncertaintyEstimator.estimate(diversified, coverage);
+		const selected = this.applyTokenBudget(
+			diversified,
+			budgetTokens,
+			Math.max(1, Math.min(options.maxResults ?? 10, 100)),
+		);
 		if (normalizedContext.trackUsage !== false) {
 			await this.recordReadUsage(selected, normalizedContext);
 		}
@@ -1663,6 +1777,866 @@ export class MemoryOrchestrator {
 		return report;
 	}
 
+	async reindexEmbeddings(input: {
+		mode: "preview" | "apply";
+		limit?: number;
+		cursor?: string;
+		upperBoundId?: string;
+		allowFallbackTarget?: boolean;
+		recordOperation?: boolean;
+		operationGuard?: () => Promise<boolean>;
+	}): Promise<EmbeddingReindexReport> {
+		await this.initialize();
+		const limit = Math.max(1, Math.min(input.limit ?? 100, 1000));
+		const probe = this.deps.embeddingFn.embedVersioned
+			? await this.deps.embeddingFn.embedVersioned("octopus embedding reindex probe", "document")
+			: {
+					values: await this.deps.embeddingFn(
+						"octopus embedding reindex probe",
+						"document",
+					),
+					descriptor: this.deps.embeddingFn.getDescriptor?.(),
+				};
+		const target = probe.descriptor;
+		const report: EmbeddingReindexReport = {
+			mode: input.mode,
+			scanned: 0,
+			eligible: 0,
+			reindexed: 0,
+			alreadyCurrent: 0,
+			blocked: 0,
+			failed: 0,
+			target,
+		};
+		if (!target || (target.quality === "fallback" && !input.allowFallbackTarget)) {
+			report.blocked = 1;
+			return report;
+		}
+		const rows = await this.deps.db.all<{ id: string }>(
+			`SELECT id FROM memory_items WHERE id > ?${input.upperBoundId ? " AND id <= ?" : ""} ORDER BY id ASC LIMIT ?`,
+			input.upperBoundId
+				? [input.cursor ?? "", input.upperBoundId, limit + 1]
+				: [input.cursor ?? "", limit + 1],
+		);
+		report.hasMore = rows.length > limit;
+		for (const row of rows.slice(0, limit)) {
+			report.scanned++;
+			report.nextCursor = row.id;
+			const item = await this.deps.ltm.getById(row.id);
+			if (!item) {
+				report.failed++;
+				continue;
+			}
+			if (
+				item.metadata.embeddingVersion === target.version &&
+				item.metadata.embeddingDimensions === target.dimensions &&
+				item.metadata.embeddingQuality === target.quality
+			) {
+				report.alreadyCurrent++;
+				continue;
+			}
+			report.eligible++;
+			if (input.mode === "preview") continue;
+			try {
+				const embedded = this.deps.embeddingFn.embedVersioned
+					? await this.deps.embeddingFn.embedVersioned(item.content, "document")
+					: {
+							values: await this.deps.embeddingFn(item.content, "document"),
+							descriptor: this.deps.embeddingFn.getDescriptor?.(),
+						};
+				if (
+					!embedded.descriptor ||
+					embedded.descriptor.version !== target.version ||
+					embedded.descriptor.quality !== target.quality ||
+					embedded.values.length !== target.dimensions
+				) {
+					report.failed++;
+					continue;
+				}
+				const updated: MemoryItem = {
+					...item,
+					embedding: embedded.values,
+					metadata: {
+						...item.metadata,
+						embeddingProvider: target.provider,
+						embeddingModel: target.model,
+						embeddingDimensions: target.dimensions,
+						embeddingVersion: target.version,
+						embeddingQuality: target.quality,
+						embeddingReindexedAt: new Date().toISOString(),
+					},
+				};
+				await this.deps.db.transaction(async () => {
+					if (input.operationGuard && !(await input.operationGuard())) {
+						throw new Error("MEMORY_OPERATION_LEASE_LOST");
+					}
+					await this.deps.ltm.stageStore(updated);
+				});
+				await this.deps.ltm.finalizeStore(updated.id).catch(() => {});
+				report.reindexed++;
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					error.message === "MEMORY_OPERATION_LEASE_LOST"
+				) {
+					throw error;
+				}
+				report.failed++;
+			}
+		}
+		if (input.mode === "apply" && input.recordOperation !== false) {
+			await this.recordMemoryOperation("embedding.reindex", input, report);
+		}
+		return report;
+	}
+
+	async backfillLegacyClaims(input: {
+		mode: "preview" | "apply";
+		limit?: number;
+		cursor?: string;
+		upperBoundId?: string;
+		validFromPolicy?: "require_explicit" | "created_at";
+		recordOperation?: boolean;
+		operationGuard?: () => Promise<boolean>;
+	}): Promise<LegacyClaimBackfillReport> {
+		await this.initialize();
+		const limit = Math.max(1, Math.min(input.limit ?? 100, 1000));
+		const report: LegacyClaimBackfillReport = {
+			mode: input.mode,
+			scanned: 0,
+			eligible: 0,
+			inserted: 0,
+			alreadyPresent: 0,
+			missingScope: 0,
+			missingValidFrom: 0,
+			invalid: 0,
+			samples: [],
+		};
+		const rows = await this.deps.db.all<{ id: string }>(
+			`SELECT id FROM memory_items WHERE id > ?${input.upperBoundId ? " AND id <= ?" : ""} ORDER BY id ASC LIMIT ?`,
+			input.upperBoundId
+				? [input.cursor ?? "", input.upperBoundId, limit + 1]
+				: [input.cursor ?? "", limit + 1],
+		);
+		report.hasMore = rows.length > limit;
+		for (const row of rows.slice(0, limit)) {
+			report.scanned++;
+			report.nextCursor = row.id;
+			const item = await this.deps.ltm.getById(row.id);
+			if (!item) continue;
+			if (
+				await this.deps.db.get("SELECT id FROM memory_claims WHERE memory_id = ?", [
+					item.id,
+				])
+			) {
+				report.alreadyPresent++;
+				continue;
+			}
+			const descriptor = this.readClaimDescriptor(item.metadata);
+			if (!descriptor) continue;
+			const scopeValues = [
+				item.metadata.tenantId,
+				item.metadata.userId,
+				item.metadata.projectId,
+				item.metadata.agentRole,
+			];
+			if (!scopeValues.every((value) => typeof value === "string" && value.length > 0)) {
+				report.missingScope++;
+				continue;
+			}
+			const explicitValidFrom = item.metadata.claimValidFrom;
+			const validFrom =
+				typeof explicitValidFrom === "string"
+					? new Date(explicitValidFrom)
+					: input.validFromPolicy === "created_at"
+						? item.createdAt
+						: undefined;
+			if (!validFrom) {
+				report.missingValidFrom++;
+				continue;
+			}
+			if (Number.isNaN(validFrom.getTime())) {
+				report.invalid++;
+				continue;
+			}
+			report.eligible++;
+			report.samples.push({ memoryId: item.id, outcome: "eligible" });
+			if (input.mode === "preview") continue;
+			await this.deps.db.transaction(async () => {
+				if (input.operationGuard && !(await input.operationGuard())) {
+					throw new Error("MEMORY_OPERATION_LEASE_LOST");
+				}
+				await this.deps.db.run(
+					`INSERT INTO memory_claims
+				 (id, memory_id, tenant_id, user_id, project_id, agent_role, entity, claim_key, claim_value, valid_from, valid_to, recorded_at, confidence, source_id)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					[
+					nanoid(), item.id, ...scopeValues, descriptor.entity, descriptor.key,
+					descriptor.value, validFrom.toISOString(), null, item.createdAt.toISOString(),
+					Number(item.metadata.confidence ?? 0.5), item.source.sourceId ?? null,
+					],
+				);
+			});
+			report.inserted++;
+		}
+		report.samples = report.samples.slice(0, 20);
+		if (input.mode === "apply" && input.recordOperation !== false) {
+			await this.recordMemoryOperation("claims.backfill", input, report);
+		}
+		return report;
+	}
+
+	async previewMemoryOperation(
+		input: MemoryOperationCreateInput,
+	): Promise<EmbeddingReindexReport | LegacyClaimBackfillReport> {
+		const batchSize = this.normalizeOperationBatchSize(input.batchSize);
+		if (input.type === "embedding.reindex") {
+			return this.reindexEmbeddings({
+				mode: "preview",
+				limit: batchSize,
+				allowFallbackTarget: input.allowFallbackTarget,
+				recordOperation: false,
+			});
+		}
+		return this.backfillLegacyClaims({
+			mode: "preview",
+			limit: batchSize,
+			validFromPolicy: input.validFromPolicy,
+			recordOperation: false,
+		});
+	}
+
+	async migrateLegacyVectorPayloads(input: {
+		mode: "preview" | "apply";
+		limit?: number;
+		cursor?: string;
+		upperBoundId?: string;
+	}) {
+		await this.initialize();
+		return this.deps.ltm.migrateLegacyPayloads(input);
+	}
+
+	async importMemoryBenchmark(input: {
+		name: string;
+		format: MemoryBenchmarkFormat;
+		sourceName: string;
+		sourceSha256: string;
+		source: unknown;
+		options?: Record<string, unknown>;
+	}) {
+		await this.initialize();
+		return new MemoryBenchmarkStore(this.deps.db).importDataset(input);
+	}
+
+	async listMemoryBenchmarkDatasets() {
+		await this.initialize();
+		return new MemoryBenchmarkStore(this.deps.db).listDatasets();
+	}
+
+	async createMemoryBenchmarkRun(
+		datasetId: string,
+		options: Record<string, unknown>,
+	) {
+		await this.initialize();
+		const store = new MemoryBenchmarkStore(this.deps.db);
+		const id = await store.createRun(datasetId, options);
+		return {
+			id,
+			metrics: await store.executeRun(id, {
+				createIsolatedRuntime: async ({ runId, corpusId, documents }) => {
+					const indexStartedAt = performance.now();
+					const isolatedDb = createDatabaseAdapter("sqlite", { path: ":memory:" });
+					await isolatedDb.initialize();
+					const vectorStore = new SqliteVectorStore(isolatedDb);
+					await vectorStore.initialize();
+					const isolatedLtm = new LongTermMemory(vectorStore, isolatedDb);
+					const scope = {
+						tenantId: `benchmark:${runId}`,
+						userId: "benchmark",
+						projectId: `corpus:${corpusId}`,
+						agentRole: "benchmark",
+					};
+					const isolated = new MemoryOrchestrator({
+						db: isolatedDb,
+						ltm: isolatedLtm,
+						embeddingFn: this.deps.embeddingFn,
+						config: {
+							defaultTenantId: scope.tenantId,
+							defaultUserId: scope.userId,
+							defaultProjectId: scope.projectId,
+							maxReadCandidates: Math.max(50, documents.length),
+							minRelevance: this.config.minRelevance,
+						},
+					});
+					await isolated.initialize();
+					const documentIdsByMemory = new Map<string, string[]>();
+					try {
+						for (const document of documents) {
+							const write = await isolated.write({
+								type: "episodic",
+								content: document.content,
+								sourceTrust: "external",
+								scope,
+								importance: 0.7,
+								source: {
+									sourceType: "document",
+									sourceId: document.id,
+									title: document.externalId,
+									publishedAt: document.occurredAt,
+								},
+								metadata: {
+									benchmarkDocumentId: document.id,
+									benchmarkOrdinal: document.ordinal,
+									benchmarkRole: document.role,
+								},
+							});
+							if (!write.accepted || !write.memoryId) {
+								throw new Error(`MEMORY_BENCHMARK_DOCUMENT_REJECTED:${document.id}`);
+							}
+							const mapped = documentIdsByMemory.get(write.memoryId) ?? [];
+							mapped.push(document.id);
+							documentIdsByMemory.set(write.memoryId, mapped);
+						}
+					} catch (error) {
+						await isolatedDb.close();
+						throw error;
+					}
+					return {
+						metadata: {
+							embeddingDescriptor: this.deps.embeddingFn.getDescriptor?.(),
+							documentCount: documents.length,
+							indexDurationMs: performance.now() - indexStartedAt,
+						},
+						retrieve: async (query: string, k: number) => {
+							const pack = await isolated.read(
+								query,
+								{ ...scope, trackUsage: false },
+								Math.max(4096, k * 512),
+								{ maxResults: k },
+							);
+							return pack.memories
+								.flatMap((memory) =>
+									(documentIdsByMemory.get(memory.item.id) ?? []).map((documentId) => ({
+										id: documentId,
+										score: memory.score,
+									})),
+								)
+								.slice(0, k);
+						},
+						close: async () => isolatedDb.close(),
+					};
+				},
+			}),
+		};
+	}
+
+	async listMemoryBenchmarkRuns() {
+		await this.initialize();
+		return new MemoryBenchmarkStore(this.deps.db).listRuns();
+	}
+
+	async createMemoryOperation(
+		input: MemoryOperationCreateInput,
+		idempotencyKey?: string,
+	): Promise<{ operation: MemoryOperationRecord; replayed: boolean }> {
+		await this.initialize();
+		const batchSize = this.normalizeOperationBatchSize(input.batchSize);
+		const normalizedRequest: Record<string, unknown> = {
+			batchSize,
+			allowFallbackTarget: input.allowFallbackTarget === true,
+			validFromPolicy: input.validFromPolicy ?? "require_explicit",
+		};
+		if (idempotencyKey) {
+			const existing = await this.deps.db.get<MemoryOperationRow>(
+				"SELECT * FROM memory_operations WHERE idempotency_key = ?",
+				[idempotencyKey],
+			);
+			if (existing) {
+				const existingRequest = this.safeJsonObject(existing.request);
+				const existingIntent = {
+					batchSize: existingRequest.batchSize,
+					allowFallbackTarget: existingRequest.allowFallbackTarget,
+					validFromPolicy: existingRequest.validFromPolicy,
+				};
+				if (
+					existing.type !== input.type ||
+					JSON.stringify(existingIntent) !== JSON.stringify(normalizedRequest)
+				) {
+					throw new Error("MEMORY_OPERATION_IDEMPOTENCY_CONFLICT");
+				}
+				return {
+					operation: this.rowToMemoryOperation(existing, await this.deps.db.currentTime()),
+					replayed: true,
+				};
+			}
+		}
+		const upper = await this.deps.db.get<{ id: string | null }>(
+			"SELECT MAX(id) AS id FROM memory_items",
+		);
+		const now = (await this.deps.db.currentTime()).toISOString();
+		normalizedRequest.upperBoundId = upper?.id ?? "";
+		normalizedRequest.snapshotAt = now;
+		let targetDescriptor: EmbeddingDescriptor | undefined;
+		if (input.type === "embedding.reindex") {
+			const probe = this.deps.embeddingFn.embedVersioned
+				? await this.deps.embeddingFn.embedVersioned(
+						"octopus operation target probe",
+						"document",
+					)
+				: {
+						values: await this.deps.embeddingFn(
+							"octopus operation target probe",
+							"document",
+						),
+						descriptor: this.deps.embeddingFn.getDescriptor?.(),
+					};
+			targetDescriptor = probe.descriptor;
+			if (!targetDescriptor) throw new Error("MEMORY_OPERATION_TARGET_UNAVAILABLE");
+			if (targetDescriptor.quality === "fallback" && !input.allowFallbackTarget) {
+				throw new Error("MEMORY_OPERATION_FALLBACK_TARGET_BLOCKED");
+			}
+		}
+		const id = nanoid();
+		try {
+			await this.deps.db.run(
+				`INSERT INTO memory_operations
+				 (id, type, status, target_descriptor, cursor, request, progress, idempotency_key, attempt_count, created_at, updated_at)
+				 VALUES (?, ?, 'pending', ?, NULL, ?, '{}', ?, 0, ?, ?)`,
+				[
+					id,
+					input.type,
+					targetDescriptor ? JSON.stringify(targetDescriptor) : null,
+					JSON.stringify(normalizedRequest),
+					idempotencyKey ?? null,
+					now,
+					now,
+				],
+			);
+		} catch (error) {
+			if (idempotencyKey) {
+				const winner = await this.deps.db.get<MemoryOperationRow>(
+					"SELECT * FROM memory_operations WHERE idempotency_key = ?",
+					[idempotencyKey],
+				);
+				if (winner) {
+					const winnerRequest = this.safeJsonObject(winner.request);
+					if (
+						winner.type === input.type &&
+						winnerRequest.batchSize === normalizedRequest.batchSize &&
+						winnerRequest.allowFallbackTarget ===
+							normalizedRequest.allowFallbackTarget &&
+						winnerRequest.validFromPolicy === normalizedRequest.validFromPolicy
+					) {
+						return {
+							operation: this.rowToMemoryOperation(
+								winner,
+								await this.deps.db.currentTime(),
+							),
+							replayed: true,
+						};
+					}
+					throw new Error("MEMORY_OPERATION_IDEMPOTENCY_CONFLICT");
+				}
+			}
+			throw error;
+		}
+		const operation = await this.getMemoryOperation(id);
+		if (!operation) throw new Error("MEMORY_OPERATION_CREATE_FAILED");
+		return { operation, replayed: false };
+	}
+
+	async resumeMemoryOperation(id: string): Promise<MemoryOperationRecord> {
+		await this.initialize();
+		const existing = await this.deps.db.get<MemoryOperationRow>(
+			"SELECT * FROM memory_operations WHERE id = ?",
+			[id],
+		);
+		if (!existing) throw new Error("MEMORY_OPERATION_NOT_FOUND");
+		const existingNow = await this.deps.db.currentTime();
+		if (existing.status === "completed" || existing.status === "cancelled") {
+			return this.rowToMemoryOperation(existing, existingNow);
+		}
+		if (existing.status === "failed") throw new Error("MEMORY_OPERATION_FAILED");
+		const leaseToken = nanoid();
+		const now = await this.deps.db.currentTime();
+		const leaseExpiresAt = new Date(now.getTime() + 300_000);
+		const claimed = await this.deps.db.get<MemoryOperationRow>(
+			`UPDATE memory_operations
+			 SET status = 'running', control_action = 'run', lease_token = ?, lease_expires_at = ?,
+			 fence_version = fence_version + 1, attempt_count = attempt_count + 1,
+			 last_error = NULL, updated_at = ?
+			 WHERE id = ? AND (status IN ('pending', 'paused') OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))
+			 RETURNING *`,
+			[
+				leaseToken,
+				leaseExpiresAt.toISOString(),
+				now.toISOString(),
+				id,
+				now.toISOString(),
+			],
+		);
+		if (!claimed) throw new Error("MEMORY_OPERATION_LEASE_CONFLICT");
+		try {
+			const request = this.safeJsonObject(claimed.request);
+			const batchSize = this.normalizeOperationBatchSize(
+				typeof request.batchSize === "number" ? request.batchSize : undefined,
+			);
+			const upperBoundId =
+				typeof request.upperBoundId === "string" ? request.upperBoundId : "";
+			if (claimed.type === "embedding.reindex") {
+				const target = claimed.target_descriptor
+					? (JSON.parse(claimed.target_descriptor) as EmbeddingDescriptor)
+					: undefined;
+				const active = this.deps.embeddingFn.getDescriptor?.();
+				if (!target || !active || active.version !== target.version) {
+					await this.failMemoryOperation(id, leaseToken, "embedding_target_changed");
+					throw new Error("MEMORY_OPERATION_TARGET_CHANGED");
+				}
+			}
+			let cursor = claimed.cursor ?? undefined;
+			let progress = this.safeJsonObject(claimed.progress);
+			let hasMore = true;
+			let finalRow = claimed;
+			const operationGuard = async (): Promise<boolean> => {
+				const guardNow = await this.deps.db.currentTime();
+				return Boolean(
+					await this.deps.db.get<{ id: string }>(
+						`UPDATE memory_operations SET updated_at = updated_at
+						 WHERE id = ? AND lease_token = ? AND fence_version = ? AND status = 'running'
+						 AND lease_expires_at > ? RETURNING id`,
+						[id, leaseToken, claimed.fence_version, guardNow.toISOString()],
+					),
+				);
+			};
+			for (let index = 0; index < batchSize && hasMore; index++) {
+				const control = await this.deps.db.get<Pick<MemoryOperationRow, "control_action">>(
+					"SELECT control_action FROM memory_operations WHERE id = ? AND lease_token = ? AND fence_version = ?",
+					[id, leaseToken, claimed.fence_version],
+				);
+				if (!control) throw new Error("MEMORY_OPERATION_LEASE_LOST");
+				if (control.control_action !== "run") break;
+				const report =
+					claimed.type === "embedding.reindex"
+						? await this.reindexEmbeddings({
+								mode: "apply",
+								limit: 1,
+								cursor,
+								upperBoundId,
+								allowFallbackTarget: request.allowFallbackTarget === true,
+								recordOperation: false,
+								operationGuard,
+							})
+						: await this.backfillLegacyClaims({
+								mode: "apply",
+								limit: 1,
+								cursor,
+								upperBoundId,
+								validFromPolicy:
+									request.validFromPolicy === "created_at"
+										? "created_at"
+										: "require_explicit",
+								recordOperation: false,
+								operationGuard,
+							});
+				cursor = report.nextCursor ?? cursor;
+				progress = this.mergeOperationProgress(progress, report);
+				hasMore = report.hasMore === true;
+				const checkpointNow = await this.deps.db.currentTime();
+				const checkpointExpiry = new Date(checkpointNow.getTime() + 300_000);
+				const checkpoint = await this.deps.db.get<MemoryOperationRow>(
+					`UPDATE memory_operations SET cursor = ?, progress = ?, lease_expires_at = ?, updated_at = ?
+					 WHERE id = ? AND lease_token = ? AND fence_version = ? AND status = 'running'
+					 RETURNING *`,
+					[
+						cursor,
+						JSON.stringify(progress),
+						checkpointExpiry.toISOString(),
+						checkpointNow.toISOString(),
+						id,
+						leaseToken,
+						claimed.fence_version,
+					],
+				);
+				if (!checkpoint) throw new Error("MEMORY_OPERATION_LEASE_LOST");
+				finalRow = checkpoint;
+			}
+			const finishNow = await this.deps.db.currentTime();
+			const finishControl = await this.deps.db.get<
+				Pick<MemoryOperationRow, "control_action">
+			>(
+				"SELECT control_action FROM memory_operations WHERE id = ? AND lease_token = ? AND fence_version = ?",
+				[id, leaseToken, claimed.fence_version],
+			);
+			if (!finishControl) throw new Error("MEMORY_OPERATION_LEASE_LOST");
+			const requestedAction = finishControl.control_action;
+			const finalStatus: MemoryOperationStatus =
+				requestedAction === "cancel"
+					? "cancelled"
+					: requestedAction === "pause"
+						? "paused"
+						: hasMore
+							? "pending"
+							: "completed";
+			const updated = await this.deps.db.get<MemoryOperationRow>(
+				`UPDATE memory_operations
+				 SET status = ?, control_action = 'run', lease_token = NULL, lease_expires_at = NULL,
+				 updated_at = ?, completed_at = ?
+				 WHERE id = ? AND lease_token = ? AND fence_version = ? RETURNING *`,
+				[
+					finalStatus,
+					finishNow.toISOString(),
+					finalStatus === "completed" || finalStatus === "cancelled"
+						? finishNow.toISOString()
+						: null,
+					id,
+					leaseToken,
+					claimed.fence_version,
+				],
+			);
+			if (!updated) throw new Error("MEMORY_OPERATION_LEASE_LOST");
+			return this.rowToMemoryOperation(updated, finishNow);
+		} catch (error) {
+			if (!(error instanceof Error && error.message === "MEMORY_OPERATION_TARGET_CHANGED")) {
+				const errorNow = await this.deps.db.currentTime();
+				await this.deps.db.run(
+					`UPDATE memory_operations SET status = 'pending', lease_token = NULL, lease_expires_at = NULL,
+					 last_error = ?, updated_at = ? WHERE id = ? AND lease_token = ?`,
+					[
+						error instanceof Error ? error.message.slice(0, 2000) : String(error),
+						errorNow.toISOString(),
+						id,
+						leaseToken,
+					],
+				);
+			}
+			throw error;
+		}
+	}
+
+	async pauseMemoryOperation(id: string): Promise<MemoryOperationRecord> {
+		return this.controlMemoryOperation(id, "pause");
+	}
+
+	async cancelMemoryOperation(id: string): Promise<MemoryOperationRecord> {
+		return this.controlMemoryOperation(id, "cancel");
+	}
+
+	private async controlMemoryOperation(
+		id: string,
+		action: "pause" | "cancel",
+	): Promise<MemoryOperationRecord> {
+		await this.initialize();
+		const now = await this.deps.db.currentTime();
+		const row = await this.deps.db.get<MemoryOperationRow>(
+			"SELECT * FROM memory_operations WHERE id = ?",
+			[id],
+		);
+		if (!row) throw new Error("MEMORY_OPERATION_NOT_FOUND");
+		if (row.status === "completed" || row.status === "cancelled" || row.status === "failed") {
+			throw new Error("MEMORY_OPERATION_TERMINAL");
+		}
+		const immediate = row.status === "pending" || row.status === "paused";
+		const updated = await this.deps.db.get<MemoryOperationRow>(
+			`UPDATE memory_operations SET control_action = ?, status = ?, updated_at = ?,
+			 completed_at = ?, lease_token = CASE WHEN ? THEN NULL ELSE lease_token END,
+			 lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END
+			 WHERE id = ? RETURNING *`,
+			[
+				action,
+				immediate ? (action === "pause" ? "paused" : "cancelled") : "running",
+				now.toISOString(),
+				immediate && action === "cancel" ? now.toISOString() : null,
+				immediate ? 1 : 0,
+				immediate ? 1 : 0,
+				id,
+			],
+		);
+		if (!updated) throw new Error("MEMORY_OPERATION_NOT_FOUND");
+		return this.rowToMemoryOperation(updated, now);
+	}
+
+	async getMemoryOperation(id: string): Promise<MemoryOperationRecord | undefined> {
+		await this.initialize();
+		const row = await this.deps.db.get<MemoryOperationRow>(
+			"SELECT * FROM memory_operations WHERE id = ?",
+			[id],
+		);
+		return row
+			? this.rowToMemoryOperation(row, await this.deps.db.currentTime())
+			: undefined;
+	}
+
+	async listMemoryOperations(
+		options: MemoryOperationListOptions = {},
+	): Promise<MemoryOperationRecord[]> {
+		await this.initialize();
+		const clauses: string[] = [];
+		const params: unknown[] = [];
+		if (options.type) {
+			clauses.push("type = ?");
+			params.push(options.type);
+		}
+		if (options.status) {
+			clauses.push("status = ?");
+			params.push(options.status);
+		}
+		params.push(Math.max(1, Math.min(options.limit ?? 50, 200)));
+		params.push(Math.max(0, options.offset ?? 0));
+		const rows = await this.deps.db.all<MemoryOperationRow>(
+			`SELECT * FROM memory_operations${clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : ""}
+			 ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+			params,
+		);
+		const now = await this.deps.db.currentTime();
+		return rows.map((row) => this.rowToMemoryOperation(row, now));
+	}
+
+	async getMetricsSnapshot(): Promise<MemoryMetricsSnapshot> {
+		await this.initialize();
+		const count = async (sql: string, params: unknown[] = []) =>
+			(await this.deps.db.get<{ count: number }>(sql, params))?.count ?? 0;
+		const totalMemories = await count("SELECT COUNT(*) AS count FROM memory_items");
+		const annIndexedMemories = await count(
+			"SELECT COUNT(DISTINCT memory_id) AS count FROM memory_vector_lsh",
+		);
+		const operations = await this.deps.db.all<{ status: string; count: number }>(
+			"SELECT status, COUNT(*) AS count FROM memory_operations GROUP BY status",
+		);
+		const diagnostics = this.deps.ltm.getDiagnostics();
+		return {
+			totalMemories,
+			versionedEmbeddings: annIndexedMemories,
+			fallbackEmbeddings: await count(
+				"SELECT COUNT(*) AS count FROM memory_items WHERE metadata LIKE '%\"embeddingQuality\":\"fallback\"%'",
+			),
+			annIndexedMemories,
+			annCoverage: totalMemories > 0 ? annIndexedMemories / totalMemories : 1,
+			annSearches: diagnostics.annSearches ?? 0,
+			annFallbackSearches: diagnostics.annFallbackSearches ?? 0,
+			annAverageCandidates: diagnostics.annAverageCandidates ?? 0,
+			temporalClaims: await count("SELECT COUNT(*) AS count FROM memory_claims"),
+			activeInsights: await count(
+				"SELECT COUNT(*) AS count FROM learning_insights WHERE invalidated_at IS NULL",
+			),
+			invalidatedInsights: await count(
+				"SELECT COUNT(*) AS count FROM learning_insights WHERE invalidated_at IS NOT NULL",
+			),
+			operationsByStatus: Object.fromEntries(
+				operations.map((row) => [row.status, row.count]),
+			),
+		};
+	}
+
+	private normalizeOperationBatchSize(value?: number): number {
+		if (value === undefined) return 100;
+		if (!Number.isInteger(value) || value < 1 || value > 1000) {
+			throw new Error("MEMORY_OPERATION_INVALID_BATCH_SIZE");
+		}
+		return value;
+	}
+
+	private safeJsonObject(value: string): Record<string, unknown> {
+		try {
+			const parsed = JSON.parse(value) as unknown;
+			return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+				? (parsed as Record<string, unknown>)
+				: {};
+		} catch {
+			return {};
+		}
+	}
+
+	private mergeOperationProgress(
+		previous: Record<string, unknown>,
+		report: EmbeddingReindexReport | LegacyClaimBackfillReport,
+	): Record<string, unknown> {
+		const progress: Record<string, unknown> = { ...previous };
+		for (const [key, value] of Object.entries(report)) {
+			if (
+				typeof value === "number" &&
+				!["mode"].includes(key)
+			) {
+				progress[key] = Number(progress[key] ?? 0) + value;
+			}
+		}
+		progress.batches = Number(progress.batches ?? 0) + 1;
+		progress.hasMore = report.hasMore === true;
+		if ("samples" in report) {
+			progress.samples = [
+				...(Array.isArray(progress.samples) ? progress.samples : []),
+				...report.samples,
+			].slice(0, 20);
+		}
+		return progress;
+	}
+
+	private async failMemoryOperation(
+		id: string,
+		leaseToken: string,
+		reason: string,
+	): Promise<void> {
+		const now = (await this.deps.db.currentTime()).toISOString();
+		await this.deps.db.run(
+			`UPDATE memory_operations SET status = 'failed', lease_token = NULL, lease_expires_at = NULL,
+			 last_error = ?, updated_at = ?, completed_at = ? WHERE id = ? AND lease_token = ?`,
+			[reason, now, now, id, leaseToken],
+		);
+	}
+
+	private rowToMemoryOperation(
+		row: MemoryOperationRow,
+		now = new Date(),
+	): MemoryOperationRecord {
+		const leaseExpiry = row.lease_expires_at
+			? new Date(row.lease_expires_at)
+			: undefined;
+		const leaseState = !row.lease_token
+			? "none"
+			: leaseExpiry && leaseExpiry.getTime() > now.getTime()
+				? "active"
+				: "expired";
+		let targetDescriptor: EmbeddingDescriptor | undefined;
+		if (row.target_descriptor) {
+			try {
+				targetDescriptor = JSON.parse(row.target_descriptor) as EmbeddingDescriptor;
+			} catch {}
+		}
+		return {
+			id: row.id,
+			type: row.type,
+			status: row.status,
+			controlAction: row.control_action ?? "run",
+			fenceVersion: row.fence_version ?? 0,
+			cursor: row.cursor ?? undefined,
+			request: this.safeJsonObject(row.request),
+			progress: this.safeJsonObject(row.progress),
+			targetDescriptor,
+			attemptCount: row.attempt_count ?? 0,
+			lastError: row.last_error ?? undefined,
+			leaseState,
+			resumable:
+				row.status === "pending" || row.status === "paused" ||
+				(row.status === "running" && leaseState === "expired"),
+			createdAt: new Date(row.created_at),
+			updatedAt: new Date(row.updated_at),
+			completedAt: row.completed_at ? new Date(row.completed_at) : undefined,
+		};
+	}
+
+	private async recordMemoryOperation(
+		type: string,
+		request: unknown,
+		progress: unknown,
+	): Promise<void> {
+		const now = new Date().toISOString();
+		await this.deps.db.run(
+			`INSERT INTO memory_operations
+			 (id, type, status, request, progress, created_at, updated_at, completed_at)
+			 VALUES (?, ?, 'completed', ?, ?, ?, ?, ?)`,
+			[nanoid(), type, JSON.stringify(request), JSON.stringify(progress), now, now, now],
+		);
+	}
+
 	private normalizeCandidate(candidate: MemoryCandidate): MemoryCandidate {
 		return {
 			...candidate,
@@ -1797,6 +2771,7 @@ export class MemoryOrchestrator {
 	private async findDuplicate(
 		candidate: MemoryCandidate,
 		embedding: number[],
+		embeddingDescriptor?: EmbeddingDescriptor,
 	): Promise<MemoryItem | undefined> {
 		const context = this.normalizeContext(candidate.scope);
 		const results = await this.deps.ltm.retrieveByEmbedding(embedding, {
@@ -1806,7 +2781,13 @@ export class MemoryOrchestrator {
 			recencyWeight: 0,
 			frequencyWeight: 0,
 			relevanceWeight: 1,
-			filter: (item) => this.matchesContext(item, context),
+			constraints: {
+				scope: context,
+				embedding: embeddingDescriptor,
+			},
+			filter: (item) =>
+				this.matchesContext(item, context) &&
+				this.matchesEmbeddingDescriptor(item, embeddingDescriptor),
 			updateAccess: false,
 		});
 		return results.find(
@@ -1836,6 +2817,7 @@ export class MemoryOrchestrator {
 	private async applyDeclaredRelations(
 		item: MemoryItem,
 		candidate: MemoryCandidate,
+		stagedMemoryIds?: Set<string>,
 	): Promise<void> {
 		const supersedes = this.readStringList(candidate.metadata?.supersedes);
 		for (const targetId of supersedes) {
@@ -1850,6 +2832,7 @@ export class MemoryOrchestrator {
 						supersededBy: item.id,
 						supersededAt: new Date().toISOString(),
 					},
+					stagedMemoryIds,
 				);
 		}
 
@@ -1873,7 +2856,7 @@ export class MemoryOrchestrator {
 					"contradicted_by_new_memory",
 					"system",
 				);
-				await this.deps.ltm.update(updated);
+				await this.persistMemoryItem(updated, stagedMemoryIds);
 				await this.recordAudit({
 					actorId: candidate.scope.userId ?? "system",
 					action: "status:contradicted",
@@ -1918,7 +2901,12 @@ export class MemoryOrchestrator {
 	private async detectStructuredContradictions(
 		item: MemoryItem,
 		candidate: MemoryCandidate,
+		stagedMemoryIds?: Set<string>,
 	): Promise<MemoryItem> {
+		if (candidate.claim) {
+			await this.detectTemporalClaimContradictions(item, candidate.claim);
+			return item;
+		}
 		const claim = this.readClaimDescriptor(candidate.metadata);
 		if (!claim) return item;
 		const context = this.normalizeContext(candidate.scope);
@@ -1952,7 +2940,7 @@ export class MemoryOrchestrator {
 					"auto_contradicted",
 					"system",
 				);
-				await this.deps.ltm.update(updated);
+				await this.persistMemoryItem(updated, stagedMemoryIds);
 				await this.recordAudit({
 					actorId: context.userId ?? "system",
 					action: "auto_contradicted",
@@ -1977,7 +2965,7 @@ export class MemoryOrchestrator {
 					"auto_contradicted",
 					"system",
 				);
-				await this.deps.ltm.update(currentItem);
+				await this.persistMemoryItem(currentItem, stagedMemoryIds);
 				await this.recordAudit({
 					actorId: context.userId ?? "system",
 					action: "auto_contradicted",
@@ -2007,6 +2995,175 @@ export class MemoryOrchestrator {
 		const value = this.normalizeClaimPart(metadata.claimValue);
 		if (entity && key && value) return { entity, key, value };
 		return undefined;
+	}
+
+	private claimDate(value: Date | string | undefined, fallback: Date): Date {
+		if (value === undefined) return fallback;
+		const date = value instanceof Date ? value : new Date(value);
+		if (Number.isNaN(date.getTime())) throw new Error("Invalid temporal claim date");
+		return date;
+	}
+
+	private async recordTemporalClaim(
+		memoryId: string,
+		candidate: MemoryCandidate,
+		recordedAt: Date,
+	): Promise<void> {
+		if (!candidate.claim) return;
+		const validFrom = this.claimDate(candidate.claim.validFrom, recordedAt);
+		const validTo = candidate.claim.validTo
+			? this.claimDate(candidate.claim.validTo, recordedAt)
+			: undefined;
+		if (validTo && validTo <= validFrom) {
+			throw new Error("Temporal claim validTo must be after validFrom");
+		}
+		await this.deps.db.run(
+			`INSERT INTO memory_claims
+			 (id, memory_id, tenant_id, user_id, project_id, agent_role, entity, claim_key, claim_value, valid_from, valid_to, recorded_at, confidence, source_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				nanoid(),
+				memoryId,
+				candidate.scope.tenantId,
+				candidate.scope.userId ?? null,
+				candidate.scope.projectId ?? null,
+				candidate.scope.agentRole ?? null,
+				candidate.claim.entity.trim().toLowerCase(),
+				candidate.claim.key.trim().toLowerCase(),
+				String(candidate.claim.value),
+				validFrom.toISOString(),
+				validTo?.toISOString() ?? null,
+				recordedAt.toISOString(),
+				candidate.confidence ?? 0.7,
+				candidate.source?.sourceId ?? candidate.evidence?.sourceId ?? null,
+			],
+		);
+	}
+
+	private async detectTemporalClaimContradictions(
+		item: MemoryItem,
+		claim: MemoryClaimInput,
+	): Promise<void> {
+		const current = await this.deps.db.get<{
+			valid_from: string;
+			valid_to: string | null;
+			tenant_id: string;
+			user_id: string | null;
+			project_id: string | null;
+			agent_role: string | null;
+		}>("SELECT valid_from, valid_to, tenant_id, user_id, project_id, agent_role FROM memory_claims WHERE memory_id = ?", [
+			item.id,
+		]);
+		if (!current) return;
+		const rows = await this.deps.db.all<{
+			memory_id: string;
+			claim_value: string;
+			valid_from: string;
+			valid_to: string | null;
+		}>(
+			`SELECT memory_id, claim_value, valid_from, valid_to
+			 FROM memory_claims
+			 WHERE memory_id <> ? AND entity = ? AND claim_key = ? AND retracted_at IS NULL
+			 AND tenant_id = ? AND COALESCE(user_id, '') = COALESCE(?, '')
+			 AND COALESCE(project_id, '') = COALESCE(?, '')
+			 AND COALESCE(agent_role, '') = COALESCE(?, '')`,
+			[
+				item.id,
+				claim.entity.trim().toLowerCase(),
+				claim.key.trim().toLowerCase(),
+				current.tenant_id,
+				current.user_id,
+				current.project_id,
+				current.agent_role,
+			],
+		);
+		const currentStart = new Date(current.valid_from).getTime();
+		const currentEnd = current.valid_to
+			? new Date(current.valid_to).getTime()
+			: Number.POSITIVE_INFINITY;
+		for (const row of rows) {
+			if (row.claim_value === String(claim.value)) continue;
+			const otherStart = new Date(row.valid_from).getTime();
+			const otherEnd = row.valid_to
+				? new Date(row.valid_to).getTime()
+				: Number.POSITIVE_INFINITY;
+			if (currentStart >= otherEnd || otherStart >= currentEnd) continue;
+			await this.createEdge(row.memory_id, item.id, "contradicts", 0.9);
+			if (otherStart < currentStart && otherEnd > currentStart) {
+				await this.deps.db.run(
+					"UPDATE memory_claims SET valid_to = ? WHERE memory_id = ? AND (valid_to IS NULL OR valid_to > ?)",
+					[
+						new Date(currentStart).toISOString(),
+						row.memory_id,
+						new Date(currentStart).toISOString(),
+					],
+				);
+			}
+		}
+	}
+
+	async getClaims(
+		context: MemoryReadContext,
+		selector: { entity?: string; key?: string } = {},
+	): Promise<MemoryClaimRecord[]> {
+		await this.initialize();
+		const normalized = this.normalizeContext(context);
+		const validAt = context.validAt ?? new Date();
+		const knownAt = context.knownAt ?? new Date();
+		const clauses = [
+			"tenant_id = ?",
+			"COALESCE(user_id, '') = COALESCE(?, '')",
+			"COALESCE(project_id, '') = COALESCE(?, '')",
+			"COALESCE(agent_role, '') = COALESCE(?, '')",
+			"valid_from <= ?",
+			"(valid_to IS NULL OR valid_to > ?)",
+			"recorded_at <= ?",
+			"(retracted_at IS NULL OR retracted_at > ?)",
+		];
+		const params: unknown[] = [
+			normalized.tenantId,
+			normalized.userId ?? null,
+			normalized.projectId ?? null,
+			normalized.agentRole ?? null,
+			validAt.toISOString(),
+			validAt.toISOString(),
+			knownAt.toISOString(),
+			knownAt.toISOString(),
+		];
+		if (selector.entity) {
+			clauses.push("entity = ?");
+			params.push(selector.entity.trim().toLowerCase());
+		}
+		if (selector.key) {
+			clauses.push("claim_key = ?");
+			params.push(selector.key.trim().toLowerCase());
+		}
+		const rows = await this.deps.db.all<{
+			id: string;
+			memory_id: string;
+			entity: string;
+			claim_key: string;
+			claim_value: string;
+			valid_from: string;
+			valid_to: string | null;
+			recorded_at: string;
+			retracted_at: string | null;
+			confidence: number;
+		}>(`SELECT * FROM memory_claims WHERE ${clauses.join(" AND ")}`, params);
+		return rows.map((row) => ({
+			id: row.id,
+			memoryId: row.memory_id,
+			entity: row.entity,
+			key: row.claim_key,
+			value: row.claim_value,
+			validFrom: row.valid_from,
+			validTo: row.valid_to ?? undefined,
+			recordedAt: new Date(row.recorded_at),
+			retractedAt: row.retracted_at
+				? new Date(row.retracted_at)
+				: undefined,
+			confidence: row.confidence,
+		}));
 	}
 
 	private normalizeClaimPart(value: unknown): string | undefined {
@@ -2788,25 +3945,154 @@ export class MemoryOrchestrator {
 		}));
 	}
 
+	private async expandCandidatesByEdges(
+		seeds: ScoredMemory[],
+		context: MemoryReadContext,
+	): Promise<ScoredMemory[]> {
+		if (seeds.length === 0) return seeds;
+		const allowed = new Set<MemoryRelationType>([
+			"associated",
+			"supports",
+			"derived_from",
+			"depends_on",
+			"caused",
+			"confirmed_by",
+		]);
+		const seedIds = seeds.map((seed) => seed.item.id);
+		const placeholders = seedIds.map(() => "?").join(", ");
+		const rows = await this.deps.db.all<{
+			source_id: string;
+			target_id: string;
+			type: string;
+			confidence: number;
+		}>(
+			`SELECT source_id, target_id, type, confidence FROM memory_edges
+			 WHERE source_id IN (${placeholders}) OR target_id IN (${placeholders})
+			 ORDER BY confidence DESC LIMIT ?`,
+			[...seedIds, ...seedIds, this.config.maxReadCandidates * 4],
+		);
+		const byId = new Map(seeds.map((seed) => [seed.item.id, seed]));
+		for (const row of rows) {
+			const relationType = this.normalizeRelationType(row.type);
+			if (!allowed.has(relationType)) continue;
+			const seedId = byId.has(row.source_id) ? row.source_id : row.target_id;
+			const neighborId = seedId === row.source_id ? row.target_id : row.source_id;
+			if (byId.has(neighborId)) continue;
+			const neighbor = await this.deps.ltm.getById(neighborId);
+			if (!neighbor || this.getMemoryStatus(neighbor) !== "active") continue;
+			if (!this.matchesContext(neighbor, context)) continue;
+			const seed = byId.get(seedId);
+			if (!seed) continue;
+			byId.set(neighborId, {
+				item: neighbor,
+				score: clamp01(seed.score * clamp01(row.confidence) * 0.75),
+			});
+			if (byId.size >= this.config.maxReadCandidates) break;
+		}
+		return [...byId.values()].sort((a, b) => b.score - a.score);
+	}
+
+	private async filterTemporalClaimMemories(
+		memories: ScoredMemory[],
+		context: MemoryReadContext,
+	): Promise<ScoredMemory[]> {
+		const validAt = context.validAt ?? new Date();
+		const knownAt = context.knownAt ?? new Date();
+		const result: ScoredMemory[] = [];
+		for (const memory of memories) {
+			const count = await this.deps.db.get<{ count: number }>(
+				"SELECT COUNT(*) AS count FROM memory_claims WHERE memory_id = ?",
+				[memory.item.id],
+			);
+			if (!count?.count) {
+				result.push(memory);
+				continue;
+			}
+			const active = await this.deps.db.get<{ id: string }>(
+				`SELECT id FROM memory_claims
+				 WHERE memory_id = ? AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)
+				 AND recorded_at <= ? AND (retracted_at IS NULL OR retracted_at > ?)
+				 LIMIT 1`,
+				[
+					memory.item.id,
+					validAt.toISOString(),
+					validAt.toISOString(),
+					knownAt.toISOString(),
+					knownAt.toISOString(),
+				],
+			);
+			if (active) result.push(memory);
+		}
+		return result;
+	}
+
 	private async retrieveHybrid(
 		query: string,
 		vectorResults: ScoredMemory[],
+		exactResults: ScoredMemory[],
 		filter?: (item: MemoryItem) => boolean,
 	): Promise<ScoredMemory[]> {
-		if (!this.ftsSearch) return vectorResults;
+		const ftsResults = this.ftsSearch
+			? await this.ftsSearch.search(query).catch(() => [])
+			: [];
+		const channels: Array<{
+			results: ScoredMemory[];
+			weight: number;
+		}> = [
+			{ results: vectorResults, weight: 1 },
+			{
+				results: ftsResults.map((result) => ({
+					item: result.item,
+					score: result.ftsScore,
+				})),
+				weight: 1,
+			},
+			{ results: exactResults, weight: 1.35 },
+		];
 		try {
-			const hybrid = await this.ftsSearch.hybridSearch(query, vectorResults);
-			const deduped = new Map<string, ScoredMemory>();
-			for (const result of hybrid) {
-				if (filter && !filter(result.item)) continue;
-				const previous = deduped.get(result.item.id);
-				if (!previous || result.score > previous.score) {
-					deduped.set(result.item.id, result);
+			const fused = new Map<
+				string,
+				{ memory: ScoredMemory; rrf: number; strongestScore: number }
+			>();
+			const rankConstant = 60;
+			for (const channel of channels) {
+				for (let index = 0; index < channel.results.length; index++) {
+					const result = channel.results[index];
+					if (filter && !filter(result.item)) continue;
+					const previous = fused.get(result.item.id);
+					const rrf = channel.weight / (rankConstant + index + 1);
+					if (previous) {
+						previous.rrf += rrf;
+						previous.strongestScore = Math.max(
+							previous.strongestScore,
+							result.score,
+						);
+					} else {
+						fused.set(result.item.id, {
+							memory: result,
+							rrf,
+							strongestScore: result.score,
+						});
+					}
 				}
 			}
-			return Array.from(deduped.values()).sort((a, b) => b.score - a.score);
+			const maxRrf = Math.max(
+				...[...fused.values()].map((entry) => entry.rrf),
+				Number.EPSILON,
+			);
+			return [...fused.values()]
+				.map((entry) => ({
+					...entry.memory,
+					score: clamp01(
+						0.85 * (entry.rrf / maxRrf) + 0.15 * clamp01(entry.strongestScore),
+					),
+				}))
+				.sort((a, b) => b.score - a.score);
 		} catch {
-			return vectorResults;
+			return this.deduplicateScoredMemories([
+				...exactResults,
+				...vectorResults,
+			]);
 		}
 	}
 
@@ -2868,6 +4154,60 @@ export class MemoryOrchestrator {
 			}
 		}
 		return Array.from(deduped.values()).sort((a, b) => b.score - a.score);
+	}
+
+	private applyMmr(
+		memories: ScoredMemory[],
+		maxResults: number,
+		lambda = 0.78,
+	): ScoredMemory[] {
+		if (memories.length <= 1) return memories;
+		const remaining = [...memories];
+		const selected: ScoredMemory[] = [];
+		const limit = Math.max(1, Math.min(maxResults, memories.length));
+		while (remaining.length > 0 && selected.length < limit) {
+			let bestIndex = 0;
+			let bestMmr = Number.NEGATIVE_INFINITY;
+			for (let index = 0; index < remaining.length; index++) {
+				const candidate = remaining[index];
+				const redundancy = selected.reduce(
+					(maximum, existing) =>
+						Math.max(
+							maximum,
+							this.cosineSimilarity(
+								candidate.item.embedding,
+								existing.item.embedding,
+							),
+						),
+					0,
+				);
+				const mmr = lambda * candidate.score - (1 - lambda) * redundancy;
+				if (
+					mmr > bestMmr ||
+					(mmr === bestMmr &&
+						candidate.item.id.localeCompare(remaining[bestIndex].item.id) < 0)
+				) {
+					bestMmr = mmr;
+					bestIndex = index;
+				}
+			}
+			selected.push(remaining.splice(bestIndex, 1)[0]);
+		}
+		return selected;
+	}
+
+	private cosineSimilarity(left: number[], right: number[]): number {
+		if (left.length === 0 || left.length !== right.length) return 0;
+		let dot = 0;
+		let leftNorm = 0;
+		let rightNorm = 0;
+		for (let index = 0; index < left.length; index++) {
+			dot += left[index] * right[index];
+			leftNorm += left[index] * left[index];
+			rightNorm += right[index] * right[index];
+		}
+		if (leftNorm === 0 || rightNorm === 0) return 0;
+		return clamp01(dot / Math.sqrt(leftNorm * rightNorm));
 	}
 
 	private computeImportance(candidate: MemoryCandidate): number {
@@ -3016,25 +4356,19 @@ export class MemoryOrchestrator {
 		}
 		if (metadata.tenantId && metadata.tenantId !== context.tenantId)
 			return false;
-		if (
-			metadata.userId &&
-			context.userId &&
-			metadata.userId !== context.userId
-		) {
+		if (metadata.userId && metadata.userId !== context.userId) {
 			return false;
 		}
-		if (
-			metadata.projectId &&
-			context.projectId &&
-			metadata.projectId !== context.projectId
-		) {
+		if (metadata.projectId && metadata.projectId !== context.projectId) {
 			return false;
 		}
-		if (
-			context.agentRole &&
-			metadata.agentRole &&
-			metadata.agentRole !== context.agentRole
-		) {
+		if (metadata.agentRole && metadata.agentRole !== context.agentRole) {
+			return false;
+		}
+		if (metadata.sessionId && metadata.sessionId !== context.sessionId) {
+			return false;
+		}
+		if (metadata.taskId && metadata.taskId !== context.taskId) {
 			return false;
 		}
 		if (context.timeRange?.since && item.createdAt < context.timeRange.since) {
@@ -3051,6 +4385,18 @@ export class MemoryOrchestrator {
 			return (sourceTrust ?? 0) >= TRUST_RANK[context.minTrustLevel];
 		}
 		return true;
+	}
+
+	private matchesEmbeddingDescriptor(
+		item: MemoryItem,
+		descriptor: EmbeddingDescriptor | undefined,
+	): boolean {
+		if (!descriptor) return true;
+		return (
+			item.metadata.embeddingVersion === descriptor.version &&
+			item.metadata.embeddingDimensions === descriptor.dimensions &&
+			item.metadata.embeddingQuality === descriptor.quality
+		);
 	}
 
 	private canExposeMemory(
@@ -3171,6 +4517,7 @@ export class MemoryOrchestrator {
 		status: MemoryStatus,
 		reason: string,
 		metadata?: Record<string, unknown>,
+		stagedMemoryIds?: Set<string>,
 	): Promise<void> {
 		await this.recordVersion(item.id, item.content, reason, "system");
 		const updated: MemoryItem = {
@@ -3183,7 +4530,7 @@ export class MemoryOrchestrator {
 				lastActiveForgettingAt: new Date().toISOString(),
 			},
 		};
-		await this.deps.ltm.update(updated);
+		await this.persistMemoryItem(updated, stagedMemoryIds);
 		await this.recordAudit({
 			actorId: "system",
 			action: `status:${status}`,
@@ -3193,15 +4540,43 @@ export class MemoryOrchestrator {
 		});
 	}
 
+	private async persistMemoryItem(
+		item: MemoryItem,
+		stagedMemoryIds?: Set<string>,
+	): Promise<void> {
+		if (stagedMemoryIds) {
+			await this.stageMemoryItem(item, stagedMemoryIds);
+			return;
+		}
+		await this.deps.ltm.update(item);
+	}
+
+	private async stageMemoryItem(
+		item: MemoryItem,
+		stagedMemoryIds: Set<string>,
+	): Promise<void> {
+		await this.deps.ltm.stageStore(item);
+		stagedMemoryIds.add(item.id);
+	}
+
+	private async finalizeMemoryItems(memoryIds: Set<string>): Promise<void> {
+		await Promise.all(
+			[...memoryIds].map((memoryId) =>
+				this.deps.ltm.finalizeStore(memoryId).catch(() => {}),
+			),
+		);
+	}
+
 	private applyTokenBudget(
 		memories: ScoredMemory[],
 		budgetTokens: number,
+		maxResults: number,
 	): ScoredMemory[] {
 		const selected: ScoredMemory[] = [];
 		let used = 0;
-		for (const memory of memories.slice(0, 10)) {
+		for (const memory of memories.slice(0, maxResults)) {
 			const cost = estimateTokens(memory.item.content);
-			if (used + cost > budgetTokens && selected.length > 0) continue;
+			if (used + cost > budgetTokens) continue;
 			selected.push(memory);
 			used += cost;
 			if (used >= budgetTokens) break;

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LLMRouter } from "../ai/router.js";
 import { TokenCounter } from "../ai/tokenizer.js";
 import type { LLMRequest, LLMResponse } from "../ai/types.js";
@@ -6,9 +6,11 @@ import { MemoryConsolidator } from "../memory/consolidator.js";
 import { ContextAssembler } from "../memory/context-assembler.js";
 import { GlobalDailyMemory } from "../memory/daily.js";
 import { MemoryDecayEngine } from "../memory/decay.js";
+import { EmbeddingProvider } from "../memory/embedding-provider.js";
 import { FTSSearchEngine } from "../memory/fts-search.js";
 import { MemoryIntegrityLayer } from "../memory/integrity.js";
 import { KnowledgeGraph } from "../memory/knowledge-graph.js";
+import { KnowledgeManager } from "../memory/knowledge-manager.js";
 import { LongTermMemory } from "../memory/ltm.js";
 import { MemoryOrchestrator } from "../memory/orchestrator.js";
 import { ProactiveMemoryScanner } from "../memory/proactive-scanner.js";
@@ -16,7 +18,7 @@ import { MemoryRetentionScheduler } from "../memory/retention-scheduler.js";
 import { MemoryRetrieval } from "../memory/retrieval.js";
 import { SqliteVectorStore } from "../memory/sqlite-vss.js";
 import { ShortTermMemory } from "../memory/stm.js";
-import type { MemoryItem } from "../memory/types.js";
+import type { MemoryItem, MemoryReadContext } from "../memory/types.js";
 import { UserProfileManager } from "../memory/user-profile.js";
 import { WorkingMemory } from "../memory/working-memory.js";
 import {
@@ -629,7 +631,12 @@ describe("non-learning memory systems", () => {
 
 		const pack = await orchestrator.read(
 			"como debo responder a Edwin en español",
-			{ tenantId: "tenant-a", userId: "user-a", projectId: "project-a" },
+			{
+				tenantId: "tenant-a",
+				userId: "user-a",
+				projectId: "project-a",
+				sessionId: "s1",
+			},
 			200,
 		);
 		expect(pack.userMemory.length).toBeGreaterThan(0);
@@ -647,6 +654,649 @@ describe("non-learning memory systems", () => {
 			"SELECT topic_label FROM memory_coverage",
 		);
 		expect(coverage).toHaveLength(1);
+	});
+
+	it("persists the active embedding descriptor with new memories", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		const provider = new EmbeddingProvider({ dimensions: 16 });
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm,
+			embeddingFn: provider.getEmbedFunction(),
+		});
+		const write = await orchestrator.write({
+			type: "semantic",
+			content: "Versioned fallback embedding marker",
+			sourceTrust: "agent",
+			scope: { tenantId: "tenant-a", userId: "user-a" },
+		});
+		const stored = await ltm.getById(write.memoryId ?? "");
+		expect(stored?.metadata).toEqual(
+			expect.objectContaining({
+				embeddingProvider: "hash-bow",
+				embeddingModel: "hash-bow-v1",
+				embeddingDimensions: 16,
+				embeddingVersion: "hash-bow-v1:16",
+				embeddingQuality: "fallback",
+			}),
+		);
+	});
+
+	it("keeps incompatible embedding versions out of vector retrieval", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		const versionedEmbed = Object.assign(async () => [1, 0], {
+			getDescriptor: () => ({
+				provider: "openai",
+				model: "embedding-current",
+				dimensions: 2,
+				version: "openai:embedding-current:2:v1",
+				quality: "provider" as const,
+			}),
+		});
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm,
+			embeddingFn: versionedEmbed,
+			config: { minRelevance: 0.1 },
+		});
+		for (const item of [
+			createMemory({
+				id: "compatible-vector",
+				content: "Compatible semantic evidence",
+				embedding: [1, 0],
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					status: "active",
+					embeddingVersion: "openai:embedding-current:2:v1",
+					embeddingDimensions: 2,
+					embeddingQuality: "provider",
+				},
+			}),
+			createMemory({
+				id: "incompatible-vector",
+				content: "Incompatible semantic evidence",
+				embedding: [1, 0],
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					status: "active",
+					embeddingVersion: "hash-bow-v1:2",
+					embeddingDimensions: 2,
+					embeddingQuality: "fallback",
+				},
+			}),
+		]) {
+			await ltm.store(item);
+		}
+
+		const pack = await orchestrator.read(
+			"orthogonal retrieval query",
+			{ tenantId: "tenant-a", userId: "user-a" },
+			200,
+		);
+		expect(pack.memories.map((memory) => memory.item.id)).toContain(
+			"compatible-vector",
+		);
+		expect(pack.memories.map((memory) => memory.item.id)).not.toContain(
+			"incompatible-vector",
+		);
+	});
+
+	it("uses the persisted SQLite LSH index with scoped cosine reranking", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const descriptor = {
+			provider: "test",
+			model: "ann-v1",
+			dimensions: 4,
+			version: "test:ann-v1:4",
+			quality: "provider" as const,
+		};
+		for (const memory of [
+			createMemory({
+				id: "ann-target",
+				embedding: [1, 0, 0, 0],
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					projectId: "project-a",
+					embeddingVersion: descriptor.version,
+					embeddingDimensions: 4,
+					embeddingQuality: "provider",
+				},
+			}),
+			createMemory({
+				id: "ann-distractor",
+				embedding: [0, 1, 0, 0],
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					projectId: "project-a",
+					embeddingVersion: descriptor.version,
+					embeddingDimensions: 4,
+					embeddingQuality: "provider",
+				},
+			}),
+			createMemory({
+				id: "ann-other-tenant",
+				embedding: [1, 0, 0, 0],
+				metadata: {
+					tenantId: "tenant-b",
+					userId: "user-a",
+					projectId: "project-a",
+					embeddingVersion: descriptor.version,
+					embeddingDimensions: 4,
+					embeddingQuality: "provider",
+				},
+			}),
+		]) {
+			await store.store(memory);
+		}
+		const targetBuckets = await db.all<{ table_no: number; bucket: string }>(
+			"SELECT table_no, bucket FROM memory_vector_lsh WHERE memory_id = ?",
+			["ann-target"],
+		);
+		for (const row of targetBuckets) {
+			await db.run(
+				"UPDATE memory_vector_lsh SET bucket = ? WHERE memory_id = ? AND table_no = ?",
+				[
+					(Number.parseInt(row.bucket, 16) ^ 1).toString(16).padStart(3, "0"),
+					"ann-target",
+					row.table_no,
+				],
+			);
+		}
+		const allSpy = vi.spyOn(db, "all");
+		const results = await store.search([1, 0, 0, 0], {
+			limit: 5,
+			threshold: 0.5,
+			constraints: {
+				scope: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					projectId: "project-a",
+				},
+				embedding: descriptor,
+			},
+		});
+		expect(results.map((result) => result.item.id)).toContain("ann-target");
+		expect(results.map((result) => result.item.id)).not.toContain(
+			"ann-other-tenant",
+		);
+		expect(
+			allSpy.mock.calls.some(([sql]) => String(sql).includes("memory_vector_lsh")),
+		).toBe(true);
+		expect(store.getDiagnostics()).toMatchObject({
+			annSearches: 1,
+			annFallbackSearches: 0,
+		});
+		expect(store.getDiagnostics().annAverageCandidates).toBeGreaterThan(0);
+	});
+
+	it("previews and applies resumable embedding reindex without fallback targets", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		await ltm.store(
+			createMemory({
+				id: "legacy-reindex",
+				content: "Legacy embedding to reindex",
+				embedding: [1, 0],
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					projectId: "project-a",
+					agentRole: "agent-a",
+				},
+			}),
+		);
+		const descriptor = {
+			provider: "test",
+			model: "reindex-v2",
+			dimensions: 4,
+			version: "test:reindex-v2:4",
+			quality: "provider" as const,
+		};
+		const embeddingFn = Object.assign(async () => [0, 1, 0, 0], {
+			embedVersioned: async () => ({ values: [0, 1, 0, 0], descriptor }),
+			getDescriptor: () => descriptor,
+		});
+		const orchestrator = new MemoryOrchestrator({ db, ltm, embeddingFn });
+
+		const preview = await orchestrator.reindexEmbeddings({ mode: "preview" });
+		expect(preview).toMatchObject({ eligible: 1, reindexed: 0 });
+		expect(
+			await db.get("SELECT memory_id FROM memory_vector_lsh WHERE memory_id = ?", [
+				"legacy-reindex",
+			]),
+		).toBeUndefined();
+		expect(
+			(await db.get<{ count: number }>(
+				"SELECT COUNT(*) AS count FROM memory_operations",
+			))?.count,
+		).toBe(0);
+
+		const applied = await orchestrator.reindexEmbeddings({ mode: "apply" });
+		expect(applied.reindexed).toBe(1);
+		expect((await ltm.getById("legacy-reindex"))?.metadata.embeddingVersion).toBe(
+			descriptor.version,
+		);
+		expect(
+			(await db.get<{ count: number }>(
+				"SELECT COUNT(*) AS count FROM memory_vector_lsh WHERE memory_id = ?",
+				["legacy-reindex"],
+			))?.count,
+		).toBe(4);
+		expect(
+			(await orchestrator.reindexEmbeddings({ mode: "apply" })).alreadyCurrent,
+		).toBe(1);
+
+		const fallbackDescriptor = {
+			provider: "hash-bow",
+			model: "hash-bow-v1",
+			dimensions: 4,
+			version: "hash-bow-v1:4",
+			quality: "fallback" as const,
+		};
+		const fallbackFn = Object.assign(async () => [1, 0, 0, 0], {
+			embedVersioned: async () => ({
+				values: [1, 0, 0, 0],
+				descriptor: fallbackDescriptor,
+			}),
+			getDescriptor: () => fallbackDescriptor,
+		});
+		const fallbackOrchestrator = new MemoryOrchestrator({
+			db,
+			ltm,
+			embeddingFn: fallbackFn,
+		});
+		expect(
+			(await fallbackOrchestrator.reindexEmbeddings({ mode: "apply" })).blocked,
+		).toBe(1);
+	});
+
+	it("runs embedding reindex as leased resumable batches", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		for (const id of ["operation-a", "operation-b", "operation-c"]) {
+			await ltm.store(
+				createMemory({
+					id,
+					content: `Legacy operation memory ${id}`,
+					embedding: [1, 0, 0, 0],
+					metadata: {
+						tenantId: "tenant-a",
+						userId: "user-a",
+						projectId: "project-a",
+						agentRole: "agent-a",
+					},
+				}),
+			);
+		}
+		const descriptor = {
+			provider: "test",
+			model: "durable-v1",
+			dimensions: 4,
+			version: "test:durable-v1:4",
+			quality: "provider" as const,
+		};
+		const embeddingFn = Object.assign(async () => [0, 1, 0, 0], {
+			embedVersioned: async (text: string) => {
+				if (text.includes("operation memory")) {
+					await new Promise((resolve) => setTimeout(resolve, 25));
+				}
+				return { values: [0, 1, 0, 0], descriptor };
+			},
+			getDescriptor: () => descriptor,
+		});
+		const orchestrator = new MemoryOrchestrator({ db, ltm, embeddingFn });
+		const created = await orchestrator.createMemoryOperation(
+			{ type: "embedding.reindex", batchSize: 1 },
+			"durable-reindex-key",
+		);
+		expect(created.replayed).toBe(false);
+		expect(created.operation).toMatchObject({
+			status: "pending",
+			attemptCount: 0,
+			leaseState: "none",
+			resumable: true,
+		});
+		expect((await ltm.getById("operation-a"))?.metadata.embeddingVersion).toBe(
+			undefined,
+		);
+		const replay = await orchestrator.createMemoryOperation(
+			{ type: "embedding.reindex", batchSize: 1 },
+			"durable-reindex-key",
+		);
+		expect(replay.replayed).toBe(true);
+		expect(replay.operation.id).toBe(created.operation.id);
+		const racedCreates = await Promise.all([
+			orchestrator.createMemoryOperation(
+				{ type: "embedding.reindex", batchSize: 1 },
+				"durable-race-key",
+			),
+			orchestrator.createMemoryOperation(
+				{ type: "embedding.reindex", batchSize: 1 },
+				"durable-race-key",
+			),
+		]);
+		expect(new Set(racedCreates.map((result) => result.operation.id)).size).toBe(1);
+		await expect(
+			orchestrator.createMemoryOperation(
+				{ type: "embedding.reindex", batchSize: 2 },
+				"durable-reindex-key",
+			),
+		).rejects.toThrow("MEMORY_OPERATION_IDEMPOTENCY_CONFLICT");
+
+		const concurrent = await Promise.allSettled([
+			orchestrator.resumeMemoryOperation(created.operation.id),
+			orchestrator.resumeMemoryOperation(created.operation.id),
+		]);
+		expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(
+			1,
+		);
+		expect(concurrent.filter((result) => result.status === "rejected")).toHaveLength(
+			1,
+		);
+		let operation = await orchestrator.getMemoryOperation(created.operation.id);
+		expect(operation?.status).toBe("pending");
+		expect(operation?.progress.reindexed).toBe(1);
+		while (operation?.status !== "completed") {
+			operation = await orchestrator.resumeMemoryOperation(created.operation.id);
+		}
+		expect(operation.progress.reindexed).toBe(3);
+		expect(operation.attemptCount).toBe(3);
+		expect(operation.resumable).toBe(false);
+		const completedAgain = await orchestrator.resumeMemoryOperation(
+			created.operation.id,
+		);
+		expect(completedAgain.attemptCount).toBe(3);
+		expect(
+			(await orchestrator.listMemoryOperations({ status: "completed" })).map(
+				(candidate) => candidate.id,
+			),
+		).toContain(created.operation.id);
+	});
+
+	it("takes over an expired memory operation lease", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		await ltm.store(
+			createMemory({
+				id: "expired-lease-memory",
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					projectId: "project-a",
+					agentRole: "agent-a",
+					claimEntity: "Acme",
+					claimKey: "tier",
+					claimValue: "enterprise",
+					claimValidFrom: "2026-01-01T00:00:00.000Z",
+				},
+			}),
+		);
+		const orchestrator = new MemoryOrchestrator({ db, ltm, embeddingFn: embedFn });
+		const { operation } = await orchestrator.createMemoryOperation({
+			type: "claims.backfill",
+			batchSize: 1,
+		});
+		await db.run(
+			"UPDATE memory_operations SET status = 'running', lease_token = 'stale', lease_expires_at = ? WHERE id = ?",
+			[new Date(Date.now() - 1000).toISOString(), operation.id],
+		);
+		const resumed = await orchestrator.resumeMemoryOperation(operation.id);
+		expect(resumed.status).toBe("completed");
+		expect(resumed.attemptCount).toBe(1);
+		expect(
+			await db.get("SELECT id FROM memory_claims WHERE memory_id = ?", [
+				"expired-lease-memory",
+			]),
+		).toBeDefined();
+	});
+
+	it("pauses running operations at item boundaries and cancels pending work", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		for (const id of ["control-a", "control-b"]) {
+			await ltm.store(
+				createMemory({
+					id,
+					content: `Controlled operation memory ${id}`,
+					embedding: [1, 0],
+					metadata: {
+						tenantId: "tenant-a",
+						userId: "user-a",
+						projectId: "project-a",
+						agentRole: "agent-a",
+					},
+				}),
+			);
+		}
+		const descriptor = {
+			provider: "test",
+			model: "control-v1",
+			dimensions: 2,
+			version: "test:control-v1:2",
+			quality: "provider" as const,
+		};
+		const embeddingFn = Object.assign(async () => [0, 1], {
+			embedVersioned: async (text: string) => {
+				if (text.includes("Controlled operation")) {
+					await new Promise((resolve) => setTimeout(resolve, 40));
+				}
+				return { values: [0, 1], descriptor };
+			},
+			getDescriptor: () => descriptor,
+		});
+		const orchestrator = new MemoryOrchestrator({ db, ltm, embeddingFn });
+		const { operation } = await orchestrator.createMemoryOperation({
+			type: "embedding.reindex",
+			batchSize: 2,
+		});
+		const running = orchestrator.resumeMemoryOperation(operation.id);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		const requestedPause = await orchestrator.pauseMemoryOperation(operation.id);
+		expect(requestedPause).toMatchObject({
+			status: "running",
+			controlAction: "pause",
+		});
+		const paused = await running;
+		expect(paused).toMatchObject({ status: "paused", resumable: true });
+		expect(paused.progress.reindexed).toBe(1);
+		const completed = await orchestrator.resumeMemoryOperation(operation.id);
+		expect(completed.status).toBe("completed");
+		expect(completed.progress.reindexed).toBe(2);
+
+		const cancelledCandidate = await orchestrator.createMemoryOperation({
+			type: "claims.backfill",
+			batchSize: 1,
+		});
+		const cancelled = await orchestrator.cancelMemoryOperation(
+			cancelledCandidate.operation.id,
+		);
+		expect(cancelled).toMatchObject({
+			status: "cancelled",
+			resumable: false,
+		});
+		expect(
+			(await orchestrator.resumeMemoryOperation(cancelled.id)).status,
+		).toBe("cancelled");
+	});
+
+	it("fences a stale worker before it writes after lease takeover", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		await ltm.store(
+			createMemory({ id: "fenced-memory", content: "Fenced worker content", embedding: [1, 0] }),
+		);
+		const descriptor = {
+			provider: "test",
+			model: "fenced-v1",
+			dimensions: 2,
+			version: "test:fenced-v1:2",
+			quality: "provider" as const,
+		};
+		let itemCalls = 0;
+		const embeddingFn = Object.assign(async () => [0, 1], {
+			embedVersioned: async (text: string) => {
+				if (text === "Fenced worker content") {
+					itemCalls++;
+					if (itemCalls === 1) {
+						await new Promise((resolve) => setTimeout(resolve, 80));
+						return { values: [1, 0], descriptor };
+					}
+				}
+				return { values: [0, 1], descriptor };
+			},
+			getDescriptor: () => descriptor,
+		});
+		const orchestrator = new MemoryOrchestrator({ db, ltm, embeddingFn });
+		const { operation } = await orchestrator.createMemoryOperation({
+			type: "embedding.reindex",
+			batchSize: 1,
+		});
+		const staleWorker = orchestrator.resumeMemoryOperation(operation.id);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		await db.run(
+			"UPDATE memory_operations SET lease_expires_at = ? WHERE id = ?",
+			["2000-01-01T00:00:00.000Z", operation.id],
+		);
+		const winner = await orchestrator.resumeMemoryOperation(operation.id);
+		expect(winner.status).toBe("completed");
+		await expect(staleWorker).rejects.toThrow("MEMORY_OPERATION_LEASE_LOST");
+		expect((await ltm.getById("fenced-memory"))?.embedding).toEqual([0, 1]);
+	});
+
+	it("backfills only explicit legacy claims through preview and apply", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		for (const memory of [
+			createMemory({
+				id: "claim-backfill-safe",
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					projectId: "project-a",
+					agentRole: "agent-a",
+					claimEntity: "Acme",
+					claimKey: "tier",
+					claimValue: "enterprise",
+					claimValidFrom: "2026-01-01T00:00:00.000Z",
+				},
+			}),
+			createMemory({
+				id: "claim-backfill-unsafe",
+				metadata: {
+					tenantId: "tenant-a",
+					userId: "user-a",
+					claimEntity: "Acme",
+					claimKey: "region",
+					claimValue: "west",
+					claimValidFrom: "2026-01-01T00:00:00.000Z",
+				},
+			}),
+		]) {
+			await ltm.store(memory);
+		}
+		const orchestrator = new MemoryOrchestrator({ db, ltm, embeddingFn: embedFn });
+		const preview = await orchestrator.backfillLegacyClaims({ mode: "preview" });
+		expect(preview).toMatchObject({ eligible: 1, inserted: 0, missingScope: 1 });
+		expect(
+			(await db.get<{ count: number }>(
+				"SELECT COUNT(*) AS count FROM memory_claims",
+			))?.count,
+		).toBe(0);
+		const applied = await orchestrator.backfillLegacyClaims({ mode: "apply" });
+		expect(applied.inserted).toBe(1);
+		expect(
+			await db.get<{ memory_id: string }>(
+				"SELECT memory_id FROM memory_claims WHERE memory_id = ?",
+				["claim-backfill-safe"],
+			),
+		).toMatchObject({ memory_id: "claim-backfill-safe" });
+		const metrics = await orchestrator.getMetricsSnapshot();
+		expect(metrics.temporalClaims).toBe(1);
+		expect(metrics.operationsByStatus.completed).toBeGreaterThan(0);
+	});
+
+	it("rolls back the complete local write when a cognitive side table fails", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm,
+			embeddingFn: embedFn,
+			config: { minRelevance: 0.1 },
+		});
+		await orchestrator.initialize();
+		const realRun = db.run.bind(db);
+		let memoryStoredBeforeFailure = false;
+		vi.spyOn(db, "run").mockImplementation(async (sql, params) => {
+			if (/INSERT OR REPLACE INTO memory_items/i.test(sql)) {
+				memoryStoredBeforeFailure = true;
+			}
+			if (/INSERT INTO memory_evidence/i.test(sql)) {
+				throw new Error("failure-after-memory-store");
+			}
+			return realRun(sql, params);
+		});
+
+		await expect(
+			orchestrator.write({
+				type: "semantic",
+				content: "Atomic rollback marker for memory write",
+				sourceTrust: "agent",
+				scope: { tenantId: "tenant-a", userId: "user-a" },
+				evidence: {
+					sourceType: "message",
+					sourceId: "atomic-message",
+					excerpt: "Atomic rollback marker for memory write",
+				},
+			}),
+		).rejects.toThrow("failure-after-memory-store");
+		expect(memoryStoredBeforeFailure).toBe(true);
+		expect(
+			await db.get("SELECT id FROM memory_items WHERE content = ?", [
+				"Atomic rollback marker for memory write",
+			]),
+		).toBeUndefined();
+		expect(
+			await db.get("SELECT id FROM memory_evidence WHERE source_id = ?", [
+				"atomic-message",
+			]),
+		).toBeUndefined();
 	});
 
 	it("filters scoped memory reads before candidate limiting and access updates", async () => {
@@ -700,6 +1350,73 @@ describe("non-learning memory systems", () => {
 		]);
 		expect((await ltm.getById("current-tenant"))?.accessCount).toBe(1);
 		expect((await ltm.getById("other-tenant"))?.accessCount).toBe(0);
+	});
+
+	it("fails closed for declared user, project, agent, session, and task scopes", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm,
+			embeddingFn: embedFn,
+			config: { minRelevance: 0.1 },
+		});
+		const write = await orchestrator.write({
+			type: "procedural",
+			content: "Scoped deployment procedure alpha omega",
+			sourceTrust: "agent",
+			scope: {
+				tenantId: "tenant-a",
+				userId: "user-a",
+				projectId: "project-a",
+				agentRole: "agent-a",
+				sessionId: "session-a",
+				taskId: "task-a",
+			},
+		});
+		expect(write.accepted).toBe(true);
+		const stored = await ltm.getById(write.memoryId ?? "");
+		expect(stored?.metadata.sessionId).toBe("session-a");
+		expect(stored?.metadata.taskId).toBe("task-a");
+
+		const exactContext: MemoryReadContext = {
+			tenantId: "tenant-a",
+			userId: "user-a",
+			projectId: "project-a",
+			agentRole: "agent-a",
+			sessionId: "session-a",
+			taskId: "task-a",
+		};
+		const exact = await orchestrator.read(
+			"Scoped deployment procedure alpha omega",
+			exactContext,
+			200,
+		);
+		expect(exact.memories.map((memory) => memory.item.id)).toContain(
+			write.memoryId,
+		);
+
+		for (const missing of [
+			"userId",
+			"projectId",
+			"agentRole",
+			"sessionId",
+			"taskId",
+		] as const) {
+			const context = { ...exactContext };
+			delete context[missing];
+			const pack = await orchestrator.read(
+				"Scoped deployment procedure alpha omega",
+				context,
+				200,
+			);
+			expect(pack.memories.map((memory) => memory.item.id)).not.toContain(
+				write.memoryId,
+			);
+		}
 	});
 
 	it("physically deletes forgotten memories from every read path", async () => {
@@ -1157,6 +1874,107 @@ describe("non-learning memory systems", () => {
 
 		expect(pack.memories[0]?.item.content).toContain("zafiro-cobalto-77");
 		expect(pack.uncertaintyLevel).not.toBe("NO_COVERAGE");
+	});
+
+	it("uses MMR to prefer diverse evidence over near-duplicate candidates", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm: new LongTermMemory(store, db),
+			embeddingFn: embedFn,
+		});
+		const applyMmr = (
+			orchestrator as unknown as {
+				applyMmr: (
+					memories: Array<{ item: MemoryItem; score: number }>,
+					maxResults: number,
+					lambda: number,
+				) => Array<{ item: MemoryItem; score: number }>;
+			}
+		).applyMmr.bind(orchestrator);
+		const diversified = applyMmr(
+			[
+				{
+					item: createMemory({ id: "primary", embedding: [1, 0] }),
+					score: 1,
+				},
+				{
+					item: createMemory({ id: "duplicate", embedding: [1, 0] }),
+					score: 0.99,
+				},
+				{
+					item: createMemory({ id: "diverse", embedding: [0, 1] }),
+					score: 0.8,
+				},
+			],
+			3,
+			0.5,
+		);
+		expect(diversified.map((memory) => memory.item.id)).toEqual([
+			"primary",
+			"diverse",
+			"duplicate",
+		]);
+	});
+
+	it("expands retrieval candidates by supportive graph edges only", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm,
+			embeddingFn: async () => [1, 0],
+			config: { minRelevance: 0.99, maxReadCandidates: 10 },
+		});
+		for (const memory of [
+			createMemory({
+				id: "graph-seed",
+				content: "ExactGraphSeed deployment fact",
+				embedding: [1, 0],
+				metadata: { tenantId: "tenant-a", userId: "user-a", status: "active" },
+			}),
+			createMemory({
+				id: "graph-support",
+				content: "Independent supporting evidence",
+				embedding: [0, 1],
+				metadata: { tenantId: "tenant-a", userId: "user-a", status: "active" },
+			}),
+			createMemory({
+				id: "graph-conflict",
+				content: "Conflicting evidence must not expand",
+				embedding: [0, 1],
+				metadata: { tenantId: "tenant-a", userId: "user-a", status: "active" },
+			}),
+		]) {
+			await ltm.store(memory);
+		}
+		await orchestrator.initialize();
+		await db.run(
+			"INSERT INTO memory_edges (id, source_id, target_id, type, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			["edge-support", "graph-seed", "graph-support", "supports", 0.95, new Date().toISOString()],
+		);
+		await db.run(
+			"INSERT INTO memory_edges (id, source_id, target_id, type, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			["edge-conflict", "graph-seed", "graph-conflict", "contradicts", 1, new Date().toISOString()],
+		);
+
+		const pack = await orchestrator.read(
+			"ExactGraphSeed",
+			{ tenantId: "tenant-a", userId: "user-a" },
+			200,
+		);
+		expect(pack.memories.map((memory) => memory.item.id)).toContain(
+			"graph-support",
+		);
+		expect(pack.memories.map((memory) => memory.item.id)).not.toContain(
+			"graph-conflict",
+		);
 	});
 
 	it("reinforces duplicate memories instead of storing a new copy", async () => {
@@ -1802,6 +2620,130 @@ describe("non-learning memory systems", () => {
 		expect(edges).toHaveLength(0);
 	});
 
+	it("preserves historical truth with bitemporal claims", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm,
+			embeddingFn: embedFn,
+			config: { minRelevance: 0.1 },
+		});
+		const scope = { tenantId: "tenant-a", userId: "user-a" };
+		const old = await orchestrator.write({
+			type: "semantic",
+			content: "Acme billing plan was legacy",
+			sourceTrust: "system",
+			scope,
+			confidence: 0.9,
+			claim: {
+				entity: "Acme",
+				key: "billing_plan",
+				value: "legacy",
+				validFrom: "2026-01-01T00:00:00.000Z",
+			},
+		});
+		const current = await orchestrator.write({
+			type: "semantic",
+			content: "Acme billing plan is enterprise",
+			sourceTrust: "system",
+			scope,
+			confidence: 0.95,
+			claim: {
+				entity: "Acme",
+				key: "billing_plan",
+				value: "enterprise",
+				validFrom: "2026-03-01T00:00:00.000Z",
+			},
+		});
+
+		const historical = await orchestrator.getClaims(
+			{ ...scope, validAt: new Date("2026-02-01T00:00:00.000Z") },
+			{ entity: "Acme", key: "billing_plan" },
+		);
+		const latest = await orchestrator.getClaims(
+			{ ...scope, validAt: new Date("2026-04-01T00:00:00.000Z") },
+			{ entity: "Acme", key: "billing_plan" },
+		);
+		expect(historical.map((claim) => claim.value)).toEqual(["legacy"]);
+		expect(latest.map((claim) => claim.value)).toEqual(["enterprise"]);
+		expect((await ltm.getById(old.memoryId ?? ""))?.metadata.status).toBe(
+			"active",
+		);
+		expect((await ltm.getById(current.memoryId ?? ""))?.metadata.status).toBe(
+			"active",
+		);
+		const edges = await db.all<{ type: string }>(
+			"SELECT type FROM memory_edges WHERE source_id = ? AND target_id = ?",
+			[old.memoryId, current.memoryId],
+		);
+		expect(edges.map((edge) => edge.type)).toContain("contradicts");
+
+		const retractedAt = new Date(Date.now() + 60_000);
+		await db.run("UPDATE memory_claims SET retracted_at = ? WHERE memory_id = ?", [
+			retractedAt.toISOString(),
+			current.memoryId,
+		]);
+		expect(
+			(
+				await orchestrator.getClaims({
+					...scope,
+					validAt: new Date("2026-04-01T00:00:00.000Z"),
+					knownAt: new Date(retractedAt.getTime() - 1),
+				})
+			).map((claim) => claim.value),
+		).toContain("enterprise");
+		expect(
+			(
+				await orchestrator.getClaims({
+					...scope,
+					validAt: new Date("2026-04-01T00:00:00.000Z"),
+					knownAt: new Date(retractedAt.getTime() + 1),
+				})
+			).map((claim) => claim.value),
+		).not.toContain("enterprise");
+	});
+
+	it("does not create temporal contradictions across scopes", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const ltm = new LongTermMemory(store, db);
+		const orchestrator = new MemoryOrchestrator({ db, ltm, embeddingFn: embedFn });
+		const first = await orchestrator.write({
+			type: "semantic",
+			content: "Tenant A Acme tier enterprise",
+			sourceTrust: "system",
+			scope: { tenantId: "tenant-a", userId: "user-a" },
+			claim: { entity: "Acme", key: "tier", value: "enterprise" },
+		});
+		const second = await orchestrator.write({
+			type: "semantic",
+			content: "Tenant B Acme tier starter",
+			sourceTrust: "system",
+			scope: { tenantId: "tenant-b", userId: "user-b" },
+			claim: { entity: "Acme", key: "tier", value: "starter" },
+		});
+		expect(
+			await db.all(
+				"SELECT id FROM memory_edges WHERE source_id = ? AND target_id = ? AND type = 'contradicts'",
+				[first.memoryId, second.memoryId],
+			),
+		).toHaveLength(0);
+		expect(
+			(
+				await db.get<{ valid_to: string | null }>(
+					"SELECT valid_to FROM memory_claims WHERE memory_id = ?",
+					[first.memoryId],
+				)
+			)?.valid_to,
+		).toBeNull();
+	});
+
 	it("applies feedback and forgets memories through orchestrator controls", async () => {
 		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
 		await db.initialize();
@@ -2044,6 +2986,51 @@ describe("non-learning memory systems", () => {
 			return acc;
 		}, {});
 		expect(Math.max(...Object.values(usageCounts))).toBe(1);
+	});
+
+	it("assembles scoped knowledge chunks within their own budget", async () => {
+		db = createDatabaseAdapter("sqlite", { path: ":memory:" });
+		await db.initialize();
+		const store = new SqliteVectorStore(db);
+		await store.initialize();
+		const orchestrator = new MemoryOrchestrator({
+			db,
+			ltm: new LongTermMemory(store, db),
+			embeddingFn: embedFn,
+			config: { minRelevance: 0.1 },
+		});
+		const knowledge = new KnowledgeManager(db);
+		const allowed = await knowledge.createCollection({ name: "Allowed KB" });
+		const denied = await knowledge.createCollection({ name: "Denied KB" });
+		await knowledge.createTextItem({
+			collectionId: allowed.id,
+			title: "Deployment policy",
+			content: "KnowledgeMarker use blue-green deployment with verified health checks.",
+		});
+		await knowledge.createTextItem({
+			collectionId: denied.id,
+			content: "KnowledgeMarker this collection must remain isolated.",
+		});
+		const assembler = new ContextAssembler(
+			orchestrator,
+			{ reserveTokens: 32, maxKnowledgeChunks: 2, maxKnowledgeTokens: 80 },
+			knowledge,
+		);
+		const result = await assembler.assemble({
+			objective: "KnowledgeMarker",
+			tenantId: "tenant-a",
+			userId: "user-a",
+			budgetTokens: 300,
+			knowledgeCollectionIds: [allowed.id],
+		});
+		expect(result.knowledgeChunks).toHaveLength(1);
+		expect(result.knowledgeChunks[0]).toMatchObject({
+			collectionId: allowed.id,
+			title: "Deployment policy",
+		});
+		expect(result.knowledgeChunks[0]?.content).not.toContain(
+			"must remain isolated",
+		);
 	});
 
 	it("records usage only for final assembled memory context and proactive notices", async () => {

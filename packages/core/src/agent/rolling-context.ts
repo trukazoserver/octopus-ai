@@ -5,6 +5,9 @@ import type { LLMMessage } from "../ai/types.js";
 import { createLogger } from "../utils/logger.js";
 
 const logger = createLogger("rolling-context");
+const UNTRUSTED_CONTEXT_START = "<<<OCTOPUS_UNTRUSTED_CONTEXT_V1>>>";
+const UNTRUSTED_CONTEXT_END = "<<<END_OCTOPUS_UNTRUSTED_CONTEXT_V1>>>";
+const ROLLING_SUMMARY_SOURCE = '"source":"rolling_context"';
 
 const SUMMARY_PROMPT = `You are a context compression assistant for Octopus AI. Your job is to summarize a conversation segment into a dense, information-rich summary that preserves ALL important context for the AI to continue the conversation seamlessly.
 
@@ -130,19 +133,35 @@ export class RollingContextManager {
 	}
 
 	private hasRollingSummary(messages: LLMMessage[]): boolean {
-		return messages.some(
-			(message) =>
-				message.role === "system" &&
-				typeof message.content === "string" &&
-				message.content.includes("## Conversation Summary (rolling context)"),
-		);
+		return messages.some((message) => this.isRollingSummaryMessage(message));
 	}
 
 	private buildSummaryMessage(): LLMMessage {
+		const record = JSON.stringify({
+			provenance: {
+				kind: "recovered_context",
+				source: "rolling_context",
+				sourceTrust: "mixed:user,agent,tool",
+				retrievedAt: new Date().toISOString(),
+			},
+			data: { summary: this.currentSummary },
+		})
+			.replace(/</g, "\\u003c")
+			.replace(/>/g, "\\u003e");
 		return {
-			role: "system",
-			content: `## Conversation Summary (rolling context)\nThis is a persisted summary of earlier conversation context. Use it to preserve continuity after reconnects, restarts, or context compression.\n\nIf you need an exact detail that is not present in the summary, do not guess. Use the [Retrieval Hints] section as a search map: call the raw conversation search tool (recall_conversation, if available) with exact filenames, paths, URLs, media IDs, command fragments, error text, or user phrases listed there. Prefer the current conversation first, then broaden only if needed.\n\n${this.currentSummary}`,
+			role: "user",
+			content: [UNTRUSTED_CONTEXT_START, record, UNTRUSTED_CONTEXT_END].join(
+				"\n",
+			),
 		};
+	}
+
+	private isRollingSummaryMessage(message: LLMMessage): boolean {
+		return (
+			typeof message.content === "string" &&
+			message.content.includes(UNTRUSTED_CONTEXT_START) &&
+			message.content.includes(ROLLING_SUMMARY_SOURCE)
+		);
 	}
 
 	private injectSummaryMessage(messages: LLMMessage[]): LLMMessage[] {
@@ -167,8 +186,11 @@ export class RollingContextManager {
 		model: string,
 		inputBudget: number,
 	): Promise<LLMMessage[]> {
-		const { systemMessages, conversationMessages } =
+		const { systemMessages, conversationMessages: rawConversationMessages } =
 			this.splitSystemAndConversation(messages);
+		const conversationMessages = rawConversationMessages.filter(
+			(message) => !this.isRollingSummaryMessage(message),
+		);
 
 		const protectFirstN = Math.max(0, this.compression.protectFirstN);
 		const protectLastN = Math.max(1, this.compression.protectLastN);

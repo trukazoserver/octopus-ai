@@ -25,6 +25,12 @@ import * as migration023 from "./023_workflow_run_leases.js";
 import * as migration024 from "./024_memory_vector_outbox.js";
 import * as migration025 from "./025_memory_vector_outbox_leases.js";
 import * as migration026 from "./026_memory_relation_owner.js";
+import * as migration027 from "./027_learning_scopes.js";
+import * as migration028 from "./028_temporal_claims_learning_evidence.js";
+import * as migration029 from "./029_memory_operations_ann.js";
+import * as migration030 from "./030_resumable_memory_operations.js";
+import * as migration031 from "./031_memory_operation_control.js";
+import * as migration032 from "./032_memory_benchmarks.js";
 
 export interface Migration {
 	version: number;
@@ -59,4 +65,10 @@ export const migrations: Migration[] = [
 	{ version: 24, up: migration024.up, down: migration024.down },
 	{ version: 25, up: migration025.up, down: migration025.down },
 	{ version: 26, up: migration026.up, down: migration026.down },
+	{ version: 27, up: migration027.up, down: migration027.down },
+	{ version: 28, up: migration028.up, down: migration028.down },
+	{ version: 29, up: migration029.up, down: migration029.down },
+	{ version: 30, up: migration030.up, down: migration030.down },
+	{ version: 31, up: migration031.up, down: migration031.down },
+	{ version: 32, up: migration032.up, down: migration032.down },
 ];

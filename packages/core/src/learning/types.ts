@@ -22,7 +22,30 @@ export interface ExperienceSkillTrace {
 	level?: number;
 }
 
+export interface ExperienceOutcomeVerification {
+	verified: boolean;
+	checks: Array<{
+		name: string;
+		passed: boolean;
+		evidence?: string;
+	}>;
+}
+
+export interface LearningScope {
+	tenantId: string;
+	userId: string;
+	projectId: string;
+	agentRole: string;
+	sessionId?: string;
+	taskId?: string;
+}
+
+export type LearningAccess =
+	| { kind: "admin" }
+	| { kind: "scoped"; scope: LearningScope };
+
 export interface ExperienceRecordInput {
+	scope: LearningScope;
 	conversationId?: string;
 	taskId?: string;
 	agentId?: string;
@@ -35,6 +58,7 @@ export interface ExperienceRecordInput {
 	skillsUsed?: ExperienceSkillTrace[];
 	durationMs?: number;
 	metadata?: Record<string, unknown>;
+	outcome?: ExperienceOutcomeVerification;
 }
 
 export interface ExperienceRecord
@@ -42,6 +66,7 @@ export interface ExperienceRecord
 		Pick<ExperienceRecordInput, "userRequest" | "finalResponse">
 	> {
 	id: string;
+	scope: LearningScope;
 	conversationId?: string;
 	taskId?: string;
 	agentId?: string;
@@ -57,6 +82,7 @@ export interface ExperienceRecord
 
 export interface LearningInsight {
 	id: string;
+	scope: LearningScope;
 	experienceId: string;
 	type: LearningInsightType;
 	domain?: string;
@@ -68,6 +94,9 @@ export interface LearningInsight {
 	embedding: number[];
 	useCount: number;
 	lastUsedAt?: Date;
+	invalidatedAt?: Date;
+	invalidationReason?: string;
+	invalidatedByExperienceId?: string;
 	createdAt: Date;
 }
 

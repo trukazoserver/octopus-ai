@@ -59,6 +59,7 @@ export interface AgentConfig {
 	reasoningEffort?: AgentReasoningEffort;
 	tools?: string[];
 	channels?: string[];
+	knowledgeBaseIds?: string[];
 	maxTokens?: number;
 	temperature?: number;
 	toolIterationLimit?: ToolIterationLimitConfig;

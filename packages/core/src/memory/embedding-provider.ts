@@ -18,7 +18,12 @@
 import { createHash, createSign } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createLogger } from "../utils/logger.js";
-import type { EmbeddingTask } from "./types.js";
+import type {
+	EmbeddingDescriptor,
+	EmbeddingFunction,
+	EmbeddingTask,
+	VersionedEmbedding,
+} from "./types.js";
 
 const logger = createLogger("embedding-provider");
 
@@ -85,6 +90,7 @@ const DEFAULT_CONFIG: EmbeddingProviderConfig = {
 /** Resultado de un embedding con metadata */
 export interface EmbeddingResult {
 	embedding: number[];
+	descriptor: EmbeddingDescriptor;
 	model: string;
 	cached: boolean;
 	tokensUsed: number;
@@ -98,6 +104,7 @@ export class EmbeddingProvider {
 	private lastApiFailureAt = 0;
 	private totalApiCalls = 0;
 	private totalCacheHits = 0;
+	private totalFallbacks = 0;
 	private vertexTokenCache?: { token: string; expiresAt: number };
 
 	constructor(config: Partial<EmbeddingProviderConfig> = {}) {
@@ -112,30 +119,43 @@ export class EmbeddingProvider {
 		text: string,
 		task: EmbeddingTask = this.config.task,
 	): Promise<number[]> {
+		return (await this.embedVersioned(text, task)).values;
+	}
+
+	async embedVersioned(
+		text: string,
+		task: EmbeddingTask = this.config.task,
+	): Promise<VersionedEmbedding> {
 		if (!text || text.trim().length === 0) {
-			return new Array(this.config.dimensions).fill(0);
+			return {
+				values: new Array(this.config.dimensions).fill(0),
+				descriptor: this.fallbackDescriptor(),
+			};
 		}
 
 		const cleanText = text.trim().slice(0, this.config.maxTextLength);
-		const cacheKey = this.hashText(`${task}:${cleanText}`);
+		const cacheKey = this.cacheKey(task, cleanText);
 
 		// Check cache
 		const cached = this.cache.get(cacheKey);
 		if (cached) {
 			this.totalCacheHits++;
-			return cached;
+			return { values: cached, descriptor: this.providerDescriptor() };
 		}
 
 		// Try API
 		if (this.hasApiCredentials() && this.shouldTryApi()) {
 			try {
-				const result = await this.embedViaAPI([cleanText], task);
+				const result = this.validateApiBatch(
+					await this.embedViaAPI([cleanText], task),
+					1,
+				);
 				if (result.length > 0) {
 					this.apiAvailable = true;
 					this.lastApiFailureAt = 0;
 					const embedding = result[0];
 					this.cacheSet(cacheKey, embedding);
-					return embedding;
+					return { values: embedding, descriptor: this.providerDescriptor() };
 				}
 			} catch (err) {
 				this.lastApiFailureAt = Date.now();
@@ -149,9 +169,9 @@ export class EmbeddingProvider {
 		}
 
 		// Fallback: hash-based bag-of-words
+		this.totalFallbacks++;
 		const fallback = this.hashEmbedding(cleanText);
-		this.cacheSet(cacheKey, fallback);
-		return fallback;
+		return { values: fallback, descriptor: this.fallbackDescriptor() };
 	}
 
 	/**
@@ -170,7 +190,7 @@ export class EmbeddingProvider {
 		// Check cache first
 		for (let i = 0; i < texts.length; i++) {
 			const clean = (texts[i] || "").trim().slice(0, this.config.maxTextLength);
-			const key = this.hashText(`${task}:${clean}`);
+			const key = this.cacheKey(task, clean);
 			const cached = this.cache.get(key);
 			if (cached) {
 				results[i] = cached;
@@ -199,13 +219,16 @@ export class EmbeddingProvider {
 						batch,
 						batch + this.config.maxBatchSize,
 					);
-					const embeddings = await this.embedViaAPI(batchTexts, task);
+					const embeddings = this.validateApiBatch(
+						await this.embedViaAPI(batchTexts, task),
+						batchTexts.length,
+					);
 
 					for (let j = 0; j < embeddings.length; j++) {
 						const idx = batchIndices[j];
 						results[idx] = embeddings[j];
 						this.cacheSet(
-							this.hashText(`${task}:${batchTexts[j]}`),
+							this.cacheKey(task, batchTexts[j]),
 							embeddings[j],
 						);
 					}
@@ -231,7 +254,7 @@ export class EmbeddingProvider {
 					.trim()
 					.slice(0, this.config.maxTextLength);
 				results[i] = this.hashEmbedding(clean);
-				this.cacheSet(this.hashText(`${task}:${clean}`), results[i]);
+				this.totalFallbacks++;
 			}
 		}
 
@@ -241,11 +264,49 @@ export class EmbeddingProvider {
 	/**
 	 * Obtener la función de embedding compatible con EmbeddingFunction type.
 	 */
-	getEmbedFunction(): (
-		text: string,
-		task?: EmbeddingTask,
-	) => Promise<number[]> {
-		return (text: string, task?: EmbeddingTask) => this.embed(text, task);
+	getEmbedFunction(): EmbeddingFunction {
+		const embed: EmbeddingFunction = (text, task) => this.embed(text, task);
+		embed.embedVersioned = (text, task) => this.embedVersioned(text, task);
+		embed.getDescriptor = () => this.getDescriptor();
+		return embed;
+	}
+
+	getDescriptor(): EmbeddingDescriptor {
+		const quality =
+			this.hasApiCredentials() && this.apiAvailable !== false
+				? "provider"
+				: "fallback";
+		return {
+			provider: quality === "provider" ? this.config.apiType : "hash-bow",
+			model:
+				quality === "provider" ? this.config.model || "unspecified" : "hash-bow-v1",
+			dimensions: this.config.dimensions,
+			version:
+				quality === "provider"
+					? this.providerVersion()
+					: `hash-bow-v1:${this.config.dimensions}`,
+			quality,
+		};
+	}
+
+	private providerDescriptor(): EmbeddingDescriptor {
+		return {
+			provider: this.config.apiType,
+			model: this.config.model || "unspecified",
+			dimensions: this.config.dimensions,
+			version: this.providerVersion(),
+			quality: "provider",
+		};
+	}
+
+	private fallbackDescriptor(): EmbeddingDescriptor {
+		return {
+			provider: "hash-bow",
+			model: "hash-bow-v1",
+			dimensions: this.config.dimensions,
+			version: `hash-bow-v1:${this.config.dimensions}`,
+			quality: "fallback",
+		};
 	}
 
 	/**
@@ -255,19 +316,26 @@ export class EmbeddingProvider {
 		apiAvailable: boolean;
 		totalApiCalls: number;
 		totalCacheHits: number;
+		totalFallbacks: number;
 		cacheSize: number;
 		model: string;
 		dimensions: number;
 		apiType: EmbeddingApiType;
+		version: string;
+		quality: EmbeddingDescriptor["quality"];
 	} {
+		const descriptor = this.getDescriptor();
 		return {
 			apiAvailable: this.apiAvailable ?? false,
 			totalApiCalls: this.totalApiCalls,
 			totalCacheHits: this.totalCacheHits,
+			totalFallbacks: this.totalFallbacks,
 			cacheSize: this.cache.size,
 			model: this.config.model,
 			dimensions: this.config.dimensions,
 			apiType: this.config.apiType,
+			version: descriptor.version,
+			quality: descriptor.quality,
 		};
 	}
 
@@ -295,6 +363,46 @@ export class EmbeddingProvider {
 		if (this.apiAvailable !== false) return true;
 		if (this.config.failureRetryMs <= 0) return true;
 		return Date.now() - this.lastApiFailureAt >= this.config.failureRetryMs;
+	}
+
+	private validateApiBatch(
+		embeddings: number[][],
+		expectedCount: number,
+	): number[][] {
+		if (embeddings.length !== expectedCount) {
+			throw new Error(
+				`Embedding API cardinality mismatch: expected ${expectedCount}, received ${embeddings.length}`,
+			);
+		}
+		for (let index = 0; index < embeddings.length; index++) {
+			const embedding = embeddings[index];
+			if (embedding.length !== this.config.dimensions) {
+				throw new Error(
+					`Embedding API dimension mismatch at index ${index}: expected ${this.config.dimensions}, received ${embedding.length}`,
+				);
+			}
+			if (!embedding.every(Number.isFinite)) {
+				throw new Error(
+					`Embedding API returned non-finite values at index ${index}`,
+				);
+			}
+		}
+		return embeddings;
+	}
+
+	private cacheKey(task: EmbeddingTask, text: string): string {
+		return this.hashText(`${this.providerVersion()}:${task}:${text}`);
+	}
+
+	private providerVersion(): string {
+		const identity = JSON.stringify({
+			apiType: this.config.apiType,
+			baseUrl: this.trimTrailingSlash(this.config.baseUrl),
+			model: this.config.model,
+			dimensions: this.config.dimensions,
+			task: this.config.task,
+		});
+		return `${this.config.apiType}:${this.config.model || "unspecified"}:${this.config.dimensions}:${this.hashText(identity).slice(0, 12)}`;
 	}
 
 	private hasApiCredentials(): boolean {

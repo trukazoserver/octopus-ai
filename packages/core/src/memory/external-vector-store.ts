@@ -1,8 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseAdapter } from "../storage/database.js";
 import { SqliteVectorStore } from "./sqlite-vss.js";
-import { VectorStore } from "./store.js";
-import type { MemoryItem, VectorSearchResult } from "./types.js";
+import {
+	embeddingDescriptorFromMetadata,
+	resolveVectorGeneration,
+	type VectorGeneration,
+	type LegacyVectorPayloadMigrationInput,
+	type LegacyVectorPayloadMigrationReport,
+	VectorStore,
+} from "./store.js";
+import type {
+	MemoryItem,
+	VectorSearchOptions,
+	VectorSearchResult,
+} from "./types.js";
 
 export type ExternalVectorBackend = "qdrant" | "weaviate" | "milvus";
 
@@ -44,7 +55,7 @@ export interface ExternalVectorStoreStatus {
 export class ExternalVectorStore extends VectorStore {
 	private local: SqliteVectorStore;
 	private initialized = false;
-	private dimension?: number;
+	private readonly ensuredGenerations = new Map<string, number>();
 	private consecutiveRemoteFailures = 0;
 	private remoteCircuitOpenUntil = 0;
 	private lastRemoteFailureAt?: Date;
@@ -69,7 +80,11 @@ export class ExternalVectorStore extends VectorStore {
 		if (this.initialized) return;
 		this.closing = false;
 		await this.local.initialize();
-		if (this.dimension) await this.ensureRemoteCollection(this.dimension);
+		if (this.config.dimension) {
+			await this.ensureRemoteCollection(
+				resolveVectorGeneration(undefined, this.config.dimension),
+			);
+		}
 		this.initialized = true;
 		await this.reconcilePendingWrites().catch(() => 0);
 		this.reconciliationTimer = setInterval(() => {
@@ -81,19 +96,24 @@ export class ExternalVectorStore extends VectorStore {
 	async store(item: MemoryItem): Promise<void> {
 		await this.ensureInitialized();
 		await this.db.transaction(async () => {
-			await this.local.store(item);
-			await this.enqueueRemoteWrite(item.id, "upsert");
+			await this.stageStore(item);
 		});
-		await this.reconcilePendingWrites(item.id);
+		await this.finalizeStore(item.id);
+	}
+
+	async stageStore(item: MemoryItem): Promise<void> {
+		await this.ensureInitialized();
+		await this.local.store(item);
+		await this.enqueueRemoteWrite(item.id, "upsert");
+	}
+
+	async finalizeStore(id: string): Promise<void> {
+		await this.reconcilePendingWrites(id);
 	}
 
 	async search(
 		queryEmbedding: number[],
-		options: {
-			limit: number;
-			threshold: number;
-			filter?: (item: MemoryItem) => boolean;
-		},
+		options: VectorSearchOptions,
 	): Promise<VectorSearchResult[]> {
 		await this.ensureInitialized();
 		if (this.isRemoteCircuitOpen()) {
@@ -102,8 +122,12 @@ export class ExternalVectorStore extends VectorStore {
 
 		let remote: RemoteSearchResult[];
 		try {
-			await this.ensureRemoteCollection(queryEmbedding.length);
-			remote = await this.searchRemote(queryEmbedding, options);
+			const generation = resolveVectorGeneration(
+				options.constraints?.embedding,
+				queryEmbedding.length,
+			);
+			await this.ensureRemoteCollection(generation);
+			remote = await this.searchRemote(queryEmbedding, options, generation);
 			this.recordRemoteSuccess();
 		} catch (err) {
 			this.recordRemoteFailure(err);
@@ -117,6 +141,9 @@ export class ExternalVectorStore extends VectorStore {
 			if (hit.score >= options.threshold) {
 				results.push({ item, similarity: hit.score });
 			}
+		}
+		if (results.length === 0 && options.constraints) {
+			return this.local.search(queryEmbedding, options);
 		}
 		return results.slice(0, options.limit);
 	}
@@ -159,6 +186,17 @@ export class ExternalVectorStore extends VectorStore {
 	}
 
 	async stageDelete(id: string): Promise<void> {
+		const existing = await this.local.getById(id);
+		if (existing) {
+			const descriptor = embeddingDescriptorFromMetadata(existing.metadata);
+			if (descriptor) {
+				const generation = resolveVectorGeneration(descriptor, existing.embedding.length);
+				this.ensuredGenerations.set(
+					this.collectionName(generation),
+					generation.dimensions,
+				);
+			}
+		}
 		await this.local.delete(id);
 		await this.enqueueRemoteWrite(id, "delete");
 	}
@@ -180,6 +218,67 @@ export class ExternalVectorStore extends VectorStore {
 			lastFailureAt: this.lastRemoteFailureAt,
 			lastError: this.lastRemoteError,
 		};
+	}
+
+	getDiagnostics(): Record<string, number> {
+		return this.local.getDiagnostics();
+	}
+
+	async migrateLegacyPayloads(
+		input: LegacyVectorPayloadMigrationInput,
+	): Promise<LegacyVectorPayloadMigrationReport> {
+		await this.ensureInitialized();
+		const limit = Math.max(1, Math.min(input.limit ?? 100, 1000));
+		const rows = await this.db.all<{ id: string }>(
+			`SELECT id FROM memory_items WHERE id > ?${input.upperBoundId ? " AND id <= ?" : ""} ORDER BY id ASC LIMIT ?`,
+			input.upperBoundId
+				? [input.cursor ?? "", input.upperBoundId, limit + 1]
+				: [input.cursor ?? "", limit + 1],
+		);
+		const report: LegacyVectorPayloadMigrationReport = {
+			supported: true,
+			mode: input.mode,
+			scanned: 0,
+			eligible: 0,
+			migrated: 0,
+			queued: 0,
+			missingDescriptor: 0,
+			invalidDescriptor: 0,
+			failed: 0,
+			hasMore: rows.length > limit,
+		};
+		for (const row of rows.slice(0, limit)) {
+			report.scanned++;
+			report.nextCursor = row.id;
+			const item = await this.local.getById(row.id);
+			if (!item) {
+				report.failed++;
+				continue;
+			}
+			const descriptor = embeddingDescriptorFromMetadata(item.metadata);
+			if (!descriptor) {
+				if (item.metadata.embeddingVersion) report.invalidDescriptor++;
+				else report.missingDescriptor++;
+				continue;
+			}
+			try {
+				resolveVectorGeneration(descriptor, item.embedding.length);
+			} catch {
+				report.invalidDescriptor++;
+				continue;
+			}
+			report.eligible++;
+			if (input.mode === "preview") continue;
+			await this.enqueueRemoteWrite(item.id, "upsert");
+			await this.reconcilePendingWrites(item.id);
+			const pending = await this.db.get(
+				"SELECT memory_id FROM memory_vector_outbox WHERE target_id = ? AND memory_id = ?",
+				[this.targetId, item.id],
+			);
+			if (pending) report.queued++;
+			else report.migrated++;
+		}
+		return report;
 	}
 
 	async reconcilePendingWrites(memoryId?: string): Promise<number> {
@@ -264,42 +363,43 @@ export class ExternalVectorStore extends VectorStore {
 		if (!this.initialized) await this.initialize();
 	}
 
-	private async ensureRemoteCollection(dimension: number): Promise<void> {
-		if (this.dimension === dimension) return;
-		if (this.dimension && this.dimension !== dimension) {
-			throw new Error(
-				`Vector dimension mismatch for ${this.config.backend}: expected ${this.dimension}, received ${dimension}`,
-			);
-		}
+	private async ensureRemoteCollection(generation: VectorGeneration): Promise<void> {
+		const collection = this.collectionName(generation);
+		if (this.ensuredGenerations.get(collection) === generation.dimensions) return;
 		switch (this.config.backend) {
 			case "qdrant":
-				await this.request(`/collections/${this.config.collection}`, {
+				await this.request(`/collections/${collection}`, {
 					method: "PUT",
-					body: { vectors: { size: dimension, distance: "Cosine" } },
+					body: { vectors: { size: generation.dimensions, distance: "Cosine" } },
 				});
 				break;
 			case "weaviate":
-				await this.ensureWeaviateClass(dimension);
+				await this.ensureWeaviateClass(collection, generation.dimensions);
 				break;
 			case "milvus":
-				await this.ensureMilvusCollection(dimension);
+				await this.ensureMilvusCollection(collection, generation.dimensions);
 				break;
 		}
-		this.dimension = dimension;
+		this.ensuredGenerations.set(collection, generation.dimensions);
 	}
 
 	private async upsertRemote(item: MemoryItem): Promise<void> {
-		await this.ensureRemoteCollection(item.embedding.length);
+		const generation = resolveVectorGeneration(
+			embeddingDescriptorFromMetadata(item.metadata),
+			item.embedding.length,
+		);
+		await this.ensureRemoteCollection(generation);
+		const collection = this.collectionName(generation);
 		switch (this.config.backend) {
 			case "qdrant":
-				await this.request(`/collections/${this.config.collection}/points`, {
+				await this.request(`/collections/${collection}/points`, {
 					method: "PUT",
 					body: {
 						points: [
 							{
 								id: this.pointId(item.id),
 								vector: item.embedding,
-								payload: { memoryId: item.id },
+								payload: this.remoteMetadata(item, generation),
 							},
 						],
 					},
@@ -307,13 +407,13 @@ export class ExternalVectorStore extends VectorStore {
 				break;
 			case "weaviate":
 				await this.request(
-					`/objects/${encodeURIComponent(this.config.collection)}/${this.pointId(item.id)}`,
+					`/objects/${encodeURIComponent(collection)}/${this.pointId(item.id)}`,
 					{
 						method: "PUT",
 						body: {
-							class: this.config.collection,
+							class: collection,
 							id: this.pointId(item.id),
-							properties: { memoryId: item.id },
+							properties: this.remoteMetadata(item, generation),
 							vector: item.embedding,
 						},
 					},
@@ -323,8 +423,8 @@ export class ExternalVectorStore extends VectorStore {
 				await this.request("/vectordb/entities/upsert", {
 					method: "POST",
 					body: {
-						collectionName: this.config.collection,
-						data: [{ id: item.id, vector: item.embedding, memoryId: item.id }],
+						collectionName: collection,
+						data: [{ id: item.id, vector: item.embedding, ...this.remoteMetadata(item, generation) }],
 					},
 				});
 				break;
@@ -333,19 +433,22 @@ export class ExternalVectorStore extends VectorStore {
 
 	private async searchRemote(
 		queryEmbedding: number[],
-		options: { limit: number; threshold: number },
+		options: VectorSearchOptions,
+		generation: VectorGeneration,
 	): Promise<RemoteSearchResult[]> {
+		const collection = this.collectionName(generation);
 		switch (this.config.backend) {
 			case "qdrant": {
 				const response = await this.request<{
 					result?: Array<{ score?: number; payload?: { memoryId?: string } }>;
-				}>(`/collections/${this.config.collection}/points/search`, {
+				}>(`/collections/${collection}/points/search`, {
 					method: "POST",
 					body: {
 						vector: queryEmbedding,
 						limit: options.limit,
 						score_threshold: options.threshold,
 						with_payload: true,
+						filter: this.qdrantFilter(options),
 					},
 				});
 				return (response?.result ?? []).flatMap((hit) =>
@@ -366,10 +469,10 @@ export class ExternalVectorStore extends VectorStore {
 				}>("/graphql", {
 					method: "POST",
 					body: {
-						query: `{ Get { ${this.config.collection}(nearVector: { vector: ${vector} certainty: ${options.threshold} } limit: ${options.limit}) { memoryId _additional { certainty } } } }`,
+						query: `{ Get { ${collection}(nearVector: { vector: ${vector} certainty: ${options.threshold} }${this.weaviateWhere(options)} limit: ${options.limit}) { memoryId _additional { certainty } } } }`,
 					},
 				});
-				const rows = response?.data?.Get?.[this.config.collection] ?? [];
+				const rows = response?.data?.Get?.[collection] ?? [];
 				return rows.flatMap((row) => {
 					const memoryId = row.memoryId;
 					const additional = row._additional as
@@ -390,10 +493,11 @@ export class ExternalVectorStore extends VectorStore {
 				}>("/vectordb/entities/search", {
 					method: "POST",
 					body: {
-						collectionName: this.config.collection,
+						collectionName: collection,
 						data: [queryEmbedding],
 						limit: options.limit,
 						outputFields: ["memoryId"],
+						filter: this.milvusFilter(options),
 					},
 				});
 				return (response?.data ?? []).flatMap((hit) =>
@@ -410,11 +514,105 @@ export class ExternalVectorStore extends VectorStore {
 		}
 	}
 
+	private remoteMetadata(
+		item: MemoryItem,
+		generation: VectorGeneration,
+	): Record<string, unknown> {
+		return {
+			memoryId: item.id,
+			scopeTenant: this.metadataString(item.metadata.tenantId),
+			scopeUser: this.metadataString(item.metadata.userId),
+			scopeProject: this.metadataString(item.metadata.projectId),
+			scopeAgent: this.metadataString(item.metadata.agentRole),
+			scopeSession: this.metadataString(item.metadata.sessionId),
+			scopeTask: this.metadataString(item.metadata.taskId),
+			embeddingVersion: this.metadataString(item.metadata.embeddingVersion),
+			embeddingQuality: this.metadataString(item.metadata.embeddingQuality),
+			embeddingDimensions: Number(item.metadata.embeddingDimensions ?? 0),
+			embeddingGeneration: generation.key,
+		};
+	}
+
+	private collectionName(generation: VectorGeneration): string {
+		if (generation.legacy) return this.config.collection;
+		const raw = `${this.config.collection}__${generation.key}`;
+		if (this.config.backend !== "weaviate") return raw;
+		const sanitized = raw.replace(/[^A-Za-z0-9_]/g, "_");
+		return `${sanitized.charAt(0).toUpperCase()}${sanitized.slice(1)}`;
+	}
+
+	private qdrantFilter(options: VectorSearchOptions): Record<string, unknown> | undefined {
+		const scope = options.constraints?.scope;
+		const embedding = options.constraints?.embedding;
+		if (!scope && !embedding) return undefined;
+		const must: Record<string, unknown>[] = [];
+		const exact = (key: string, value: unknown) => {
+			if (typeof value === "string") must.push({ key, match: { value } });
+		};
+		exact("scopeTenant", scope?.tenantId);
+		exact("scopeUser", scope?.userId);
+		exact("scopeProject", scope?.projectId);
+		exact("embeddingVersion", embedding?.version);
+		if (embedding) must.push({ key: "embeddingDimensions", match: { value: embedding.dimensions } });
+		for (const [key, value] of [
+			["scopeAgent", scope?.agentRole],
+			["scopeSession", scope?.sessionId],
+			["scopeTask", scope?.taskId],
+		] as const) {
+			must.push({ key, match: { any: ["", value ?? ""] } });
+		}
+		return { must };
+	}
+
+	private weaviateWhere(options: VectorSearchOptions): string {
+		const operands: string[] = [];
+		const add = (path: string, value: unknown) => {
+			if (typeof value === "string") {
+				operands.push(`{ path: [${JSON.stringify(path)}] operator: Equal valueText: ${JSON.stringify(value)} }`);
+			}
+		};
+		add("scopeTenant", options.constraints?.scope?.tenantId);
+		add("scopeUser", options.constraints?.scope?.userId);
+		add("scopeProject", options.constraints?.scope?.projectId);
+		add("embeddingVersion", options.constraints?.embedding?.version);
+		return operands.length > 0
+			? ` where: { operator: And operands: [${operands.join(" ")}] }`
+			: "";
+	}
+
+	private milvusFilter(options: VectorSearchOptions): string | undefined {
+		const clauses: string[] = [];
+		const add = (key: string, value: unknown) => {
+			if (typeof value === "string") {
+				clauses.push(`${key} == ${JSON.stringify(value)}`);
+			}
+		};
+		add("scopeTenant", options.constraints?.scope?.tenantId);
+		add("scopeUser", options.constraints?.scope?.userId);
+		add("scopeProject", options.constraints?.scope?.projectId);
+		add("embeddingVersion", options.constraints?.embedding?.version);
+		return clauses.length > 0 ? clauses.join(" && ") : undefined;
+	}
+
+	private metadataString(value: unknown): string {
+		return typeof value === "string" ? value : "";
+	}
+
 	private async deleteRemote(id: string): Promise<void> {
+		const collections = new Set([
+			this.config.collection,
+			...this.ensuredGenerations.keys(),
+		]);
+		for (const collection of collections) {
+			await this.deleteRemoteFromCollection(id, collection);
+		}
+	}
+
+	private async deleteRemoteFromCollection(id: string, collection: string): Promise<void> {
 		switch (this.config.backend) {
 			case "qdrant":
 				await this.request(
-					`/collections/${this.config.collection}/points/delete`,
+					`/collections/${collection}/points/delete`,
 					{
 						method: "POST",
 						body: { points: [this.pointId(id)] },
@@ -423,7 +621,7 @@ export class ExternalVectorStore extends VectorStore {
 				break;
 			case "weaviate":
 				await this.request(
-					`/objects/${encodeURIComponent(this.config.collection)}/${this.pointId(id)}`,
+					`/objects/${encodeURIComponent(collection)}/${this.pointId(id)}`,
 					{ method: "DELETE" },
 				);
 				break;
@@ -431,7 +629,7 @@ export class ExternalVectorStore extends VectorStore {
 				await this.request("/vectordb/entities/delete", {
 					method: "POST",
 					body: {
-						collectionName: this.config.collection,
+						collectionName: collection,
 						filter: `id == "${id.replace(/"/g, '\\"')}"`,
 					},
 				});
@@ -471,8 +669,10 @@ export class ExternalVectorStore extends VectorStore {
 		this.remoteCircuitOpenUntil = Date.now() + REMOTE_CIRCUIT_OPEN_MS;
 	}
 
-	private async ensureWeaviateClass(dimension: number): Promise<void> {
-		const className = this.config.collection;
+	private async ensureWeaviateClass(
+		className: string,
+		_dimension: number,
+	): Promise<void> {
 		const existing = await this.request(`/schema/${className}`, {
 			method: "GET",
 			allowNotFound: true,
@@ -488,22 +688,36 @@ export class ExternalVectorStore extends VectorStore {
 					vectorCacheMaxObjects: 100000,
 				},
 				moduleConfig: {},
-				properties: [{ name: "memoryId", dataType: ["text"] }],
+				properties: [
+					"memoryId",
+					"scopeTenant",
+					"scopeUser",
+					"scopeProject",
+					"scopeAgent",
+					"scopeSession",
+					"scopeTask",
+					"embeddingVersion",
+					"embeddingQuality",
+					"embeddingGeneration",
+				].map((name) => ({ name, dataType: ["text"] })),
 			},
 		});
 	}
 
-	private async ensureMilvusCollection(dimension: number): Promise<void> {
+	private async ensureMilvusCollection(
+		collection: string,
+		dimension: number,
+	): Promise<void> {
 		const existing = await this.request("/vectordb/collections/describe", {
 			method: "POST",
-			body: { collectionName: this.config.collection },
+			body: { collectionName: collection },
 			allowNotFound: true,
 		});
 		if (!existing) {
 			await this.request("/vectordb/collections/create", {
 				method: "POST",
 				body: {
-					collectionName: this.config.collection,
+					collectionName: collection,
 					schema: {
 						autoId: false,
 						enabledDynamicField: true,

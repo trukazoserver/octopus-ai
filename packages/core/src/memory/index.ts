@@ -6,6 +6,7 @@ export type {
 	MemoryContext,
 	ScoredMemory,
 	VectorSearchResult,
+	EmbeddingDescriptor,
 	EmbeddingFunction,
 } from "./types.js";
 
@@ -22,7 +23,16 @@ export type {
 } from "./external-vector-store.js";
 export { PgVectorStore } from "./pgvector-store.js";
 export type { PgVectorStoreConfig } from "./pgvector-store.js";
-export { VectorStore } from "./store.js";
+export {
+	VectorStore,
+	resolveVectorGeneration,
+	embeddingDescriptorFromMetadata,
+} from "./store.js";
+export type {
+	VectorGeneration,
+	LegacyVectorPayloadMigrationInput,
+	LegacyVectorPayloadMigrationReport,
+} from "./store.js";
 export { createVectorStore } from "./factory.js";
 export type { VectorStoreFactoryOptions } from "./factory.js";
 export { KnowledgeGraph } from "./knowledge-graph.js";
@@ -72,6 +82,28 @@ export { WorkingMemory } from "./working-memory.js";
 export type { WorkingState } from "./working-memory.js";
 export type { CondensationCallback } from "./stm.js";
 export { ContextAssembler } from "./context-assembler.js";
+export { evaluateMemoryConditions } from "./evaluation.js";
+export {
+	MemoryBenchmarkStore,
+	normalizeMemoryBenchmarkSource,
+	scoreMemoryBenchmarkCase,
+} from "./benchmark.js";
+export type {
+	MemoryBenchmarkFormat,
+	MemoryBenchmarkDocument,
+	MemoryBenchmarkCase,
+	NormalizedMemoryBenchmark,
+	MemoryBenchmarkCaseMetrics,
+	MemoryBenchmarkCondition,
+	MemoryBenchmarkHit,
+	MemoryBenchmarkIsolatedRuntime,
+	MemoryBenchmarkRuntimeFactory,
+} from "./benchmark.js";
+export type {
+	MemoryEvaluationCase,
+	MemoryEvaluationCondition,
+	MemoryEvaluationResult,
+} from "./evaluation.js";
 export type { ContextAssemblerConfig } from "./context-assembler.js";
 export { MemoryIntegrityLayer } from "./integrity.js";
 export { MemoryOrchestrator } from "./orchestrator.js";
@@ -103,6 +135,19 @@ export type {
 	MemoryAuditEntry,
 	MemoryActionLogEntry,
 	MemoryBackfillReport,
+	EmbeddingReindexReport,
+	LegacyClaimBackfillReport,
+	MemoryMetricsSnapshot,
+	MemoryOperationType,
+	MemoryOperationStatus,
+	MemoryOperationControlAction,
+	MemoryOperationLeaseState,
+	MemoryOperationCreateInput,
+	MemoryOperationRecord,
+	MemoryOperationListOptions,
+	VectorSearchConstraints,
+	VectorSearchOptions,
+	VersionedEmbedding,
 	MemoryAuditIntegrityReport,
 	MemoryLogIntegrityResult,
 	RetrievalSignals,
@@ -113,6 +158,7 @@ export type {
 	MemoryValidationResult,
 	MemoryPack,
 	MemoryReadContext,
+	MemoryReadOptions,
 	MemoryWriteResult,
 	MemoryFeedbackType,
 	MemoryFeedbackInput,

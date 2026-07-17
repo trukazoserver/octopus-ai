@@ -68,6 +68,13 @@ export class PostgresDatabase implements DatabaseAdapter {
 		// PostgreSQL commits each non-transactional query immediately.
 	}
 
+	async currentTime(): Promise<Date> {
+		const row = await this.get<{ now: Date | string }>(
+			"SELECT clock_timestamp() AS now",
+		);
+		return new Date(row?.now ?? new Date().toISOString());
+	}
+
 	private async runMigrations(): Promise<void> {
 		await this.run(`
 			CREATE TABLE IF NOT EXISTS _migrations (

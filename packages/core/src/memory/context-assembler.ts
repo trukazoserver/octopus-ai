@@ -1,8 +1,10 @@
+import type { KnowledgeManager } from "./knowledge-manager.js";
 import type { MemoryOrchestrator } from "./orchestrator.js";
 import { ProactiveMemoryScanner } from "./proactive-scanner.js";
 import type {
 	ContextAssemblyInput,
 	ContextAssemblyResult,
+	ContextKnowledgeChunk,
 	MemoryPack,
 	ScoredMemory,
 } from "./types.js";
@@ -11,12 +13,16 @@ export interface ContextAssemblerConfig {
 	reserveTokens: number;
 	maxSimilarEpisodes: number;
 	maxAgentLessons: number;
+	maxKnowledgeChunks: number;
+	maxKnowledgeTokens: number;
 }
 
 const DEFAULT_CONFIG: ContextAssemblerConfig = {
 	reserveTokens: 96,
 	maxSimilarEpisodes: 4,
 	maxAgentLessons: 5,
+	maxKnowledgeChunks: 4,
+	maxKnowledgeTokens: 400,
 };
 
 export class ContextAssembler {
@@ -26,6 +32,7 @@ export class ContextAssembler {
 	constructor(
 		private orchestrator: MemoryOrchestrator,
 		config: Partial<ContextAssemblerConfig> = {},
+		private knowledgeManager?: KnowledgeManager,
 	) {
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.scanner = new ProactiveMemoryScanner(orchestrator, {
@@ -33,15 +40,24 @@ export class ContextAssembler {
 		});
 	}
 
+	setKnowledgeManager(knowledgeManager: KnowledgeManager): void {
+		this.knowledgeManager = knowledgeManager;
+	}
+
 	async assemble(input: ContextAssemblyInput): Promise<ContextAssemblyResult> {
 		const effectiveBudget = Math.max(
 			64,
 			input.budgetTokens - this.config.reserveTokens,
 		);
+		const knowledgeReserve =
+			this.knowledgeManager && (input.knowledgeCollectionIds?.length ?? 0) > 0
+				? Math.min(this.config.maxKnowledgeTokens, Math.floor(effectiveBudget / 2))
+				: 0;
+		const memoryBudget = Math.max(64, effectiveBudget - knowledgeReserve);
 		const memoryPack = await this.orchestrator.read(
 			input.objective,
 			{ ...input, trackUsage: false },
-			effectiveBudget,
+			memoryBudget,
 		);
 		const proactive = await this.scanner.scan(
 			input.objective,
@@ -60,6 +76,10 @@ export class ContextAssembler {
 		const budgetExceeded = trimmed.tokenBudgetUsed > effectiveBudget;
 		const proactiveMemoryIds = proactive.reminders.map(
 			(reminder) => reminder.memoryId,
+		);
+		const knowledgeChunks = await this.retrieveKnowledgeChunks(
+			input,
+			knowledgeReserve,
 		);
 		await this.orchestrator.recordReadUsageByIds(
 			[
@@ -81,7 +101,43 @@ export class ContextAssembler {
 				"prospective_reminders",
 			],
 			budgetExceeded,
+			knowledgeChunks,
 		};
+	}
+
+	private async retrieveKnowledgeChunks(
+		input: ContextAssemblyInput,
+		budgetTokens: number,
+	): Promise<ContextKnowledgeChunk[]> {
+		const collectionIds = [...new Set(input.knowledgeCollectionIds ?? [])].filter(
+			Boolean,
+		);
+		if (!this.knowledgeManager || collectionIds.length === 0 || budgetTokens <= 0) {
+			return [];
+		}
+		const results = await this.knowledgeManager.searchChunks({
+			query: input.objective,
+			collectionIds,
+			limit: this.config.maxKnowledgeChunks * 3,
+		});
+		const selected: ContextKnowledgeChunk[] = [];
+		let used = 0;
+		for (const chunk of results) {
+			const cost = Math.ceil(chunk.content.split(/\s+/).length * 1.3);
+			if (used + cost > budgetTokens) continue;
+			selected.push({
+				id: chunk.id,
+				itemId: chunk.item_id,
+				collectionId: chunk.collection_id,
+				title: chunk.item_title ?? undefined,
+				content: chunk.content,
+				modality: chunk.modality,
+				score: chunk.score,
+			});
+			used += cost;
+			if (selected.length >= this.config.maxKnowledgeChunks) break;
+		}
+		return selected;
 	}
 
 	private mergeProspective(

@@ -11,6 +11,7 @@ export interface DatabaseAdapter {
 	get<T>(sql: string, params?: unknown[]): Promise<T | undefined>;
 	all<T>(sql: string, params?: unknown[]): Promise<T[]>;
 	transaction<T>(fn: () => Promise<T>): Promise<T>;
+	currentTime(): Promise<Date>;
 	flush?(): Promise<void>;
 }
 

@@ -104,6 +104,13 @@ export class NativeSqliteDatabase implements DatabaseAdapter {
 		await this.waitForTransaction();
 	}
 
+	async currentTime(): Promise<Date> {
+		const row = await this.get<{ now: string }>(
+			"SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS now",
+		);
+		return new Date(row?.now ?? new Date().toISOString());
+	}
+
 	private async runSavepoint<T>(context: TransactionContext, fn: () => Promise<T>): Promise<T> {
 		const name = `octopus_sp_${++this.savepointId}`;
 		const db = this.ensureOpen();

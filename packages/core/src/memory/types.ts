@@ -202,6 +202,104 @@ export interface MemoryBackfillReport {
 	skipped: number;
 }
 
+export interface VectorSearchConstraints {
+	scope?: MemoryScope;
+	embedding?: EmbeddingDescriptor;
+}
+
+export interface VectorSearchOptions {
+	limit: number;
+	threshold: number;
+	constraints?: VectorSearchConstraints;
+	filter?: (item: MemoryItem) => boolean;
+}
+
+export interface EmbeddingReindexReport {
+	mode: "preview" | "apply";
+	scanned: number;
+	eligible: number;
+	reindexed: number;
+	alreadyCurrent: number;
+	blocked: number;
+	failed: number;
+	target?: EmbeddingDescriptor;
+	nextCursor?: string;
+	hasMore?: boolean;
+}
+
+export interface LegacyClaimBackfillReport {
+	mode: "preview" | "apply";
+	scanned: number;
+	eligible: number;
+	inserted: number;
+	alreadyPresent: number;
+	missingScope: number;
+	missingValidFrom: number;
+	invalid: number;
+	nextCursor?: string;
+	hasMore?: boolean;
+	samples: Array<{ memoryId: string; outcome: string }>;
+}
+
+export interface MemoryMetricsSnapshot {
+	totalMemories: number;
+	versionedEmbeddings: number;
+	fallbackEmbeddings: number;
+	annIndexedMemories: number;
+	annCoverage: number;
+	annSearches: number;
+	annFallbackSearches: number;
+	annAverageCandidates: number;
+	temporalClaims: number;
+	activeInsights: number;
+	invalidatedInsights: number;
+	operationsByStatus: Record<string, number>;
+}
+
+export type MemoryOperationType = "embedding.reindex" | "claims.backfill";
+export type MemoryOperationStatus =
+	| "pending"
+	| "running"
+	| "paused"
+	| "completed"
+	| "cancelled"
+	| "failed";
+export type MemoryOperationControlAction = "run" | "pause" | "cancel";
+export type MemoryOperationLeaseState = "none" | "active" | "expired";
+
+export interface MemoryOperationCreateInput {
+	type: MemoryOperationType;
+	batchSize?: number;
+	allowFallbackTarget?: boolean;
+	validFromPolicy?: "require_explicit" | "created_at";
+}
+
+export interface MemoryOperationRecord {
+	id: string;
+	type: MemoryOperationType;
+	status: MemoryOperationStatus;
+	controlAction: MemoryOperationControlAction;
+	fenceVersion: number;
+	cursor?: string;
+	request: Record<string, unknown>;
+	progress: Record<string, unknown>;
+	targetDescriptor?: EmbeddingDescriptor;
+	attemptCount: number;
+	lastError?: string;
+	leaseState: MemoryOperationLeaseState;
+	resumable: boolean;
+	createdAt: Date;
+	updatedAt: Date;
+	completedAt?: Date;
+}
+
+export interface MemoryOperationListOptions {
+	type?: MemoryOperationType;
+	status?: MemoryOperationStatus;
+	limit?: number;
+	offset?: number;
+}
+
 export interface RetrievalSignals {
 	semanticScore: number;
 	confidence: number;
@@ -240,6 +338,22 @@ export interface MemoryScope {
 	taskId?: string;
 }
 
+export interface MemoryClaimInput {
+	entity: string;
+	key: string;
+	value: string | number | boolean;
+	validFrom?: Date | string;
+	validTo?: Date | string;
+}
+
+export interface MemoryClaimRecord extends MemoryClaimInput {
+	id: string;
+	memoryId: string;
+	recordedAt: Date;
+	retractedAt?: Date;
+	confidence: number;
+}
+
 export interface MemoryCandidate {
 	type: MemoryType;
 	content: string;
@@ -249,6 +363,7 @@ export interface MemoryCandidate {
 	importance?: number;
 	source?: MemorySource;
 	permissions?: MemoryPermissions;
+	claim?: MemoryClaimInput;
 	metadata?: Record<string, unknown>;
 	evidence?: {
 		sourceType:
@@ -303,12 +418,18 @@ export interface MemoryPack {
 export interface MemoryReadContext extends MemoryScope {
 	agentRole?: string;
 	timeRange?: { since?: Date; until?: Date };
+	validAt?: Date;
+	knownAt?: Date;
 	minTrustLevel?: MemorySourceTrustLevel;
 	trackUsage?: boolean;
 	actorId?: string;
 	includeSources?: boolean;
 	includeGraph?: boolean;
 	userConfirmed?: boolean;
+}
+
+export interface MemoryReadOptions {
+	maxResults?: number;
 }
 
 export interface MemoryWriteResult {
@@ -427,6 +548,17 @@ export interface ContextAssemblyInput extends MemoryReadContext {
 	objective: string;
 	budgetTokens: number;
 	now?: Date;
+	knowledgeCollectionIds?: string[];
+}
+
+export interface ContextKnowledgeChunk {
+	id: string;
+	itemId: string;
+	collectionId: string;
+	title?: string;
+	content: string;
+	modality: "text" | "image" | "audio" | "video" | "document" | "metadata";
+	score?: number;
 }
 
 export interface ContextAssemblyResult {
@@ -436,6 +568,7 @@ export interface ContextAssemblyResult {
 	degradedSections: string[];
 	mandatorySectionsPreserved: string[];
 	budgetExceeded: boolean;
+	knowledgeChunks: ContextKnowledgeChunk[];
 }
 
 export interface RetrieveOptions {
@@ -447,6 +580,7 @@ export interface RetrieveOptions {
 	relevanceWeight: number;
 	types?: MemoryType[];
 	since?: Date;
+	constraints?: VectorSearchConstraints;
 	filter?: (item: MemoryItem) => boolean;
 	updateAccess?: boolean;
 }
@@ -480,7 +614,24 @@ export interface VectorSearchResult {
 
 export type EmbeddingTask = "document" | "query" | "none";
 
-export type EmbeddingFunction = (
-	text: string,
-	task?: EmbeddingTask,
-) => Promise<number[]>;
+export interface EmbeddingDescriptor {
+	provider: string;
+	model: string;
+	dimensions: number;
+	version: string;
+	quality: "provider" | "fallback";
+}
+
+export interface VersionedEmbedding {
+	values: number[];
+	descriptor: EmbeddingDescriptor;
+}
+
+export type EmbeddingFunction = {
+	(text: string, task?: EmbeddingTask): Promise<number[]>;
+	embedVersioned?: (
+		text: string,
+		task?: EmbeddingTask,
+	) => Promise<VersionedEmbedding>;
+	getDescriptor?: () => EmbeddingDescriptor;
+};

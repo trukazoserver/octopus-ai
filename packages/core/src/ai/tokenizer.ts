@@ -12,11 +12,19 @@ export class TokenCounter {
 		let total = 0;
 		for (const message of messages) {
 			total += 4;
-			const contentStr =
-				typeof message.content === "string"
-					? message.content
-					: (message.content.find((p) => p.type === "text")?.text ?? "");
-			total += encoding.encode(contentStr).length;
+			if (typeof message.content === "string") {
+				total += encoding.encode(message.content).length;
+			} else {
+				for (const part of message.content) {
+					if (part.type === "text") {
+						total += encoding.encode(part.text).length;
+					} else {
+						// Providers tokenize images differently; reserve a conservative
+						// fixed amount so multimodal requests cannot bypass preflight.
+						total += 1024;
+					}
+				}
+			}
 			total += encoding.encode(message.role).length;
 			if (message.toolCalls) {
 				total += encoding.encode(JSON.stringify(message.toolCalls)).length;

@@ -74,6 +74,9 @@ import type {
 	MemoryAuditEntry,
 	MemoryFeedbackType,
 	MemoryGraphTraversalOptions,
+	MemoryOperationCreateInput,
+	MemoryOperationStatus,
+	MemoryOperationType,
 	MemoryReadContext,
 	MemoryRelationType,
 } from "../memory/types.js";
@@ -117,9 +120,9 @@ const CORS_HEADERS = {
 	"Access-Control-Allow-Origin": "*",
 	"Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, PATCH, OPTIONS",
 	"Access-Control-Allow-Headers":
-		"Content-Type, Range, Authorization, X-Octopus-Api-Key",
+		"Content-Type, Range, Authorization, X-Octopus-Api-Key, Idempotency-Key",
 	"Access-Control-Expose-Headers":
-		"Content-Length, Content-Range, Accept-Ranges",
+		"Content-Length, Content-Range, Accept-Ranges, Location",
 };
 
 const MEMORY_FEEDBACK_TYPES = new Set<Exclude<MemoryFeedbackType, "none">>([
@@ -130,6 +133,8 @@ const MEMORY_FEEDBACK_TYPES = new Set<Exclude<MemoryFeedbackType, "none">>([
 	"implicit_negative",
 	"implicit_neutral",
 ]);
+
+const LEARNING_ADMIN_ACCESS = { kind: "admin" } as const;
 
 const MEMORY_RELATION_TYPES = new Set<MemoryRelationType>([
 	"associated",
@@ -864,6 +869,26 @@ export class TransportServer {
 					void this.handleApplyEmbeddingConfig(res);
 					return;
 				}
+				if (pathname === "/api/memory/benchmarks/datasets") {
+					if (req.method === "GET") {
+						void this.handleMemoryBenchmarkDatasets(res);
+						return;
+					}
+					if (req.method === "POST") {
+						void this.handleMemoryBenchmarkImport(req, res);
+						return;
+					}
+				}
+				if (pathname === "/api/memory/benchmarks/runs") {
+					if (req.method === "GET") {
+						void this.handleMemoryBenchmarkRuns(res);
+						return;
+					}
+					if (req.method === "POST") {
+						void this.handleMemoryBenchmarkRun(req, res);
+						return;
+					}
+				}
 
 				if (req.method === "GET" && pathname.startsWith("/api/config/")) {
 					const keyPath = pathname.slice("/api/config/".length);
@@ -977,6 +1002,52 @@ export class TransportServer {
 				if (req.method === "GET" && pathname === "/api/memory/stats") {
 					void this.handleMemoryStats(res);
 					return;
+				}
+				if (req.method === "GET" && pathname === "/api/memory/metrics") {
+					void this.handleMemoryMetrics(res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					pathname === "/api/memory/vector-payloads/migrate"
+				) {
+					void this.handleLegacyVectorPayloadMigration(req, res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					pathname === "/api/memory/operations/preview"
+				) {
+					void this.handleMemoryOperationPreview(req, res);
+					return;
+				}
+				if (pathname === "/api/memory/operations") {
+					if (req.method === "POST") {
+						void this.handleMemoryOperationCreate(req, res);
+						return;
+					}
+					if (req.method === "GET") {
+						void this.handleMemoryOperationList(res, url.searchParams);
+						return;
+					}
+				}
+				const memoryOperationMatch = pathname.match(
+					/^\/api\/memory\/operations\/([^/]+)(\/(resume|pause|cancel))?$/,
+				);
+				if (memoryOperationMatch) {
+					const operationId = decodeURIComponent(memoryOperationMatch[1]);
+					if (req.method === "GET" && !memoryOperationMatch[2]) {
+						void this.handleMemoryOperationGet(res, operationId);
+						return;
+					}
+					if (req.method === "POST" && memoryOperationMatch[3]) {
+						void this.handleMemoryOperationAction(
+							res,
+							operationId,
+							memoryOperationMatch[3] as "resume" | "pause" | "cancel",
+						);
+						return;
+					}
 				}
 
 				if (req.method === "GET" && pathname === "/api/memory/config") {
@@ -3027,6 +3098,334 @@ export class TransportServer {
 		}
 	}
 
+	private async handleMemoryMetrics(res: ServerResponse): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator) {
+			jsonRes(res, 503, { error: "Advanced memory is not available" });
+			return;
+		}
+		try {
+			jsonRes(res, 200, await orchestrator.getMetricsSnapshot());
+		} catch (error) {
+			jsonRes(res, 500, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async handleLegacyVectorPayloadMigration(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator?.migrateLegacyVectorPayloads) {
+			jsonRes(res, 503, { error: "Advanced memory is not available" });
+			return;
+		}
+		const body = await this.readJsonBody(req, res);
+		if (!body) return;
+		if (
+			(body.mode !== "preview" && body.mode !== "apply") ||
+			(body.limit !== undefined &&
+				(!Number.isInteger(body.limit) || Number(body.limit) < 1 || Number(body.limit) > 1000))
+		) {
+			jsonRes(res, 400, { error: "Invalid vector payload migration request" });
+			return;
+		}
+		try {
+			jsonRes(
+				res,
+				200,
+				await orchestrator.migrateLegacyVectorPayloads({
+					mode: body.mode,
+					limit: typeof body.limit === "number" ? body.limit : undefined,
+					cursor: typeof body.cursor === "string" ? body.cursor : undefined,
+					upperBoundId:
+						typeof body.upperBoundId === "string" ? body.upperBoundId : undefined,
+				}),
+			);
+		} catch (error) {
+			jsonRes(res, 500, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async handleMemoryBenchmarkImport(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		const body = await this.readJsonBody(req, res);
+		if (!body) return;
+		if (
+			!orchestrator?.importMemoryBenchmark ||
+			typeof body.name !== "string" ||
+			!(["memops", "longmemeval", "beam"] as unknown[]).includes(body.format) ||
+			body.source === undefined
+		) {
+			jsonRes(res, 400, { error: "Invalid memory benchmark dataset" });
+			return;
+		}
+		try {
+			const sourceText = JSON.stringify(body.source);
+			const imported = await orchestrator.importMemoryBenchmark({
+				name: body.name.trim(),
+				format: body.format,
+				sourceName:
+					typeof body.sourceName === "string" ? body.sourceName : "api-dataset.json",
+				sourceSha256: crypto.createHash("sha256").update(sourceText).digest("hex"),
+				source: body.source,
+				options:
+					body.options && typeof body.options === "object" ? body.options : undefined,
+			});
+			jsonRes(res, 201, imported);
+		} catch (error) {
+			jsonRes(res, 422, { error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+
+	private async handleMemoryBenchmarkDatasets(res: ServerResponse): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator?.listMemoryBenchmarkDatasets) {
+			jsonRes(res, 503, { error: "Memory benchmarks are not available" });
+			return;
+		}
+		jsonRes(res, 200, await orchestrator.listMemoryBenchmarkDatasets());
+	}
+
+	private async handleMemoryBenchmarkRun(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		const body = await this.readJsonBody(req, res);
+		if (!body) return;
+		if (!orchestrator?.createMemoryBenchmarkRun || typeof body.datasetId !== "string") {
+			jsonRes(res, 400, { error: "Invalid memory benchmark run" });
+			return;
+		}
+		try {
+			jsonRes(
+				res,
+				201,
+				await orchestrator.createMemoryBenchmarkRun(body.datasetId, {
+					k: typeof body.k === "number" ? body.k : 10,
+					condition:
+						body.condition === "no-memory" || body.condition === "octopus-isolated"
+							? body.condition
+							: "lexical-baseline",
+				}),
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			jsonRes(res, message === "MEMORY_BENCHMARK_DATASET_NOT_FOUND" ? 404 : 500, { error: message });
+		}
+	}
+
+	private async handleMemoryBenchmarkRuns(res: ServerResponse): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator?.listMemoryBenchmarkRuns) {
+			jsonRes(res, 503, { error: "Memory benchmarks are not available" });
+			return;
+		}
+		jsonRes(res, 200, await orchestrator.listMemoryBenchmarkRuns());
+	}
+
+	private parseMemoryOperationInput(
+		body: Record<string, unknown>,
+	): MemoryOperationCreateInput | undefined {
+		if (body.type !== "embedding.reindex" && body.type !== "claims.backfill") {
+			return undefined;
+		}
+		if (
+			body.batchSize !== undefined &&
+			(!Number.isInteger(body.batchSize) || Number(body.batchSize) < 1 || Number(body.batchSize) > 1000)
+		) {
+			return undefined;
+		}
+		if (
+			body.allowFallbackTarget !== undefined &&
+			typeof body.allowFallbackTarget !== "boolean"
+		) {
+			return undefined;
+		}
+		if (
+			body.validFromPolicy !== undefined &&
+			body.validFromPolicy !== "require_explicit" &&
+			body.validFromPolicy !== "created_at"
+		) {
+			return undefined;
+		}
+		return {
+			type: body.type,
+			batchSize:
+				typeof body.batchSize === "number" ? body.batchSize : undefined,
+			allowFallbackTarget:
+				typeof body.allowFallbackTarget === "boolean"
+					? body.allowFallbackTarget
+					: undefined,
+			validFromPolicy:
+				body.validFromPolicy === "created_at"
+					? "created_at"
+					: body.validFromPolicy === "require_explicit"
+						? "require_explicit"
+						: undefined,
+		};
+	}
+
+	private memoryOperationErrorStatus(error: unknown): number {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message === "MEMORY_OPERATION_NOT_FOUND") return 404;
+		if (
+			message === "MEMORY_OPERATION_LEASE_CONFLICT" ||
+			message === "MEMORY_OPERATION_IDEMPOTENCY_CONFLICT" ||
+			message === "MEMORY_OPERATION_FAILED" ||
+			message === "MEMORY_OPERATION_TARGET_CHANGED"
+			|| message === "MEMORY_OPERATION_TERMINAL"
+		) {
+			return 409;
+		}
+		if (
+			message === "MEMORY_OPERATION_FALLBACK_TARGET_BLOCKED" ||
+			message === "MEMORY_OPERATION_TARGET_UNAVAILABLE"
+		) {
+			return 422;
+		}
+		if (message === "MEMORY_OPERATION_INVALID_BATCH_SIZE") return 400;
+		return 500;
+	}
+
+	private async handleMemoryOperationPreview(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator?.previewMemoryOperation) {
+			jsonRes(res, 503, { error: "Advanced memory is not available" });
+			return;
+		}
+		const body = await this.readJsonBody(req, res);
+		if (!body) return;
+		const input = this.parseMemoryOperationInput(body);
+		if (!input) {
+			jsonRes(res, 400, { error: "Invalid memory operation request" });
+			return;
+		}
+		try {
+			jsonRes(res, 200, await orchestrator.previewMemoryOperation(input));
+		} catch (error) {
+			jsonRes(res, this.memoryOperationErrorStatus(error), {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async handleMemoryOperationCreate(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator?.createMemoryOperation) {
+			jsonRes(res, 503, { error: "Advanced memory is not available" });
+			return;
+		}
+		const body = await this.readJsonBody(req, res);
+		if (!body) return;
+		const input = this.parseMemoryOperationInput(body);
+		if (!input) {
+			jsonRes(res, 400, { error: "Invalid memory operation request" });
+			return;
+		}
+		const rawKey = req.headers["idempotency-key"];
+		const idempotencyKey = Array.isArray(rawKey) ? rawKey[0] : rawKey;
+		try {
+			const result = await orchestrator.createMemoryOperation(
+				input,
+				idempotencyKey?.slice(0, 200),
+			);
+			res.setHeader("Location", `/api/memory/operations/${result.operation.id}`);
+			jsonRes(res, result.replayed ? 200 : 201, result);
+		} catch (error) {
+			jsonRes(res, this.memoryOperationErrorStatus(error), {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async handleMemoryOperationList(
+		res: ServerResponse,
+		params: URLSearchParams,
+	): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator?.listMemoryOperations) {
+			jsonRes(res, 503, { error: "Advanced memory is not available" });
+			return;
+		}
+		const type = params.get("type") as MemoryOperationType | null;
+		const status = params.get("status") as MemoryOperationStatus | null;
+		if (type && type !== "embedding.reindex" && type !== "claims.backfill") {
+			jsonRes(res, 400, { error: "Invalid operation type" });
+			return;
+		}
+		if (
+			status &&
+			!["pending", "running", "paused", "completed", "cancelled", "failed"].includes(
+				status,
+			)
+		) {
+			jsonRes(res, 400, { error: "Invalid operation status" });
+			return;
+		}
+		jsonRes(
+			res,
+			200,
+			await orchestrator.listMemoryOperations({
+				type: type ?? undefined,
+				status: status ?? undefined,
+				limit: Number(params.get("limit") ?? 50),
+				offset: Number(params.get("offset") ?? 0),
+			}),
+		);
+	}
+
+	private async handleMemoryOperationGet(
+		res: ServerResponse,
+		id: string,
+	): Promise<void> {
+		const operation = await this.system?.memoryOrchestrator?.getMemoryOperation?.(id);
+		jsonRes(
+			res,
+			operation ? 200 : 404,
+			operation ?? { error: "Memory operation not found" },
+		);
+	}
+
+	private async handleMemoryOperationAction(
+		res: ServerResponse,
+		id: string,
+		action: "resume" | "pause" | "cancel",
+	): Promise<void> {
+		const orchestrator = this.system?.memoryOrchestrator;
+		if (!orchestrator?.resumeMemoryOperation) {
+			jsonRes(res, 503, { error: "Advanced memory is not available" });
+			return;
+		}
+		try {
+			const operation =
+				action === "resume"
+					? await orchestrator.resumeMemoryOperation(id)
+					: action === "pause"
+						? await orchestrator.pauseMemoryOperation(id)
+						: await orchestrator.cancelMemoryOperation(id);
+			jsonRes(res, 200, operation);
+		} catch (error) {
+			jsonRes(res, this.memoryOperationErrorStatus(error), {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	private async getAdvancedMemoryStats(): Promise<Record<string, number>> {
 		const db = this.system?.db;
 		if (!db?.get) return {};
@@ -4232,10 +4631,13 @@ export class TransportServer {
 			}
 			const limit = Number.parseInt(params.get("limit") ?? "50", 10);
 			const type = params.get("type") ?? undefined;
-			const insights = await this.system.learningEngine.listInsights({
-				limit: Number.isFinite(limit) ? limit : 50,
-				...(type ? { type } : {}),
-			});
+			const insights = await this.system.learningEngine.listInsights(
+				LEARNING_ADMIN_ACCESS,
+				{
+					limit: Number.isFinite(limit) ? limit : 50,
+					...(type ? { type } : {}),
+				},
+			);
 			jsonRes(res, 200, {
 				enabled: config.learning.enabled,
 				config: config.learning,
@@ -4269,10 +4671,13 @@ export class TransportServer {
 			)
 				? rawStatus
 				: undefined;
-			const experiences = await this.system.learningEngine.listExperiences({
-				limit: Number.isFinite(limit) ? limit : 30,
-				...(status ? { status } : {}),
-			});
+			const experiences = await this.system.learningEngine.listExperiences(
+				LEARNING_ADMIN_ACCESS,
+				{
+					limit: Number.isFinite(limit) ? limit : 30,
+					...(status ? { status } : {}),
+				},
+			);
 			jsonRes(res, 200, {
 				enabled: config.learning.enabled,
 				config: config.learning,
@@ -4301,7 +4706,18 @@ export class TransportServer {
 				jsonRes(res, 400, { error: "Invalid JSON body" });
 				return;
 			}
-			await this.system.learningEngine.addFeedback({
+			const rating = body.rating;
+			if (
+				typeof rating !== "number" &&
+				rating !== "positive" &&
+				rating !== "negative"
+			) {
+				jsonRes(res, 400, { error: "Invalid learning feedback rating" });
+				return;
+			}
+			const ok = await this.system.learningEngine.addFeedback(
+				LEARNING_ADMIN_ACCESS,
+				{
 				experienceId:
 					typeof body.experienceId === "string" ? body.experienceId : undefined,
 				conversationId:
@@ -4310,15 +4726,15 @@ export class TransportServer {
 						: undefined,
 				messageId:
 					typeof body.messageId === "string" ? body.messageId : undefined,
-				rating:
-					typeof body.rating === "number" ||
-					body.rating === "positive" ||
-					body.rating === "negative"
-						? body.rating
-						: "positive",
+				rating,
 				comment: typeof body.comment === "string" ? body.comment : undefined,
-			});
-			jsonRes(res, 200, { ok: true });
+				},
+			);
+			jsonRes(
+				res,
+				ok ? 200 : 404,
+				ok ? { ok: true } : { error: "Learning experience not found" },
+			);
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -4335,7 +4751,10 @@ export class TransportServer {
 				jsonRes(res, 404, { error: "Learning engine not available" });
 				return;
 			}
-			const ok = await this.system.learningEngine.forgetInsight(id);
+			const ok = await this.system.learningEngine.forgetInsight(
+				LEARNING_ADMIN_ACCESS,
+				id,
+			);
 			jsonRes(
 				res,
 				ok ? 200 : 404,

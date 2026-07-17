@@ -190,6 +190,13 @@ export class SqlJsDatabase implements DatabaseAdapter {
 		this.persist();
 	}
 
+	async currentTime(): Promise<Date> {
+		const row = await this.get<{ now: string }>(
+			"SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS now",
+		);
+		return new Date(row?.now ?? new Date().toISOString());
+	}
+
 	private ensureOpen(): Database {
 		if (!this.db) {
 			throw new Error("Database is not initialized. Call initialize() first.");
@@ -260,5 +267,6 @@ function normalizeSqlJsRow(row: Record<string, unknown>): Record<string, unknown
 	for (const [key, value] of Object.entries(row)) {
 		normalized[key] = value instanceof Uint8Array && !Buffer.isBuffer(value) ? Buffer.from(value) : value;
 	}
+
 	return normalized;
 }

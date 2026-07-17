@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import {
 	ConfigLoader,
 	type MemoryCandidate,
@@ -295,6 +296,54 @@ export function createMemoryCommand(): Command {
 				process.exit(1);
 			}
 		});
+
+	const benchmark = cmd.command("benchmark").description("Import and run memory retrieval benchmarks");
+	benchmark
+		.command("import <file>")
+		.requiredOption("--format <format>", "memops, longmemeval, or beam")
+		.option("--name <name>", "Dataset display name")
+		.action(async (file: string, options: { format: string; name?: string }) => {
+			const format = options.format.toLowerCase();
+			if (!["memops", "longmemeval", "beam"].includes(format)) throw new Error("Unsupported benchmark format");
+			const expanded = expandTildePath(file);
+			const content = fs.readFileSync(expanded, "utf8");
+			const source = JSON.parse(content) as unknown;
+			const payload = { name: options.name ?? path.basename(expanded), format, sourceName: path.basename(expanded), source };
+			const serverUrl = await getActiveMemoryServerUrl();
+			if (serverUrl) {
+				console.log(JSON.stringify(await postJson(`${serverUrl}/api/memory/benchmarks/datasets`, payload), null, 2));
+				return;
+			}
+			const system = await bootstrap();
+			try {
+				console.log(JSON.stringify(await system.memoryOrchestrator.importMemoryBenchmark({ ...payload, format: format as "memops" | "longmemeval" | "beam", sourceSha256: createHash("sha256").update(content).digest("hex") }), null, 2));
+			} finally {
+				await system.shutdown();
+			}
+		});
+	benchmark.command("datasets").action(async () => {
+		const serverUrl = await getActiveMemoryServerUrl();
+		if (serverUrl) return console.log(JSON.stringify(await getJson(`${serverUrl}/api/memory/benchmarks/datasets`), null, 2));
+		const system = await bootstrap();
+		try { console.log(JSON.stringify(await system.memoryOrchestrator.listMemoryBenchmarkDatasets(), null, 2)); } finally { await system.shutdown(); }
+	});
+	benchmark
+		.command("run <datasetId>")
+		.option("--k <number>", "Retrieval cutoff", "10")
+		.option("--condition <condition>", "no-memory, lexical-baseline, or octopus-isolated", "lexical-baseline")
+		.action(async (datasetId: string, options: { k: string; condition: string }) => {
+			const payload = { datasetId, k: Number(options.k), condition: options.condition };
+			const serverUrl = await getActiveMemoryServerUrl();
+			if (serverUrl) return console.log(JSON.stringify(await postJson(`${serverUrl}/api/memory/benchmarks/runs`, payload), null, 2));
+			const system = await bootstrap();
+			try { console.log(JSON.stringify(await system.memoryOrchestrator.createMemoryBenchmarkRun(datasetId, payload), null, 2)); } finally { await system.shutdown(); }
+		});
+	benchmark.command("runs").action(async () => {
+		const serverUrl = await getActiveMemoryServerUrl();
+		if (serverUrl) return console.log(JSON.stringify(await getJson(`${serverUrl}/api/memory/benchmarks/runs`), null, 2));
+		const system = await bootstrap();
+		try { console.log(JSON.stringify(await system.memoryOrchestrator.listMemoryBenchmarkRuns(), null, 2)); } finally { await system.shutdown(); }
+	});
 
 	return cmd;
 }

@@ -1,6 +1,10 @@
 import { nanoid } from "nanoid";
 import type { DatabaseAdapter } from "../storage/database.js";
-import type { VectorStore } from "./store.js";
+import type {
+	LegacyVectorPayloadMigrationInput,
+	LegacyVectorPayloadMigrationReport,
+	VectorStore,
+} from "./store.js";
 import type {
 	EmbeddingFunction,
 	MemoryItem,
@@ -16,7 +20,22 @@ export class LongTermMemory {
 	) {}
 
 	async store(item: MemoryItem): Promise<void> {
-		await this.vectorStore.store(item);
+		await this.db.transaction(async () => this.stageStore(item));
+		await this.finalizeStore(item.id);
+	}
+
+	async stageStore(item: MemoryItem): Promise<void> {
+		await this.vectorStore.stageStore(item);
+	}
+
+	async finalizeStore(itemId: string): Promise<void> {
+		await this.vectorStore.finalizeStore(itemId);
+	}
+
+	async migrateLegacyPayloads(
+		input: LegacyVectorPayloadMigrationInput,
+	): Promise<LegacyVectorPayloadMigrationReport> {
+		return this.vectorStore.migrateLegacyPayloads(input);
 	}
 
 	async retrieve(
@@ -35,6 +54,7 @@ export class LongTermMemory {
 		const results = await this.vectorStore.search(embedding, {
 			limit: Math.max(options.maxResults * 20, options.maxResults),
 			threshold: options.minRelevance,
+			constraints: options.constraints,
 			filter: (item) =>
 				this.isVisible(item) && (!options.filter || options.filter(item)),
 		});
@@ -217,13 +237,12 @@ export class LongTermMemory {
 		return this.vectorStore.count();
 	}
 
+	getDiagnostics(): Record<string, number> {
+		return this.vectorStore.getDiagnostics();
+	}
+
 	async updateAccess(itemId: string): Promise<void> {
-		const item = await this.vectorStore.getById(itemId);
-		if (item) {
-			item.accessCount += 1;
-			item.lastAccessed = new Date();
-			await this.vectorStore.update(item);
-		}
+		await this.vectorStore.updateAccess(itemId);
 	}
 
 	private computeRecencyScore(item: MemoryItem): number {

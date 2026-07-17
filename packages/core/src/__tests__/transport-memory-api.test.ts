@@ -82,6 +82,261 @@ describe("memory API endpoints", () => {
 		expect(local.status).toBe(200);
 	});
 
+	it("uses explicit admin access for learning dashboard operations", async () => {
+		const learningEngine = {
+			listInsights: vi.fn(async () => []),
+			listExperiences: vi.fn(async () => []),
+			addFeedback: vi.fn(async () => true),
+			forgetInsight: vi.fn(async () => true),
+		};
+		const baseUrl = await startServer({}, { learningEngine });
+
+		expect((await getJson(`${baseUrl}/api/learning/insights`)).status).toBe(200);
+		expect((await getJson(`${baseUrl}/api/learning/experiences`)).status).toBe(
+			200,
+		);
+		expect(
+			(
+				await postJson(`${baseUrl}/api/learning/feedback`, {
+					experienceId: "experience-a",
+					rating: "negative",
+				})
+			).status,
+		).toBe(200);
+		const deleted = await fetch(
+			`${baseUrl}/api/learning/insights/insight-a`,
+			{ method: "DELETE" },
+		);
+		expect(deleted.status).toBe(200);
+
+		expect(learningEngine.listInsights).toHaveBeenCalledWith(
+			{ kind: "admin" },
+			expect.objectContaining({ limit: 50 }),
+		);
+		expect(learningEngine.listExperiences).toHaveBeenCalledWith(
+			{ kind: "admin" },
+			expect.objectContaining({ limit: 30 }),
+		);
+		expect(learningEngine.addFeedback).toHaveBeenCalledWith(
+			{ kind: "admin" },
+			expect.objectContaining({
+				experienceId: "experience-a",
+				rating: "negative",
+			}),
+		);
+		expect(learningEngine.forgetInsight).toHaveBeenCalledWith(
+			{ kind: "admin" },
+			"insight-a",
+		);
+	});
+
+	it("rejects invalid learning feedback instead of treating it as positive", async () => {
+		const learningEngine = {
+			addFeedback: vi.fn(async () => true),
+		};
+		const baseUrl = await startServer({}, { learningEngine });
+		const response = await postJson(`${baseUrl}/api/learning/feedback`, {
+			experienceId: "experience-a",
+			rating: "invalid",
+		});
+		expect(response.status).toBe(400);
+		expect(learningEngine.addFeedback).not.toHaveBeenCalled();
+	});
+
+	it("exposes cognitive memory metrics from the orchestrator", async () => {
+		const snapshot = {
+			totalMemories: 10,
+			versionedEmbeddings: 8,
+			fallbackEmbeddings: 2,
+			annIndexedMemories: 8,
+			annCoverage: 0.8,
+			temporalClaims: 4,
+			activeInsights: 6,
+			invalidatedInsights: 1,
+			operationsByStatus: { completed: 3 },
+		};
+		const memoryOrchestrator = {
+			getMetricsSnapshot: vi.fn(async () => snapshot),
+		};
+		const baseUrl = await startServer({}, { memoryOrchestrator });
+		const response = await getJson(`${baseUrl}/api/memory/metrics`);
+		expect(response.status).toBe(200);
+		expect(response.body).toEqual(snapshot);
+		expect(memoryOrchestrator.getMetricsSnapshot).toHaveBeenCalledTimes(1);
+	});
+
+	it("previews and applies legacy vector payload migration", async () => {
+		const report = { supported: true, mode: "preview", eligible: 2, migrated: 0 };
+		const memoryOrchestrator = {
+			migrateLegacyVectorPayloads: vi.fn(async () => report),
+		};
+		const baseUrl = await startServer({}, { memoryOrchestrator });
+		const response = await postJson(
+			`${baseUrl}/api/memory/vector-payloads/migrate`,
+			{ mode: "preview", limit: 50 },
+		);
+		expect(response).toMatchObject({ status: 200, body: report });
+		expect(memoryOrchestrator.migrateLegacyVectorPayloads).toHaveBeenCalledWith({
+			mode: "preview",
+			limit: 50,
+			cursor: undefined,
+			upperBoundId: undefined,
+		});
+		expect(
+			(
+				await postJson(`${baseUrl}/api/memory/vector-payloads/migrate`, {
+					mode: "destroy",
+				})
+			).status,
+		).toBe(400);
+	});
+
+	it("imports, lists, and executes persisted memory benchmarks", async () => {
+		const memoryOrchestrator = {
+			importMemoryBenchmark: vi.fn(async () => ({ id: "dataset-1", documentCount: 1, caseCount: 1 })),
+			listMemoryBenchmarkDatasets: vi.fn(async () => [{ id: "dataset-1" }]),
+			createMemoryBenchmarkRun: vi.fn(async () => ({ id: "run-1", metrics: { recallAtK: 1 } })),
+			listMemoryBenchmarkRuns: vi.fn(async () => [{ id: "run-1", status: "completed" }]),
+		};
+		const baseUrl = await startServer({}, { memoryOrchestrator });
+		const imported = await postJson(`${baseUrl}/api/memory/benchmarks/datasets`, {
+			name: "Fixture",
+			format: "longmemeval",
+			sourceName: "fixture.json",
+			source: [],
+		});
+		expect(imported.status).toBe(201);
+		expect((await getJson(`${baseUrl}/api/memory/benchmarks/datasets`)).status).toBe(200);
+		const run = await postJson(`${baseUrl}/api/memory/benchmarks/runs`, {
+			datasetId: "dataset-1",
+			k: 10,
+			condition: "octopus-isolated",
+		});
+		expect(run).toMatchObject({ status: 201, body: { id: "run-1" } });
+		expect(memoryOrchestrator.createMemoryBenchmarkRun).toHaveBeenCalledWith(
+			"dataset-1",
+			expect.objectContaining({ condition: "octopus-isolated" }),
+		);
+		expect((await getJson(`${baseUrl}/api/memory/benchmarks/runs`)).status).toBe(200);
+	});
+
+	it("manages resumable memory operations through administrative routes", async () => {
+		const operation = {
+			id: "operation-1",
+			type: "embedding.reindex",
+			status: "pending",
+			request: { batchSize: 10 },
+			progress: {},
+			attemptCount: 0,
+			leaseState: "none",
+			resumable: true,
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+		const memoryOrchestrator = {
+			previewMemoryOperation: vi.fn(async () => ({ mode: "preview", scanned: 0 })),
+			createMemoryOperation: vi
+				.fn()
+				.mockResolvedValueOnce({ operation, replayed: false })
+				.mockResolvedValueOnce({ operation, replayed: true }),
+			listMemoryOperations: vi.fn(async () => [operation]),
+			getMemoryOperation: vi.fn(async () => operation),
+			resumeMemoryOperation: vi.fn(async () => ({
+				...operation,
+				status: "completed",
+				resumable: false,
+			})),
+			pauseMemoryOperation: vi.fn(async () => ({
+				...operation,
+				status: "paused",
+				controlAction: "run",
+				resumable: true,
+			})),
+			cancelMemoryOperation: vi.fn(async () => ({
+				...operation,
+				status: "cancelled",
+				controlAction: "run",
+				resumable: false,
+			})),
+		};
+		const baseUrl = await startServer({}, { memoryOrchestrator });
+		expect(
+			(
+				await postJson(`${baseUrl}/api/memory/operations/preview`, {
+					type: "embedding.reindex",
+					batchSize: 10,
+				})
+			).status,
+		).toBe(200);
+		expect(
+			(
+				await postJson(
+					`${baseUrl}/api/memory/operations/operation-1/pause`,
+					{},
+				)
+			).status,
+		).toBe(200);
+		expect(
+			(
+				await postJson(
+					`${baseUrl}/api/memory/operations/operation-1/cancel`,
+					{},
+				)
+			).status,
+		).toBe(200);
+		expect(memoryOrchestrator.pauseMemoryOperation).toHaveBeenCalledWith(
+			"operation-1",
+		);
+		expect(memoryOrchestrator.cancelMemoryOperation).toHaveBeenCalledWith(
+			"operation-1",
+		);
+		const create = await fetch(`${baseUrl}/api/memory/operations`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"Idempotency-Key": "operation-key",
+			},
+			body: JSON.stringify({ type: "embedding.reindex", batchSize: 10 }),
+		});
+		expect(create.status).toBe(201);
+		expect(create.headers.get("location")).toBe(
+			"/api/memory/operations/operation-1",
+		);
+		const replay = await fetch(`${baseUrl}/api/memory/operations`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"Idempotency-Key": "operation-key",
+			},
+			body: JSON.stringify({ type: "embedding.reindex", batchSize: 10 }),
+		});
+		expect(replay.status).toBe(200);
+		expect(memoryOrchestrator.createMemoryOperation).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "embedding.reindex", batchSize: 10 }),
+			"operation-key",
+		);
+		expect((await getJson(`${baseUrl}/api/memory/operations`)).status).toBe(200);
+		expect(
+			(await getJson(`${baseUrl}/api/memory/operations/operation-1`)).status,
+		).toBe(200);
+		expect(
+			(
+				await postJson(
+					`${baseUrl}/api/memory/operations/operation-1/resume`,
+					{},
+				)
+			).status,
+		).toBe(200);
+		expect(
+			(
+				await postJson(`${baseUrl}/api/memory/operations/preview`, {
+					type: "embedding.reindex",
+					batchSize: 0,
+				})
+			).status,
+		).toBe(400);
+	});
+
 	it("rejects encoded traversal in dynamic tool names", async () => {
 		const baseUrl = await startServer({});
 		const response = await fetch(

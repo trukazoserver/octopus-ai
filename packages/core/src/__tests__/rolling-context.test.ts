@@ -16,9 +16,14 @@ describe("RollingContextManager", () => {
 
 		expect(messages.map((message) => message.role)).toEqual([
 			"system",
-			"system",
+			"user",
 			"user",
 		]);
 		expect(messages[1]?.content).toContain("14 clips generated");
+		expect(messages[1]?.content).toContain(
+			"<<<OCTOPUS_UNTRUSTED_CONTEXT_V1>>>",
+		);
+		expect(messages[1]?.content).toContain('"source":"rolling_context"');
+		expect(messages[2]?.content).toBe("continua");
 	});
 });

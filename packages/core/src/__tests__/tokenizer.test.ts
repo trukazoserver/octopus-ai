@@ -58,6 +58,26 @@ describe("TokenCounter", () => {
 			expect(count).toBeGreaterThan(0);
 		});
 
+		it("counts every multimodal text part and reserves image tokens", () => {
+			const textOnly = counter.countMessagesTokens([
+				{ role: "user", content: [{ type: "text", text: "first" }] },
+			]);
+			const multimodal = counter.countMessagesTokens([
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "first" },
+						{ type: "text", text: "second text part" },
+						{
+							type: "image_url",
+							image_url: { url: "https://example.test/image.png" },
+						},
+					],
+				},
+			]);
+			expect(multimodal).toBeGreaterThan(textOnly + 1024);
+		});
+
 		it("should handle empty array", () => {
 			expect(counter.countMessagesTokens([])).toBe(2);
 		});

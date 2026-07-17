@@ -21,6 +21,8 @@ type TabId =
 	| "learning"
 	| "stm"
 	| "ltm"
+	| "operations"
+	| "benchmarks"
 	| "knowledge"
 	| "daily"
 	| "profile";
@@ -167,6 +169,46 @@ interface KnowledgeSearchResult {
 	modality: string;
 	item_title: string | null;
 	collection_id: string;
+}
+
+interface MemoryMetrics {
+	totalMemories: number;
+	annCoverage: number;
+	annSearches: number;
+	annFallbackSearches: number;
+	annAverageCandidates: number;
+	fallbackEmbeddings: number;
+	temporalClaims: number;
+	activeInsights: number;
+	invalidatedInsights: number;
+}
+
+interface MemoryOperation {
+	id: string;
+	type: "embedding.reindex" | "claims.backfill";
+	status: "pending" | "running" | "paused" | "completed" | "cancelled" | "failed";
+	controlAction: "run" | "pause" | "cancel";
+	cursor?: string;
+	progress: Record<string, unknown>;
+	attemptCount: number;
+	leaseState: "none" | "active" | "expired";
+	resumable: boolean;
+	lastError?: string;
+}
+
+interface MemoryBenchmarkDataset {
+	id: string;
+	name: string;
+	format: string;
+	document_count: number;
+	case_count: number;
+}
+
+interface MemoryBenchmarkRun {
+	id: string;
+	dataset_id: string;
+	status: string;
+	metrics: string | Record<string, number>;
 }
 
 type LearningExperienceStatusFilter = "all" | LearningExperience["status"];
@@ -361,6 +403,19 @@ export const MemoryPage: React.FC = () => {
 
 	// Consolidation
 	const [consolidating, setConsolidating] = useState(false);
+	const [memoryMetrics, setMemoryMetrics] = useState<MemoryMetrics | null>(null);
+	const [memoryOperations, setMemoryOperations] = useState<MemoryOperation[]>([]);
+	const [operationType, setOperationType] = useState<MemoryOperation["type"]>(
+		"embedding.reindex",
+	);
+	const [operationBatchSize, setOperationBatchSize] = useState(100);
+	const [operationBusy, setOperationBusy] = useState<string | null>(null);
+	const [benchmarkDatasets, setBenchmarkDatasets] = useState<MemoryBenchmarkDataset[]>([]);
+	const [benchmarkRuns, setBenchmarkRuns] = useState<MemoryBenchmarkRun[]>([]);
+	const [benchmarkFormat, setBenchmarkFormat] = useState("longmemeval");
+	const [benchmarkName, setBenchmarkName] = useState("");
+	const [benchmarkSource, setBenchmarkSource] = useState("");
+	const [benchmarkBusy, setBenchmarkBusy] = useState(false);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -480,6 +535,24 @@ export const MemoryPage: React.FC = () => {
 		[selectedKnowledgeCollectionId],
 	);
 
+	const loadOperations = useCallback(async () => {
+		const [metrics, operations] = await Promise.all([
+			apiGet<MemoryMetrics>("/api/memory/metrics"),
+			apiGet<MemoryOperation[]>("/api/memory/operations?limit=100"),
+		]);
+		setMemoryMetrics(metrics);
+		setMemoryOperations(operations);
+	}, []);
+
+	const loadBenchmarks = useCallback(async () => {
+		const [datasets, runs] = await Promise.all([
+			apiGet<MemoryBenchmarkDataset[]>("/api/memory/benchmarks/datasets"),
+			apiGet<MemoryBenchmarkRun[]>("/api/memory/benchmarks/runs"),
+		]);
+		setBenchmarkDatasets(datasets);
+		setBenchmarkRuns(runs);
+	}, []);
+
 	const loadTab = useCallback(
 		async (tab: TabId) => {
 			setActiveTab(tab);
@@ -510,6 +583,10 @@ export const MemoryPage: React.FC = () => {
 					setLtmItems(data.memories ?? []);
 				} else if (tab === "knowledge") {
 					await loadKnowledge();
+				} else if (tab === "operations") {
+					await loadOperations();
+				} else if (tab === "benchmarks") {
+					await loadBenchmarks();
 				} else if (tab === "daily") {
 					const data = await apiGet<{
 						context: string;
@@ -532,8 +609,104 @@ export const MemoryPage: React.FC = () => {
 				setMsg(e instanceof Error ? e.message : String(e));
 			}
 		},
-		[loadKnowledge, loadLearningInsights],
+		[loadBenchmarks, loadKnowledge, loadLearningInsights, loadOperations],
 	);
+
+	useEffect(() => {
+		if (activeTab !== "operations") return;
+		if (
+			!memoryOperations.some(
+				(operation) => operation.status === "running" || operation.controlAction !== "run",
+			)
+		) {
+			return;
+		}
+		const timer = window.setInterval(() => void loadOperations(), 2500);
+		return () => window.clearInterval(timer);
+	}, [activeTab, loadOperations, memoryOperations]);
+
+	const createMemoryOperation = async (preview: boolean) => {
+		setOperationBusy(preview ? "preview" : "create");
+		try {
+			await apiPost(
+				preview ? "/api/memory/operations/preview" : "/api/memory/operations",
+				{ type: operationType, batchSize: operationBatchSize },
+				preview
+					? undefined
+					: { headers: { "Idempotency-Key": crypto.randomUUID() } },
+			);
+			setMsg(preview ? "✓ Vista previa completada" : "✓ Operación creada");
+			await loadOperations();
+		} catch (error) {
+			setMsg(`✗ ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			setOperationBusy(null);
+		}
+	};
+
+	const controlMemoryOperation = async (
+		operation: MemoryOperation,
+		action: "resume" | "pause" | "cancel",
+	) => {
+		setOperationBusy(`${operation.id}:${action}`);
+		try {
+			await apiPost(
+				`/api/memory/operations/${encodeURIComponent(operation.id)}/${action}`,
+				{},
+			);
+			await loadOperations();
+		} catch (error) {
+			setMsg(`✗ ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			setOperationBusy(null);
+		}
+	};
+
+	const migrateVectorPayloads = async (mode: "preview" | "apply") => {
+		setOperationBusy(`payloads:${mode}`);
+		try {
+			const report = await apiPost("/api/memory/vector-payloads/migrate", {
+				mode,
+				limit: operationBatchSize,
+			});
+			setMsg(
+				`✓ Payloads ${mode === "preview" ? "analizados" : "migrados"}: ${String(report.eligible ?? 0)} elegibles`,
+			);
+		} catch (error) {
+			setMsg(`✗ ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			setOperationBusy(null);
+		}
+	};
+
+	const importBenchmark = async () => {
+		setBenchmarkBusy(true);
+		try {
+			await apiPost("/api/memory/benchmarks/datasets", {
+				name: benchmarkName.trim() || `${benchmarkFormat} dataset`,
+				format: benchmarkFormat,
+				sourceName: "dashboard.json",
+				source: JSON.parse(benchmarkSource),
+			});
+			setBenchmarkSource("");
+			setMsg("✓ Dataset importado");
+			await loadBenchmarks();
+		} catch (error) {
+			setMsg(`✗ ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			setBenchmarkBusy(false);
+		}
+	};
+
+	const runBenchmark = async (datasetId: string, condition: string) => {
+		setBenchmarkBusy(true);
+		try {
+			await apiPost("/api/memory/benchmarks/runs", { datasetId, k: 10, condition });
+			await loadBenchmarks();
+		} finally {
+			setBenchmarkBusy(false);
+		}
+	};
 
 	const handleSearch = async () => {
 		if (!searchQuery.trim()) return;
@@ -736,6 +909,8 @@ export const MemoryPage: React.FC = () => {
 		{ id: "stm", label: "Corto Plazo", icon: "chat" },
 		{ id: "ltm", label: "Largo Plazo", icon: "database" },
 		{ id: "knowledge", label: "Conocimiento", icon: "folder" },
+		{ id: "operations", label: "Operaciones", icon: "settings" },
+		{ id: "benchmarks", label: "Benchmarks", icon: "activity" },
 		{ id: "daily", label: "Diaria", icon: "file" },
 		{ id: "profile", label: "Perfil", icon: "user" },
 	];
@@ -830,6 +1005,8 @@ export const MemoryPage: React.FC = () => {
 		stm: stmTotal || undefined,
 		ltm: ltmItems.length || undefined,
 		knowledge: knowledgeCollections.length || undefined,
+		operations: memoryOperations.length || undefined,
+		benchmarks: benchmarkRuns.length || undefined,
 		daily: dailyCount || undefined,
 		profile: undefined,
 	};
@@ -1036,6 +1213,119 @@ export const MemoryPage: React.FC = () => {
 					onOpenGraph={() => loadTab("graph")}
 					onOpenSource={openGraphNodeSource}
 				/>
+			)}
+
+			{activeTab === "operations" && (
+				<div className="animate-slide-up">
+					<div className="stats-grid" style={{ marginBottom: 16 }}>
+						{[
+							["Memorias", memoryMetrics?.totalMemories ?? 0],
+							["Cobertura ANN", `${Math.round((memoryMetrics?.annCoverage ?? 0) * 100)}%`],
+							["Fallbacks ANN", memoryMetrics?.annFallbackSearches ?? 0],
+							["Embeddings fallback", memoryMetrics?.fallbackEmbeddings ?? 0],
+							["Claims", memoryMetrics?.temporalClaims ?? 0],
+							["Insights activos", memoryMetrics?.activeInsights ?? 0],
+						].map(([label, value]) => (
+							<div key={String(label)} style={S.card}>
+								<div className="mem-item__meta">{label}</div>
+								<div style={{ fontSize: "1.45rem", fontWeight: 700 }}>{value}</div>
+							</div>
+						))}
+					</div>
+					<section style={S.section}>
+						<h3 style={{ marginTop: 0 }}>Nueva operación</h3>
+						<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+							<select
+								value={operationType}
+								onChange={(event) =>
+									setOperationType(event.target.value as MemoryOperation["type"])
+								}
+								style={S.input}
+							>
+								<option value="embedding.reindex">Reindexar embeddings</option>
+								<option value="claims.backfill">Backfill de claims</option>
+							</select>
+							<input
+								type="number"
+								min={1}
+								max={1000}
+								value={operationBatchSize}
+								onChange={(event) => setOperationBatchSize(Number(event.target.value))}
+								style={S.input}
+							/>
+							<button className="ui-btn ui-btn--secondary" type="button" onClick={() => void createMemoryOperation(true)} disabled={Boolean(operationBusy)}>
+								Vista previa
+							</button>
+							<button className="ui-btn ui-btn--primary" type="button" onClick={() => void createMemoryOperation(false)} disabled={Boolean(operationBusy)}>
+								Crear
+							</button>
+							<button className="ui-btn ui-btn--secondary" type="button" onClick={() => void migrateVectorPayloads("preview")} disabled={Boolean(operationBusy)}>
+								Analizar payloads
+							</button>
+							<button className="ui-btn ui-btn--secondary" type="button" onClick={() => void migrateVectorPayloads("apply")} disabled={Boolean(operationBusy)}>
+								Migrar payloads
+							</button>
+						</div>
+					</section>
+					<section style={S.section}>
+						<h3 style={{ marginTop: 0 }}>Operaciones</h3>
+						{memoryOperations.map((operation) => (
+							<MemItem key={operation.id} title={operation.type} meta={`${operation.status} · intento ${operation.attemptCount} · lease ${operation.leaseState}`}>
+								<div style={{ color: "#a1a1aa", fontSize: "0.82rem", margin: "8px 0" }}>
+									Cursor: {operation.cursor ?? "inicio"} · Progreso: {JSON.stringify(operation.progress)}
+								</div>
+								{operation.lastError ? <div style={{ color: "#ef4444" }}>{operation.lastError}</div> : null}
+								<div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+									{operation.resumable ? <button className="ui-btn ui-btn--primary" type="button" onClick={() => void controlMemoryOperation(operation, "resume")}>Continuar</button> : null}
+									{operation.status === "running" || operation.status === "pending" ? <button className="ui-btn ui-btn--secondary" type="button" onClick={() => void controlMemoryOperation(operation, "pause")}>Pausar</button> : null}
+									{!["completed", "cancelled", "failed"].includes(operation.status) ? <button className="ui-btn ui-btn--danger" type="button" onClick={() => void controlMemoryOperation(operation, "cancel")}>Cancelar</button> : null}
+								</div>
+							</MemItem>
+						))}
+						{memoryOperations.length === 0 ? <p className="ui-section-subtitle">No hay operaciones.</p> : null}
+					</section>
+				</div>
+			)}
+
+			{activeTab === "benchmarks" && (
+				<div className="animate-slide-up">
+					<section style={S.section}>
+						<h3 style={{ marginTop: 0 }}>Importar dataset local</h3>
+						<div style={{ display: "grid", gap: 10 }}>
+							<div style={{ display: "flex", gap: 10 }}>
+								<select value={benchmarkFormat} onChange={(event) => setBenchmarkFormat(event.target.value)} style={S.input}>
+									<option value="longmemeval">LongMemEval</option>
+									<option value="memops">MemOps</option>
+									<option value="beam">BEAM</option>
+								</select>
+								<input value={benchmarkName} onChange={(event) => setBenchmarkName(event.target.value)} placeholder="Nombre del dataset" style={S.input} />
+							</div>
+							<textarea value={benchmarkSource} onChange={(event) => setBenchmarkSource(event.target.value)} placeholder="JSON del dataset" rows={7} style={{ ...S.input, resize: "vertical" }} />
+							<button type="button" className="ui-btn ui-btn--primary" disabled={benchmarkBusy || !benchmarkSource.trim()} onClick={() => void importBenchmark()}>
+								Importar y normalizar
+							</button>
+						</div>
+					</section>
+					<section style={S.section}>
+						<h3 style={{ marginTop: 0 }}>Datasets</h3>
+						{benchmarkDatasets.map((dataset) => (
+							<MemItem key={dataset.id} title={dataset.name} meta={`${dataset.format} · ${dataset.document_count} documentos · ${dataset.case_count} casos`}>
+								<div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+									<button type="button" className="ui-btn ui-btn--secondary" disabled={benchmarkBusy} onClick={() => void runBenchmark(dataset.id, "no-memory")}>Sin memoria</button>
+									<button type="button" className="ui-btn ui-btn--primary" disabled={benchmarkBusy} onClick={() => void runBenchmark(dataset.id, "lexical-baseline")}>Baseline lexical</button>
+									<button type="button" className="ui-btn ui-btn--primary" disabled={benchmarkBusy} onClick={() => void runBenchmark(dataset.id, "octopus-isolated")}>Octopus aislado</button>
+								</div>
+							</MemItem>
+						))}
+					</section>
+					<section style={S.section}>
+						<h3 style={{ marginTop: 0 }}>Resultados</h3>
+						{benchmarkRuns.map((run) => {
+							const metrics = typeof run.metrics === "string" ? JSON.parse(run.metrics || "{}") as Record<string, number> : run.metrics;
+							return <MemItem key={run.id} title={run.id} meta={`${run.status} · dataset ${run.dataset_id}`}><div style={{ color: "#a1a1aa", fontSize: "0.82rem" }}>Recall@K {Number(metrics.recallAtK ?? 0).toFixed(3)} · MRR {Number(metrics.mrr ?? 0).toFixed(3)} · nDCG {Number(metrics.ndcgAtK ?? 0).toFixed(3)} · Forbidden {Number(metrics.forbiddenCaseRate ?? 0).toFixed(3)}</div></MemItem>;
+						})}
+					</section>
+				</div>
 			)}
 
 			{activeTab === "graph" && (
@@ -4378,6 +4668,8 @@ function getTabDescription(tab: TabId): string {
 		stm: "contexto actual",
 		ltm: "recuerdos",
 		knowledge: "multimodal",
+		operations: "mantenimiento durable",
+		benchmarks: "evaluación reproducible",
 		daily: "hoy",
 		profile: "usuario",
 	};

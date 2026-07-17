@@ -87,6 +87,43 @@ describe("KnowledgeManager", () => {
 		expect(results[0]?.score).toBeGreaterThan(0.9);
 	});
 
+	it("searches only ready items in the requested knowledge collections", async () => {
+		const first = await manager.createCollection({ name: "First KB" });
+		const second = await manager.createCollection({ name: "Second KB" });
+		const excluded = await manager.createCollection({ name: "Excluded KB" });
+		const firstItem = await manager.createTextItem({
+			collectionId: first.id,
+			content: "Scoped knowledge marker alpha",
+		});
+		const secondItem = await manager.createTextItem({
+			collectionId: second.id,
+			content: "Scoped knowledge marker beta",
+		});
+		const failedItem = await manager.createTextItem({
+			collectionId: second.id,
+			content: "Scoped knowledge marker failed",
+		});
+		await manager.createTextItem({
+			collectionId: excluded.id,
+			content: "Scoped knowledge marker excluded",
+		});
+		await db.run("UPDATE knowledge_items SET status = 'error' WHERE id = ?", [
+			failedItem.id,
+		]);
+
+		const results = await manager.searchChunks({
+			query: "Scoped knowledge marker",
+			collectionIds: [first.id, second.id],
+		});
+		expect(results.map((result) => result.item_id)).toEqual(
+			expect.arrayContaining([firstItem.id, secondItem.id]),
+		);
+		expect(results.map((result) => result.item_id)).not.toContain(failedItem.id);
+		expect(results.every((result) => result.collection_id !== excluded.id)).toBe(
+			true,
+		);
+	});
+
 	it("ingests local multimodal files with sidecar captions", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "octopus-kb-"));
 		try {

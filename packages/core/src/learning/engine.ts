@@ -7,14 +7,17 @@ import type { SkillImprover } from "../skills/improver.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import type { SkillUsage } from "../skills/types.js";
 import type { DatabaseAdapter } from "../storage/database.js";
+import { createLogger } from "../utils/logger.js";
 import type {
 	ExperienceRecord,
 	ExperienceRecordInput,
 	ExperienceStatus,
+	LearningAccess,
 	LearningEngineConfig,
 	LearningFeedbackInput,
 	LearningInsight,
 	LearningInsightType,
+	LearningScope,
 } from "./types.js";
 
 const DEFAULT_CONFIG: LearningEngineConfig = {
@@ -28,6 +31,9 @@ const DEFAULT_CONFIG: LearningEngineConfig = {
 	minSimilarSuccessesForSkill: 3,
 	retainFailedInsights: true,
 };
+
+const LEGACY_SCOPE = "__learning_legacy_unscoped_v1__";
+const logger = createLogger("learning-engine");
 
 type ExperienceRow = {
 	id: string;
@@ -44,6 +50,13 @@ type ExperienceRow = {
 	duration_ms: number | null;
 	metadata: string;
 	created_at: string;
+	scope_key: string;
+	scope_tenant_id: string;
+	scope_user_id: string;
+	scope_project_id: string;
+	scope_agent_role: string;
+	scope_session_id: string | null;
+	scope_task_id: string | null;
 };
 
 type InsightRow = {
@@ -60,6 +73,16 @@ type InsightRow = {
 	use_count: number;
 	last_used_at: string | null;
 	created_at: string;
+	scope_key: string;
+	scope_tenant_id: string;
+	scope_user_id: string;
+	scope_project_id: string;
+	scope_agent_role: string;
+	scope_session_id: string | null;
+	scope_task_id: string | null;
+	invalidated_at: string | null;
+	invalidation_reason: string | null;
+	invalidated_by_experience_id: string | null;
 };
 
 export class LearningEngine {
@@ -105,9 +128,14 @@ export class LearningEngine {
 	recordExperience(input: ExperienceRecordInput): Promise<ExperienceRecord> {
 		const work = this.doRecordExperience(input);
 		this.pendingExperienceWrites.add(work);
-		void work.finally(() => {
+		// Drop from the pending set once settled. Use then(onFulfilled, onRejected)
+		// rather than a bare .finally(): a detached .finally() on a rejected work
+		// promise re-emits the rejection as an unhandled one. The caller remains
+		// responsible for handling `work` itself.
+		const cleanup = (): void => {
 			this.pendingExperienceWrites.delete(work);
-		});
+		};
+		work.then(cleanup, cleanup);
 		return work;
 	}
 
@@ -133,9 +161,11 @@ export class LearningEngine {
 		input: ExperienceRecordInput,
 	): Promise<ExperienceRecord> {
 		await this.ensureTables();
+		const scope = this.normalizeScope(input.scope);
 		const assessed = this.assessExperience(input);
 		const experience: ExperienceRecord = {
 			id: nanoid(),
+			scope,
 			conversationId: input.conversationId,
 			taskId: input.taskId,
 			agentId: input.agentId,
@@ -154,8 +184,8 @@ export class LearningEngine {
 		if (!this.config.enabled) return experience;
 
 		await this.db.run(
-			`INSERT INTO experiences (id, conversation_id, task_id, agent_id, channel_id, user_request, final_response, status, confidence, tools_used, skills_used, duration_ms, metadata, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO experiences (id, conversation_id, task_id, agent_id, channel_id, user_request, final_response, status, confidence, tools_used, skills_used, duration_ms, metadata, created_at, scope_key, scope_tenant_id, scope_user_id, scope_project_id, scope_agent_role, scope_session_id, scope_task_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				experience.id,
 				experience.conversationId ?? null,
@@ -171,6 +201,13 @@ export class LearningEngine {
 				experience.durationMs ?? null,
 				JSON.stringify(experience.metadata),
 				experience.createdAt.toISOString(),
+				this.scopeKey(scope),
+				scope.tenantId,
+				scope.userId,
+				scope.projectId,
+				scope.agentRole,
+				scope.sessionId ?? null,
+				scope.taskId ?? null,
 			],
 		);
 
@@ -182,12 +219,13 @@ export class LearningEngine {
 		// so semantic retrieval stays high-signal as the store grows.
 		this.consolidateCounter++;
 		if (this.consolidateCounter % 25 === 0) {
-			await this.consolidateInsights().catch(() => {});
+			await this.consolidateInsights({ kind: "scoped", scope }).catch(() => {});
 		}
 		return experience;
 	}
 
 	async recordUserCorrection(input: {
+		scope: LearningScope;
 		content: string;
 		conversationId?: string;
 		channelId?: string;
@@ -197,9 +235,11 @@ export class LearningEngine {
 		await this.ensureTables();
 		const content = input.content.trim();
 		if (!content) return;
+		const scope = this.normalizeScope(input.scope);
 
 		const experience: ExperienceRecord = {
 			id: nanoid(),
+			scope,
 			conversationId: input.conversationId,
 			agentId: input.agentId,
 			channelId: input.channelId,
@@ -214,8 +254,8 @@ export class LearningEngine {
 		};
 
 		await this.db.run(
-			`INSERT INTO experiences (id, conversation_id, task_id, agent_id, channel_id, user_request, final_response, status, confidence, tools_used, skills_used, duration_ms, metadata, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO experiences (id, conversation_id, task_id, agent_id, channel_id, user_request, final_response, status, confidence, tools_used, skills_used, duration_ms, metadata, created_at, scope_key, scope_tenant_id, scope_user_id, scope_project_id, scope_agent_role, scope_session_id, scope_task_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				experience.id,
 				experience.conversationId ?? null,
@@ -231,12 +271,20 @@ export class LearningEngine {
 				null,
 				JSON.stringify(experience.metadata),
 				experience.createdAt.toISOString(),
+				this.scopeKey(scope),
+				scope.tenantId,
+				scope.userId,
+				scope.projectId,
+				scope.agentRole,
+				scope.sessionId ?? null,
+				scope.taskId ?? null,
 			],
 		);
 
 		const keywords = this.extractKeywords(content);
 		const insight: LearningInsight = {
 			id: nanoid(),
+			scope,
 			experienceId: experience.id,
 			type: "procedure",
 			domain: this.detectDomain(keywords, content),
@@ -254,14 +302,19 @@ export class LearningEngine {
 		await this.storeInsight(insight);
 	}
 
-	async retrieveRelevant(query: string): Promise<LearningInsight[]> {
+	async retrieveRelevant(
+		query: string,
+		scopeInput: LearningScope,
+	): Promise<LearningInsight[]> {
 		if (!this.config.enabled) return [];
 		await this.ensureTables();
+		const scope = this.normalizeScope(scopeInput);
+		const scopeKey = this.scopeKey(scope);
 		const queryEmbedding = await this.embedFn(query);
 		const queryKeywords = new Set(this.extractKeywords(query));
 		const rows = await this.db.all<InsightRow>(
-			"SELECT * FROM learning_insights WHERE confidence >= ? ORDER BY importance DESC, created_at DESC LIMIT 200",
-			[this.config.minConfidenceToInject],
+			"SELECT * FROM learning_insights WHERE scope_key = ? AND invalidated_at IS NULL AND confidence >= ? ORDER BY importance DESC, created_at DESC LIMIT 200",
+			[scopeKey, this.config.minConfidenceToInject],
 		);
 		const scored = rows.map((row) => {
 			const insight = this.deserializeInsight(row);
@@ -331,53 +384,79 @@ export class LearningEngine {
 		}
 
 		if (selected.length > 0)
-			await this.markInsightsUsed(selected.map((i) => i.id));
+			await this.markInsightsUsed(
+				selected.map((i) => i.id),
+				scopeKey,
+			);
 		return selected;
 	}
 
 	async listInsights(
-		options: { limit?: number; type?: LearningInsightType } = {},
+		access: LearningAccess,
+		options: {
+			limit?: number;
+			type?: LearningInsightType;
+			includeInvalidated?: boolean;
+		} = {},
 	): Promise<LearningInsight[]> {
 		await this.ensureTables();
 		const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
-		const rows = options.type
-			? await this.db.all<InsightRow>(
-					"SELECT * FROM learning_insights WHERE type = ? ORDER BY created_at DESC LIMIT ?",
-					[options.type, limit],
-				)
-			: await this.db.all<InsightRow>(
-					"SELECT * FROM learning_insights ORDER BY created_at DESC LIMIT ?",
-					[limit],
-				);
+		const scopeKey = this.scopeKeyForAccess(access);
+		const clauses: string[] = [];
+		const params: unknown[] = [];
+		if (scopeKey) {
+			clauses.push("scope_key = ?");
+			params.push(scopeKey);
+		}
+		if (options.type) {
+			clauses.push("type = ?");
+			params.push(options.type);
+		}
+		if (!options.includeInvalidated) clauses.push("invalidated_at IS NULL");
+		params.push(limit);
+		const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+		const rows = await this.db.all<InsightRow>(
+			`SELECT * FROM learning_insights${where} ORDER BY created_at DESC LIMIT ?`,
+			params,
+		);
 		return rows.map((row) => this.deserializeInsight(row));
 	}
 
 	async listExperiences(
+		access: LearningAccess,
 		options: { limit?: number; status?: ExperienceStatus } = {},
 	): Promise<ExperienceRecord[]> {
 		await this.ensureTables();
 		const limit = Math.max(1, Math.min(options.limit ?? 30, 100));
-		const rows = options.status
-			? await this.db.all<ExperienceRow>(
-					"SELECT * FROM experiences WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-					[options.status, limit],
-				)
-			: await this.db.all<ExperienceRow>(
-					"SELECT * FROM experiences ORDER BY created_at DESC LIMIT ?",
-					[limit],
-				);
+		const scopeKey = this.scopeKeyForAccess(access);
+		const clauses: string[] = [];
+		const params: unknown[] = [];
+		if (scopeKey) {
+			clauses.push("scope_key = ?");
+			params.push(scopeKey);
+		}
+		if (options.status) {
+			clauses.push("status = ?");
+			params.push(options.status);
+		}
+		params.push(limit);
+		const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+		const rows = await this.db.all<ExperienceRow>(
+			`SELECT * FROM experiences${where} ORDER BY created_at DESC LIMIT ?`,
+			params,
+		);
 		return rows.map((row) => this.deserializeExperience(row));
 	}
 
-	async forgetInsight(id: string): Promise<boolean> {
+	async forgetInsight(access: LearningAccess, id: string): Promise<boolean> {
 		await this.ensureTables();
-		const existing = await this.db.get<{ id: string }>(
-			"SELECT id FROM learning_insights WHERE id = ?",
-			[id],
+		const scopeKey = this.scopeKeyForAccess(access);
+		const existing = await this.db.get<{ id: string; scope_key: string }>(
+			`SELECT id, scope_key FROM learning_insights WHERE id = ?${scopeKey ? " AND scope_key = ?" : ""}`,
+			scopeKey ? [id, scopeKey] : [id],
 		);
 		if (!existing) return false;
-		await this.db.run("DELETE FROM learning_insights WHERE id = ?", [id]);
-		return true;
+		return this.deleteInsightWithMirror(existing.id, existing.scope_key);
 	}
 
 	/**
@@ -386,23 +465,26 @@ export class LearningEngine {
 	 * scan, safe (only merges true duplicates), keeps retrieval high-signal as
 	 * the store grows. Returns how many redundant rows were removed.
 	 */
-	async consolidateInsights(): Promise<number> {
+	async consolidateInsights(access: LearningAccess): Promise<number> {
 		await this.ensureTables();
+		const scopeKey = this.scopeKeyForAccess(access);
 		const rows = await this.db
 			.all<{
 				id: string;
+				scope_key: string;
 				type: string;
 				keywords: string;
 				confidence: number;
 				importance: number;
 			}>(
-				"SELECT id, type, keywords, confidence, importance FROM learning_insights",
-			)
-			.catch(() => []);
+				`SELECT id, scope_key, type, keywords, confidence, importance FROM learning_insights${scopeKey ? " WHERE scope_key = ? AND invalidated_at IS NULL" : " WHERE invalidated_at IS NULL"}`,
+				scopeKey ? [scopeKey] : [],
+			);
 		const bySig = new Map<
 			string,
 			Array<{
 				id: string;
+				scope_key: string;
 				confidence: number;
 				importance: number;
 			}>
@@ -414,7 +496,7 @@ export class LearningEngine {
 			} catch {
 				continue;
 			}
-			const sig = `${r.type}|${[...new Set(kw)].sort().join(",")}`;
+			const sig = `${r.scope_key}|${r.type}|${[...new Set(kw)].sort().join(",")}`;
 			const arr = bySig.get(sig) ?? [];
 			arr.push(r);
 			bySig.set(sig, arr);
@@ -426,29 +508,40 @@ export class LearningEngine {
 				(a, b) => b.confidence * b.importance - a.confidence * a.importance,
 			);
 			for (const r of arr.slice(1)) {
-				await this.db
-					.run("DELETE FROM learning_insights WHERE id = ?", [r.id])
-					.catch(() => {});
-				removed++;
+				try {
+					if (await this.deleteInsightWithMirror(r.id, r.scope_key)) removed++;
+				} catch (error) {
+					logger.warn(
+						`Failed to consolidate learning insight ${r.id}: ${String(error)}`,
+					);
+				}
 			}
 		}
 		return removed;
 	}
 
-	async addFeedback(feedback: LearningFeedbackInput): Promise<void> {
+	async addFeedback(
+		access: LearningAccess,
+		feedback: LearningFeedbackInput,
+	): Promise<boolean> {
 		await this.ensureTables();
+		const scopeKey = this.scopeKeyForAccess(access);
 		const target = feedback.experienceId
 			? await this.db.get<ExperienceRow>(
-					"SELECT * FROM experiences WHERE id = ?",
-					[feedback.experienceId],
+					`SELECT * FROM experiences WHERE id = ?${scopeKey ? " AND scope_key = ?" : ""}`,
+					scopeKey
+						? [feedback.experienceId, scopeKey]
+						: [feedback.experienceId],
 				)
 			: feedback.conversationId
 				? await this.db.get<ExperienceRow>(
-						"SELECT * FROM experiences WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
-						[feedback.conversationId],
+						`SELECT * FROM experiences WHERE conversation_id = ?${scopeKey ? " AND scope_key = ?" : ""} ORDER BY created_at DESC LIMIT 1`,
+						scopeKey
+							? [feedback.conversationId, scopeKey]
+							: [feedback.conversationId],
 					)
 				: undefined;
-		if (!target) return;
+		if (!target) return false;
 		const positive =
 			typeof feedback.rating === "number"
 				? feedback.rating > 0
@@ -467,7 +560,7 @@ export class LearningEngine {
 			messageId: feedback.messageId,
 		});
 		await this.db.run(
-			"UPDATE experiences SET status = ?, confidence = ?, metadata = ? WHERE id = ?",
+			"UPDATE experiences SET status = ?, confidence = ?, metadata = ? WHERE id = ? AND scope_key = ?",
 			[
 				positive ? "succeeded" : "failed",
 				positive
@@ -475,10 +568,11 @@ export class LearningEngine {
 					: Math.max(target.confidence, 0.75),
 				JSON.stringify({ ...metadata, feedback: feedbackItems }),
 				target.id,
+				target.scope_key,
 			],
 		);
 
-		if (!this.config.enabled) return;
+		if (!this.config.enabled || target.scope_key === LEGACY_SCOPE) return true;
 		const updatedExperience = this.deserializeExperience({
 			...target,
 			status: positive ? "succeeded" : "failed",
@@ -487,6 +581,13 @@ export class LearningEngine {
 				: Math.max(target.confidence, 0.75),
 			metadata: JSON.stringify({ ...metadata, feedback: feedbackItems }),
 		});
+		if (!positive) {
+			await this.invalidateInsightsForExperience(
+				updatedExperience.id,
+				target.scope_key,
+				feedback.comment ?? "negative_user_feedback",
+			);
+		}
 		const content = positive
 			? `User confirmed this approach worked: ${this.compact(updatedExperience.finalResponse, 450)}`
 			: `User marked this approach as failed${feedback.comment ? `: ${feedback.comment}` : ""}. Avoid repeating it without correction: ${this.compact(updatedExperience.finalResponse, 350)}`;
@@ -496,6 +597,7 @@ export class LearningEngine {
 		const type: LearningInsightType = positive ? "what_worked" : "what_failed";
 		const insight: LearningInsight = {
 			id: nanoid(),
+			scope: updatedExperience.scope,
 			experienceId: updatedExperience.id,
 			type,
 			domain: this.detectDomain(keywords, updatedExperience.userRequest),
@@ -512,6 +614,7 @@ export class LearningEngine {
 		await this.storeInsight(insight);
 		await this.recordSkillUsage(updatedExperience, feedback);
 		if (positive) await this.maybeCreateSkill(updatedExperience, [insight]);
+		return true;
 	}
 
 	private async extractInsights(
@@ -537,7 +640,10 @@ export class LearningEngine {
 		experience: ExperienceRecord,
 	): Promise<LearningInsight[]> {
 		const insights: Array<
-			Omit<LearningInsight, "id" | "embedding" | "createdAt" | "useCount">
+			Omit<
+				LearningInsight,
+				"id" | "scope" | "embedding" | "createdAt" | "useCount"
+			>
 		> = [];
 		const keywords = this.extractKeywords(
 			`${experience.userRequest} ${experience.finalResponse}`,
@@ -635,6 +741,7 @@ export class LearningEngine {
 			result.push({
 				...insight,
 				id: nanoid(),
+				scope: experience.scope,
 				embedding,
 				useCount: 0,
 				createdAt: new Date(),
@@ -767,6 +874,7 @@ export class LearningEngine {
 			);
 			result.push({
 				id: nanoid(),
+				scope: experience.scope,
 				experienceId: experience.id,
 				type,
 				domain,
@@ -789,7 +897,10 @@ export class LearningEngine {
 	 * copy. Bounded to recent insights of the same type so it stays cheap on
 	 * every experience. Returns true when it reinforced an existing insight.
 	 */
-	private async reinforceExisting(insight: LearningInsight): Promise<boolean> {
+	private async reinforceExisting(
+		insight: LearningInsight,
+	): Promise<string | undefined> {
+		const scopeKey = this.scopeKey(this.normalizeScope(insight.scope));
 		const rows = await this.db
 			.all<{
 				id: string;
@@ -797,8 +908,8 @@ export class LearningEngine {
 				confidence: number;
 				importance: number;
 			}>(
-				"SELECT id, keywords, confidence, importance FROM learning_insights WHERE type = ? ORDER BY created_at DESC LIMIT 60",
-				[insight.type],
+				"SELECT id, keywords, confidence, importance FROM learning_insights WHERE scope_key = ? AND invalidated_at IS NULL AND type = ? ORDER BY created_at DESC LIMIT 60",
+				[scopeKey, insight.type],
 			)
 			.catch(() => []);
 		for (const row of rows) {
@@ -824,7 +935,7 @@ export class LearningEngine {
 			if (insight.confidence > row.confidence) {
 				await this.db
 					.run(
-						"UPDATE learning_insights SET confidence = ?, importance = ?, content = ?, evidence = ?, keywords = ? WHERE id = ?",
+						"UPDATE learning_insights SET confidence = ?, importance = ?, content = ?, evidence = ?, keywords = ? WHERE id = ? AND scope_key = ?",
 						[
 							newConfidence,
 							newImportance,
@@ -832,51 +943,48 @@ export class LearningEngine {
 							insight.evidence ?? null,
 							JSON.stringify(insight.keywords),
 							row.id,
+							scopeKey,
 						],
 					)
 					.catch(() => {});
 			} else {
 				await this.db
 					.run(
-						"UPDATE learning_insights SET confidence = ?, importance = ?, evidence = COALESCE(?, evidence) WHERE id = ?",
-						[newConfidence, newImportance, insight.evidence ?? null, row.id],
+						"UPDATE learning_insights SET confidence = ?, importance = ?, evidence = COALESCE(?, evidence) WHERE id = ? AND scope_key = ?",
+						[
+							newConfidence,
+							newImportance,
+							insight.evidence ?? null,
+							row.id,
+							scopeKey,
+						],
 					)
 					.catch(() => {});
 			}
-			return true;
+			return row.id;
 		}
-		return false;
+		return undefined;
 	}
 
 	private async storeInsight(insight: LearningInsight): Promise<void> {
+		const scope = this.normalizeScope(insight.scope);
+		const scopeKey = this.scopeKey(scope);
 		// Upsert: if a near-duplicate already exists, reinforce it (raise
 		// confidence/importance) instead of inserting another copy. This keeps
 		// the insight store high-signal — the same lesson surfacing again
 		// strengthens it rather than adding noise — and is the closed learning
 		// loop (a repeated mistake makes the existing lesson more prominent).
-		if (await this.reinforceExisting(insight)) return;
-
-		await this.db.run(
-			`INSERT INTO learning_insights (id, experience_id, type, domain, keywords, content, evidence, confidence, importance, embedding, use_count, last_used_at, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			[
-				insight.id,
+		const reinforcedInsightId = await this.reinforceExisting(insight);
+		if (reinforcedInsightId) {
+			await this.recordInsightEvidence(
+				reinforcedInsightId,
 				insight.experienceId,
-				insight.type,
-				insight.domain ?? null,
-				JSON.stringify(insight.keywords),
-				insight.content,
-				insight.evidence ?? null,
-				insight.confidence,
-				insight.importance,
-				JSON.stringify(insight.embedding),
-				insight.useCount,
-				insight.lastUsedAt?.toISOString() ?? null,
-				insight.createdAt.toISOString(),
-			],
-		);
+				"supports",
+			);
+			return;
+		}
 
-		if (
+		const shouldMirror =
 			this.options.ltm &&
 			insight.confidence >= Math.max(0.8, this.config.minConfidenceToStore) &&
 			[
@@ -885,9 +993,10 @@ export class LearningEngine {
 				"tool_strategy",
 				"what_worked",
 				"what_failed",
-			].includes(insight.type)
-		) {
-			const memory: MemoryItem = {
+			].includes(insight.type);
+		const embeddingDescriptor = this.embedFn.getDescriptor?.();
+		const memory: MemoryItem | undefined = shouldMirror
+			? {
 				id: `learn_${insight.id}`,
 				type: "procedural",
 				content: insight.content,
@@ -900,12 +1009,68 @@ export class LearningEngine {
 				source: { taskId: insight.experienceId },
 				metadata: {
 					source: "learning_engine",
+					...(embeddingDescriptor
+						? {
+							embeddingProvider: embeddingDescriptor.provider,
+							embeddingModel: embeddingDescriptor.model,
+							embeddingDimensions: embeddingDescriptor.dimensions,
+							embeddingVersion: embeddingDescriptor.version,
+							embeddingQuality: embeddingDescriptor.quality,
+						}
+						: {}),
+					tenantId: scope.tenantId,
+					userId: scope.userId,
+					projectId: scope.projectId,
+					agentRole: scope.agentRole,
 					insightId: insight.id,
 					type: insight.type,
 					confidence: insight.confidence,
 				},
-			};
-			await this.options.ltm.store(memory).catch(() => {});
+			}
+			: undefined;
+
+		await this.db.transaction(async () => {
+			await this.db.run(
+				`INSERT INTO learning_insights (id, experience_id, type, domain, keywords, content, evidence, confidence, importance, embedding, use_count, last_used_at, created_at, scope_key, scope_tenant_id, scope_user_id, scope_project_id, scope_agent_role, scope_session_id, scope_task_id)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					insight.id,
+					insight.experienceId,
+					insight.type,
+					insight.domain ?? null,
+					JSON.stringify(insight.keywords),
+					insight.content,
+					insight.evidence ?? null,
+					insight.confidence,
+					insight.importance,
+					JSON.stringify(insight.embedding),
+					insight.useCount,
+					insight.lastUsedAt?.toISOString() ?? null,
+					insight.createdAt.toISOString(),
+					scopeKey,
+					scope.tenantId,
+					scope.userId,
+					scope.projectId,
+					scope.agentRole,
+					scope.sessionId ?? null,
+					scope.taskId ?? null,
+				],
+			);
+			if (memory && this.options.ltm) {
+				await this.options.ltm.stageStore(memory);
+			}
+			await this.recordInsightEvidence(
+				insight.id,
+				insight.experienceId,
+				"supports",
+			);
+		});
+		if (memory && this.options.ltm) {
+			await this.options.ltm.finalizeStore(memory.id).catch((error) => {
+				logger.warn(
+					`Failed to finalize learning mirror write ${memory.id}: ${String(error)}`,
+				);
+			});
 		}
 	}
 
@@ -978,8 +1143,8 @@ export class LearningEngine {
 		const like = `%${keywords[0] ?? ""}%`;
 		const similar = await this.db
 			.all<{ cnt: number }>(
-				"SELECT COUNT(*) as cnt FROM experiences WHERE status = 'succeeded' AND user_request LIKE ?",
-				[like],
+				"SELECT COUNT(*) as cnt FROM experiences WHERE scope_key = ? AND status = 'succeeded' AND user_request LIKE ?",
+				[this.scopeKey(experience.scope), like],
 			)
 			.catch(() => [{ cnt: 0 }]);
 		if ((similar[0]?.cnt ?? 0) < this.config.minSimilarSuccessesForSkill)
@@ -1026,6 +1191,29 @@ export class LearningEngine {
 		const failedTools = tools.filter((t) => !t.success).length;
 		let confidence = 0.55;
 		let status: ExperienceStatus = "unknown";
+		if (input.outcome) {
+			const passed = input.outcome.checks.filter((check) => check.passed).length;
+			const failed = input.outcome.checks.length - passed;
+			if (input.outcome.verified && failed === 0 && passed > 0) {
+				return {
+					status: "succeeded",
+					confidence: 0.95,
+					reasons: ["verified_outcome", ...input.outcome.checks.map((c) => c.name)],
+				};
+			}
+			if (failed > 0) {
+				return {
+					status: passed > 0 ? "partial" : "failed",
+					confidence: 0.9,
+					reasons: [
+						"failed_outcome_verification",
+						...input.outcome.checks
+							.filter((check) => !check.passed)
+							.map((check) => check.name),
+					],
+				};
+			}
+		}
 
 		if (input.finalResponse.trim().length > 40) {
 			confidence += 0.1;
@@ -1058,13 +1246,13 @@ export class LearningEngine {
 		return { status, confidence: this.clamp(confidence), reasons };
 	}
 
-	private async markInsightsUsed(ids: string[]): Promise<void> {
+	private async markInsightsUsed(ids: string[], scopeKey: string): Promise<void> {
 		const now = new Date().toISOString();
 		for (const id of ids) {
 			await this.db
 				.run(
-					"UPDATE learning_insights SET use_count = use_count + 1, last_used_at = ? WHERE id = ?",
-					[now, id],
+					"UPDATE learning_insights SET use_count = use_count + 1, last_used_at = ? WHERE id = ? AND scope_key = ?",
+					[now, id, scopeKey],
 				)
 				.catch(() => {});
 		}
@@ -1072,16 +1260,20 @@ export class LearningEngine {
 
 	private async ensureTables(): Promise<void> {
 		await this.db.run(
-			"CREATE TABLE IF NOT EXISTS experiences (id TEXT PRIMARY KEY, conversation_id TEXT, task_id TEXT, agent_id TEXT, channel_id TEXT, user_request TEXT NOT NULL, final_response TEXT NOT NULL, status TEXT NOT NULL, confidence REAL NOT NULL, tools_used TEXT NOT NULL, skills_used TEXT NOT NULL, duration_ms INTEGER, metadata TEXT NOT NULL, created_at TEXT NOT NULL)",
+			`CREATE TABLE IF NOT EXISTS experiences (id TEXT PRIMARY KEY, conversation_id TEXT, task_id TEXT, agent_id TEXT, channel_id TEXT, user_request TEXT NOT NULL, final_response TEXT NOT NULL, status TEXT NOT NULL, confidence REAL NOT NULL, tools_used TEXT NOT NULL, skills_used TEXT NOT NULL, duration_ms INTEGER, metadata TEXT NOT NULL, created_at TEXT NOT NULL, scope_key TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_tenant_id TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_user_id TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_project_id TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_agent_role TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_session_id TEXT, scope_task_id TEXT)`,
 		);
 		await this.db.run(
-			"CREATE TABLE IF NOT EXISTS learning_insights (id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, type TEXT NOT NULL, domain TEXT, keywords TEXT NOT NULL, content TEXT NOT NULL, evidence TEXT, confidence REAL NOT NULL, importance REAL NOT NULL, embedding TEXT NOT NULL, use_count INTEGER NOT NULL DEFAULT 0, last_used_at TEXT, created_at TEXT NOT NULL)",
+			`CREATE TABLE IF NOT EXISTS learning_insights (id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, type TEXT NOT NULL, domain TEXT, keywords TEXT NOT NULL, content TEXT NOT NULL, evidence TEXT, confidence REAL NOT NULL, importance REAL NOT NULL, embedding TEXT NOT NULL, use_count INTEGER NOT NULL DEFAULT 0, last_used_at TEXT, created_at TEXT NOT NULL, scope_key TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_tenant_id TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_user_id TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_project_id TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_agent_role TEXT NOT NULL DEFAULT '${LEGACY_SCOPE}', scope_session_id TEXT, scope_task_id TEXT, invalidated_at TEXT, invalidation_reason TEXT, invalidated_by_experience_id TEXT)`,
+		);
+		await this.db.run(
+			"CREATE TABLE IF NOT EXISTS learning_insight_evidence (insight_id TEXT NOT NULL, experience_id TEXT NOT NULL, relation TEXT NOT NULL, recorded_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (insight_id, experience_id))",
 		);
 	}
 
 	private deserializeInsight(row: InsightRow): LearningInsight {
 		return {
 			id: row.id,
+			scope: this.deserializeScope(row),
 			experienceId: row.experience_id,
 			type: row.type,
 			domain: row.domain ?? undefined,
@@ -1093,6 +1285,12 @@ export class LearningEngine {
 			embedding: this.safeJson<number[]>(row.embedding, []),
 			useCount: row.use_count,
 			lastUsedAt: row.last_used_at ? new Date(row.last_used_at) : undefined,
+			invalidatedAt: row.invalidated_at
+				? new Date(row.invalidated_at)
+				: undefined,
+			invalidationReason: row.invalidation_reason ?? undefined,
+			invalidatedByExperienceId:
+				row.invalidated_by_experience_id ?? undefined,
 			createdAt: new Date(row.created_at),
 		};
 	}
@@ -1100,6 +1298,7 @@ export class LearningEngine {
 	private deserializeExperience(row: ExperienceRow): ExperienceRecord {
 		return {
 			id: row.id,
+			scope: this.deserializeScope(row),
 			conversationId: row.conversation_id ?? undefined,
 			taskId: row.task_id ?? undefined,
 			agentId: row.agent_id ?? undefined,
@@ -1128,6 +1327,177 @@ export class LearningEngine {
 		return allowed.includes(value as LearningInsightType)
 			? (value as LearningInsightType)
 			: "procedure";
+	}
+
+	private normalizeScope(scope: LearningScope): LearningScope {
+		const required = {
+			tenantId: scope?.tenantId?.trim(),
+			userId: scope?.userId?.trim(),
+			projectId: scope?.projectId?.trim(),
+			agentRole: scope?.agentRole?.trim(),
+		};
+		for (const [key, value] of Object.entries(required)) {
+			if (!value || value === LEGACY_SCOPE) {
+				throw new Error(`Invalid learning scope: ${key} is required`);
+			}
+		}
+		return {
+			tenantId: required.tenantId as string,
+			userId: required.userId as string,
+			projectId: required.projectId as string,
+			agentRole: required.agentRole as string,
+			sessionId: scope.sessionId?.trim() || undefined,
+			taskId: scope.taskId?.trim() || undefined,
+		};
+	}
+
+	private scopeKeyForAccess(access: LearningAccess): string | undefined {
+		if (access.kind === "admin") return undefined;
+		return this.scopeKey(this.normalizeScope(access.scope));
+	}
+
+	private scopeKey(scope: LearningScope): string {
+		return JSON.stringify([
+			scope.tenantId,
+			scope.userId,
+			scope.projectId,
+			scope.agentRole,
+		]);
+	}
+
+	private async recordInsightEvidence(
+		insightId: string,
+		experienceId: string,
+		relation: "supports" | "refutes",
+	): Promise<void> {
+		const now = new Date().toISOString();
+		await this.db.run(
+			`INSERT OR REPLACE INTO learning_insight_evidence
+			 (insight_id, experience_id, relation, recorded_at, updated_at)
+			 VALUES (?, ?, ?, COALESCE((SELECT recorded_at FROM learning_insight_evidence WHERE insight_id = ? AND experience_id = ?), ?), ?)`,
+			[insightId, experienceId, relation, insightId, experienceId, now, now],
+		);
+	}
+
+	private async invalidateInsightsForExperience(
+		experienceId: string,
+		scopeKey: string,
+		reason: string,
+	): Promise<void> {
+		const positiveTypes: LearningInsightType[] = [
+			"procedure",
+			"tool_strategy",
+			"what_worked",
+			"skill_candidate",
+		];
+		const placeholders = positiveTypes.map(() => "?").join(", ");
+		const candidates = await this.db.all<{ id: string }>(
+			`SELECT DISTINCT li.id
+			 FROM learning_insights li
+			 JOIN learning_insight_evidence e ON e.insight_id = li.id
+			 WHERE e.experience_id = ? AND e.relation = 'supports'
+			 AND li.scope_key = ? AND li.invalidated_at IS NULL
+			 AND li.type IN (${placeholders})`,
+			[experienceId, scopeKey, ...positiveTypes],
+		);
+		const invalidatedIds: string[] = [];
+		await this.db.transaction(async () => {
+			for (const candidate of candidates) {
+				await this.recordInsightEvidence(candidate.id, experienceId, "refutes");
+				const support = await this.db.get<{ count: number }>(
+					`SELECT COUNT(*) AS count
+					 FROM learning_insight_evidence e
+					 JOIN experiences x ON x.id = e.experience_id
+					 WHERE e.insight_id = ? AND e.relation = 'supports'
+					 AND e.experience_id <> ? AND x.status <> 'failed'`,
+					[candidate.id, experienceId],
+				);
+				if ((support?.count ?? 0) > 0) continue;
+				if (this.options.ltm) {
+					await this.options.ltm.stageForget(`learn_${candidate.id}`);
+				}
+				await this.db.run(
+					`UPDATE learning_insights
+					 SET invalidated_at = ?, invalidation_reason = ?, invalidated_by_experience_id = ?
+					 WHERE id = ? AND scope_key = ? AND invalidated_at IS NULL`,
+					[
+						new Date().toISOString(),
+						reason.slice(0, 1000),
+						experienceId,
+						candidate.id,
+						scopeKey,
+					],
+				);
+				invalidatedIds.push(candidate.id);
+			}
+		});
+		if (this.options.ltm) {
+			await Promise.all(
+				invalidatedIds.map((id) =>
+					this.options.ltm
+						?.finalizeForget(`learn_${id}`)
+						.catch((error) =>
+							logger.warn(
+								`Failed to finalize invalidated learning mirror learn_${id}: ${String(error)}`,
+							),
+						),
+				),
+			);
+		}
+	}
+
+	private async deleteInsightWithMirror(
+		id: string,
+		scopeKey: string,
+	): Promise<boolean> {
+		const mirrorId = `learn_${id}`;
+		const deleted = await this.db.transaction(async () => {
+			const existing = await this.db.get<{ id: string }>(
+				"SELECT id FROM learning_insights WHERE id = ? AND scope_key = ?",
+				[id, scopeKey],
+			);
+			if (!existing) return false;
+			if (this.options.ltm) await this.options.ltm.stageForget(mirrorId);
+			await this.db.run(
+				"DELETE FROM learning_insight_evidence WHERE insight_id = ?",
+				[id],
+			);
+			await this.db.run(
+				"DELETE FROM learning_insights WHERE id = ? AND scope_key = ?",
+				[id, scopeKey],
+			);
+			return true;
+		});
+
+		if (deleted && this.options.ltm) {
+			await this.options.ltm.finalizeForget(mirrorId).catch((error) => {
+				logger.warn(
+					`Failed to finalize learning mirror deletion ${mirrorId}: ${String(error)}`,
+				);
+			});
+		}
+		return deleted;
+	}
+
+	private deserializeScope(
+		row: Pick<
+			ExperienceRow,
+			| "scope_tenant_id"
+			| "scope_user_id"
+			| "scope_project_id"
+			| "scope_agent_role"
+			| "scope_session_id"
+			| "scope_task_id"
+		>,
+	): LearningScope {
+		return {
+			tenantId: row.scope_tenant_id,
+			userId: row.scope_user_id,
+			projectId: row.scope_project_id,
+			agentRole: row.scope_agent_role,
+			sessionId: row.scope_session_id ?? undefined,
+			taskId: row.scope_task_id ?? undefined,
+		};
 	}
 
 	private dedupeInsights(insights: LearningInsight[]): LearningInsight[] {

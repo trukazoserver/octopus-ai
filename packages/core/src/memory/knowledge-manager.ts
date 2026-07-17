@@ -48,7 +48,7 @@ export interface KnowledgeChunkRecord {
 	metadata: string | null;
 }
 
-type KnowledgeSearchResult = KnowledgeChunkRecord & {
+export type KnowledgeSearchResult = KnowledgeChunkRecord & {
 	item_title: string | null;
 	collection_id: string;
 	score?: number;
@@ -316,6 +316,7 @@ export class KnowledgeManager {
 	async searchChunks(options: {
 		query: string;
 		collectionId?: string;
+		collectionIds?: string[];
 		limit?: number;
 	}): Promise<KnowledgeSearchResult[]> {
 		const query = options.query.trim();
@@ -323,6 +324,7 @@ export class KnowledgeManager {
 		const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
 		const semantic = await this.searchChunksByEmbedding(query, {
 			collectionId: options.collectionId,
+			collectionIds: options.collectionIds,
 			limit,
 		});
 		if (semantic.length > 0) return semantic;
@@ -330,16 +332,20 @@ export class KnowledgeManager {
 		const like = `%${query.toLowerCase()}%`;
 		const params: unknown[] = [like, like, like];
 		let collectionFilter = "";
-		if (options.collectionId) {
-			collectionFilter = " AND i.collection_id = ?";
-			params.push(options.collectionId);
+		const collectionIds = options.collectionId
+			? [options.collectionId]
+			: [...new Set(options.collectionIds ?? [])].filter(Boolean);
+		if (collectionIds.length > 0) {
+			const placeholders = collectionIds.map(() => "?").join(", ");
+			collectionFilter = ` AND i.collection_id IN (${placeholders})`;
+			params.push(...collectionIds);
 		}
 		params.push(limit);
 		return this.db.all<KnowledgeSearchResult>(
 			`SELECT c.*, i.title AS item_title, i.collection_id AS collection_id
 			 FROM knowledge_chunks c
 			 JOIN knowledge_items i ON i.id = c.item_id
-			 WHERE (LOWER(c.content) LIKE ? OR LOWER(COALESCE(i.title, '')) LIKE ? OR LOWER(COALESCE(i.metadata, '')) LIKE ?)${collectionFilter}
+			 WHERE i.status = 'ready' AND (LOWER(c.content) LIKE ? OR LOWER(COALESCE(i.title, '')) LIKE ? OR LOWER(COALESCE(i.metadata, '')) LIKE ?)${collectionFilter}
 			 ORDER BY i.updated_at DESC, c.chunk_index ASC
 			 LIMIT ?`,
 			params,
@@ -348,17 +354,21 @@ export class KnowledgeManager {
 
 	private async searchChunksByEmbedding(
 		query: string,
-		options: { collectionId?: string; limit: number },
+		options: { collectionId?: string; collectionIds?: string[]; limit: number },
 	): Promise<KnowledgeSearchResult[]> {
 		if (!this.embedFn) return [];
 		const queryEmbedding = await this.embedText(query, "query");
 		if (!queryEmbedding) return [];
 
 		const params: unknown[] = [];
-		let collectionFilter = "";
-		if (options.collectionId) {
-			collectionFilter = " WHERE i.collection_id = ?";
-			params.push(options.collectionId);
+		let collectionFilter = " WHERE i.status = 'ready'";
+		const collectionIds = options.collectionId
+			? [options.collectionId]
+			: [...new Set(options.collectionIds ?? [])].filter(Boolean);
+		if (collectionIds.length > 0) {
+			const placeholders = collectionIds.map(() => "?").join(", ");
+			collectionFilter += ` AND i.collection_id IN (${placeholders})`;
+			params.push(...collectionIds);
 		}
 		const candidates = await this.db.all<KnowledgeSearchResult>(
 			`SELECT c.*, i.title AS item_title, i.collection_id AS collection_id

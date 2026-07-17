@@ -834,6 +834,7 @@ function buildAgentRuntimeConfig(
 		model: agent.model ?? fallbackConfig.model,
 		reasoningEffort: reasoningEffort ?? fallbackConfig.reasoningEffort,
 		maxTokens: fallbackConfig.maxTokens,
+		knowledgeBaseIds: parseJsonStringArray(agent.knowledge_base_ids),
 		toolIterationLimit: fallbackConfig.toolIterationLimit,
 		resultTruncation: fallbackConfig.resultTruncation,
 		compression: fallbackConfig.compression,
@@ -918,6 +919,9 @@ export async function bootstrap(options?: {
 	let embeddingProvider = createEmbeddingProvider(config);
 	const embedFn: EmbeddingFunction = (text, task) =>
 		embeddingProvider.embed(text, task);
+	embedFn.embedVersioned = (text, task) =>
+		embeddingProvider.embedVersioned(text, task);
+	embedFn.getDescriptor = () => embeddingProvider.getDescriptor();
 	const refreshEmbeddingProvider = async (
 		nextConfig: OctopusConfig = config,
 	): Promise<boolean> => {
@@ -1244,6 +1248,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		embedFn,
 		createConfiguredKnowledgeExtractor(router, config.ai),
 	);
+	contextAssembler.setKnowledgeManager(knowledgeManager);
 	const teamBlackboard = new TeamBlackboard();
 	let envEncryptionKey =
 		config.security.encryptionKey ||

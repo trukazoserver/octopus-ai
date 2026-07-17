@@ -17,6 +17,7 @@ stderr*.log
 stdout*.log
 server*.log
 octopus-*.log
+.dev-logs/
 
 # User config (contains API keys)
 .octopus/

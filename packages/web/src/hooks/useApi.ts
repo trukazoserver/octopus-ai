@@ -64,10 +64,15 @@ export async function apiPutJson(
 export async function apiPost(
 	path: string,
 	body?: unknown,
+	init?: RequestInit,
 ): Promise<Record<string, unknown>> {
 	const res = await fetch(`${API_BASE}${path}`, {
+		...init,
 		method: "POST",
-		headers: body ? { "Content-Type": "application/json" } : {},
+		headers: {
+			...(body ? { "Content-Type": "application/json" } : {}),
+			...(init?.headers ?? {}),
+		},
 		body: body ? JSON.stringify(body) : undefined,
 	});
 	if (!res.ok) throw await readApiError(res);

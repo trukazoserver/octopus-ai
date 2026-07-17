@@ -1,6 +1,13 @@
 import type { DatabaseAdapter } from "../storage/database.js";
 import { VectorStore } from "./store.js";
-import type { MemoryItem, VectorSearchResult } from "./types.js";
+import type {
+	MemoryItem,
+	VectorSearchOptions,
+	VectorSearchResult,
+} from "./types.js";
+
+const LSH_TABLES = 4;
+const LSH_BITS = 12;
 
 interface MemoryItemRow {
 	id: string;
@@ -18,6 +25,9 @@ interface MemoryItemRow {
 
 export class SqliteVectorStore extends VectorStore {
 	private initialized = false;
+	private annSearches = 0;
+	private annFallbackSearches = 0;
+	private annCandidates = 0;
 
 	async initialize(): Promise<void> {
 		if (this.initialized) return;
@@ -45,6 +55,16 @@ export class SqliteVectorStore extends VectorStore {
 
 		await this.db.run(
 			"CREATE INDEX IF NOT EXISTS idx_memory_items_importance ON memory_items(importance)",
+		);
+		await this.db.run(`CREATE TABLE IF NOT EXISTS memory_vector_lsh (
+			memory_id TEXT NOT NULL, embedding_version TEXT NOT NULL, dimensions INTEGER NOT NULL,
+			table_no INTEGER NOT NULL, bucket TEXT NOT NULL, scope_tenant TEXT NOT NULL,
+			scope_user TEXT NOT NULL, scope_project TEXT NOT NULL, scope_agent TEXT NOT NULL,
+			scope_session TEXT NOT NULL, scope_task TEXT NOT NULL,
+			PRIMARY KEY (memory_id, table_no)
+		)`);
+		await this.db.run(
+			"CREATE INDEX IF NOT EXISTS idx_memory_vector_lsh_lookup ON memory_vector_lsh (embedding_version, dimensions, scope_tenant, scope_user, scope_project, table_no, bucket)",
 		);
 
 		// Migrations
@@ -94,20 +114,17 @@ export class SqliteVectorStore extends VectorStore {
 				JSON.stringify(item.metadata),
 			],
 		);
+		await this.syncLsh(item);
 		await this.syncFts(item);
 	}
 
 	async search(
 		queryEmbedding: number[],
-		options: {
-			limit: number;
-			threshold: number;
-			filter?: (item: MemoryItem) => boolean;
-		},
+		options: VectorSearchOptions,
 	): Promise<VectorSearchResult[]> {
 		await this.ensureInitialized();
 
-		const rows = await this.db.all<MemoryItemRow>("SELECT * FROM memory_items");
+		const rows = await this.getSearchCandidates(queryEmbedding, options);
 		const results: VectorSearchResult[] = [];
 		for (const row of rows) {
 			const embedding = this.deserializeEmbedding(row.embedding);
@@ -194,6 +211,7 @@ export class SqliteVectorStore extends VectorStore {
 				item.id,
 			],
 		);
+		await this.syncLsh(item);
 		await this.syncFts(item);
 	}
 
@@ -201,6 +219,7 @@ export class SqliteVectorStore extends VectorStore {
 		await this.ensureInitialized();
 
 		await this.db.run("DELETE FROM memory_items WHERE id = ?", [id]);
+		await this.db.run("DELETE FROM memory_vector_lsh WHERE memory_id = ?", [id]);
 		await this.db
 			.run("DELETE FROM memory_fts WHERE id = ?", [id])
 			.catch(() => {});
@@ -225,6 +244,143 @@ export class SqliteVectorStore extends VectorStore {
 		} catch {
 			// FTS is optional and may not be initialized for this store.
 		}
+	}
+
+	private async syncLsh(item: MemoryItem): Promise<void> {
+		await this.db.run("DELETE FROM memory_vector_lsh WHERE memory_id = ?", [item.id]);
+		const version = item.metadata.embeddingVersion;
+		const dimensions = Number(item.metadata.embeddingDimensions);
+		if (
+			typeof version !== "string" ||
+			!version ||
+			!Number.isInteger(dimensions) ||
+			dimensions !== item.embedding.length
+		) {
+			return;
+		}
+		const scope = {
+			tenant: this.scopeValue(item.metadata.tenantId),
+			user: this.scopeValue(item.metadata.userId),
+			project: this.scopeValue(item.metadata.projectId),
+			agent: this.scopeValue(item.metadata.agentRole),
+			session: this.scopeValue(item.metadata.sessionId),
+			task: this.scopeValue(item.metadata.taskId),
+		};
+		for (let table = 0; table < LSH_TABLES; table++) {
+			await this.db.run(
+				`INSERT INTO memory_vector_lsh
+				 (memory_id, embedding_version, dimensions, table_no, bucket, scope_tenant, scope_user, scope_project, scope_agent, scope_session, scope_task)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					item.id,
+					version,
+					dimensions,
+					table,
+					this.lshBucket(item.embedding, table),
+					scope.tenant,
+					scope.user,
+					scope.project,
+					scope.agent,
+					scope.session,
+					scope.task,
+				],
+			);
+		}
+	}
+
+	private async getSearchCandidates(
+		queryEmbedding: number[],
+		options: VectorSearchOptions,
+	): Promise<MemoryItemRow[]> {
+		const descriptor = options.constraints?.embedding;
+		const scope = options.constraints?.scope;
+		if (!descriptor || !scope || descriptor.dimensions !== queryEmbedding.length) {
+			this.annFallbackSearches++;
+			return this.db.all<MemoryItemRow>("SELECT * FROM memory_items");
+		}
+		const totals = await this.db.get<{ memories: number; indexed: number }>(
+			"SELECT (SELECT COUNT(*) FROM memory_items) AS memories, (SELECT COUNT(DISTINCT memory_id) FROM memory_vector_lsh) AS indexed",
+		);
+		if (!totals || totals.memories === 0 || totals.indexed < totals.memories) {
+			this.annFallbackSearches++;
+			return this.db.all<MemoryItemRow>("SELECT * FROM memory_items");
+		}
+		this.annSearches++;
+		const bucketClauses: string[] = [];
+		const params: unknown[] = [
+			descriptor.version,
+			descriptor.dimensions,
+			this.scopeValue(scope.tenantId),
+			this.scopeValue(scope.userId),
+			this.scopeValue(scope.projectId),
+			this.scopeValue(scope.agentRole),
+			this.scopeValue(scope.sessionId),
+			this.scopeValue(scope.taskId),
+		];
+		for (let table = 0; table < LSH_TABLES; table++) {
+			for (const bucket of this.lshProbeBuckets(queryEmbedding, table)) {
+				bucketClauses.push("(table_no = ? AND bucket = ?)");
+				params.push(table, bucket);
+			}
+		}
+		params.push(Math.max(options.limit * 8, 64));
+		const ids = await this.db.all<{ memory_id: string }>(
+			`SELECT DISTINCT memory_id FROM memory_vector_lsh
+			 WHERE embedding_version = ? AND dimensions = ? AND scope_tenant = ?
+			 AND (scope_user = '' OR scope_user = ?) AND (scope_project = '' OR scope_project = ?)
+			 AND (scope_agent = '' OR scope_agent = ?) AND (scope_session = '' OR scope_session = ?)
+			 AND (scope_task = '' OR scope_task = ?) AND (${bucketClauses.join(" OR ")}) LIMIT ?`,
+			params,
+		);
+		this.annCandidates += ids.length;
+		if (ids.length === 0) return [];
+		const placeholders = ids.map(() => "?").join(", ");
+		return this.db.all<MemoryItemRow>(
+			`SELECT * FROM memory_items WHERE id IN (${placeholders})`,
+			ids.map((row) => row.memory_id),
+		);
+	}
+
+	private lshBucket(embedding: number[], table: number): string {
+		let bits = 0;
+		for (let bit = 0; bit < LSH_BITS; bit++) {
+			let projection = 0;
+			for (let index = 0; index < embedding.length; index++) {
+				let seed =
+					Math.imul(table + 1, 73856093) ^
+					Math.imul(bit + 1, 19349663) ^
+					Math.imul(index + 1, 83492791);
+				seed ^= seed >>> 16;
+				seed = Math.imul(seed, 0x7feb352d);
+				seed ^= seed >>> 15;
+				const weight = (seed & 1) === 0 ? 1 : -1;
+				projection += embedding[index] * weight;
+			}
+			if (projection >= 0) bits |= 1 << bit;
+		}
+		return bits.toString(16).padStart(Math.ceil(LSH_BITS / 4), "0");
+	}
+
+	private lshProbeBuckets(embedding: number[], table: number): string[] {
+		const base = Number.parseInt(this.lshBucket(embedding, table), 16);
+		const buckets = [base];
+		for (let bit = 0; bit < LSH_BITS; bit++) buckets.push(base ^ (1 << bit));
+		return buckets.map((value) =>
+			value.toString(16).padStart(Math.ceil(LSH_BITS / 4), "0"),
+		);
+	}
+
+	private scopeValue(value: unknown): string {
+		return typeof value === "string" ? value : "";
+	}
+
+	getDiagnostics(): Record<string, number> {
+		return {
+			annSearches: this.annSearches,
+			annFallbackSearches: this.annFallbackSearches,
+			annAverageCandidates:
+				this.annSearches > 0 ? this.annCandidates / this.annSearches : 0,
+		};
 	}
 
 	async count(): Promise<number> {
