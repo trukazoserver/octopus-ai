@@ -77,6 +77,15 @@ export function updateQuotaCache(entry: CachedQuota): void {
 	quotaCache.set(entry.provider, entry);
 }
 
+/**
+ * Clear the in-memory quota cache. Call on provider reconnect / credential
+ * change so the dashboard re-probes with the new token instead of serving the
+ * previous account's stale quota until the 9-min TTL expires.
+ */
+export function clearQuotaCache(): void {
+	quotaCache.clear();
+}
+
 export function getCachedQuota(provider: string): CachedQuota | undefined {
 	const entry = quotaCache.get(provider);
 	if (!entry) return undefined;

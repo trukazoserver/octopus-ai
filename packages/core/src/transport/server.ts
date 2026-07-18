@@ -30,7 +30,7 @@ import {
 	getModelCapabilities,
 	getModelCapabilitiesFromRef,
 } from "../ai/model-capabilities.js";
-import { resolveProviderQuotas } from "../ai/quota-service.js";
+import { clearQuotaCache, resolveProviderQuotas } from "../ai/quota-service.js";
 import {
 	type LLMRouter,
 	getProviderRegistry,
@@ -2332,6 +2332,8 @@ export class TransportServer {
 			providerConfig[provider] = prov;
 			loader.save(config);
 
+			if (this.system) this.system.config = config;
+			clearQuotaCache();
 			if (this.system?.router) {
 				await this.system.router.reconfigure(config.ai);
 			}
@@ -2774,6 +2776,7 @@ export class TransportServer {
 			// Update the in-memory config so /api/config reflects the disconnect
 			// immediately (not just the file on disk).
 			if (this.system) this.system.config = config;
+			clearQuotaCache();
 
 			if (this.system?.router) {
 				await this.system.router.reconfigure(config.ai);
@@ -2861,6 +2864,12 @@ export class TransportServer {
 				prov.browserUserAgent = undefined;
 				providerConfig.openai = prov;
 				loader.save(config);
+				// Update the in-memory config + clear the quota cache so /api/config,
+				// /api/quotas and the model selector reflect the new token immediately
+				// (loadConfig() serves this.system.config; without this, quota sees the
+				// stale pre-connect config and omits the provider).
+				if (this.system) this.system.config = config;
+				clearQuotaCache();
 				if (this.system?.router) {
 					await this.system.router.reconfigure(config.ai);
 				}
@@ -2897,6 +2906,8 @@ export class TransportServer {
 			providerConfig[provider] = prov;
 			loader.save(config);
 
+			if (this.system) this.system.config = config;
+			clearQuotaCache();
 			if (this.system?.router) {
 				await this.system.router.reconfigure(config.ai);
 			}
@@ -2980,6 +2991,7 @@ export class TransportServer {
 			if (this.system) {
 				this.system.config = nextConfig;
 				if (keyPath === "ai" || keyPath.startsWith("ai.")) {
+					clearQuotaCache();
 					await this.system.router?.reconfigure({
 						default: nextConfig.ai.default,
 						fallback: nextConfig.ai.fallback,

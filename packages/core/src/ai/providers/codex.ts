@@ -27,7 +27,11 @@ import { readNextWithTimeout } from "./stream-reader.js";
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const ORIGINATOR = "codex_cli_rs";
 /** Client version sent to /models (matches the @openai/codex npm release). */
-const CODEX_CLIENT_VERSION = process.env.CODEX_CLIENT_VERSION || "0.142.0";
+// Keep this in step with the current @openai/codex CLI (npm `latest`): the
+// Codex backend gates the model catalog by client_version. The gpt-5.6
+// sol/terra/luna variants appeared at 0.144.0; <=0.143 returns only the older
+// 4-model list. Override with the CODEX_CLIENT_VERSION env var if needed.
+const CODEX_CLIENT_VERSION = process.env.CODEX_CLIENT_VERSION || "0.144.5";
 const CODEX_MODELS_TTL_MS = 60 * 60_000; // 1 hour cache
 
 let codexModelsCache: { models: string[]; fetchedAt: number } | null = null;
