@@ -596,12 +596,19 @@ describe("memory API endpoints", () => {
 		expect(kanbanDispatcher.setEnabled).toHaveBeenCalledWith(true);
 	});
 
-	it("exposes all known models for active providers", async () => {
+	it("exposes live models for available providers", async () => {
 		const baseUrl = await startServer(
 			{},
 			{
 				router: {
 					getAvailableProviders: () => ["zhipu"],
+					getProvider: () => ({
+						hasCredentials: () => true,
+						listModels: async () => ({
+							ok: true,
+							models: ["glm-5.2", "glm-4.7"],
+						}),
+					}),
 				},
 				config: {
 					ai: {
@@ -619,9 +626,40 @@ describe("memory API endpoints", () => {
 
 		expect(response.status).toBe(200);
 		expect(response.body.providers[0].provider).toBe("zhipu");
+		// Live listModels output merged with the user-configured models.
 		expect(response.body.providers[0].models).toEqual(
-			expect.arrayContaining(["glm-5.1", "glm-4.7", "glm-4.6"]),
+			expect.arrayContaining(["glm-5.2", "glm-4.7", "glm-5.1"]),
 		);
+	});
+
+	it("hides providers without configured credentials", async () => {
+		const baseUrl = await startServer(
+			{},
+			{
+				router: {
+					getAvailableProviders: () => ["zhipu", "anthropic"],
+					getProvider: (name: string) =>
+						name === "zhipu"
+							? {
+									hasCredentials: () => true,
+									listModels: async () => ({ ok: true, models: ["glm-5.2"] }),
+								}
+							: {
+									hasCredentials: () => false,
+									listModels: async () => ({ ok: true, models: [] }),
+								},
+				},
+				config: { ai: { providers: {} } },
+			},
+		);
+
+		const response = await getJson(`${baseUrl}/api/models`);
+
+		expect(response.status).toBe(200);
+		const providers = (response.body.providers as Array<{ provider: string }>)
+			.map((p) => p.provider);
+		expect(providers).toEqual(["zhipu"]);
+		expect(providers).not.toContain("anthropic");
 	});
 
 	it("creates Kanban plans through the planner API", async () => {

@@ -9,7 +9,7 @@ import type {
 	ProviderConfig,
 	ReasoningEffort,
 } from "../types.js";
-import { BaseLLMProvider, verifyModelsGet } from "./base.js";
+import { BaseLLMProvider, fetchModelsList, verifyModelsGet } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 interface GoogleServiceAccountCredentials {
@@ -948,6 +948,18 @@ export class GoogleProvider extends BaseLLMProvider {
 			};
 		}
 		return verifyModelsGet(
+			`${this.getBaseUrl()}/models`,
+			await this.getHeaders(),
+		);
+	}
+
+	async listModels(): Promise<{ ok: boolean; models: string[] }> {
+		// Vertex has no simple OpenAI-style list-models endpoint; report presence
+		// only so the caller falls back to the registry's static defaultModels.
+		if (this.authMode === "vertex") {
+			return { ok: await this.isAvailable(), models: [] };
+		}
+		return fetchModelsList(
 			`${this.getBaseUrl()}/models`,
 			await this.getHeaders(),
 		);

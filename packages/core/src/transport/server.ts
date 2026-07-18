@@ -30,7 +30,6 @@ import {
 	getModelCapabilities,
 	getModelCapabilitiesFromRef,
 } from "../ai/model-capabilities.js";
-import { listCodexModels } from "../ai/providers/codex.js";
 import { resolveProviderQuotas } from "../ai/quota-service.js";
 import {
 	type LLMRouter,
@@ -2036,50 +2035,57 @@ export class TransportServer {
 			const config = this.loadConfig();
 			const router = this.system?.router;
 			const registry = getProviderRegistry();
-			const availableProviders = new Set(router?.getAvailableProviders() ?? []);
 			const entries: Array<{
 				provider: string;
 				providerDisplayName: string;
 				models: string[];
 			}> = [];
-			for (const [provider, providerConfig] of Object.entries(
-				config.ai.providers,
-			)) {
-				if (!availableProviders.has(provider)) continue;
-				const pc = providerConfig as Record<string, unknown>;
+			for (const providerName of router?.getAvailableProviders() ?? []) {
+				const provider = router?.getProvider(providerName);
+				// Skip providers without a configured credential — the selector must
+				// only show providers the user can actually use.
+				if (!provider || !provider.hasCredentials()) continue;
+				const providerConfig = (
+					config.ai.providers as Record<
+						string,
+						Record<string, unknown> | undefined
+					>
+				)[providerName];
 				const configuredModels =
-					"models" in providerConfig && Array.isArray(providerConfig.models)
+					providerConfig && Array.isArray(providerConfig.models)
 						? (providerConfig.models as string[])
 						: [];
-				let models: string[];
-				// Codex (ChatGPT account): fetch the live model list from the backend
-				// (= `codex models`) instead of the static api-key defaults.
-				if (
-					provider === "openai" &&
-					pc.authMode === "codex" &&
-					typeof pc.accessToken === "string" &&
-					pc.accessToken
-				) {
-					const live = await listCodexModels(pc.accessToken);
-					models = [...new Set([...configuredModels, ...live])];
-					// Fallback to the registry defaults if the live fetch failed.
-					if (models.length === 0) {
-						models = [...(registry[provider]?.defaultModels ?? [])];
-					}
-				} else {
-					const defaultModels = registry[provider]?.defaultModels ?? [];
-					models = [...new Set([...configuredModels, ...defaultModels])];
+				const defaultModels = registry[providerName]?.defaultModels ?? [];
+				// Live model list (one cached authenticated GET). `ok` means the
+				// provider responded — the verified-availability gate. Providers
+				// that fail (bad key, unreachable) are hidden.
+				let live: { ok: boolean; models: string[] } = {
+					ok: false,
+					models: [],
+				};
+				try {
+					live = await provider.listModels();
+				} catch {
+					live = { ok: false, models: [] };
 				}
+				if (!live.ok) continue;
+				// Prefer the real live list; fall back to static defaults only when
+				// the provider is available but its list endpoint is unparseable
+				// (e.g. Vertex). User-curated config models are always preserved.
+				const models =
+					live.models.length > 0
+						? [...new Set([...live.models, ...configuredModels])]
+						: [...new Set([...configuredModels, ...defaultModels])];
 				if (models.length > 0) {
 					entries.push({
-						provider,
-						providerDisplayName: registry[provider]?.displayName ?? provider,
+						provider: providerName,
+						providerDisplayName:
+							registry[providerName]?.displayName ?? providerName,
 						models,
 					});
 				}
 			}
 			// Rich per-model metadata (reasoning capabilities) for the UI selectors.
-			// Kept as a separate field so existing `providers` consumers are unaffected.
 			const modelCapabilities = entries.flatMap((entry) =>
 				entry.models.map((model) =>
 					getModelCapabilities(entry.provider, model),

@@ -5,7 +5,7 @@ import type {
 	LLMToolCall,
 	ProviderConfig,
 } from "../types.js";
-import { BaseLLMProvider } from "./base.js";
+import { BaseLLMProvider, fetchModelsList } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 export class OllamaProvider extends BaseLLMProvider {
@@ -183,6 +183,12 @@ export class OllamaProvider extends BaseLLMProvider {
 		}
 	}
 
+	// Ollama is local and needs no API key — always considered configured when
+	// present in config (connectivity is verified by listModels' /api/tags GET).
+	hasCredentials(): boolean {
+		return true;
+	}
+
 	async isAvailable(): Promise<boolean> {
 		try {
 			const response = await fetch(`${this.baseUrl}/api/tags`, {
@@ -193,5 +199,10 @@ export class OllamaProvider extends BaseLLMProvider {
 		} catch {
 			return false;
 		}
+	}
+
+	async listModels(): Promise<{ ok: boolean; models: string[] }> {
+		// Ollama exposes installed models via /api/tags ({models:[{name}]}).
+		return fetchModelsList(`${this.baseUrl}/api/tags`, {}, 5000);
 	}
 }

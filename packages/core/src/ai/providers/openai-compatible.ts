@@ -7,7 +7,7 @@ import type {
 	ProviderConfig,
 	ThinkingBlock,
 } from "../types.js";
-import { BaseLLMProvider, verifyModelsGet } from "./base.js";
+import { BaseLLMProvider, fetchModelsList, verifyModelsGet } from "./base.js";
 import { readNextWithTimeout } from "./stream-reader.js";
 
 export interface OpenAICompatibleConfig extends ProviderConfig {
@@ -408,6 +408,18 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 
 	async verifyKey(): Promise<{ ok: boolean; error?: string }> {
 		return verifyModelsGet(`${this.baseUrl}/models`, this.getHeaders());
+	}
+
+	async listModels(): Promise<{ ok: boolean; models: string[] }> {
+		// Codex/browser auth is handled by CodexProvider; for api-key providers
+		// the live list comes from the OpenAI-compatible /models endpoint.
+		if (
+			this.prefix === "openai" &&
+			(this.config.authMode === "codex" || this.config.authMode === "browser")
+		) {
+			return { ok: Boolean(this.config.accessToken), models: [] };
+		}
+		return fetchModelsList(`${this.baseUrl}/models`, this.getHeaders());
 	}
 }
 

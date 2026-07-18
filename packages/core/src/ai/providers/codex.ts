@@ -65,6 +65,15 @@ export async function listCodexModels(accessToken: string): Promise<string[]> {
 	}
 }
 
+/**
+ * Clear the live Codex model-list cache. Called when providers are reconfigured
+ * (reconnect/disconnect/credential change) so the selector fetches fresh models
+ * with the new token instead of serving the cached list.
+ */
+export function clearCodexModelsCache(): void {
+	codexModelsCache = null;
+}
+
 interface ResponseInputItem {
 	type: string;
 	role?: string;
@@ -148,6 +157,13 @@ export class CodexProvider extends BaseLLMProvider {
 			`${this.baseUrl}/models?client_version=${CODEX_CLIENT_VERSION}`,
 			this.getHeaders(),
 		);
+	}
+
+	async listModels(): Promise<{ ok: boolean; models: string[] }> {
+		// listCodexModels is already cached (CODEX_MODELS_TTL_MS) and fetches the
+		// live ChatGPT-account model list from the Codex backend.
+		const models = await listCodexModels(this.accessToken);
+		return { ok: models.length > 0, models };
 	}
 
 	private getHeaders(): Record<string, string> {

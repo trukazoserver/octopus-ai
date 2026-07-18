@@ -35,6 +35,37 @@ export abstract class BaseLLMProvider {
 	}
 
 	/**
+	 * Live model list from the provider's list-models endpoint. Returns
+	 * `{ok, models}`: `ok` means the endpoint responded successfully (provider is
+	 * available/credentialed), `models` is the parsed id list (may be empty if the
+	 * response shape was unparseable). Used by /api/models to show real, current
+	 * models for configured providers only; callers fall back to the registry's
+	 * static defaultModels when `ok` is true but `models` is empty.
+	 */
+	async listModels(): Promise<{ ok: boolean; models: string[] }> {
+		return { ok: false, models: [] };
+	}
+
+	/**
+	 * Whether this provider has a credential CONFIGURED (presence only, no
+	 * network). Used as a cheap pre-filter so /api/models doesn't fire a doomed
+	 * request at every unconfigured provider. The live listModels() GET remains
+	 * the real "verified" check; this just skips the obviously-unconfigured ones.
+	 */
+	hasCredentials(): boolean {
+		if (this.config.accessToken) return true;
+		if (this.config.authMode === "vertex") {
+			return Boolean(
+				this.config.credentialsJson ||
+					this.config.credentialsFile ||
+					process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+					process.env.GOOGLE_VERTEX_ACCESS_TOKEN,
+			);
+		}
+		return Boolean(this.config.apiKey);
+	}
+
+	/**
 	 * Resolves the effective per-read (chunk-gap) stream timeout for this
 	 * provider. Precedence:
 	 *   1. explicit per-provider `streamReadTimeoutMs` (set by the router from
@@ -110,4 +141,79 @@ export async function verifyModelsGet(
 			error: e instanceof Error ? e.message : "Error de red",
 		};
 	}
+}
+
+/**
+ * TTL for the live model-list cache. Opening the model selector must not hammer
+ * every provider on each call; one authenticated GET per provider per window.
+ */
+const MODELS_LIST_TTL_MS = 10 * 60 * 1000;
+const modelsListCache = new Map<
+	string,
+	{ models: string[]; fetchedAt: number }
+>();
+
+/**
+ * Extract model ids from a provider's list-models JSON, handling the common
+ * response shapes: `{data:[{id}]}` (OpenAI-compat, Anthropic, Zhipu),
+ * `{models:[{name|id|slug}]}` (Google, Cohere, Ollama, Codex) and a bare
+ * top-level array. Google names like `models/gemini-...` are normalized.
+ */
+export function parseModelIds(data: unknown): string[] {
+	let arr: unknown[] = [];
+	if (Array.isArray(data)) arr = data;
+	else if (data && typeof data === "object") {
+		const obj = data as Record<string, unknown>;
+		if (Array.isArray(obj.data)) arr = obj.data;
+		else if (Array.isArray(obj.models)) arr = obj.models;
+	}
+	const ids = arr
+		.map((item) => {
+			if (typeof item === "string") return item;
+			if (item && typeof item === "object") {
+				const m = item as Record<string, unknown>;
+				return (m.id ?? m.name ?? m.slug) as unknown;
+			}
+			return undefined;
+		})
+		.filter((v): v is string => typeof v === "string" && v.length > 0);
+	return [...new Set(ids.map((id) => id.replace(/^models\//, "")))];
+}
+
+/**
+ * Shared helper for `listModels()`: one cached authenticated GET to the
+ * provider's list-models endpoint, returning the parsed model ids. Mirrors
+ * verifyModelsGet's status handling but keeps the body. `ok` means the endpoint
+ * responded successfully (so the provider is available); `models` may still be
+ * empty if the response shape was unparseable — callers fall back to static
+ * defaults in that case.
+ */
+export async function fetchModelsList(
+	url: string,
+	headers: Record<string, string>,
+	timeoutMs = 8000,
+): Promise<{ ok: boolean; models: string[] }> {
+	const cached = modelsListCache.get(url);
+	if (cached && Date.now() - cached.fetchedAt < MODELS_LIST_TTL_MS) {
+		return { ok: true, models: cached.models };
+	}
+	try {
+		const res = await fetch(url, {
+			method: "GET",
+			headers,
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (!res.ok) return { ok: false, models: [] };
+		const data = (await res.json()) as unknown;
+		const models = parseModelIds(data);
+		modelsListCache.set(url, { models, fetchedAt: Date.now() });
+		return { ok: true, models };
+	} catch {
+		return { ok: false, models: [] };
+	}
+}
+
+/** Clear the live model-list cache (for tests / forced refresh). */
+export function clearModelsListCache(): void {
+	modelsListCache.clear();
 }

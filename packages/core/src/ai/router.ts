@@ -3,7 +3,8 @@ import { getModelContextWindow } from "./model-context.js";
 import { estimateCost } from "./pricing.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import type { BaseLLMProvider } from "./providers/base.js";
-import { CodexProvider } from "./providers/codex.js";
+import { clearModelsListCache } from "./providers/base.js";
+import { CodexProvider, clearCodexModelsCache } from "./providers/codex.js";
 import { CohereProvider } from "./providers/cohere.js";
 import { GoogleProvider } from "./providers/google.js";
 import { OllamaProvider } from "./providers/ollama.js";
@@ -863,6 +864,13 @@ export class LLMRouter {
 	async reconfigure(config: LLMRouterConfig): Promise<void> {
 		this.config = config;
 		this.providers.clear();
+		// Clear live model-list caches so a reconnect / credential change is
+		// reflected immediately in the model selector and quota probes — otherwise
+		// the cached lists (1h for Codex, 10min for the rest) mask the reloaded
+		// providers and the UI keeps showing stale (or empty) results until TTL.
+		clearCodexModelsCache();
+		clearModelsListCache();
+		logger.info("Router reconfigured (providers + model caches cleared)");
 		await this.initialize();
 	}
 
@@ -914,6 +922,20 @@ export class LLMRouter {
 				"No AI providers available. Please configure at least one provider with a valid API key.",
 			);
 		}
+		// Warn if the configured fallback points to a provider that isn't available
+		// (no credential / unreachable) — it would never succeed as a fallback and
+		// only produce a second, misleading failure. Parse the provider name
+		// directly (resolveProvider throws when the provider is unavailable).
+		if (this.config.fallback) {
+			const fallbackProviderName = this.config.fallback.includes("/")
+				? this.config.fallback.slice(0, this.config.fallback.indexOf("/"))
+				: this.config.fallback;
+			if (!this.providers.has(fallbackProviderName)) {
+				logger.warn(
+					`Configured fallback '${this.config.fallback}' is not available (no credential); it will be skipped. Set ai.fallback to a configured provider/model.`,
+				);
+			}
+		}
 		this.applyTokenRefreshHook();
 	}
 
@@ -923,6 +945,11 @@ export class LLMRouter {
 
 	getAvailableProviders(): string[] {
 		return Array.from(this.providers.keys());
+	}
+
+	/** Provider instance by name (or undefined if not initialized). */
+	getProvider(name: string): BaseLLMProvider | undefined {
+		return this.providers.get(name);
 	}
 
 	/**
@@ -1156,6 +1183,16 @@ export class LLMRouter {
 					logger.warn(
 						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}': ${summarizeError(error)}`,
 					);
+					// Only attempt the fallback if it is actually available (credentialed
+					// + reachable). Otherwise skip the doomed call and let the original
+					// provider error surface — a fallback to an unconfigured provider
+					// would only produce a second, misleading failure.
+					if (!(await fallbackProvider.isAvailable())) {
+						logger.warn(
+							`Fallback '${this.config.fallback}' no está disponible/credenciado; se omite el intento.`,
+						);
+						throw error;
+					}
 					const fallbackResolved = this.applyVisionRouting(
 						{ ...enriched, model: fallbackModelName },
 						fallbackProviderName,
@@ -1242,6 +1279,16 @@ export class LLMRouter {
 					logger.warn(
 						`Provider '${providerName}' failed, falling back to '${fallbackProviderName}': ${summarizeError(error)}`,
 					);
+					// Only attempt the fallback if it is actually available (credentialed
+					// + reachable). Otherwise skip the doomed call and let the original
+					// provider error surface — a fallback to an unconfigured provider
+					// would only produce a second, misleading failure.
+					if (!(await fallbackProvider.isAvailable())) {
+						logger.warn(
+							`Fallback '${this.config.fallback}' no está disponible/credenciado; se omite el intento.`,
+						);
+						throw error;
+					}
 					const fallbackResolved = this.applyVisionRouting(
 						{ ...enriched, model: fallbackModelName },
 						fallbackProviderName,
