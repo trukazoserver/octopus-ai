@@ -6,6 +6,11 @@ import {
 } from "../security/command-approval.js";
 import { PathSafetyPolicy } from "../security/path-safety-policy.js";
 import { SecretRedactor } from "../security/secret-redactor.js";
+import {
+	ensureTransparentImage,
+	isTransparentImageRequested,
+	prepareTransparentImagePrompt,
+} from "./codex-image.js";
 import { mediaContext } from "./media.js";
 import { ToolRateLimiter } from "./rate-limiter.js";
 import type { ToolRateLimitConfig } from "./rate-limiter.js";
@@ -666,6 +671,11 @@ export class ToolExecutor {
 		try {
 			const scopedMediaContext = {
 				...mediaContext,
+				transparency: {
+					isRequested: isTransparentImageRequested,
+					prepare: prepareTransparentImagePrompt,
+					process: ensureTransparentImage,
+				},
 				save: (
 					buffer: Buffer,
 					mimeType: string,

@@ -92,6 +92,49 @@ describe("ToolExecutor", () => {
 			);
 		});
 
+		it("exposes shared transparency processing to dynamic tools", async () => {
+			registry.register(
+				createTestTool({
+					name: "dynamic-image-generator",
+					handler: async (_params, context) => {
+						const transparency = context.media.transparency;
+						if (!transparency) {
+							return { success: false, output: "", error: "missing helper" };
+						}
+						const prepared = transparency.prepare(
+							"Un dragón verde con fondo transparente",
+						);
+						return {
+							success: true,
+							output: prepared.prompt,
+							metadata: {
+								requested: transparency.isRequested(
+									"Un dragón verde sin fondo",
+									"auto",
+								),
+								chromaKey: prepared.chromaKey.hex,
+							},
+						};
+					},
+				}),
+			);
+			const executor = new ToolExecutor(registry, {
+				sandboxCommands: false,
+				allowedPaths: [],
+			});
+
+			const result = await executor.execute("dynamic-image-generator", {
+				input: "test",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.metadata).toMatchObject({
+				requested: true,
+				chromaKey: "#0000FF",
+			});
+			expect(result.output).toContain("#0000FF");
+		});
+
 		it("aborts the signal exposed to a tool when its timeout expires", async () => {
 			let observedSignal: AbortSignal | undefined;
 			registry.register(

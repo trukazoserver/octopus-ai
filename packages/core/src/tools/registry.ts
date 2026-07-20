@@ -42,6 +42,30 @@ export interface ToolContext {
 		 * Resuelve un archivo local o URL nativa de Octopus, y devuelve su Buffer.
 		 */
 		resolve: (url: string) => Promise<{ buffer: Buffer; mimeType: string }>;
+		/** Shared chroma-key processing for image-generating dynamic tools. */
+		transparency?: {
+			isRequested: (prompt: string, background?: string) => boolean;
+			prepare: (prompt: string) => {
+				prompt: string;
+				chromaKey: {
+					hex: string;
+					name: string;
+					r: number;
+					g: number;
+					b: number;
+				};
+			};
+			process: (
+				buffer: Buffer,
+				chromaKey?: {
+					hex: string;
+					name: string;
+					r: number;
+					g: number;
+					b: number;
+				},
+			) => Promise<{ buffer: Buffer; alphaPostProcessed: boolean }>;
+		};
 	};
 	agent?: {
 		agentId?: string;

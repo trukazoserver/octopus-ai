@@ -44,19 +44,20 @@ const MIME_BY_EXT: Record<string, string> = {
 
 type ImageBackground = "auto" | "opaque" | "transparent";
 
-type ChromaKey = {
+export type ChromaKey = {
 	hex: string;
 	name: string;
 	r: number;
 	g: number;
 	b: number;
-	conflicts: RegExp;
 };
+
+type ChromaKeyCandidate = ChromaKey & { conflicts: RegExp };
 
 const TRANSPARENT_BACKGROUND_RE =
 	/(?:transparent(?:e)?\s+(?:background|fondo|image|imagen|png)|(?:background|fondo|image|imagen|png)\s+transparent(?:e)?|transparen(?:cy|cia)|(?:without|with\s+no|sin)\s+(?:a\s+|el\s+)?(?:background|fondo)|(?:remove|delete|erase|quitar|eliminar|remover|borrar)\s+(?:the\s+|el\s+)?(?:background|fondo)|(?:alpha|alfa)\s+channel|canal\s+alfa)/i;
 
-const CHROMA_KEYS: ChromaKey[] = [
+const CHROMA_KEYS: ChromaKeyCandidate[] = [
 	{
 		hex: "#00FF00",
 		name: "pure chroma green",
@@ -103,6 +104,24 @@ function addChromaKeyInstruction(prompt: string, chromaKey: ChromaKey): string {
 	return `${prompt}\n\nIMPORTANT INTERMEDIATE RENDER REQUIREMENT FOR TRANSPARENCY EXTRACTION: render every empty/background pixel as one completely flat, uniform ${chromaKey.name} field (${chromaKey.hex}, exact RGB ${chromaKey.r},${chromaKey.g},${chromaKey.b}). Do not render transparency, white, gray, a checkerboard, gradients, texture, scenery, or background shadows in this intermediate image. Keep the subject and all of its internal details intact, and do not use ${chromaKey.hex} anywhere inside the subject. Octopus will remove only this chroma field after generation to create the final transparent PNG.`;
 }
 
+export function isTransparentImageRequested(
+	prompt: string,
+	background?: string,
+): boolean {
+	const requested = background?.trim().toLowerCase();
+	if (requested === "opaque") return false;
+	if (requested === "transparent") return true;
+	return TRANSPARENT_BACKGROUND_RE.test(prompt);
+}
+
+export function prepareTransparentImagePrompt(prompt: string): {
+	prompt: string;
+	chromaKey: ChromaKey;
+} {
+	const chromaKey = selectChromaKey(prompt);
+	return { prompt: addChromaKeyInstruction(prompt, chromaKey), chromaKey };
+}
+
 function resolveImageOptions(
 	params: Record<string, unknown>,
 	prompt: string,
@@ -125,7 +144,7 @@ function resolveImageOptions(
 
 	const background =
 		(rawBackground as ImageBackground | "") ||
-		(TRANSPARENT_BACKGROUND_RE.test(prompt) ? "transparent" : undefined);
+		(isTransparentImageRequested(prompt) ? "transparent" : undefined);
 	return { model: requestedModel, background };
 }
 
@@ -417,7 +436,15 @@ async function recoverTransparentBackground(
 		let outputRed = red;
 		let outputGreen = green;
 		let outputBlue = blue;
-		const distance = edgeDistance[pixelIndex] ?? 0;
+		const chromaSpill =
+			chromaConfirmed &&
+			chromaKey &&
+			Math.max(
+				Math.abs(red - chromaKey.r),
+				Math.abs(green - chromaKey.g),
+				Math.abs(blue - chromaKey.b),
+			) <= 150;
+		const distance = (edgeDistance[pixelIndex] ?? 0) || (chromaSpill ? 1 : 0);
 		if (alpha && distance) {
 			const { color } = nearestBackground(pixelIndex);
 			const colorDifference = Math.max(
@@ -459,6 +486,23 @@ async function recoverTransparentBackground(
 	return sharp(rgba, { raw: { width, height, channels: 4 } })
 		.png()
 		.toBuffer();
+}
+
+export async function ensureTransparentImage(
+	buffer: Buffer,
+	chromaKey?: ChromaKey,
+): Promise<{ buffer: Buffer; alphaPostProcessed: boolean }> {
+	const { default: sharp } = await import("sharp");
+	if (!(await sharp(buffer).stats()).isOpaque) {
+		return { buffer, alphaPostProcessed: false };
+	}
+	const recovered = await recoverTransparentBackground(buffer, chromaKey);
+	if (!recovered || (await sharp(recovered).stats()).isOpaque) {
+		throw new Error(
+			"The image is opaque and Octopus could not isolate its background safely.",
+		);
+	}
+	return { buffer: recovered, alphaPostProcessed: true };
 }
 
 /** Save returned images to a workspace path or the media library. */
@@ -506,21 +550,9 @@ async function persistImageOutputs(
 			}
 			if (!buffer) continue;
 			if (background === "transparent") {
-				const { default: sharp } = await import("sharp");
-				const stats = await sharp(buffer).stats();
-				if (stats.isOpaque) {
-					const recovered = await recoverTransparentBackground(
-						buffer,
-						chromaKey,
-					);
-					if (!recovered || (await sharp(recovered).stats()).isOpaque) {
-						persistError =
-							"Codex returned an opaque image and Octopus could not isolate its background safely; the file was not saved.";
-						continue;
-					}
-					buffer = recovered;
-					alphaPostProcessed = true;
-				}
+				const transparent = await ensureTransparentImage(buffer, chromaKey);
+				buffer = transparent.buffer;
+				alphaPostProcessed ||= transparent.alphaPostProcessed;
 			}
 			if (destPath) {
 				const finalAbs =
@@ -624,11 +656,12 @@ export function createCodexImageTools(): ToolDefinition[] {
 					return { success: false, output: "", error: imageOptions.error };
 				}
 				const { model, background } = imageOptions;
-				const chromaKey =
-					background === "transparent" ? selectChromaKey(prompt) : undefined;
-				const requestPrompt = chromaKey
-					? addChromaKeyInstruction(prompt, chromaKey)
-					: prompt;
+				const transparency =
+					background === "transparent"
+						? prepareTransparentImagePrompt(prompt)
+						: undefined;
+				const chromaKey = transparency?.chromaKey;
+				const requestPrompt = transparency?.prompt ?? prompt;
 				const size = String(params.size ?? "1024x1024");
 				const n = Math.min(Math.max(Number(params.n ?? 1) || 1, 1), 4);
 				const quality = String(params.quality ?? "auto");
@@ -768,11 +801,12 @@ export function createCodexImageTools(): ToolDefinition[] {
 					return { success: false, output: "", error: imageOptions.error };
 				}
 				const { model, background } = imageOptions;
-				const chromaKey =
-					background === "transparent" ? selectChromaKey(prompt) : undefined;
-				const requestPrompt = chromaKey
-					? addChromaKeyInstruction(prompt, chromaKey)
-					: prompt;
+				const transparency =
+					background === "transparent"
+						? prepareTransparentImagePrompt(prompt)
+						: undefined;
+				const chromaKey = transparency?.chromaKey;
+				const requestPrompt = transparency?.prompt ?? prompt;
 				const size = String(params.size ?? "1024x1024");
 				const n = Math.min(Math.max(Number(params.n ?? 1) || 1, 1), 4);
 				const quality = String(params.quality ?? "auto");

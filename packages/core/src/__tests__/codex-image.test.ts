@@ -142,6 +142,12 @@ describe("codex_generate_image workspace-path save", () => {
 					pixels[offset + 1] = 255;
 					pixels[offset + 2] = 255;
 				}
+				// Detached green spill inside the subject must also be decontaminated.
+				if (x === 45 && y === 40) {
+					pixels[offset] = 60;
+					pixels[offset + 1] = 180;
+					pixels[offset + 2] = 60;
+				}
 			}
 		}
 		responseBytes = await sharp(pixels, {
@@ -179,6 +185,12 @@ describe("codex_generate_image workspace-path save", () => {
 		expect(data[edgeOffset + 3]).toBeLessThan(255);
 		expect(data[edgeOffset + 1]).toBeLessThan(
 			pixels[(30 * width + 18) * 3 + 1],
+		);
+		const spillOffset = (40 * width + 45) * 4;
+		expect(data[spillOffset + 3]).toBeGreaterThan(0);
+		expect(data[spillOffset + 3]).toBeLessThan(255);
+		expect(data[spillOffset + 1]).toBeLessThan(
+			pixels[(40 * width + 45) * 3 + 1],
 		);
 	});
 
@@ -272,7 +284,7 @@ describe("codex_generate_image workspace-path save", () => {
 		});
 
 		expect(res.success).toBe(false);
-		expect(res.error).toMatch(/opaque image/i);
+		expect(res.error).toMatch(/image is opaque/i);
 		expect(existsSync(outputPath)).toBe(false);
 	});
 });
