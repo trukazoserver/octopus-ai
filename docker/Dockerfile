@@ -49,14 +49,22 @@ ENV NODE_ENV=production \
 	OCTOPUS_LOG_LEVEL=info \
 	PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
 	CHROME_BIN=/usr/bin/chromium \
-	PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+	PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+	OCTOPUS_SOFFICE_PATH=/usr/bin/soffice \
+	OCTOPUS_TESSDATA_PATH=/data/tessdata
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	chromium \
 	curl \
 	ffmpeg \
+	fontconfig \
+	fonts-dejavu-core \
 	fonts-liberation \
+	fonts-noto-core \
+	libreoffice-calc \
+	libreoffice-impress \
+	libreoffice-writer \
 	python3 \
 	tini \
 	&& rm -rf /var/lib/apt/lists/* \
@@ -64,6 +72,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	&& useradd -u 1001 -g octopus -m -s /usr/sbin/nologin octopus \
 	&& mkdir -p /data/db /data/skills /data/plugins /data/logs /data/workspace \
 	&& chown -R octopus:octopus /data /app
+
+RUN soffice --headless --version
 
 COPY --from=builder --chown=octopus:octopus /app/package.json ./package.json
 COPY --from=builder --chown=octopus:octopus /app/node_modules ./node_modules

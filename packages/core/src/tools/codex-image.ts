@@ -1,10 +1,4 @@
-/**
- * codex_generate_image / codex_edit_image — generate and edit images via the
- * OpenAI Codex backend using the ChatGPT-account access_token (same auth as the
- * Codex text provider). Mirrors the Codex CLI image endpoints:
- *   POST {codex}/images/generations  (text -> image)
- *   POST {codex}/images/edits        (image(s) + text -> image)
- */
+/** OpenAI image generation/editing through either the public API or Codex. */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -43,6 +37,14 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 type ImageBackground = "auto" | "opaque" | "transparent";
+type OpenAIImageProvider = "openai-api" | "codex";
+
+type OpenAIImageConnection = {
+	provider: OpenAIImageProvider;
+	model: string;
+	baseUrl: string;
+	headers: Record<string, string>;
+};
 
 export type ChromaKey = {
 	hex: string;
@@ -166,6 +168,12 @@ function inferMime(p: string): string {
 	return MIME_BY_EXT[extname(p).toLowerCase()] ?? "image/png";
 }
 
+function firstConfigured(
+	...values: Array<string | undefined>
+): string | undefined {
+	return values.find((value) => Boolean(value?.trim()))?.trim();
+}
+
 function codexImageHeaders(
 	accessToken: string,
 	accountId?: string,
@@ -179,18 +187,53 @@ function codexImageHeaders(
 	return h;
 }
 
-function loadCodexCreds():
-	| { accessToken: string; accountId?: string }
+function loadOpenAIImageConnection():
+	| OpenAIImageConnection
 	| { error: string } {
-	const openai = new ConfigLoader().load().ai.providers.openai;
-	const accessToken = openai.accessToken;
-	const accountId = openai.accountId;
-	if (!accessToken || openai.authMode !== "codex") {
+	const config = new ConfigLoader().load();
+	const openai = config.ai.providers.openai;
+	const settings = config.tools.imageGeneration.openai;
+	if (settings.provider === "openai-api") {
+		const apiKey = firstConfigured(
+			openai.apiKey,
+			openai.apiKeyEnv ? process.env[openai.apiKeyEnv] : undefined,
+			process.env.OPENAI_API_KEY,
+		);
+		if (!apiKey) {
+			return {
+				error: "OpenAI API key is required for the selected image provider.",
+			};
+		}
+		return {
+			provider: "openai-api",
+			model: settings.model || "gpt-image-2",
+			baseUrl: (openai.baseUrl || "https://api.openai.com/v1").replace(
+				/\/+$/,
+				"",
+			),
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"content-type": "application/json",
+			},
+		};
+	}
+
+	const accessToken = firstConfigured(
+		openai.accessToken,
+		openai.accessTokenEnv ? process.env[openai.accessTokenEnv] : undefined,
+		process.env.CODEX_ACCESS_TOKEN,
+	);
+	if (!accessToken) {
 		return {
 			error: "Codex login is required. Sign in with your OpenAI account first.",
 		};
 	}
-	return { accessToken, accountId };
+	return {
+		provider: "codex",
+		model: settings.model || "gpt-image-2",
+		baseUrl: CODEX_BASE_URL.replace(/\/+$/, ""),
+		headers: codexImageHeaders(accessToken, openai.accountId),
+	};
 }
 
 /**
@@ -512,12 +555,14 @@ async function persistImageOutputs(
 		destPath: string;
 		prompt: string;
 		model: string;
+		provider: OpenAIImageProvider;
 		size: string;
 		background?: ImageBackground;
 		chromaKey?: ChromaKey;
 	},
 ): Promise<{ urls: string[]; error?: string; alphaPostProcessed: boolean }> {
-	const { destPath, prompt, model, size, background, chromaKey } = opts;
+	const { destPath, prompt, model, provider, size, background, chromaKey } =
+		opts;
 	let destAbs = "";
 	let destStem = "";
 	let destExt = ".png";
@@ -563,7 +608,7 @@ async function persistImageOutputs(
 				urls.push(relPath);
 			} else {
 				const saved = await mediaContext.save(buffer, "image/png", prompt, {
-					provider: "codex",
+					provider,
 					model,
 					prompt,
 					size,
@@ -583,7 +628,7 @@ async function persistImageOutputs(
 
 function fetchErrorResult(err: unknown, label: string): ToolResult {
 	const msg = err instanceof Error ? err.message : String(err);
-	const aborted = /aborted|timeout|timed out|TimeoutError/i.test(msg);
+	const aborted = isTimeoutError(err);
 	console.error(`[codex-image] ${label} failed: ${msg}`);
 	return {
 		success: false,
@@ -591,6 +636,79 @@ function fetchErrorResult(err: unknown, label: string): ToolResult {
 		error: aborted
 			? `${label} timed out (no response in 180s). The service may be overloaded — retry shortly.`
 			: `${label} failed: ${msg}`,
+	};
+}
+
+function isTimeoutError(err: unknown): boolean {
+	const msg = err instanceof Error ? err.message : String(err);
+	return /aborted|timeout|timed out|TimeoutError/i.test(msg);
+}
+
+function isRetryableImageStatus(status: number): boolean {
+	return status === 408 || status === 429 || status >= 500;
+}
+
+function retryDelayMs(response: Response): number {
+	const retryAfter = response.headers.get("retry-after")?.trim();
+	if (retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)) {
+		return Math.min(Number(retryAfter) * 1000, 5_000);
+	}
+	return 1_000;
+}
+
+async function requestImageWithRetry(
+	label: string,
+	requestedQuality: string,
+	request: (quality: string) => Promise<Response>,
+): Promise<
+	| { response: Response; quality: string; retried: boolean }
+	| { error: ToolResult }
+> {
+	let quality = requestedQuality;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		let response: Response;
+		try {
+			response = await request(quality);
+		} catch (err) {
+			const timedOut = isTimeoutError(err);
+			if (attempt === 0 && (timedOut || err instanceof TypeError)) {
+				quality = requestedQuality === "high" ? "medium" : requestedQuality;
+				console.warn(
+					`[codex-image] ${label} failed transiently; retrying once with quality=${quality}`,
+				);
+				if (!timedOut) {
+					await new Promise((resolve) => setTimeout(resolve, 1_000));
+				}
+				continue;
+			}
+			return { error: fetchErrorResult(err, label) };
+		}
+
+		if (
+			response.ok ||
+			attempt > 0 ||
+			!isRetryableImageStatus(response.status)
+		) {
+			return { response, quality, retried: attempt > 0 };
+		}
+
+		const details = await response.text().catch(() => response.statusText);
+		quality = requestedQuality === "high" ? "medium" : requestedQuality;
+		console.warn(
+			`[codex-image] ${label} received ${response.status}; retrying once with quality=${quality}: ${details.slice(0, 200)}`,
+		);
+		const delay = retryDelayMs(response);
+		if (delay > 0) {
+			await new Promise((resolve) => setTimeout(resolve, delay));
+		}
+	}
+
+	return {
+		error: {
+			success: false,
+			output: "",
+			error: `${label} failed after retry.`,
+		},
 	};
 }
 
@@ -635,7 +753,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 		{
 			name: "codex_generate_image",
 			description:
-				"Generate one or more images from a text prompt using the OpenAI Codex backend (your ChatGPT/Codex account, gpt-image-2). Requires Codex login. For a real transparent alpha channel, pass background='transparent'; Octopus requests a high-saturation chroma background selected to avoid the subject's colors, then removes that chroma locally while preserving internal details such as eyes and highlights. By default returns the saved image URL(s) in the Octopus media library. For images that must appear in a generated HTML/site, pass `path` so the image is saved next to the HTML and referenced by relative path — do NOT embed images as base64 data URIs in HTML, it bloats the file and breaks the conversation context.",
+				"Generate images with OpenAI gpt-image-2 using the provider selected in Settings: OpenAI API or OpenAI Codex. Supports native API transparency and safe chroma recovery for Codex. By default returns media-library URLs; pass `path` only for workspace assets used by generated HTML/sites.",
 			uiIcon: IMAGE_SVG,
 			managesOwnPathPolicy: true,
 			parameters: {
@@ -651,13 +769,20 @@ export function createCodexImageTools(): ToolDefinition[] {
 				if (!prompt) {
 					return { success: false, output: "", error: "Missing 'prompt'." };
 				}
-				const imageOptions = resolveImageOptions(params, prompt);
+				const connection = loadOpenAIImageConnection();
+				if ("error" in connection) {
+					return { success: false, output: "", error: connection.error };
+				}
+				const imageOptions = resolveImageOptions(
+					{ ...params, model: params.model ?? connection.model },
+					prompt,
+				);
 				if (imageOptions.error) {
 					return { success: false, output: "", error: imageOptions.error };
 				}
 				const { model, background } = imageOptions;
 				const transparency =
-					background === "transparent"
+					background === "transparent" && connection.provider === "codex"
 						? prepareTransparentImagePrompt(prompt)
 						: undefined;
 				const chromaKey = transparency?.chromaKey;
@@ -674,42 +799,44 @@ export function createCodexImageTools(): ToolDefinition[] {
 					return { success: false, output: "", error: destinationError };
 				}
 
-				const creds = loadCodexCreds();
-				if ("error" in creds) {
-					return { success: false, output: "", error: creds.error };
-				}
-
-				let response: Response;
-				try {
-					response = await fetch(`${CODEX_BASE_URL}/images/generations`, {
-						method: "POST",
-						headers: codexImageHeaders(creds.accessToken, creds.accountId),
-						body: JSON.stringify({
-							prompt: requestPrompt,
-							model,
-							n,
-							size,
-							quality,
-							...(background ? { background } : {}),
+				const requestResult = await requestImageWithRetry(
+					"OpenAI image request",
+					quality,
+					(effectiveQuality) =>
+						fetch(`${connection.baseUrl}/images/generations`, {
+							method: "POST",
+							headers: connection.headers,
+							body: JSON.stringify({
+								prompt: requestPrompt,
+								model,
+								n,
+								size,
+								quality: effectiveQuality,
+								...(background ? { background } : {}),
+								...(connection.provider === "openai-api"
+									? { output_format: "png" }
+									: {}),
+							}),
+							// Image generation can take a while (high-quality gpt-image
+							// runs reach ~60-120s), but a hung request must not pin the
+							// agent turn forever. 180s is generous; an abort surfaces as
+							// a normal tool error the model can retry by calling again.
+							signal: AbortSignal.timeout(180000),
 						}),
-						// Image generation can take a while (high-quality gpt-image
-						// runs reach ~60-120s), but a hung request must not pin the
-						// agent turn forever. 180s is generous; an abort surfaces as
-						// a normal tool error the model can retry by calling again.
-						signal: AbortSignal.timeout(180000),
-					});
-				} catch (err) {
-					return fetchErrorResult(err, "Codex image request");
+				);
+				if ("error" in requestResult) {
+					return requestResult.error;
 				}
+				const { response, quality: effectiveQuality, retried } = requestResult;
 				if (!response.ok) {
 					const text = await response.text().catch(() => response.statusText);
 					console.error(
-						`[codex-image] API error ${response.status} (prompt=${prompt.slice(0, 80)}): ${text.slice(0, 300)}`,
+						`[openai-image] API error ${response.status} (provider=${connection.provider}, prompt=${prompt.slice(0, 80)}): ${text.slice(0, 300)}`,
 					);
 					return {
 						success: false,
 						output: "",
-						error: `Codex image API error (${response.status}): ${text.slice(0, 300)}`,
+						error: `OpenAI image API error (${response.status}): ${text.slice(0, 300)}`,
 					};
 				}
 
@@ -717,7 +844,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 				try {
 					json = (await response.json()) as typeof json;
 				} catch (err) {
-					return fetchErrorResult(err, "Codex image response");
+					return fetchErrorResult(err, "OpenAI image response");
 				}
 				const { urls, error, alphaPostProcessed } = await persistImageOutputs(
 					json.data ?? [],
@@ -725,6 +852,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 						destPath,
 						prompt,
 						model,
+						provider: connection.provider,
 						size,
 						background,
 						chromaKey,
@@ -734,7 +862,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 					return {
 						success: false,
 						output: "",
-						error: error ?? "Codex image API returned no image data.",
+						error: error ?? "OpenAI image API returned no image data.",
 					};
 				}
 				return {
@@ -744,7 +872,11 @@ export function createCodexImageTools(): ToolDefinition[] {
 						count: urls.length,
 						urls,
 						model,
+						provider: connection.provider,
 						prompt,
+						quality: effectiveQuality,
+						requestedQuality: quality,
+						retried,
 						background,
 						chromaKey: chromaKey?.hex,
 						alphaPostProcessed,
@@ -755,7 +887,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 		{
 			name: "codex_edit_image",
 			description:
-				"Edit one or more existing images with a text prompt using the OpenAI Codex backend (gpt-image-2). Pass the image to edit via `image` (an Octopus media URL like '/api/media/file/<id>.png', an http(s) URL, or a local/workspace file path) plus a `prompt` describing the edit (e.g. 'remove the background', 'add a red hat', 'change the color to blue', 'make it a watercolor'). For background removal with a real alpha channel, pass background='transparent'; Octopus uses a dynamically selected chroma background and removes only that color, preserving internal subject details. To composite/edit with more than one input, pass additional images via `images`. Returns the edited image URL(s) in the media library, or a workspace-relative path when `path` is set.",
+				"Edit one or more images with OpenAI gpt-image-2 using the provider selected in Settings: OpenAI API or OpenAI Codex. Accepts Octopus media URLs, HTTP URLs, and workspace paths, including multiple inputs for compositing.",
 			uiIcon: EDIT_SVG,
 			managesOwnPathPolicy: true,
 			parameters: {
@@ -796,13 +928,20 @@ export function createCodexImageTools(): ToolDefinition[] {
 						error: "Missing 'image' (the image to edit).",
 					};
 				}
-				const imageOptions = resolveImageOptions(params, prompt);
+				const connection = loadOpenAIImageConnection();
+				if ("error" in connection) {
+					return { success: false, output: "", error: connection.error };
+				}
+				const imageOptions = resolveImageOptions(
+					{ ...params, model: params.model ?? connection.model },
+					prompt,
+				);
 				if (imageOptions.error) {
 					return { success: false, output: "", error: imageOptions.error };
 				}
 				const { model, background } = imageOptions;
 				const transparency =
-					background === "transparent"
+					background === "transparent" && connection.provider === "codex"
 						? prepareTransparentImagePrompt(prompt)
 						: undefined;
 				const chromaKey = transparency?.chromaKey;
@@ -819,19 +958,16 @@ export function createCodexImageTools(): ToolDefinition[] {
 					return { success: false, output: "", error: destinationError };
 				}
 
-				const creds = loadCodexCreds();
-				if ("error" in creds) {
-					return { success: false, output: "", error: creds.error };
-				}
-
 				// Resolve each input image -> {image_url: data URL}. The Codex
 				// /images/edits endpoint expects an array of objects, each with
 				// exactly one of `image_url` or `file_id`; data URLs work for local
 				// images that the backend cannot fetch directly.
 				const images: Array<{ image_url: string }> = [];
+				const resolvedImages: Array<{ buffer: Buffer; mimeType: string }> = [];
 				for (const inp of inputs) {
 					try {
 						const { buffer, mimeType } = await resolveInputImage(inp);
+						resolvedImages.push({ buffer, mimeType });
 						images.push({
 							image_url: `data:${mimeType};base64,${buffer.toString("base64")}`,
 						});
@@ -844,34 +980,62 @@ export function createCodexImageTools(): ToolDefinition[] {
 					}
 				}
 
-				let response: Response;
-				try {
-					response = await fetch(`${CODEX_BASE_URL}/images/edits`, {
-						method: "POST",
-						headers: codexImageHeaders(creds.accessToken, creds.accountId),
-						body: JSON.stringify({
-							images,
-							prompt: requestPrompt,
-							model,
-							n,
-							size,
-							quality,
-							...(background ? { background } : {}),
-						}),
-						signal: AbortSignal.timeout(180000),
-					});
-				} catch (err) {
-					return fetchErrorResult(err, "Codex image edit request");
+				const requestResult = await requestImageWithRetry(
+					"OpenAI image edit request",
+					quality,
+					async (effectiveQuality) => {
+						if (connection.provider === "openai-api") {
+							const form = new FormData();
+							form.append("prompt", requestPrompt);
+							form.append("model", model);
+							form.append("n", String(n));
+							form.append("size", size);
+							form.append("quality", effectiveQuality);
+							form.append("output_format", "png");
+							if (background) form.append("background", background);
+							resolvedImages.forEach(({ buffer, mimeType }, index) => {
+								form.append(
+									"image[]",
+									new Blob([new Uint8Array(buffer)], { type: mimeType }),
+									`image-${index + 1}.${mimeType.includes("png") ? "png" : "jpg"}`,
+								);
+							});
+							return fetch(`${connection.baseUrl}/images/edits`, {
+								method: "POST",
+								headers: { Authorization: connection.headers.Authorization },
+								body: form,
+								signal: AbortSignal.timeout(180000),
+							});
+						}
+						return fetch(`${connection.baseUrl}/images/edits`, {
+							method: "POST",
+							headers: connection.headers,
+							body: JSON.stringify({
+								images,
+								prompt: requestPrompt,
+								model,
+								n,
+								size,
+								quality: effectiveQuality,
+								...(background ? { background } : {}),
+							}),
+							signal: AbortSignal.timeout(180000),
+						});
+					},
+				);
+				if ("error" in requestResult) {
+					return requestResult.error;
 				}
+				const { response, quality: effectiveQuality, retried } = requestResult;
 				if (!response.ok) {
 					const text = await response.text().catch(() => response.statusText);
 					console.error(
-						`[codex-image] edit API error ${response.status} (prompt=${prompt.slice(0, 80)}): ${text.slice(0, 300)}`,
+						`[openai-image] edit API error ${response.status} (provider=${connection.provider}, prompt=${prompt.slice(0, 80)}): ${text.slice(0, 300)}`,
 					);
 					return {
 						success: false,
 						output: "",
-						error: `Codex image edit API error (${response.status}): ${text.slice(0, 300)}`,
+						error: `OpenAI image edit API error (${response.status}): ${text.slice(0, 300)}`,
 					};
 				}
 
@@ -879,7 +1043,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 				try {
 					json = (await response.json()) as typeof json;
 				} catch (err) {
-					return fetchErrorResult(err, "Codex image edit response");
+					return fetchErrorResult(err, "OpenAI image edit response");
 				}
 				const { urls, error, alphaPostProcessed } = await persistImageOutputs(
 					json.data ?? [],
@@ -887,6 +1051,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 						destPath,
 						prompt,
 						model,
+						provider: connection.provider,
 						size,
 						background,
 						chromaKey,
@@ -896,7 +1061,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 					return {
 						success: false,
 						output: "",
-						error: error ?? "Codex image edit returned no image data.",
+						error: error ?? "OpenAI image edit returned no image data.",
 					};
 				}
 				return {
@@ -906,7 +1071,11 @@ export function createCodexImageTools(): ToolDefinition[] {
 						count: urls.length,
 						urls,
 						model,
+						provider: connection.provider,
 						prompt,
+						quality: effectiveQuality,
+						requestedQuality: quality,
+						retried,
 						background,
 						chromaKey: chromaKey?.hex,
 						alphaPostProcessed,

@@ -30,14 +30,15 @@ async function runChecks(): Promise<CheckResult[]> {
 	}
 
 	const nodeVersion = process.version;
-	const major = Number.parseInt(nodeVersion.slice(1).split(".")[0] ?? "0", 10);
+	const [major = 0, minor = 0] = nodeVersion.slice(1).split(".").map(Number);
+	const nodeOk = major > 22 || (major === 22 && minor >= 13);
 	results.push({
 		name: "Node.js Version",
-		passed: major >= 22,
+		passed: nodeOk,
 		message:
-			major >= 22
-				? `${nodeVersion} (>= 22)`
-				: `${nodeVersion} (requires >= 22)`,
+			nodeOk
+				? `${nodeVersion} (>= 22.13)`
+				: `${nodeVersion} (requires >= 22.13)`,
 	});
 
 	const configPath = path.join(homedir(), ".octopus", "config.json");

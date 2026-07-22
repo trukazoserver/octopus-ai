@@ -331,7 +331,10 @@ export {
 	SkillMarketplace,
 	SkillResearcher,
 	Context7HttpClient,
+	OFFICE_FILE_MASTERY_SKILL_IDS,
+	buildOfficeFileMasterySkills,
 	buildWebSelfReviewSkill,
+	officeFileMasteryEmbeddingTexts,
 } from "./skills/index.js";
 export type {
 	Skill,
@@ -376,7 +379,23 @@ export {
 	CodeExecutor,
 	createCodeTools,
 	createCodexImageTools,
+	createNanoBananaImageTools,
 	createMediaTools,
+	ArtifactIndex,
+	hashArtifactUnits,
+	createDataFileTools,
+	createOfficeAdvancedTools,
+	createOfficeEditTools,
+	createOfficeMediaTools,
+	createOfficePreviewTools,
+	convertOfficeFile,
+	convertOfficeFileToPdf,
+	findLibreOfficeExecutable,
+	renderPdfPreviewPages,
+	createOfficeTools,
+	createPdfAdvancedTools,
+	getOfflineOcrLanguageStatus,
+	getOfflineTessdataPath,
 	mediaContext,
 	createWorkflowTools,
 	createAutomationTools,
@@ -391,6 +410,15 @@ export {
 	HumanBehavior,
 	ToolHealthManager,
 	PdfReader,
+} from "./tools/index.js";
+export type {
+	ArtifactIndexOptions,
+	ArtifactIndexSnapshot,
+	ArtifactIndexStatus,
+	ArtifactSearchMatch,
+	ArtifactSearchOptions,
+	ArtifactUnit,
+	OcrLanguageStatus,
 } from "./tools/index.js";
 
 export {

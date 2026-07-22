@@ -19,6 +19,11 @@ vi.mock("../config/loader.js", () => ({
 						},
 					},
 				},
+				tools: {
+					imageGeneration: {
+						openai: { provider: "codex", model: "gpt-image-2" },
+					},
+				},
 			};
 		}
 	},
@@ -65,6 +70,75 @@ describe("codex_generate_image workspace-path save", () => {
 		expect(res.output).not.toContain("base64");
 		// The file actually landed next to where an HTML would be written.
 		expect(existsSync(join(WORKSPACE, TEST_SUB, "hero.png"))).toBe(true);
+	});
+
+	it("retries a transient server error at medium quality", async () => {
+		const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+		fetchMock
+			.mockReset()
+			.mockResolvedValueOnce(
+				new Response('{"error":{"message":"temporary failure"}}', {
+					status: 500,
+					headers: { "retry-after": "0" },
+				}),
+			)
+			.mockResolvedValueOnce(
+				Response.json({
+					data: [{ b64_json: responseBytes.toString("base64") }],
+				}),
+			);
+		const { createCodexImageTools } = await import("../tools/codex-image.js");
+		const result = await createCodexImageTools()[0].handler({
+			prompt: "friendly crab",
+			background: "opaque",
+			quality: "high",
+			path: `${TEST_SUB}/retry.png`,
+		});
+
+		expect(result.success).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const retryBody = JSON.parse(
+			String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body),
+		);
+		expect(retryBody.quality).toBe("medium");
+		expect(result.metadata).toMatchObject({
+			quality: "medium",
+			requestedQuality: "high",
+			retried: true,
+		});
+		expect(existsSync(join(WORKSPACE, TEST_SUB, "retry.png"))).toBe(true);
+	});
+
+	it("retries a timed-out high-quality request at medium quality", async () => {
+		const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+		fetchMock
+			.mockReset()
+			.mockRejectedValueOnce(
+				new DOMException(
+					"The operation was aborted due to timeout",
+					"TimeoutError",
+				),
+			)
+			.mockResolvedValueOnce(
+				Response.json({
+					data: [{ b64_json: responseBytes.toString("base64") }],
+				}),
+			);
+		const { createCodexImageTools } = await import("../tools/codex-image.js");
+		const result = await createCodexImageTools()[0].handler({
+			prompt: "friendly crab",
+			background: "opaque",
+			quality: "high",
+			path: `${TEST_SUB}/timeout-retry.png`,
+		});
+
+		expect(result.success).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const retryBody = JSON.parse(
+			String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body),
+		);
+		expect(retryBody.quality).toBe("medium");
+		expect(result.metadata).toMatchObject({ retried: true });
 	});
 
 	it("rejects a destination path that escapes the workspace", async () => {

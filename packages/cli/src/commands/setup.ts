@@ -11,7 +11,11 @@ import {
 import type { OctopusConfig } from "@octopus-ai/core";
 import chalk from "chalk";
 import { Command } from "commander";
-import { checkPrerequisites, printPrereqResults } from "./prereqs.js";
+import {
+	autoInstallMissing,
+	checkPrerequisites,
+	printPrereqResults,
+} from "./prereqs.js";
 
 function askQuestion(rl: readline.Interface, prompt: string): Promise<string> {
 	return new Promise((resolve) => {
@@ -47,16 +51,32 @@ export function createSetupCommand(): Command {
 						}
 					}
 					console.log(
-						chalk.red.bold(
-							"\n  Ejecuta 'node scripts/install.mjs' para instalarlos automáticamente.\n",
+						chalk.yellow.bold(
+							"\n  Octopus puede instalar automáticamente los requisitos compatibles.\n",
 						),
 					);
-					const proceed = await askQuestion(
+					let recovered = false;
+					const installMissing = await askQuestion(
 						rl,
-						chalk.yellow("  ¿Continuar de todas formas? (s/N): "),
+						chalk.yellow("  ¿Instalar requisitos faltantes ahora? (S/n): "),
 					);
-					if (proceed.toLowerCase() !== "s" && proceed.toLowerCase() !== "si") {
-						process.exit(1);
+					if (installMissing.toLowerCase() !== "n") {
+						const installed = await autoInstallMissing(prereqs);
+						recovered = installed && printPrereqResults(checkPrerequisites());
+						if (recovered) {
+							console.log(chalk.green("\n  Requisitos instalados correctamente ✓\n"));
+						} else {
+							console.log(chalk.yellow("\n  Algunos requisitos siguen sin estar disponibles.\n"));
+						}
+					}
+					if (!recovered) {
+						const proceed = await askQuestion(
+							rl,
+							chalk.yellow("  ¿Continuar de todas formas? (s/N): "),
+						);
+						if (proceed.toLowerCase() !== "s" && proceed.toLowerCase() !== "si") {
+							process.exit(1);
+						}
 					}
 					console.log();
 				} else {

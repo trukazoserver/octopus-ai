@@ -1,7 +1,7 @@
 /**
  * Document extraction for chat attachments.
  *
- * When a user attaches a non-image file, its text content is extracted and
+ * When a user attaches a file, its text content is extracted and
  * inlined into the model's context so the model can read it directly (no tool
  * round-trip required). Heavy parsers (xlsx, officeparser, adm-zip, PDF.js) are
  * imported lazily inside the branch that needs them, so startup stays fast and a
@@ -10,9 +10,12 @@
  * All parsers used here are pure JavaScript (no native build), which keeps the
  * Windows install native-build-free.
  */
-import { open, readFile, stat } from "node:fs/promises";
-import { extname } from "node:path";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
+import { extname, join } from "node:path";
 import { PdfReader } from "./pdf-reader.js";
+import { getOfflineTessdataPath } from "./ocr-language-data.js";
 
 export type DocumentKind =
 	| "text"
@@ -21,6 +24,7 @@ export type DocumentKind =
 	| "spreadsheet"
 	| "document"
 	| "archive"
+	| "image"
 	| "media"
 	| "unknown";
 
@@ -38,8 +42,8 @@ const CODE_EXTS = new Set([
 const SHEET_EXTS = new Set([".xls", ".xlsx", ".ods"]);
 const DOC_EXTS = new Set([".docx", ".doc", ".pptx", ".ppt", ".odt", ".odp", ".rtf"]);
 const ARCHIVE_EXTS = new Set([".zip"]);
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"]);
 const MEDIA_EXTS = new Set([
-	".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico",
 	".mp3", ".wav", ".ogg", ".m4a", ".mp4", ".webm", ".mov", ".ogv",
 ]);
 
@@ -63,6 +67,7 @@ const CODE_LANG: Record<string, string> = {
 
 export function guessDocumentKind(filename: string): DocumentKind {
 	const ext = extname(filename).toLowerCase();
+	if (IMAGE_EXTS.has(ext)) return "image";
 	if (MEDIA_EXTS.has(ext)) return "media";
 	if (CODE_EXTS.has(ext)) return "code";
 	if (SHEET_EXTS.has(ext)) return "spreadsheet";
@@ -81,6 +86,10 @@ export const MAX_DOC_CHARS = 20000;
 export const MAX_TOTAL_DOC_CHARS = 60000;
 const PDF_INGEST_MAX_PAGES = 20;
 const MAX_TEXT_READ_BYTES = 2 * 1024 * 1024; // bound memory for large text/code files
+const IMAGE_OCR_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_OCR_TIMEOUT_MS = 12_000;
+const IMAGE_OCR_LANGS = ["spa", "eng"];
+const IMAGE_OCR_CACHE_DIR = join(homedir(), ".octopus", "cache", "ocr");
 const CACHE_MAX_ENTRIES = 50;
 
 export interface ExtractResult {
@@ -144,6 +153,9 @@ export async function extractDocumentText(
 			case "archive":
 				text = await extractArchiveListing(localPath);
 				break;
+			case "image":
+				text = await extractImageText(localPath, filename, mtimeMs);
+				break;
 		}
 	} catch (err) {
 		text = `[No se pudo leer automáticamente el archivo ${filename}: ${
@@ -201,7 +213,7 @@ async function extractPdf(localPath: string): Promise<string> {
 	const buf = await readFile(localPath);
 	const reader = new PdfReader({});
 	const res = await reader.extract(buf, {
-		ocr: "never",
+		ocr: "auto",
 		pages: `1-${PDF_INGEST_MAX_PAGES}`,
 	});
 	const capped =
@@ -209,6 +221,97 @@ async function extractPdf(localPath: string): Promise<string> {
 			? ` (mostrando las primeras ${PDF_INGEST_MAX_PAGES} de ${res.totalPages} páginas)`
 			: ` (${res.totalPages} páginas)`;
 	return `PDF${capped}\n${res.text}`;
+}
+
+async function extractImageText(
+	localPath: string,
+	filename: string,
+	mtimeMs: number,
+): Promise<string> {
+	const ext = extname(filename).toLowerCase();
+	if (ext === ".svg") {
+		return extractSvgText(await readBoundedText(localPath));
+	}
+
+	const info = await stat(localPath);
+	if (info.size > IMAGE_OCR_MAX_BYTES) return "";
+
+	const cachePath = imageOcrCachePath(localPath, info.size, mtimeMs);
+	const cached = await readFile(cachePath, "utf8").catch(() => "");
+	if (cached) return cached;
+
+	const text = await runImageOcr(localPath).catch(() => "");
+	const trimmed = cleanOcrText(text);
+	if (!trimmed) return "";
+
+	const output = `OCR de imagen (${filename})\n${trimmed}`;
+	await mkdir(IMAGE_OCR_CACHE_DIR, { recursive: true }).catch(() => {});
+	await writeFile(cachePath, output, "utf8").catch(() => {});
+	return output;
+}
+
+function imageOcrCachePath(localPath: string, size: number, mtimeMs: number): string {
+	const key = createHash("sha256")
+		.update(`${localPath}\n${size}\n${mtimeMs}\n${IMAGE_OCR_LANGS.join("+")}`)
+		.digest("hex")
+		.slice(0, 32);
+	return join(IMAGE_OCR_CACHE_DIR, `${key}.txt`);
+}
+
+async function runImageOcr(localPath: string): Promise<string> {
+	const { default: sharp } = await import("sharp");
+	const { createWorker } = await import("tesseract.js");
+	const input = await sharp(localPath, { animated: false })
+		.rotate()
+		.resize({
+			width: 2200,
+			height: 2200,
+			fit: "inside",
+			withoutEnlargement: true,
+		})
+		.grayscale()
+		.normalize()
+		.png()
+		.toBuffer();
+
+	const worker = await createWorker(IMAGE_OCR_LANGS, 1, {
+		logger: () => {},
+		langPath: getOfflineTessdataPath(),
+		cachePath: join(homedir(), ".octopus", "tesseract-cache"),
+	});
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			worker.recognize(input).then(({ data }) => data?.text ?? ""),
+			new Promise<string>((_, reject) => {
+				timeout = setTimeout(() => {
+					void worker.terminate();
+					reject(new Error("Image OCR timed out"));
+				}, IMAGE_OCR_TIMEOUT_MS);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		await worker.terminate().catch(() => {});
+	}
+}
+
+function cleanOcrText(text: string): string {
+	return text
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.join("\n")
+		.trim();
+}
+
+function extractSvgText(svg: string): string {
+	return svg
+		.replace(/<script[\s\S]*?<\/script>/gi, " ")
+		.replace(/<style[\s\S]*?<\/style>/gi, " ")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 async function extractSpreadsheet(localPath: string): Promise<string> {

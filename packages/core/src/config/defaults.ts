@@ -316,6 +316,18 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 	},
 	tools: {
 		disabled: [],
+		imageGeneration: {
+			openai: {
+				enabled: true,
+				provider: "codex",
+				model: "gpt-image-2",
+			},
+			nanoBanana: {
+				enabled: true,
+				provider: "vertex",
+				model: "gemini-3.1-flash-image",
+			},
+		},
 		iterationLimit: {
 			enabled: true,
 			maxIterations: 256,
@@ -335,6 +347,8 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 				execute_code: 120000,
 				"nano-banana-generate": 600000,
 				"veo-video-generator": 600000,
+				office_convert_preview: 180000,
+				office_extract_media: 300000,
 				// Kanban swarm planning decomposes the goal into cards via the LLM,
 				// which routinely exceeds the 45s default for complex goals.
 				kanban_create_plan_from_goal: 180000,

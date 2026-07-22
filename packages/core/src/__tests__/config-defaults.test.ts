@@ -149,6 +149,19 @@ describe("Config Defaults", () => {
 			expect(DEFAULT_CONFIG.tools.iterationLimit.maxIterations).toBe(256);
 		});
 
+		it("should preserve image generator providers as integrated defaults", () => {
+			expect(DEFAULT_CONFIG.tools.imageGeneration.openai).toEqual({
+				enabled: true,
+				provider: "codex",
+				model: "gpt-image-2",
+			});
+			expect(DEFAULT_CONFIG.tools.imageGeneration.nanoBanana).toEqual({
+				enabled: true,
+				provider: "vertex",
+				model: "gemini-3.1-flash-image",
+			});
+		});
+
 		it("should have valid retrieval weight sum close to 1", () => {
 			const weights = DEFAULT_CONFIG.memory.retrieval.weights;
 			const sum = weights.relevance + weights.recency + weights.frequency;

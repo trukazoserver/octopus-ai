@@ -16,6 +16,7 @@ export type AppIconName =
 	| "folder"
 	| "globe"
 	| "home"
+	| "image"
 	| "key"
 	| "lock"
 	| "menu"
@@ -103,6 +104,13 @@ const paths: Record<AppIconName, React.ReactNode> = {
 		</>
 	),
 	home: <path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z" />,
+	image: (
+		<>
+			<rect x="3" y="4" width="18" height="16" rx="2" />
+			<circle cx="8.5" cy="9" r="1.5" />
+			<path d="m4 17 5-5 4 4 2-2 5 5" />
+		</>
+	),
 	key: (
 		<path d="M15 7a4 4 0 1 1-2.8 6.8L5 21H3v-2l7.2-7.2A4 4 0 0 1 15 7zM18 6l1-1" />
 	),

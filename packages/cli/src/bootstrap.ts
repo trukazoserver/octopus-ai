@@ -63,6 +63,7 @@ import {
 	UserProfileManager,
 	WorkflowManager,
 	WorkflowScheduler,
+	buildOfficeFileMasterySkills,
 	buildWebSelfReviewSkill,
 	coerceReasoningEffort,
 	createAgentCommsTools,
@@ -70,12 +71,20 @@ import {
 	createAutomationTools,
 	createCodexImageTools,
 	createConfiguredKnowledgeExtractor,
+	createDataFileTools,
 	createDatabaseAdapter,
 	createFileSystemTools,
 	createKanbanCardTools,
 	createLogger,
 	createMediaTools,
+	createNanoBananaImageTools,
+	createOfficeAdvancedTools,
+	createOfficeEditTools,
+	createOfficeMediaTools,
+	createOfficePreviewTools,
+	createOfficeTools,
 	createOrchestrationTools,
+	createPdfAdvancedTools,
 	createSandboxTools,
 	createShellTool,
 	createTeamCommTools,
@@ -88,6 +97,7 @@ import {
 	getModelCapabilitiesFromRef,
 	getZaiMCPConfigs,
 	handleProviderResponseHeaders,
+	officeFileMasteryEmbeddingTexts,
 	refreshCodexToken,
 	resolveZaiMCPAuth,
 } from "@octopus-ai/core";
@@ -370,6 +380,8 @@ function registerDynamicTool(
 	if (!existsSync(codePath)) return null;
 
 	const tool = createDynamicToolDefinition(toolDir, manifest, fallbackName);
+	const existing = toolRegistry.get(tool.name);
+	if (existing?.metadata?.source === "system") return null;
 	toolRegistry.register(tool);
 	return tool.name;
 }
@@ -1163,10 +1175,9 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	await userProfileManager.initialize();
 
 	const skillRegistry = new SkillRegistry(db, embedFn);
-	// Seed the built-in "web self-review" skill so every agent has the visual-QA
-	// loop (open → screenshot section-by-section → analyze with vision → fix →
-	// re-verify) available and semantically retrievable for web tasks. Idempotent
-	// upsert on the fixed id.
+	// Seed built-in skills so every agent has high-quality, semantically retrievable
+	// workflows for visual QA and professional file/document work. Idempotent
+	// upsert on fixed ids.
 	try {
 		await skillRegistry.save(
 			buildWebSelfReviewSkill(
@@ -1178,6 +1189,22 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	} catch (err) {
 		console.error(
 			`[bootstrap] failed to seed web-self-review skill: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+	try {
+		const embeddingPairs = await Promise.all(
+			officeFileMasteryEmbeddingTexts().map(async ({ id, text }) => [
+				id,
+				await embedFn(text),
+			] as const),
+		);
+		const embeddings = Object.fromEntries(embeddingPairs);
+		for (const skill of buildOfficeFileMasterySkills(embeddings)) {
+			await skillRegistry.save(skill);
+		}
+	} catch (err) {
+		console.error(
+			`[bootstrap] failed to seed office/file mastery skills: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 	const skillLoader = new SkillLoader(skillRegistry, embedFn, {
@@ -1405,6 +1432,27 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	for (const tool of filesystemTools) {
 		registerSystemTool(tool);
 	}
+	for (const tool of createOfficeTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createOfficeAdvancedTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createOfficeEditTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createOfficeMediaTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createOfficePreviewTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createDataFileTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createPdfAdvancedTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
 
 	const shellTool = createShellTool({
 		sandboxCommands: config.security.sandboxCommands,
@@ -1426,9 +1474,15 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		registerSystemTool(tool);
 	}
 
-	// Codex image generation (uses the ChatGPT-account token from Codex login).
-	for (const tool of createCodexImageTools()) {
-		registerSystemTool(tool);
+	if (config.tools.imageGeneration.openai.enabled) {
+		for (const tool of createCodexImageTools()) {
+			registerSystemTool(tool);
+		}
+	}
+	if (config.tools.imageGeneration.nanoBanana.enabled) {
+		for (const tool of createNanoBananaImageTools()) {
+			registerSystemTool(tool);
+		}
 	}
 
 	const kanbanCardTools = createKanbanCardTools(

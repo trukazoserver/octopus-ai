@@ -30,6 +30,33 @@ export type {
 	CodeExecutorHooks,
 } from "./code-executor.js";
 export { createMediaTools, mediaContext } from "./media.js";
+export { ArtifactIndex, hashArtifactUnits } from "./artifact-index.js";
+export type {
+	ArtifactIndexOptions,
+	ArtifactIndexSnapshot,
+	ArtifactIndexStatus,
+	ArtifactSearchMatch,
+	ArtifactSearchOptions,
+	ArtifactUnit,
+} from "./artifact-index.js";
+export { createDataFileTools } from "./data-file-tools.js";
+export { createOfficeAdvancedTools } from "./office-advanced-tools.js";
+export { createOfficeEditTools } from "./office-edit-tools.js";
+export { createOfficeMediaTools } from "./office-media-tools.js";
+export {
+	convertOfficeFile,
+	convertOfficeFileToPdf,
+	createOfficePreviewTools,
+	findLibreOfficeExecutable,
+	renderPdfPreviewPages,
+} from "./office-preview.js";
+export { createOfficeTools } from "./office-tools.js";
+export {
+	getOfflineOcrLanguageStatus,
+	getOfflineTessdataPath,
+} from "./ocr-language-data.js";
+export type { OcrLanguageStatus } from "./ocr-language-data.js";
+export { createPdfAdvancedTools } from "./pdf-advanced-tools.js";
 export { createWorkflowTools } from "./workflow.js";
 export { createAutomationTools } from "./automation.js";
 export { createTeamTools } from "./team.js";
@@ -40,6 +67,7 @@ export { createAgentCommsTools } from "./agent-comms.js";
 export { createAgentSpawnTools } from "./agent-spawn.js";
 export { createKanbanCardTools } from "./kanban-cards.js";
 export { createCodexImageTools } from "./codex-image.js";
+export { createNanoBananaImageTools } from "./nano-banana-image.js";
 
 // Stealth browsing
 export { ProxyManager } from "./proxy-manager.js";

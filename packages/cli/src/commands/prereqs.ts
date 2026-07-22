@@ -2,6 +2,10 @@ import { execSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { platform } from "node:os";
 import * as path from "node:path";
+import {
+	findLibreOfficeExecutable,
+	getOfflineOcrLanguageStatus,
+} from "@octopus-ai/core";
 import chalk from "chalk";
 
 export interface PrereqResult {
@@ -28,7 +32,9 @@ function runShell(
 	cmd: string,
 	opts?: { cwd?: string },
 ): { ok: boolean; output: string } {
-	const result = spawnSync(process.env.COMSPEC || "cmd.exe", ["/c", cmd], {
+	const shell = platform() === "win32" ? process.env.COMSPEC || "cmd.exe" : "/bin/sh";
+	const shellArgs = platform() === "win32" ? ["/c", cmd] : ["-lc", cmd];
+	const result = spawnSync(shell, shellArgs, {
 		encoding: "utf-8",
 		timeout: 300000,
 		cwd: opts?.cwd,
@@ -58,16 +64,62 @@ export function checkPrerequisites(): PrereqResult[] {
 	const isWin = platform() === "win32";
 
 	const nodeVersion = process.version;
-	const major = Number.parseInt(nodeVersion.slice(1).split(".")[0] ?? "0", 10);
+	const [major = 0, minor = 0] = nodeVersion.slice(1).split(".").map(Number);
+	const nodeOk = major > 22 || (major === 22 && minor >= 13);
 	results.push({
 		name: "Node.js",
-		passed: major >= 22,
+		passed: nodeOk,
 		message:
-			major >= 22
-				? `${nodeVersion} (>= 22)`
-				: `${nodeVersion} (se requiere >= 22)`,
-		fixHint: "Instala Node.js 22+ desde https://nodejs.org",
+			nodeOk
+				? `${nodeVersion} (>= 22.13)`
+				: `${nodeVersion} (se requiere >= 22.13)`,
+		fixHint: "Instala Node.js 22.13+ desde https://nodejs.org",
 	});
+
+	const libreOfficePath = findLibreOfficeExecutable();
+	const libreOfficeVersion = libreOfficePath
+		? run(`${platform() === "win32" ? `"${libreOfficePath}"` : `'${libreOfficePath.replace(/'/g, "'\\''")}'`} --headless --version`)
+		: "";
+	const projectRoot = findProjectRoot();
+	const documentInstaller = projectRoot
+		? path.join(projectRoot, "scripts", "install-document-runtime.mjs")
+		: null;
+	results.push({
+		name: "LibreOffice",
+		passed: Boolean(libreOfficePath && libreOfficeVersion),
+		message: libreOfficeVersion || "No encontrado; conversión Office, legacy y QA visual no disponibles",
+		fixHint: "Ejecuta: pnpm install:documents",
+		autoInstall: documentInstaller
+			? async () => {
+					console.log(chalk.cyan("    Instalando LibreOffice desde el gestor oficial..."));
+					const command = `"${process.execPath}" "${documentInstaller}"`;
+					const result = runShell(command, { cwd: projectRoot ?? undefined });
+					if (result.ok) return true;
+					console.log(chalk.red(`    Error: ${result.output}`));
+					return false;
+				}
+			: undefined,
+	});
+
+	try {
+		const languages = getOfflineOcrLanguageStatus();
+		const ready = languages.length >= 2 && languages.every((language) => language.present && language.size > 0);
+		results.push({
+			name: "OCR offline (eng+spa)",
+			passed: ready,
+			message: ready
+				? languages.map((language) => `${language.code} ${(language.size / 1024 / 1024).toFixed(1)} MB`).join(", ")
+				: "Modelos OCR offline incompletos",
+			fixHint: "Ejecuta pnpm install --frozen-lockfile y pnpm build",
+		});
+	} catch (error) {
+		results.push({
+			name: "OCR offline (eng+spa)",
+			passed: false,
+			message: error instanceof Error ? error.message : String(error),
+			fixHint: "Ejecuta pnpm install --frozen-lockfile",
+		});
+	}
 
 	const pnpmVersion = run("pnpm --version");
 	results.push({

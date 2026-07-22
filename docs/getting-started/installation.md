@@ -29,19 +29,22 @@ Esta guía te ayudará a instalar Octopus AI paso a paso, sin importar tu nivel 
 | Componente | Mínimo | Recomendado |
 |---|---|---|
 | **Memoria RAM** | 4 GB | 8 GB (para modelos locales con Ollama) |
-| **Almacenamiento** | 2 GB libres | 5 GB (con modelos locales) |
+| **Almacenamiento** | 3 GB libres | 6 GB (con LibreOffice y modelos locales) |
 | **Procesador** | Cualquier CPU moderna | Multi-núcleo para compilación rápida |
 
 ### Software
 
 | Requisito | Versión Mínima | Para qué sirve |
 |---|---|---|
-| **Node.js** | >= 22.0.0 | Entorno de ejecución principal |
+| **Node.js** | >= 22.13.0 | Entorno de ejecución principal y SQLite nativo |
 | **pnpm** | >= 10.0.0 | Gestor de paquetes del monorepo |
 | **Python** | >= 3.10 | Tools auxiliares, scripts y compatibilidad completa |
 | **C++ Build Tools** | Ver abajo | Dependencias nativas y compatibilidad completa de instalación |
 | **Docker** | Compose v2 | Opcional para despliegue en contenedores y sandbox aislado |
 | **Git** | Cualquiera | Clonar el repositorio |
+| **LibreOffice** | Versión estable actual | Conversión Office, formatos legacy, recálculo y QA visual |
+
+Los modelos OCR `eng` y `spa` se incluyen como dependencias npm bloqueadas y se preparan en `~/.octopus/tessdata`; no se descargan desde una CDN durante el primer OCR.
 
 > **¿No sabes qué es Node.js, pnpm, Python, Docker o Build Tools?** No te preocupes. El instalador verifica cada requisito, instala solo lo que falte si aceptas y permite saltar pasos opcionales.
 
@@ -49,7 +52,14 @@ Esta guía te ayudará a instalar Octopus AI paso a paso, sin importar tu nivel 
 
 ## 📦 Preparación por Sistema Operativo
 
-Antes de instalar Octopus AI necesitas Node.js, pnpm y Git. Python, Build Tools y Docker se recomiendan para funcionamiento al 100%: scripts Python, dependencias nativas, browser/media tooling, despliegue Docker y sandbox aislado. El instalador detecta lo que ya existe y solo instala lo faltante.
+Antes de instalar Octopus AI necesitas Node.js, pnpm y Git. El instalador instala LibreOffice por defecto desde el gestor oficial del sistema para habilitar el runtime documental completo. Usa `--no-system-deps` únicamente si aceptas perder conversión Office, formatos antiguos y QA visual.
+
+Puedes comprobar o instalar solo el runtime documental con:
+
+```bash
+pnpm check:documents
+pnpm install:documents
+```
 
 ### Windows
 

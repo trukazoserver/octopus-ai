@@ -688,8 +688,28 @@ const ToolRateLimitsSchema = Type.Object({
 	byTool: Type.Record(Type.String(), ToolRateLimitRuleSchema, { default: {} }),
 });
 
+const ImageGenerationConfigSchema = Type.Object({
+	openai: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		provider: Type.Union(
+			[Type.Literal("openai-api"), Type.Literal("codex")],
+			{ default: "codex" },
+		),
+		model: Type.String({ default: "gpt-image-2" }),
+	}),
+	nanoBanana: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		provider: Type.Union(
+			[Type.Literal("gemini-api"), Type.Literal("vertex")],
+			{ default: "vertex" },
+		),
+		model: Type.String({ default: "gemini-3.1-flash-image" }),
+	}),
+});
+
 const ToolsConfigSchema = Type.Object({
 	disabled: Type.Array(Type.String(), { default: [] }),
+	imageGeneration: ImageGenerationConfigSchema,
 	iterationLimit: ToolIterationLimitSchema,
 	resultTruncation: ToolResultTruncationSchema,
 	timeouts: ToolTimeoutsSchema,

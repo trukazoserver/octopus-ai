@@ -2753,7 +2753,14 @@ export const ChatPage: React.FC<{
 	const [editingTitle, setEditingTitle] = useState("");
 
 	useEffect(() => {
-		if (workspaceRequest) setWorkspaceView(workspaceRequest.view);
+		if (!workspaceRequest) return;
+		setWorkspaceView(workspaceRequest.view);
+		if (
+			workspaceRequest.view === "media" &&
+			window.matchMedia("(max-width: 800px)").matches
+		) {
+			setSidebarOpen(false);
+		}
 	}, [workspaceRequest]);
 	const [mediaPreviewSrc, setMediaPreviewSrc] = useState<string | null>(null);
 
@@ -4080,9 +4087,6 @@ export const ChatPage: React.FC<{
 	}, [
 		activeConversationId,
 		activeBusy,
-		agentStatus,
-		isLoading,
-		isStreaming,
 		syncConversationExecution,
 	]);
 
@@ -4574,6 +4578,7 @@ export const ChatPage: React.FC<{
 								<path d="m20 20-3.5-3.5" />
 							</svg>
 							<input
+								name="conversation-search"
 								value={conversationSearch}
 								onChange={(event) => setConversationSearch(event.target.value)}
 								placeholder="Buscar chats"
@@ -4857,7 +4862,12 @@ export const ChatPage: React.FC<{
 					>
 						<button
 							type="button"
-							onClick={() => setWorkspaceView("media")}
+							onClick={() => {
+								setWorkspaceView("media");
+								if (window.matchMedia("(max-width: 800px)").matches) {
+									setSidebarOpen(false);
+								}
+							}}
 							aria-pressed={workspaceView === "media"}
 							style={{
 								width: "100%",
@@ -5034,6 +5044,7 @@ export const ChatPage: React.FC<{
 								<button
 									type="button"
 									onClick={() => setSidebarOpen(true)}
+									aria-label="Mostrar panel"
 									data-tooltip="Mostrar panel"
 									style={{
 										background: "none",
@@ -5115,12 +5126,12 @@ export const ChatPage: React.FC<{
 							style={{
 								position: "relative",
 								zIndex: 10,
-								padding: "10px 24px",
+								padding: "12px 24px",
 								background: "#09090b",
 								borderBottom: "1px solid #27272a",
 								display: "flex",
 								alignItems: "center",
-								gap: "10px",
+								gap: "12px",
 								flexWrap: "wrap",
 							}}
 						>
@@ -5208,7 +5219,6 @@ export const ChatPage: React.FC<{
 								value={selectedAgentId}
 								onChange={(e) => setSelectedAgentId(e.target.value)}
 								style={{
-									marginLeft: "12px",
 									padding: "6px 12px",
 									borderRadius: "8px",
 									border: "1px solid #3f3f46",
@@ -5230,6 +5240,7 @@ export const ChatPage: React.FC<{
 
 							{/* Model selector — reflects/edits the active agent's model */}
 							<select
+								name="agent-model"
 								aria-label="Modelo del agente"
 								value={activeModelValue}
 								disabled={!canEditAgent || modelGroups.length === 0}
@@ -5269,6 +5280,7 @@ export const ChatPage: React.FC<{
 
 							{/* Reasoning selector — options scoped to the active model */}
 							<select
+								name="reasoning-effort"
 								aria-label="Nivel de razonamiento"
 								value={activeReasoning}
 								disabled={!canEditAgent || !activeCapabilities?.supportsReasoning}
@@ -5393,74 +5405,6 @@ export const ChatPage: React.FC<{
 								{tenacidad === "tenaz" ? "🔥" : "⚡"}
 								{tenacidad === "tenaz" ? "Tenaz" : "Normal"}
 							</button>
-							<div style={{ flex: 1 }} />
-							{(() => {
-								const providerName =
-									activeCapabilities?.providerDisplayName ??
-									status?.agent?.providerDisplayName ??
-									status?.providerDisplayName ??
-									status?.provider;
-								const modelName =
-									agentForControls?.effectiveModel ??
-									status?.agent?.model ??
-									status?.model ??
-									status?.provider;
-								const modelShort = modelName?.includes("/")
-									? modelName.slice(modelName.indexOf("/") + 1)
-									: modelName;
-								if (!providerName && !modelName) return null;
-								return (
-									<div
-										className="chat-status-meta"
-										style={{ display: "flex", alignItems: "center", gap: "8px" }}
-									>
-										{agentForControls?.name && (
-											<span
-												style={{
-													fontSize: "0.7rem",
-													padding: "4px 10px",
-													borderRadius: "20px",
-													background: "rgba(244, 114, 182, 0.1)",
-													color: "#f472b6",
-													border: "1px solid rgba(244, 114, 182, 0.2)",
-													fontWeight: 500,
-												}}
-											>
-												{agentForControls.name}
-											</span>
-										)}
-										{activeReasoning && activeReasoning !== "none" && (
-											<span
-												style={{
-													fontSize: "0.75rem",
-													padding: "4px 10px",
-													borderRadius: "20px",
-													background: "rgba(16, 185, 129, 0.1)",
-													color: "#10b981",
-													border: "1px solid rgba(16, 185, 129, 0.2)",
-													fontWeight: 500,
-												}}
-											>
-												Razonamiento: {REASONING_LABELS[activeReasoning]}
-											</span>
-										)}
-										<span
-											style={{
-												fontSize: "0.75rem",
-												padding: "4px 10px",
-												borderRadius: "20px",
-												background: "rgba(99, 102, 241, 0.1)",
-												color: "#818cf8",
-												border: "1px solid rgba(99, 102, 241, 0.2)",
-												fontWeight: 500,
-											}}
-										>
-											{providerName ? `${providerName} · ` : ""}Modelo:{" "}
-											{modelShort || "—"}
-										</span>
-									</div>
-								);
-							})()}
 						</div>
 
 						{/* Messages */}
@@ -5476,66 +5420,32 @@ export const ChatPage: React.FC<{
 							>
 								{messages.length === 0 && (
 									<div className="chat-welcome">
-										<div className="chat-welcome-title-row">
-											<div className="chat-welcome-logo">
-												<AgentAvatarContent
-													agent={selectedAgent}
-													alt={
-														selectedAgent
-															? `${selectedAgent.name} avatar`
-															: "Octopus"
-													}
-													imageStyle={{
-														width: "100%",
-														height: "100%",
-														objectFit: "contain",
-													}}
-													textStyle={{ fontSize: "2.2rem" }}
-												/>
-											</div>
-											<h1 className="chat-welcome-title">
-												{(() => {
-													const h = new Date().getHours();
-													const g =
-														h < 12
-															? "Buenos dias"
-															: h < 19
-																? "Buenas tardes"
-																: "Buenas noches";
-													return `${g}, ${userDisplayName}`;
-												})()}
-											</h1>
+										<div className="chat-welcome-logo">
+											<AgentAvatarContent
+												agent={selectedAgent}
+												alt={
+													selectedAgent ? `${selectedAgent.name} avatar` : "Octopus"
+												}
+												imageStyle={{
+													width: "100%",
+													height: "100%",
+													objectFit: "contain",
+												}}
+												textStyle={{ fontSize: "2.2rem" }}
+											/>
 										</div>
-										<div className="chat-welcome-chips">
-											{[
-												{ label: "Escribir", prompt: "Ayudame a escribir " },
-												{ label: "Aprender", prompt: "Explicame paso a paso " },
-												{
-													label: "Codigo",
-													prompt: "Ayudame con este codigo: ",
-												},
-												{
-													label: "Vida personal",
-													prompt: "Ayudame a organizar ",
-												},
-												{
-													label: "Multimedia",
-													prompt: "Genera una imagen de ",
-												},
-											].map((suggestion) => (
-												<button
-													key={suggestion.label}
-													type="button"
-													className="chat-welcome-chip"
-													onClick={() => {
-														setInput(suggestion.prompt);
-														inputRef.current?.focus();
-													}}
-												>
-													{suggestion.label}
-												</button>
-											))}
-										</div>
+										<h1 className="chat-welcome-title">
+											{(() => {
+												const h = new Date().getHours();
+												const g =
+													h < 12
+														? "Buenos dias"
+														: h < 19
+															? "Buenas tardes"
+															: "Buenas noches";
+												return `${g}, ${userDisplayName}`;
+											})()}
+										</h1>
 									</div>
 								)}
 								{(() => {
@@ -6304,15 +6214,11 @@ export const ChatPage: React.FC<{
 				.agent-activity-step-line { width: 7px; height: 1px; border-radius: 999px; background: #3f3f46; flex-shrink: 0; }
 				.agent-activity-step-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; opacity: 0.9; }
 				.agent-activity-step-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-				.chat-welcome { min-height: min(640px, calc(100vh - 230px)); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 16px 22px; text-align: center; }
+				.chat-welcome { min-height: min(640px, calc(100vh - 230px)); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 40px 16px 22px; text-align: center; }
 				.chat-welcome-plan { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 72px; padding: 9px 16px; border-radius: 13px; background: rgba(24,24,27,.82); color: #a1a1aa; font-size: 0.92rem; font-weight: 700; border: 1px solid rgba(63,63,70,.45); }
-				.chat-welcome-title-row { display: flex; align-items: center; justify-content: center; gap: 30px; margin-bottom: 14px; }
-				.chat-welcome-logo { width: 184px; height: 184px; display: flex; align-items: center; justify-content: center; object-fit: contain; filter: drop-shadow(0 14px 28px rgba(255,111,59,.18)); image-rendering: auto; }
+				.chat-welcome-logo { width: 156px; height: 156px; display: flex; align-items: center; justify-content: center; object-fit: contain; filter: drop-shadow(0 14px 28px rgba(255,111,59,.18)); image-rendering: auto; }
 				.chat-welcome-title { margin: 0; color: #d9d6cd; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(2.35rem, 5vw, 4.45rem); font-weight: 400; letter-spacing: -0.055em; line-height: 1.02; }
 				.chat-welcome-subtitle { margin: 0 0 54px; color: #a6a39c; font-size: clamp(1.1rem, 2.2vw, 1.55rem); font-weight: 500; }
-				.chat-welcome-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; max-width: 900px; }
-				.chat-welcome-chip { padding: 12px 18px; border-radius: 14px; border: 1px solid #383838; background: rgba(31,31,31,.72); color: #c8c4ba; font-family: inherit; font-size: 0.98rem; font-weight: 700; cursor: pointer; transition: all .16s ease; }
-				.chat-welcome-chip:hover { background: #2a2926; border-color: #4a4944; color: #f0ede6; transform: translateY(-1px); }
 				@media (max-width: 640px) {
 					.agent-activity-card { min-width: 0; max-width: calc(100vw - 92px); }
 					.agent-activity-detail { font-size: 0.72rem; }
@@ -6322,8 +6228,8 @@ export const ChatPage: React.FC<{
 					.media-image-thumb, .media-image-thumb img { width: 96px; height: 96px; }
 					.chat-welcome { min-height: calc(100vh - 240px); padding-top: 28px; }
 					.chat-welcome-plan { margin-bottom: 38px; }
-					.chat-welcome-title-row { flex-direction: column; gap: 10px; }
-					.chat-welcome-logo { width: 144px; height: 144px; }
+					.chat-welcome { gap: 14px; }
+					.chat-welcome-logo { width: 128px; height: 128px; }
 					.chat-welcome-subtitle { margin-bottom: 32px; }
 				}
 				.markdown-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }

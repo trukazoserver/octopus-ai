@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/trukazoserver/octopus-ai"><img src="https://img.shields.io/badge/GitHub-trukazoserver%2Foctopus--ai-181717?logo=github&style=flat-square" alt="GitHub" /></a>
-  <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&style=flat-square" alt="Node.js >=22" />
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22.13-339933?logo=node.js&style=flat-square" alt="Node.js >=22.13" />
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/pnpm-10.8-F69220?logo=pnpm&style=flat-square" alt="pnpm" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="MIT License" />
@@ -89,6 +89,7 @@ Octopus AI no es solo un chatbot. Es un asistente inteligente que aprende de ti 
 | **Automatización** | "Cada mañana revisa mis tareas y genera un resumen" → Programa cron jobs, ejecuta prompts en segundo plano y mantiene seguimiento diario |
 | **Kanban Swarm** | "Crea una campaña con investigacion, copy, assets y QA" → Divide el objetivo en cards paralelas con dependencias por artifact y gates de revision |
 | **Gestión de archivos** | "Lee el archivo config.json y muéstrame los errores" → Opera con tu sistema de archivos |
+| **Artifacts profesionales** | Crea, edita, busca, versiona y previsualiza DOCX, PPTX, XLSX y PDF; OCR `eng+spa` funciona offline y LibreOffice aporta conversión/QA visual |
 | **Multi-canal** | Pregunta lo mismo desde WhatsApp, Telegram, Discord o la web → Misma memoria, misma IA |
 | **Integración MCP** | Conecta con servidores Model Context Protocol (MCP) → Expande capacidades con herramientas externas |
 | **Generación de Voz** | Soporte de STT y TTS → Interactúa mediante voz y generación de audio |
@@ -116,7 +117,8 @@ App nativa para Windows, macOS y Linux. Experiencia de escritorio completa con t
 
 | Requisito | Versión | Para qué sirve |
 |---|---|---|
-| [Node.js](https://nodejs.org/) | >= 22 | Entorno de ejecución principal |
+| [Node.js](https://nodejs.org/) | >= 22.13 | Entorno de ejecución principal |
+| LibreOffice | Automático | Conversión Office, formatos legacy y QA visual |
 | [pnpm](https://pnpm.io/) | >= 10 | Gestor de paquetes |
 | Python 3.x | >= 3.10 | Recomendado para herramientas y scripts auxiliares |
 | C++ Build Tools | — | Recomendado para instalación completa y dependencias nativas |
@@ -135,14 +137,15 @@ cd octopus-ai
 pnpm run install:octopus
 ```
 
-El instalador hace todo por ti y cada paso opcional se puede saltar con Enter o `n`:
-1. Verifica Node.js, pnpm, Python, Build Tools y Docker.
-2. Instala solo las dependencias faltantes si aceptas o si usas modo automatico.
-3. Ejecuta `pnpm install` y `pnpm build` para compilar los 12 paquetes.
-4. Crea `~/.octopus/config.json`, `~/.octopus/data`, `~/.octopus/logs`, `~/.octopus/skills` y `~/.octopus/plugins`.
-5. Instala shims `octopus`/`octopus-ai` en `~/.octopus/bin`.
-6. Pregunta API keys, pero puedes saltarlas y configurarlas luego desde la web.
-7. Inicia Octopus en segundo plano y abre la web, salvo que uses `--no-start` o `--no-open`.
+El instalador hace todo por ti:
+1. Verifica Node.js, pnpm, Python, Build Tools, Docker y LibreOffice.
+2. Instala LibreOffice desde WinGet, Homebrew, apt, dnf o pacman cuando falta.
+3. Incluye y verifica modelos OCR offline en inglés y español.
+4. Ejecuta `pnpm install --frozen-lockfile` y `pnpm build`.
+5. Crea `~/.octopus/config.json`, datos, logs, skills, plugins, workspace y tessdata.
+6. Instala shims `octopus`/`octopus-ai` en `~/.octopus/bin`.
+7. Pregunta API keys, pero puedes saltarlas y configurarlas luego desde la web.
+8. Inicia Octopus en segundo plano y abre la web, salvo que uses `--no-start` o `--no-open`.
 
 Modos utiles:
 

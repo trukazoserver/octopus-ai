@@ -91,4 +91,6 @@ jobs:
       - name: Build Docker image
         run: docker build -f docker/Dockerfile -t octopus-ai:latest .
       - name: Test Docker image
-        run: docker run --rm octopus-ai:latest node -e "console.log('OK')"
+        run: >-
+          docker run --rm octopus-ai:latest sh -lc
+          "soffice --headless --version && node -e \"import('./packages/core/dist/index.js').then(m=>{const s=m.getOfflineOcrLanguageStatus();if(!s.every(x=>x.present))process.exit(1);console.log(s)})\""

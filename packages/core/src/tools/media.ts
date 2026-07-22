@@ -43,6 +43,16 @@ const MIME_EXTENSIONS: Record<string, string> = {
 	"audio/mp4": ".m4a",
 	"video/mp4": ".mp4",
 	"video/webm": ".webm",
+	"application/pdf": ".pdf",
+	"application/json": ".json",
+	"text/csv": ".csv",
+	"text/plain": ".txt",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+	"application/vnd.oasis.opendocument.text": ".odt",
+	"application/vnd.oasis.opendocument.spreadsheet": ".ods",
+	"application/vnd.oasis.opendocument.presentation": ".odp",
 };
 
 function guessMime(filename: string): string {
@@ -60,6 +70,16 @@ function guessMime(filename: string): string {
 		".m4a": "audio/mp4",
 		".mp4": "video/mp4",
 		".webm": "video/webm",
+		".pdf": "application/pdf",
+		".json": "application/json",
+		".csv": "text/csv",
+		".txt": "text/plain",
+		".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		".odt": "application/vnd.oasis.opendocument.text",
+		".ods": "application/vnd.oasis.opendocument.spreadsheet",
+		".odp": "application/vnd.oasis.opendocument.presentation",
 	};
 	return mimeMap[ext] ?? "application/octet-stream";
 }
@@ -68,25 +88,23 @@ function ensureMediaDir(): void {
 	if (!existsSync(MEDIA_DIR)) mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
-let mediaMetaCache: MediaMetaItem[] | undefined;
 let mediaMetaIndex = new Map<string, MediaMetaItem>();
 
 function loadMediaMeta(): MediaMetaItem[] {
-	if (mediaMetaCache) return mediaMetaCache;
 	ensureMediaDir();
+	let items: MediaMetaItem[];
 	try {
 		const parsed = JSON.parse(readFileSync(MEDIA_META_PATH, "utf-8"));
-		mediaMetaCache = Array.isArray(parsed) ? (parsed as MediaMetaItem[]) : [];
+		items = Array.isArray(parsed) ? (parsed as MediaMetaItem[]) : [];
 	} catch {
-		mediaMetaCache = [];
+		items = [];
 	}
-	mediaMetaIndex = new Map(mediaMetaCache.flatMap((item) => [[item.id, item], [item.filename, item]]));
-	return mediaMetaCache;
+	mediaMetaIndex = new Map(items.flatMap((item) => [[item.id, item], [item.filename, item]]));
+	return items;
 }
 
 function saveMediaMeta(items: MediaMetaItem[]): void {
 	ensureMediaDir();
-	mediaMetaCache = items;
 	mediaMetaIndex = new Map(items.flatMap((item) => [[item.id, item], [item.filename, item]]));
 	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
 }
@@ -337,9 +355,9 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 		{
 			name: "import_media_file",
 			description:
-				"Import an existing local media file into the Octopus AI media library without base64. " +
-				"Use this for large generated files such as MP4 videos, ffmpeg outputs, audio, PDFs, or images that already exist on disk. " +
-				"Returns a /api/media/file/... URL that can be embedded in the response. Prefer this over save_media for files larger than a few MB. Include semantic metadata for scene/image/video workflows.",
+				"Publish an existing local artifact into the Octopus artifact library without base64. " +
+				"Use this for generated DOCX, PPTX, XLSX, PDF, data files, videos, audio, or images that already exist on disk. " +
+				"Returns a /api/media/file/... URL. Set metadata.artifactKey to group revisions as versions and metadata.artifactTitle for the viewer title.",
 			parameters: {
 				path: {
 					type: "string",
@@ -365,7 +383,7 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 				metadata: {
 					type: "object",
 					description:
-						"Optional structured metadata such as workflowId, sceneNumber, imageNumber, stage, role, prompt, sourceTool, parentMediaIds.",
+						"Optional metadata. Use artifactKey (stable across revisions), artifactTitle, workflowId, stage, sourceTool, and parentMediaIds.",
 				},
 			},
 			handler: async (params: Record<string, unknown>): Promise<ToolResult> => {

@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	MAX_DOC_CHARS,
 	extractDocumentText,
 	guessDocumentKind,
-	MAX_DOC_CHARS,
 } from "../tools/document-extract.js";
+import { PdfReader } from "../tools/pdf-reader.js";
 
 describe("guessDocumentKind", () => {
 	it("classifies common extensions", () => {
@@ -19,13 +20,15 @@ describe("guessDocumentKind", () => {
 		expect(guessDocumentKind("book.xlsx")).toBe("spreadsheet");
 		expect(guessDocumentKind("letter.docx")).toBe("document");
 		expect(guessDocumentKind("pack.zip")).toBe("archive");
-		expect(guessDocumentKind("photo.png")).toBe("media");
+		expect(guessDocumentKind("photo.png")).toBe("image");
+		expect(guessDocumentKind("clip.mp4")).toBe("media");
 		expect(guessDocumentKind("weird.xyz")).toBe("unknown");
 	});
 
 	it("is case-insensitive on extensions", () => {
 		expect(guessDocumentKind("A.PDF")).toBe("pdf");
 		expect(guessDocumentKind("B.XLSX")).toBe("spreadsheet");
+		expect(guessDocumentKind("C.JPEG")).toBe("image");
 	});
 });
 
@@ -37,6 +40,7 @@ describe("extractDocumentText", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await rm(dir, { recursive: true, force: true });
 	});
 
@@ -55,10 +59,14 @@ describe("extractDocumentText", () => {
 		expect(code.text).toContain("print('hi')");
 	});
 
-	it("returns empty text for media/unknown without throwing", async () => {
-		const res = await extractDocumentText(join(dir, "x.png"), "x.png");
-		expect(res.kind).toBe("media");
-		expect(res.text).toBe("");
+	it("returns empty text for non-image media/unknown without throwing", async () => {
+		const media = await extractDocumentText(join(dir, "x.mp4"), "x.mp4");
+		expect(media.kind).toBe("media");
+		expect(media.text).toBe("");
+
+		const unknown = await extractDocumentText(join(dir, "x.bin"), "x.bin");
+		expect(unknown.kind).toBe("unknown");
+		expect(unknown.text).toBe("");
 	});
 
 	it("truncates very large text files", async () => {
@@ -71,12 +79,44 @@ describe("extractDocumentText", () => {
 	});
 
 	it("produces a graceful note when the file is missing", async () => {
-		const res = await extractDocumentText(
-			join(dir, "nope.pdf"),
-			"nope.pdf",
-		);
+		const res = await extractDocumentText(join(dir, "nope.pdf"), "nope.pdf");
 		expect(res.kind).toBe("pdf");
 		expect(res.text).toContain("No se pudo leer");
 		expect(res.text).toContain("NO intentes instalar");
+	});
+
+	it("uses automatic OCR for PDF chat attachments", async () => {
+		const pdfPath = join(dir, "scan.pdf");
+		await writeFile(pdfPath, Buffer.from("%PDF-1.7\n"));
+		const extractSpy = vi.spyOn(PdfReader.prototype, "extract").mockResolvedValue({
+			totalPages: 1,
+			pages: [{ page: 1, text: "texto extraido", ocrUsed: true }],
+			text: "--- Page 1 ---\ntexto extraido",
+			ocrUsed: true,
+		});
+
+		const result = await extractDocumentText(pdfPath, "scan.pdf");
+
+		expect(extractSpy).toHaveBeenCalledWith(expect.any(Buffer), {
+			ocr: "auto",
+			pages: "1-20",
+		});
+		expect(result.kind).toBe("pdf");
+		expect(result.text).toContain("texto extraido");
+	});
+
+	it("extracts visible SVG text without running raster OCR", async () => {
+		const svgPath = join(dir, "diagram.svg");
+		await writeFile(
+			svgPath,
+			'<svg><text>Factura 123</text><script>hidden()</script></svg>',
+			"utf8",
+		);
+
+		const result = await extractDocumentText(svgPath, "diagram.svg");
+
+		expect(result.kind).toBe("image");
+		expect(result.text).toContain("Factura 123");
+		expect(result.text).not.toContain("hidden");
 	});
 });

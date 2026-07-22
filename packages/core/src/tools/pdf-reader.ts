@@ -11,8 +11,9 @@
  * is unavailable, OCR is skipped and the (possibly empty) text is returned with
  * a clear note, so text-PDF reading always works.
  */
-import { readFile, mkdir } from "node:fs/promises";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { createHash } from "node:crypto";
+import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -21,18 +22,20 @@ import {
 	type UrlSafetyPolicyConfig,
 } from "../security/url-safety.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
+import { getOfflineTessdataPath } from "./ocr-language-data.js";
 
 const require = createRequire(import.meta.url);
 
 const PDF_SVG =
 	'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
-const MAX_PDF_BYTES = 60 * 1024 * 1024; // 60 MB
+const DEFAULT_MAX_PDF_BYTES = 250 * 1024 * 1024; // 250 MB
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const DOWNLOAD_MAX_REDIRECTS = 5;
 const OCR_DEFAULT_LANGS = ["spa", "eng"];
 const OCR_DEFAULT_MAX_PAGES = 5;
 const OCR_RENDER_SCALE = 2;
 const SPARSE_TEXT_THRESHOLD = 50; // chars below which a page is "image-only"
+const EXTRACTION_CACHE_MAX_ENTRIES = 8;
 
 export interface PdfReaderConfig {
 	urlPolicy?: UrlSafetyPolicyConfig;
@@ -40,6 +43,7 @@ export interface PdfReaderConfig {
 	allowedLocalRoots?: string[];
 	ocrLanguages?: string[];
 	ocrMaxPages?: number;
+	maxPdfBytes?: number;
 	/** Where Tesseract.js caches its traineddata. Defaults to ~/.octopus/tesseract-cache. */
 	tesseractCachePath?: string;
 }
@@ -54,6 +58,13 @@ export interface PdfExtractionResult {
 	totalPages: number;
 	pages: PdfPageResult[];
 	text: string;
+	ocrUsed: boolean;
+	ocrSkippedReason?: string;
+}
+
+interface PdfPageExtractionResult {
+	totalPages: number;
+	pages: PdfPageResult[];
 	ocrUsed: boolean;
 	ocrSkippedReason?: string;
 }
@@ -156,7 +167,9 @@ export class PdfReader {
 	private allowedLocalRoots: string[];
 	private ocrLanguages: string[];
 	private ocrMaxPages: number;
+	private maxPdfBytes: number;
 	private tesseractCachePath: string;
+	private static extractionCache = new Map<string, PdfPageExtractionResult>();
 
 	constructor(config: PdfReaderConfig = {}) {
 		this.urlSafetyPolicy = new UrlSafetyPolicy(config.urlPolicy);
@@ -166,6 +179,7 @@ export class PdfReader {
 				: [homedir()];
 		this.ocrLanguages = config.ocrLanguages ?? OCR_DEFAULT_LANGS;
 		this.ocrMaxPages = config.ocrMaxPages ?? OCR_DEFAULT_MAX_PAGES;
+		this.maxPdfBytes = config.maxPdfBytes ?? DEFAULT_MAX_PDF_BYTES;
 		this.tesseractCachePath =
 			config.tesseractCachePath ??
 			resolvePath(homedir(), ".octopus", "tesseract-cache");
@@ -206,84 +220,142 @@ export class PdfReader {
 		opts: {
 			pages?: string;
 			ocr?: "auto" | "never" | "force";
+			maxOcrPages?: number;
 		} = {},
 	): Promise<PdfExtractionResult> {
-		if (buffer.byteLength > MAX_PDF_BYTES) {
-			throw new Error(
-				`PDF is too large (${Math.round(buffer.byteLength / 1024 / 1024)} MB); limit is ${MAX_PDF_BYTES / 1024 / 1024} MB.`,
-			);
-		}
+		const pageResult = await this.extractPages(buffer, opts);
+		return {
+			...pageResult,
+			text: pageResult.pages.map((r) => `--- Page ${r.page} ---\n${r.text}`).join("\n\n"),
+		};
+	}
+
+	private async extractPages(
+		buffer: Buffer,
+		opts: {
+			pages?: string;
+			ocr?: "auto" | "never" | "force";
+			maxOcrPages?: number;
+		} = {},
+	): Promise<PdfPageExtractionResult> {
+		this.assertPdfSize(buffer);
+		const cacheKey = this.extractionCacheKey(buffer, opts);
+		const cached = PdfReader.extractionCache.get(cacheKey);
+		if (cached) return cached;
+
 		const data = new Uint8Array(buffer);
 		const pdfjs = await getPdfjs();
 		const doc = await pdfjs.getDocument({ data, useSystemFonts: true }).promise;
-		const totalPages = doc.numPages;
-		const targets = parsePageRange(opts.pages, totalPages);
+		try {
+			const totalPages = doc.numPages;
+			const targets = parsePageRange(opts.pages, totalPages);
 
-		const pageTexts = new Map<number, string>();
-		for (const p of targets) {
-			const page = await doc.getPage(p);
-			const content = await page.getTextContent();
-			pageTexts.set(
-				p,
-				content.items.map((it) => it.str ?? "").join(" ").trim(),
-			);
-		}
-
-		const ocr = opts.ocr ?? "auto";
-		const sparsePages = targets.filter(
-			(p) => (pageTexts.get(p)?.length ?? 0) < SPARSE_TEXT_THRESHOLD,
-		);
-		const forceAll = ocr === "force";
-		const pagesToOcr =
-			ocr === "never"
-				? []
-				: forceAll
-					? targets.slice(0, this.ocrMaxPages)
-					: sparsePages.slice(0, this.ocrMaxPages);
-
-		const results: PdfPageResult[] = [];
-		let ocrUsed = false;
-		let ocrSkippedReason: string | undefined;
-
-		if (pagesToOcr.length > 0) {
-			const ocrOutcome = await this.runOcr(doc, pagesToOcr).then(
-				(outcome): { texts: Map<number, string>; reason?: string } => outcome,
-				(err): { texts: Map<number, string>; reason?: string } => ({
-					texts: new Map(),
-					reason: err instanceof Error ? err.message : String(err),
-				}),
-			);
-			if (ocrOutcome.texts.size > 0) {
-				ocrUsed = true;
-				for (const p of pagesToOcr) {
-					const ocrText = ocrOutcome.texts.get(p);
-					if (ocrText && ocrText.length > (pageTexts.get(p)?.length ?? 0)) {
-						pageTexts.set(p, ocrText);
-					}
-				}
-			} else {
-				ocrSkippedReason = ocrOutcome.reason;
+			const pageTexts = new Map<number, string>();
+			for (const p of targets) {
+				const page = await doc.getPage(p);
+				const content = await page.getTextContent();
+				pageTexts.set(
+					p,
+					content.items.map((it) => it.str ?? "").join(" ").trim(),
+				);
 			}
+
+			const ocr = opts.ocr ?? "auto";
+			const ocrLimit = normalizePositiveInt(opts.maxOcrPages, this.ocrMaxPages);
+			const sparsePages = targets.filter(
+				(p) => (pageTexts.get(p)?.length ?? 0) < SPARSE_TEXT_THRESHOLD,
+			);
+			const forceAll = ocr === "force";
+			const pagesToOcr =
+				ocr === "never"
+					? []
+					: forceAll
+						? targets.slice(0, ocrLimit)
+						: sparsePages.slice(0, ocrLimit);
+
+			const results: PdfPageResult[] = [];
+			let ocrUsed = false;
+			let ocrSkippedReason: string | undefined;
+
+			if (pagesToOcr.length > 0) {
+				const ocrOutcome = await this.runOcr(doc, pagesToOcr).then(
+					(outcome): { texts: Map<number, string>; reason?: string } => outcome,
+					(err): { texts: Map<number, string>; reason?: string } => ({
+						texts: new Map(),
+						reason: err instanceof Error ? err.message : String(err),
+					}),
+				);
+				if (ocrOutcome.texts.size > 0) {
+					ocrUsed = true;
+					for (const p of pagesToOcr) {
+						const ocrText = ocrOutcome.texts.get(p);
+						if (ocrText && ocrText.length > (pageTexts.get(p)?.length ?? 0)) {
+							pageTexts.set(p, ocrText);
+						}
+					}
+				} else {
+					ocrSkippedReason = ocrOutcome.reason;
+				}
+			}
+
+			for (const p of targets) {
+				results.push({
+					page: p,
+					text: pageTexts.get(p) ?? "",
+					ocrUsed:
+						ocrUsed &&
+						pagesToOcr.includes(p) &&
+						(pageTexts.get(p)?.length ?? 0) > 0,
+				});
+			}
+
+			const result = {
+				totalPages,
+				pages: results,
+				ocrUsed,
+				ocrSkippedReason,
+			};
+			this.rememberExtraction(cacheKey, result);
+			return result;
+		} finally {
+			await doc.destroy?.().catch(() => {});
 		}
+	}
 
-		for (const p of targets) {
-			results.push({
-				page: p,
-				text: pageTexts.get(p) ?? "",
-				ocrUsed:
-					ocrUsed && pagesToOcr.includes(p) && (pageTexts.get(p)?.length ?? 0) > 0,
-			});
+	private assertPdfSize(buffer: Buffer): void {
+		if (buffer.byteLength > this.maxPdfBytes) {
+			throw new Error(
+				`PDF is too large (${Math.round(buffer.byteLength / 1024 / 1024)} MB); limit is ${this.maxPdfBytes / 1024 / 1024} MB.`,
+			);
 		}
+	}
 
-		await doc.destroy?.().catch(() => {});
+	private extractionCacheKey(
+		buffer: Buffer,
+		opts: { pages?: string; ocr?: string; maxOcrPages?: number },
+	): string {
+		return createHash("sha256")
+			.update(buffer)
+			.update("\n")
+			.update(opts.pages ?? "")
+			.update("\n")
+			.update(opts.ocr ?? "auto")
+			.update("\n")
+			.update(String(opts.maxOcrPages ?? this.ocrMaxPages))
+			.update("\n")
+			.update(this.ocrLanguages.join("+"))
+			.digest("hex");
+	}
 
-		return {
-			totalPages,
-			pages: results,
-			text: results.map((r) => `--- Page ${r.page} ---\n${r.text}`).join("\n\n"),
-			ocrUsed,
-			ocrSkippedReason: ocrSkippedReason,
-		};
+	private rememberExtraction(
+		key: string,
+		result: PdfPageExtractionResult,
+	): void {
+		if (PdfReader.extractionCache.size >= EXTRACTION_CACHE_MAX_ENTRIES) {
+			const first = PdfReader.extractionCache.keys().next().value;
+			if (first) PdfReader.extractionCache.delete(first);
+		}
+		PdfReader.extractionCache.set(key, result);
 	}
 
 	/** Rasterize + OCR the given pages; throws if canvas/tesseract unavailable. */
@@ -305,6 +377,7 @@ export class PdfReader {
 		await mkdir(this.tesseractCachePath, { recursive: true }).catch(() => {});
 		const worker = await createWorker(this.ocrLanguages, 1, {
 			logger: () => {},
+			langPath: getOfflineTessdataPath(),
 			cachePath: this.tesseractCachePath,
 		});
 		const texts = new Map<number, string>();
@@ -331,7 +404,7 @@ export class PdfReader {
 		return { texts };
 	}
 
-	/** Build the ToolDefinition exposed to the model. */
+	/** Build the ToolDefinitions exposed to the model. */
 	createTools(): ToolDefinition[] {
 		return [
 			{
@@ -357,6 +430,12 @@ export class PdfReader {
 						description: "'auto' (default) | 'never' | 'force'.",
 						required: false,
 					},
+					maxOcrPages: {
+						type: "number",
+						description:
+							"Maximum pages to OCR when ocr is auto/force. Default is 5; increase deliberately for large scanned PDFs.",
+						required: false,
+					},
 				},
 				handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
 					const source = String(params.source ?? "").trim();
@@ -375,6 +454,7 @@ export class PdfReader {
 						const result = await this.extract(buffer, {
 							pages: params.pages ? String(params.pages) : undefined,
 							ocr,
+							maxOcrPages: Number(params.maxOcrPages) || undefined,
 						});
 						const header = `PDF read OK — ${result.totalPages} page(s) total, returned ${result.pages.length}.${result.ocrUsed ? " OCR used on scanned page(s)." : ""}${result.ocrSkippedReason ? ` OCR skipped: ${result.ocrSkippedReason}` : ""}`;
 						const text = result.text.trim();
@@ -410,7 +490,211 @@ export class PdfReader {
 					}
 				},
 			},
+			{
+				name: "pdf_search",
+				description:
+					"Search across a large PDF without dumping all text into context. Use this for long PDFs (hundreds/thousands of pages) when the user asks for specific facts, names, clauses, totals, or topics. Returns page numbers and snippets. OCR can be enabled/forced for scanned PDFs.",
+				uiIcon: PDF_SVG,
+				managesOwnPathPolicy: true,
+				parameters: {
+					source: {
+						type: "string",
+						description: "PDF URL (http/https) or absolute local file path.",
+						required: true,
+					},
+					query: {
+						type: "string",
+						description: "Text, phrase, name, ID, or topic to search for.",
+						required: true,
+					},
+					pages: {
+						type: "string",
+						description:
+							"Optional page range, e.g. '1-200' or '1,3,5'. Omit to search the full PDF.",
+						required: false,
+					},
+					ocr: {
+						type: "string",
+						description: "'auto' (default) | 'never' | 'force'.",
+						required: false,
+					},
+					maxOcrPages: {
+						type: "number",
+						description:
+							"Maximum pages to OCR. Default is 5; set higher only when searching scanned PDFs.",
+						required: false,
+					},
+					maxResults: {
+						type: "number",
+						description: "Maximum snippets to return (default 10, max 50).",
+						required: false,
+					},
+					contextChars: {
+						type: "number",
+						description: "Characters around each match (default 350, max 2000).",
+						required: false,
+					},
+				},
+				handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+					const source = String(params.source ?? "").trim();
+					const query = String(params.query ?? "").trim();
+					if (!source || !query) {
+						return {
+							success: false,
+							output: "",
+							error: "Parameters 'source' and 'query' are required.",
+						};
+					}
+					const ocrRaw = String(params.ocr ?? "auto").toLowerCase();
+					const ocr: "auto" | "never" | "force" =
+						ocrRaw === "never" || ocrRaw === "force" ? ocrRaw : "auto";
+					try {
+						const buffer = await this.loadSource(source);
+						const result = await this.extractPages(buffer, {
+							pages: params.pages ? String(params.pages) : undefined,
+							ocr,
+							maxOcrPages: Number(params.maxOcrPages) || undefined,
+						});
+						const matches = searchPdfPages(result.pages, query, {
+							maxResults: clampInt(Number(params.maxResults) || 10, 1, 50),
+							contextChars: clampInt(Number(params.contextChars) || 350, 80, 2000),
+						});
+						const header = `PDF search OK — ${result.totalPages} page(s) total, searched ${result.pages.length}, matches ${matches.length}.${result.ocrUsed ? " OCR used." : ""}${result.ocrSkippedReason ? ` OCR skipped: ${result.ocrSkippedReason}` : ""}`;
+						if (matches.length === 0) {
+							return {
+								success: true,
+								output: `${header}\n\nNo matches found for: ${query}`,
+								metadata: {
+									totalPages: result.totalPages,
+									pagesSearched: result.pages.length,
+									matches: 0,
+									ocrUsed: result.ocrUsed,
+								},
+							};
+						}
+						return {
+							success: true,
+							output: `${header}\n\n${matches.map(formatPdfMatch).join("\n\n")}`,
+							metadata: {
+								totalPages: result.totalPages,
+								pagesSearched: result.pages.length,
+								matches: matches.length,
+								ocrUsed: result.ocrUsed,
+							},
+						};
+					} catch (err) {
+						return {
+							success: false,
+							output: "",
+							error: err instanceof Error ? err.message : String(err),
+						};
+					}
+				},
+			},
+			{
+				name: "pdf_extract_text",
+				description:
+					"Extract a large PDF (or selected page range) to a text file and return the file path plus a short summary. Use this when the user asks to process/export/read an entire long PDF, including PDFs with hundreds/thousands of pages, without flooding the chat context.",
+				uiIcon: PDF_SVG,
+				managesOwnPathPolicy: true,
+				parameters: {
+					source: {
+						type: "string",
+						description: "PDF URL (http/https) or absolute local file path.",
+						required: true,
+					},
+					pages: {
+						type: "string",
+						description:
+							"Optional page range, e.g. '1-500'. Omit to extract all pages.",
+						required: false,
+					},
+					ocr: {
+						type: "string",
+						description: "'auto' (default) | 'never' | 'force'.",
+						required: false,
+					},
+					maxOcrPages: {
+						type: "number",
+						description:
+							"Maximum pages to OCR. For a fully scanned 1500-page PDF, set to 1500 deliberately.",
+						required: false,
+					},
+					outputPath: {
+						type: "string",
+						description:
+							"Optional .txt output path. If omitted, saves under ~/.octopus/pdf-extracts.",
+						required: false,
+					},
+				},
+				handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+					const source = String(params.source ?? "").trim();
+					if (!source) {
+						return {
+							success: false,
+							output: "",
+							error: "Parameter 'source' is required (URL or local path).",
+						};
+					}
+					const ocrRaw = String(params.ocr ?? "auto").toLowerCase();
+					const ocr: "auto" | "never" | "force" =
+						ocrRaw === "never" || ocrRaw === "force" ? ocrRaw : "auto";
+					try {
+						const buffer = await this.loadSource(source);
+						const result = await this.extractPages(buffer, {
+							pages: params.pages ? String(params.pages) : undefined,
+							ocr,
+							maxOcrPages: Number(params.maxOcrPages) || undefined,
+						});
+						const outPath = this.resolveOutputPath(
+							String(params.outputPath ?? "").trim(),
+							source,
+						);
+						await mkdir(dirname(outPath), { recursive: true });
+						await writeFile(outPath, formatExtractedPdfText(result), "utf8");
+						const chars = result.pages.reduce((sum, p) => sum + p.text.length, 0);
+						return {
+							success: true,
+							output: `PDF extracted OK — ${result.totalPages} page(s) total, extracted ${result.pages.length} page(s), ${chars} text chars.${result.ocrUsed ? " OCR used." : ""}${result.ocrSkippedReason ? ` OCR skipped: ${result.ocrSkippedReason}` : ""}\nSaved text file: ${outPath}`,
+							metadata: {
+								totalPages: result.totalPages,
+								pagesExtracted: result.pages.length,
+								chars,
+								ocrUsed: result.ocrUsed,
+								outputPath: outPath,
+							},
+						};
+					} catch (err) {
+						return {
+							success: false,
+							output: "",
+							error: err instanceof Error ? err.message : String(err),
+						};
+					}
+				},
+			},
 		];
+	}
+
+	private resolveOutputPath(rawPath: string, source: string): string {
+		if (!rawPath) {
+			return join(
+				homedir(),
+				".octopus",
+				"pdf-extracts",
+				`${safeFileStem(source)}-${Date.now()}.txt`,
+			);
+		}
+		const abs = isAbsolute(rawPath) ? rawPath : resolvePath(process.cwd(), rawPath);
+		const allowed = [homedir(), ...this.allowedLocalRoots].some((root) =>
+			abs.startsWith(root),
+		);
+		if (!allowed) {
+			throw new Error(
+				`Output path is outside allowed roots: ${abs}. Omit outputPath to save under ~/.octopus/pdf-extracts.`,
+			);
+		}
+		return abs;
 	}
 }
 
@@ -435,6 +719,106 @@ function parsePageRange(spec: string | undefined, total: number): number[] {
 	}
 	const sorted = [...set].sort((a, b) => a - b);
 	return sorted.length > 0 ? sorted : Array.from({ length: total }, (_, i) => i + 1);
+}
+
+function normalizePositiveInt(value: unknown, fallback: number): number {
+	const n = Number(value);
+	return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function clampInt(value: number, min: number, max: number): number {
+	if (!Number.isFinite(value)) return min;
+	return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+interface PdfSearchMatch {
+	page: number;
+	score: number;
+	snippet: string;
+	ocrUsed: boolean;
+}
+
+function searchPdfPages(
+	pages: PdfPageResult[],
+	query: string,
+	options: { maxResults: number; contextChars: number },
+): PdfSearchMatch[] {
+	const normalizedQuery = normalizeForSearch(query);
+	const terms = normalizedQuery
+		.split(/\s+/)
+		.map((term) => term.trim())
+		.filter((term) => term.length > 1);
+	const matches: PdfSearchMatch[] = [];
+	for (const page of pages) {
+		const text = page.text.replace(/\s+/g, " ").trim();
+		if (!text) continue;
+		const normalizedText = normalizeForSearch(text);
+		const exactIndex = normalizedText.indexOf(normalizedQuery);
+		if (exactIndex >= 0) {
+			matches.push({
+				page: page.page,
+				score: 100 + normalizedQuery.length,
+				snippet: snippetAround(text, exactIndex, options.contextChars),
+				ocrUsed: page.ocrUsed,
+			});
+			continue;
+		}
+		const foundTerms = terms.filter((term) => normalizedText.includes(term));
+		if (foundTerms.length === 0) continue;
+		const firstIndex = Math.max(0, normalizedText.indexOf(foundTerms[0]));
+		matches.push({
+			page: page.page,
+			score: foundTerms.length * 10 + (foundTerms.length === terms.length ? 20 : 0),
+			snippet: snippetAround(text, firstIndex, options.contextChars),
+			ocrUsed: page.ocrUsed,
+		});
+	}
+	return matches
+		.sort((a, b) => b.score - a.score || a.page - b.page)
+		.slice(0, options.maxResults);
+}
+
+function normalizeForSearch(text: string): string {
+	let withoutDiacritics = "";
+	for (const char of text.normalize("NFD")) {
+		const code = char.charCodeAt(0);
+		if (code < 0x0300 || code > 0x036f) withoutDiacritics += char;
+	}
+	return withoutDiacritics
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function snippetAround(text: string, index: number, contextChars: number): string {
+	const start = Math.max(0, index - contextChars);
+	const end = Math.min(text.length, index + contextChars);
+	const prefix = start > 0 ? "..." : "";
+	const suffix = end < text.length ? "..." : "";
+	return `${prefix}${text.slice(start, end).trim()}${suffix}`;
+}
+
+function formatPdfMatch(match: PdfSearchMatch): string {
+	return `Page ${match.page}${match.ocrUsed ? " (OCR)" : ""} — score ${match.score}\n${match.snippet}`;
+}
+
+function formatExtractedPdfText(result: PdfPageExtractionResult): string {
+	const header = [
+		"PDF extraction",
+		`Total pages: ${result.totalPages}`,
+		`Extracted pages: ${result.pages.length}`,
+		`OCR used: ${result.ocrUsed ? "yes" : "no"}`,
+		result.ocrSkippedReason ? `OCR skipped: ${result.ocrSkippedReason}` : "",
+	]
+		.filter(Boolean)
+		.join("\n");
+	return `${header}\n\n${result.pages.map((r) => `--- Page ${r.page}${r.ocrUsed ? " (OCR)" : ""} ---\n${r.text}`).join("\n\n")}`;
+}
+
+function safeFileStem(source: string): string {
+	const raw = source.split(/[\\/]/).pop()?.split(/[?#]/)[0] || "pdf";
+	const stem = raw.replace(/\.pdf$/i, "").replace(/[^a-z0-9._-]+/gi, "-");
+	return stem.slice(0, 80) || "pdf";
 }
 
 async function downloadWithRedirects(

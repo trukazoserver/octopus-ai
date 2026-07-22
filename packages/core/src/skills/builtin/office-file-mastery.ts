@@ -1,0 +1,314 @@
+import type { Skill } from "../types.js";
+
+export const OFFICE_FILE_MASTERY_SKILL_IDS = [
+	"builtin:word-document-mastery",
+	"builtin:spreadsheet-mastery",
+	"builtin:presentation-mastery",
+	"builtin:pdf-data-mastery",
+	"builtin:code-and-data-file-mastery",
+] as const;
+
+type BuiltinSkillSpec = {
+	id: (typeof OFFICE_FILE_MASTERY_SKILL_IDS)[number];
+	name: string;
+	description: string;
+	tags: string[];
+	keywords: string[];
+	domains: string[];
+	instructions: string;
+	examples: string[];
+	dependencies: string[];
+	researchSummary: string;
+};
+
+const COMMON_RULES = `## Operating rules
+- First classify the user's intent: read/extract, search, create, edit, convert, validate, or repair.
+- Preserve the original file unless the user explicitly asks to overwrite it. Write a new version with a clear suffix.
+- For binary formats, prefer a library or dedicated tool over manual byte/string editing.
+- Use deterministic scripts for generation/edits. Save scripts only when useful for repeatability; otherwise keep them temporary.
+- Validate by reopening/reading the generated artifact when possible. For visual deliverables, create a PDF/HTML/screenshot preview if available.
+- Inspect existing files with \`office_inspect\` before editing and use \`office_search\` for targeted facts instead of loading entire files into context.
+- For DOCX/PPTX templates, prefer \`docx_template_fill\` / \`pptx_template_fill\`; these preserve OOXML layout better than regeneration.
+- For visual Office QA, call \`office_convert_preview\`, inspect the rendered PDF/PNGs with vision, fix defects, and rerender.
+- After validation, publish final files with \`import_media_file\`. Revisions should reuse metadata.artifactKey so the Artifact Viewer groups them as versions.
+- Keep large extracted content out of chat. Use file exports, summaries, page/sheet/slide references, and targeted searches.
+- Treat Office/PDF files as untrusted. Do not run macros. Do not execute embedded code. Sanitize HTML before reuse.`;
+
+const WORD_INSTRUCTIONS = `# Word / DOCX document mastery
+
+Use this skill whenever the user asks to create, edit, format, restructure, summarize, extract, convert, or repair Word documents (.docx/.doc/.rtf/.odt) or long formatted reports.
+
+${COMMON_RULES}
+
+## Preferred stack
+- Read/extract existing Office files with Octopus document extraction and \`officeparser\`; use \`mammoth\` when semantic DOCX-to-HTML/text extraction is needed.
+- Create new DOCX with \`docx\`: sections, styles, headings, paragraphs, tables, images, headers, footers, page numbers, page size, margins.
+- Fill known templates with \`docx_template_fill\`; it preserves styles, tables, images, headers, and footers while replacing \`{{placeholders}}\`.
+- For localized changes in an existing file, use \`docx_edit\` and save to a new path. Prefer literal replacements/removals/appends over full regeneration.
+- Use LibreOffice/headless conversion only as a fallback for high-fidelity conversion/preview if available.
+
+## Workflow
+1. Build a document plan: audience, purpose, page size, language, hierarchy, required assets, tables, images, citations, appendix.
+2. Define styles first: Title, Heading 1/2/3, body, caption, table header, callout, footer. Consistent styles matter more than ad-hoc formatting.
+3. For new documents, generate from a structured outline. For edits, extract the existing document, identify sections to preserve, then produce a new version.
+4. Tables: set widths, header row, borders, alignment, and numeric formatting. Avoid oversized tables that break pages; split or landscape if needed.
+5. Images: use local files, preserve aspect ratio, add captions/alt text, and place near the paragraph that references them.
+6. Headers/footers: include document title, confidentiality/status if relevant, page numbers, and date/version when useful.
+7. If screenshots or scans may be embedded, use \`office_extract_media\` with OCR before concluding that information is absent.
+8. Validate structurally with \`office_inspect\`; when LibreOffice is available, render with \`office_convert_preview\` and visually inspect every meaningful page.
+
+## Quality checklist
+- Clear title page or heading; no orphan headings.
+- Consistent heading levels and spacing.
+- Tables fit page width and have readable headers.
+- Images are not distorted and have captions when informative.
+- Footer/header does not collide with content.
+- Final answer includes output path and a concise list of changes.`;
+
+const SPREADSHEET_INSTRUCTIONS = `# Spreadsheet / Excel mastery
+
+Use this skill whenever the user asks to create, edit, analyze, format, validate, clean, merge, or repair Excel/CSV/ODS/XLSX files, formulas, sheets, dashboards, tables, or financial/data workbooks.
+
+${COMMON_RULES}
+
+## Preferred stack
+- Use \`exceljs\` for XLSX creation/editing: sheets, styles, formulas, tables, validations, freeze panes, images, print setup.
+- Use \`xlsx\` for broad import/export and quick reading of many spreadsheet formats.
+- Use \`csv-parse\`/\`csv-stringify\` for large CSV pipelines; avoid loading massive CSVs fully if streaming is feasible.
+- Use SQLite/DuckDB-style workflows for large joins, filters, aggregations, or repeated analysis.
+- Use \`data_inspect\` and read-only \`data_query\` for SQLite/CSV/TSV/JSON files; never improvise destructive database commands.
+
+## Workflow
+1. Profile input: sheet names, dimensions, headers, types, blank rows, duplicates, formulas, merged cells, hidden sheets.
+2. Clarify or infer the output contract: workbook vs CSV, formulas vs static values, dashboard vs raw data, printable vs analytical.
+3. Normalize data before formatting: headers, types, dates, currency, percentages, IDs as text, missing values.
+4. Build sheets deliberately: raw/import, cleaned data, calculations, summary/dashboard, README/notes if needed.
+5. Use Excel tables for structured ranges. Add filters, freeze panes, widths, number formats, and named ranges when helpful.
+6. Formulas: use relative formulas for rows, totals rows for tables, and set workbook calculation to recalc on open. Do not claim formulas were evaluated unless actually computed.
+7. Data validation: dropdowns, numeric bounds, date bounds, protected input cells when the user will fill the sheet later.
+8. Validate with \`office_inspect\` and \`office_search\`: sheet count, headers, sample formulas, row counts, required cells, and reference integrity. Render a PDF preview for presentation-critical workbooks.
+
+## Quality checklist
+- No accidental type coercion of IDs or leading zeros.
+- Dates/currencies/percentages have correct number formats.
+- Tables have filters and readable headers.
+- Frozen panes and widths make the sheet usable.
+- Formulas cover the intended range and totals are correct.
+- Large files are processed with summaries and exported artifacts, not pasted into chat.`;
+
+const PPT_INSTRUCTIONS = `# PowerPoint / presentation mastery
+
+Use this skill whenever the user asks to create, edit, redesign, format, or generate a PowerPoint/PPTX presentation with slides, images, charts, tables, diagrams, speaker notes, or brand styling.
+
+${COMMON_RULES}
+
+## Preferred stack
+- Create PPTX with \`pptxgenjs\`: slide masters, layouts, text, images, tables, charts, speaker notes, sections, shapes, hyperlinks.
+- Use images from local paths or generated media; preserve aspect ratio with contain/cover/crop sizing.
+- Fill existing presentation templates with \`pptx_template_fill\`; preserve masters, layouts, geometry, media, and animations.
+- For localized changes in an existing deck, use \`pptx_edit\` with selected slides and a new output path.
+- Convert to PDF/PNGs with \`office_convert_preview\` for visual QA when LibreOffice is available.
+
+## Workflow
+1. Start with a slide map: audience, goal, duration, number of slides, narrative arc, and visual style.
+2. Choose layout size and theme before slide creation: 16:9 default, brand colors, fonts, title/body sizes, footer/slide numbers.
+3. Use masters/reusable layout constants so every slide aligns. Avoid manually inventing coordinates per slide unless necessary.
+4. For each slide, define one main message. Use concise titles, 3-5 bullets max, and visual hierarchy.
+5. Images: fit into reserved boxes, never stretch; crop intentionally; add alt text where supported. Place captions or labels when needed.
+6. Tables: keep them small. For dense data, create a summary chart or split across slides.
+7. Charts: label axes/units, use readable legends, avoid too many series, and ensure colors contrast.
+8. Speaker notes: include what to say, not duplicate slide text.
+9. Animations/transitions: use sparingly. If native library support is limited, design static build-ready slides and note intended animation sequence.
+10. Search screenshots/scans embedded in slides with \`office_extract_media\` OCR when relevant.
+11. Validate with \`office_inspect\`, then export/render with \`office_convert_preview\`. Inspect each slide preview for overflow, alignment, missing images, tables, and slide count before delivery.
+
+## Quality checklist
+- Every slide has a single purpose.
+- Title and key visual align to grid.
+- No text overflow; fonts readable from a distance.
+- Images are not distorted and are high enough resolution.
+- Tables/charts are understandable in under 10 seconds.
+- Final response includes output path, slide count, and validation performed.`;
+
+const PDF_INSTRUCTIONS = `# PDF mastery
+
+Use this skill whenever the user asks to read, search, extract, OCR, summarize, split, merge, create, annotate, convert, or process PDFs, including very large PDFs and scanned/image PDFs.
+
+${COMMON_RULES}
+
+## Preferred stack and tools
+- Use \`pdf_search\` for large PDFs when the user asks for specific information. It searches pages and returns snippets without flooding context.
+- Use \`pdf_extract_text\` when the user asks to extract or process the whole PDF; save text to a file.
+- Use \`pdf_read\` for specific ranges or short PDFs.
+- Use OCR only when needed: \`ocr: "auto"\` by default, \`ocr: "force"\` plus explicit \`maxOcrPages\` for fully scanned documents.
+- Use \`pdf-lib\` for merge/split/forms/overlays/metadata, and \`pdfkit\` or HTML-to-PDF for new reports.
+- Use \`pdf_form\` to inspect/fill/flatten AcroForm fields and \`pdf_transform\` for rotation, metadata, and visible watermarks.
+
+## Workflow
+1. If the PDF is large, never read all pages into chat. Use search, page ranges, or export-to-text.
+2. If the user asks a factual question, search first; then read relevant pages around matches.
+3. If the PDF is scanned, start with a small OCR sample. Scale OCR only after confirming it works.
+4. For whole-document summaries, extract to text file, then summarize in sections/chunks with page references.
+5. For edits, choose the right route: overlay/merge/split/fill form with \`pdf-lib\`; rebuild as DOCX/HTML/PDF when structural editing is needed.
+6. Always preserve page references in answers so the user can verify claims.
+
+## Quality checklist
+- Answers cite page numbers or exported text path.
+- Large PDFs use search/chunking instead of context dumping.
+- OCR cost/time is controlled and explicit.
+- Extracted artifacts are saved and reusable.
+- PDF edits preserve the original file unless overwrite is requested.`;
+
+const CODE_DATA_INSTRUCTIONS = `# Code, data, database, and general file mastery
+
+Use this skill whenever the user asks to create, edit, inspect, transform, validate, or repair code/data files: .txt, .md, .json, .yaml, .xml, .html, .css, .js, .ts, .py, CSV/TSV, SQLite/database dumps, configs, logs, archives, or mixed project files.
+
+${COMMON_RULES}
+
+## Workflow
+1. Identify file type by extension, MIME, and content. Do not assume based only on name.
+2. For text/code/config, read existing content before editing and make the smallest correct change.
+3. For structured files, parse/validate instead of regex-only edits: JSON/YAML/XML/CSV/SQL/HTML each need syntax-aware handling.
+4. For HTML/CSS deliverables, render and visually verify using the web self-review loop.
+5. For databases, prefer read-only inspection first: schema, table list, row counts, sample rows. Require explicit intent before destructive writes.
+   Use \`data_inspect\` and \`data_query\` for local SQLite/CSV/TSV/JSON sources.
+6. For large logs/data, search/filter/chunk and write derived outputs instead of pasting everything.
+7. For archives, list contents first; extract only needed files to a safe directory.
+8. Validate with the relevant command: parser, typecheck, test, SQL query, linter, browser render, or file reopen.
+
+## Quality checklist
+- Syntax remains valid.
+- Encoding/newlines are preserved unless conversion is requested.
+- Secrets are not printed or copied into outputs.
+- Generated code/data has a validation step.
+- Final answer names the changed/created files and the verification performed.`;
+
+const SPECS: BuiltinSkillSpec[] = [
+	{
+		id: "builtin:word-document-mastery",
+		name: "word-document-mastery",
+		description:
+		"Expert workflow for creating, editing, formatting, extracting, converting, and validating Word/DOCX documents with proper structure, styles, tables, images, headers, footers, and page layout. Use whenever the user mentions Word, DOCX, reports, contracts, formatted documents, or document templates.",
+		tags: ["word", "docx", "office", "documents", "formatting"],
+		keywords: ["word", "docx", "doc", "documento", "informe", "contrato", "reporte", "plantilla"],
+		domains: ["office", "documents", "word"],
+		instructions: WORD_INSTRUCTIONS,
+		examples: ["Crea un informe Word con portada, tabla de contenidos, imágenes y tablas.", "Edita este contrato DOCX y conserva el formato."],
+		dependencies: ["docx", "mammoth", "officeparser", "docxtemplater", "libreoffice optional"],
+		researchSummary: "Current docs reviewed: docx supports sections, headers/footers, images, tables and declarative styles; mammoth is preferred for semantic DOCX extraction.",
+	},
+	{
+		id: "builtin:spreadsheet-mastery",
+		name: "spreadsheet-mastery",
+		description:
+		"Expert workflow for Excel/XLSX/CSV/ODS creation, editing, cleaning, formulas, tables, validation, styling, dashboards, and data analysis. Use whenever the user mentions Excel, spreadsheets, sheets, CSV, formulas, tables, budgets, sales data, or dashboards.",
+		tags: ["excel", "xlsx", "csv", "data", "formulas"],
+		keywords: ["excel", "xlsx", "xls", "csv", "hoja", "spreadsheet", "formula", "tabla", "dashboard", "datos"],
+		domains: ["office", "spreadsheets", "data"],
+		instructions: SPREADSHEET_INSTRUCTIONS,
+		examples: ["Crea un XLSX con fórmulas, validaciones y dashboard.", "Limpia este CSV y genera un Excel formateado."],
+		dependencies: ["exceljs", "xlsx", "csv-parse", "csv-stringify", "sql.js", "duckdb optional"],
+		researchSummary: "Current docs reviewed: ExcelJS supports workbook metadata, worksheets, formulas, tables, validation, styling, panes, print setup and images.",
+	},
+	{
+		id: "builtin:presentation-mastery",
+		name: "presentation-mastery",
+		description:
+		"Expert workflow for PowerPoint/PPTX creation and editing with professional slide layouts, images, tables, charts, speaker notes, themes, masters, and visual QA. Use whenever the user mentions PowerPoint, PPTX, slides, presentation, pitch deck, tables/images in slides, charts, or animations.",
+		tags: ["powerpoint", "pptx", "slides", "presentation", "design"],
+		keywords: ["powerpoint", "ppt", "pptx", "presentacion", "diapositiva", "slide", "pitch", "animacion", "tabla", "imagen"],
+		domains: ["office", "presentations", "design"],
+		instructions: PPT_INSTRUCTIONS,
+		examples: ["Crea una presentación PPTX con imágenes, tablas, gráficos y notas.", "Rediseña estas diapositivas para que se vean profesionales."],
+		dependencies: ["pptxgenjs", "libreoffice optional", "image generation tools optional"],
+		researchSummary: "Current docs reviewed: PptxGenJS supports masters, slide sections, images with contain/cover/crop, charts, tables and speaker notes.",
+	},
+	{
+		id: "builtin:pdf-data-mastery",
+		name: "pdf-data-mastery",
+		description:
+		"Expert workflow for PDFs: reading, searching huge PDFs, OCR, full extraction, summaries with page citations, splitting, merging, forms, overlays, and PDF report creation. Use whenever the user mentions PDF, scanned pages, OCR, page ranges, extracting all pages, or searching a large document.",
+		tags: ["pdf", "ocr", "search", "extraction", "documents"],
+		keywords: ["pdf", "ocr", "escaneado", "buscar", "extraer", "paginas", "page", "resumen", "formulario"],
+		domains: ["pdf", "documents", "ocr"],
+		instructions: PDF_INSTRUCTIONS,
+		examples: ["Busca en este PDF de 1500 páginas todas las menciones a una cláusula.", "Extrae todo el texto OCR de este PDF escaneado a un .txt."],
+		dependencies: ["pdfjs-dist", "tesseract.js", "@napi-rs/canvas", "pdf-lib", "pdfkit"],
+		researchSummary: "Current implementation includes pdf_read, pdf_search, pdf_extract_text and OCR controls; pdf-lib/pdfkit are recommended for edit/create flows.",
+	},
+	{
+		id: "builtin:code-and-data-file-mastery",
+		name: "code-and-data-file-mastery",
+		description:
+		"Expert workflow for creating, editing, validating, and transforming general files: text, code, HTML/CSS/JS/TS/Python, JSON/YAML/XML, CSV, SQLite/databases, configs, logs, and archives. Use whenever the task involves mixed file operations, structured data, databases, code files, or generated project artifacts.",
+		tags: ["files", "code", "data", "database", "html", "python", "javascript"],
+		keywords: ["archivo", "file", "txt", "json", "yaml", "xml", "html", "js", "ts", "python", "sqlite", "database", "log"],
+		domains: ["files", "code", "data", "database"],
+		instructions: CODE_DATA_INSTRUCTIONS,
+		examples: ["Edita este JSON sin romper el formato.", "Crea un proyecto HTML/JS y verifica que renderiza."],
+		dependencies: ["filesystem tools", "code executor", "cheerio", "jsdom", "sql.js", "csv-parse", "csv-stringify"],
+		researchSummary: "Current stack includes filesystem, code executor, SQL storage, browser render checks, CSV/HTML parsing dependencies and safe path policies.",
+	},
+];
+
+export function buildOfficeFileMasterySkills(
+	embeddings: Record<string, number[]>,
+): Skill[] {
+	return SPECS.map((spec) => buildSkill(spec, embeddings[spec.id] ?? []));
+}
+
+export function officeFileMasteryEmbeddingTexts(): Array<{
+	id: string;
+	text: string;
+}> {
+	return SPECS.map((spec) => ({
+		id: spec.id,
+		text: `${spec.name} ${spec.description} ${spec.keywords.join(" ")} ${spec.domains.join(" ")}`,
+	}));
+}
+
+function buildSkill(spec: BuiltinSkillSpec, embedding: number[]): Skill {
+	const createdAt = new Date(0).toISOString();
+	return {
+		id: spec.id,
+		name: spec.name,
+		version: "1.0.0",
+		description: spec.description,
+		tags: spec.tags,
+		embedding,
+		instructions: spec.instructions,
+		examples: spec.examples,
+		templates: [],
+		triggerConditions: {
+			keywords: spec.keywords,
+			taskPatterns: [],
+			domains: spec.domains,
+		},
+		contextEstimate: {
+			instructions: spec.instructions.length,
+			perExample: Math.max(...spec.examples.map((example) => example.length), 0),
+			templates: 0,
+		},
+		metrics: {
+			timesUsed: 0,
+			successRate: 0,
+			avgUserRating: 0,
+			lastUsed: createdAt,
+			improvementsCount: 0,
+			createdAt,
+		},
+		quality: { completeness: 1, accuracy: 1, clarity: 1 },
+		dependencies: spec.dependencies,
+		related: OFFICE_FILE_MASTERY_SKILL_IDS.filter((id) => id !== spec.id),
+		freshInfo: {
+			sources: [
+				"context7:/gitbrent/pptxgenjs",
+				"context7:/exceljs/exceljs",
+				"context7:/dolanmiu/docx",
+				"browser:google-search-office-node-libraries-2026",
+			],
+			fetchedAt: "2026-07-21T18:55:00.000Z",
+			summary: spec.researchSummary,
+		},
+	};
+}

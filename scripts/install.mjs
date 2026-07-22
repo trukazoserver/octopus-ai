@@ -29,6 +29,11 @@ const CLI_ENTRY = path.join(
 );
 const WEB_URL = "http://127.0.0.1:18789";
 const SERVICE_NAME = "OctopusAI";
+const DOCUMENT_RUNTIME_INSTALLER = path.join(
+	PROJECT_ROOT,
+	"scripts",
+	"install-document-runtime.mjs",
+);
 const LOG_OK = "\x1b[32m\u2713\x1b[0m";
 const LOG_FAIL = "\x1b[31m\u2717\x1b[0m";
 const LOG_INFO = "\x1b[36m";
@@ -106,12 +111,12 @@ function banner() {
 }
 
 function checkNode() {
-	const major = Number.parseInt(
-		process.version.slice(1).split(".")[0] ?? "0",
-		10,
-	);
-	if (major < 22) {
-		console.log(`${LOG_FAIL} Node.js ${process.version} - se requiere >= 22`);
+	const [major = 0, minor = 0] = process.version
+		.slice(1)
+		.split(".")
+		.map(Number);
+	if (major < 22 || (major === 22 && minor < 13)) {
+		console.log(`${LOG_FAIL} Node.js ${process.version} - se requiere >= 22.13`);
 		console.log(
 			`${LOG_GRAY}  Descarga Node.js 22+ desde https://nodejs.org${RESET}`,
 		);
@@ -317,12 +322,42 @@ function installDeps() {
 	console.log(
 		`\n${LOG_INFO}  Instalando dependencias (pnpm install)...${RESET}`,
 	);
-	const r = run("pnpm install", { timeout: 300000 });
+	const r = run("pnpm install --frozen-lockfile", { timeout: 300000 });
 	if (!r.ok) {
 		console.log(`${LOG_FAIL} Error: ${r.output}`);
 		return false;
 	}
 	console.log(`  ${LOG_OK} Dependencias instaladas`);
+	return true;
+}
+
+function checkDocumentRuntime() {
+	return run(`"${process.execPath}" "${DOCUMENT_RUNTIME_INSTALLER}" --check`, {
+		timeout: 60000,
+	});
+}
+
+function installDocumentRuntime() {
+	console.log(`${LOG_INFO}  Instalando LibreOffice desde el gestor oficial del sistema...${RESET}`);
+	const result = run(`"${process.execPath}" "${DOCUMENT_RUNTIME_INSTALLER}"`, {
+		timeout: 20 * 60_000,
+	});
+	if (!result.ok) {
+		console.log(`${LOG_FAIL} Error instalando runtime documental: ${result.output}`);
+		return false;
+	}
+	console.log(`  ${LOG_OK} ${result.output || "Runtime documental instalado"}`);
+	return true;
+}
+
+function prepareOfflineOcr() {
+	const command = `"${process.execPath}" -e "import('./packages/core/dist/index.js').then(m=>{const s=m.getOfflineOcrLanguageStatus();if(!s.every(x=>x.present&&x.size>0))process.exit(1);console.log(s.map(x=>x.code+':'+x.size).join(', '))})"`;
+	const result = run(command, { timeout: 60000 });
+	if (!result.ok) {
+		console.log(`${LOG_FAIL} No se pudieron preparar los modelos OCR offline: ${result.output}`);
+		return false;
+	}
+	console.log(`  ${LOG_OK} OCR offline listo (${result.output})`);
 	return true;
 }
 
@@ -820,13 +855,13 @@ async function postInstallActions() {
 async function main() {
 	banner();
 
-	console.log(`${LOG_INFO}${LOG_BOLD}  Paso 1/7: Verificando Node.js${RESET}`);
+	console.log(`${LOG_INFO}${LOG_BOLD}  Paso 1/8: Verificando Node.js${RESET}`);
 	if (!checkNode()) process.exit(1);
 
-	console.log(`\n${LOG_INFO}${LOG_BOLD}  Paso 2/7: Verificando pnpm${RESET}`);
+	console.log(`\n${LOG_INFO}${LOG_BOLD}  Paso 2/8: Verificando pnpm${RESET}`);
 	if (!ensurePnpm()) process.exit(1);
 
-	console.log(`\n${LOG_INFO}${LOG_BOLD}  Paso 3/7: Verificando Python${RESET}`);
+	console.log(`\n${LOG_INFO}${LOG_BOLD}  Paso 3/8: Verificando Python${RESET}`);
 	let pythonOk = checkPython();
 	if (!pythonOk) {
 		console.log(`${LOG_WARN}  Python no encontrado.${RESET}`);
@@ -845,7 +880,7 @@ async function main() {
 	}
 
 	console.log(
-		`\n${LOG_INFO}${LOG_BOLD}  Paso 4/7: Verificando Build Tools (C++)${RESET}`,
+		`\n${LOG_INFO}${LOG_BOLD}  Paso 4/8: Verificando Build Tools (C++)${RESET}`,
 	);
 	let btOk = checkBuildTools();
 	if (!btOk) {
@@ -870,7 +905,7 @@ async function main() {
 	}
 
 	console.log(
-		`\n${LOG_INFO}${LOG_BOLD}  Paso 4b/7: Verificando Docker${RESET}`,
+		`\n${LOG_INFO}${LOG_BOLD}  Paso 4b/8: Verificando Docker${RESET}`,
 	);
 	let dockerOk = checkDocker();
 	if (!dockerOk) {
@@ -890,7 +925,31 @@ async function main() {
 	}
 
 	console.log(
-		`\n${LOG_INFO}${LOG_BOLD}  Paso 5/7: Instalando dependencias${RESET}`,
+		`\n${LOG_INFO}${LOG_BOLD}  Paso 5/8: Runtime documental${RESET}`,
+	);
+	if (SKIP_SYSTEM_DEPS) {
+		console.log(`${LOG_WARN}  Runtime documental omitido por --no-system-deps.${RESET}`);
+	} else {
+		const documentRuntime = checkDocumentRuntime();
+		if (documentRuntime.ok) {
+			console.log(`  ${LOG_OK} ${documentRuntime.output}`);
+		} else {
+			console.log(`${LOG_WARN}  LibreOffice no encontrado (~700 MB-1 GB instalado).${RESET}`);
+			const install = await confirmInstall(
+				"Instalar LibreOffice para conversion, formatos legacy y QA visual?",
+				true,
+				{ systemDependency: true },
+			);
+			if (!install || !installDocumentRuntime()) {
+				console.log(`${LOG_FAIL} Runtime documental requerido no disponible.`);
+				console.log(`${LOG_GRAY}  Usa --no-system-deps solo si aceptas perder conversion Office/QA visual.${RESET}`);
+				process.exit(1);
+			}
+		}
+	}
+
+	console.log(
+		`\n${LOG_INFO}${LOG_BOLD}  Paso 6/8: Instalando dependencias Node${RESET}`,
 	);
 	let depsOk = installDeps();
 	if (!depsOk && !btOk && !SKIP_SYSTEM_DEPS) {
@@ -903,14 +962,15 @@ async function main() {
 	if (!depsOk) process.exit(1);
 
 	console.log(
-		`\n${LOG_INFO}${LOG_BOLD}  Paso 6/7: Compilando proyecto${RESET}`,
+		`\n${LOG_INFO}${LOG_BOLD}  Paso 7/8: Compilando proyecto${RESET}`,
 	);
 	if (!buildProject()) process.exit(1);
+	if (!prepareOfflineOcr()) process.exit(1);
 	console.log(`${LOG_INFO}  Instalando comando global octopus...${RESET}`);
 	installCliShims();
 
 	console.log(
-		`\n${LOG_INFO}${LOG_BOLD}  Paso 7/7: Configuracion inicial${RESET}`,
+		`\n${LOG_INFO}${LOG_BOLD}  Paso 8/8: Configuracion inicial${RESET}`,
 	);
 	await setupWizard();
 

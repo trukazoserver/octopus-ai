@@ -21,6 +21,8 @@ services:
       OCTOPUS_DATA_DIR: /data
       OCTOPUS_DB_PATH: /data/db/octopus.db
       OCTOPUS_LOG_LEVEL: info
+      OCTOPUS_SOFFICE_PATH: /usr/bin/soffice
+      OCTOPUS_TESSDATA_PATH: /data/tessdata
       OCTOPUS_DAEMON_MODE: "true"
       OCTOPUS_API_KEY: ${OCTOPUS_API_KEY:-}
       OCTOPUS_MEMORY_API_KEY: ${OCTOPUS_MEMORY_API_KEY:-}

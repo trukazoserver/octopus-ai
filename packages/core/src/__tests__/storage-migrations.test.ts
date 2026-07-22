@@ -17,7 +17,7 @@ describe("storage migration ledger", () => {
 			"SELECT version FROM _migrations ORDER BY version ASC",
 		);
 		expect(versions.map((row) => row.version)).toEqual(
-			Array.from({ length: 32 }, (_, index) => index + 1),
+			Array.from({ length: 33 }, (_, index) => index + 1),
 		);
 
 		for (const table of ["experiences", "learning_insights"]) {
@@ -63,6 +63,7 @@ describe("storage migration ledger", () => {
 				"learning_insight_evidence",
 				"memory_vector_lsh",
 				"memory_operations",
+				"artifact_annotations",
 			]),
 		);
 

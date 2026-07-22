@@ -112,7 +112,8 @@ export const Toggle: React.FC<{
 	value: boolean;
 	onChange: (v: boolean) => void;
 	description?: string;
-}> = ({ label, value, onChange, description }) => (
+	disabled?: boolean;
+}> = ({ label, value, onChange, description, disabled = false }) => (
 	<div
 		style={{
 			display: "flex",
@@ -143,12 +144,14 @@ export const Toggle: React.FC<{
 		<button
 			type="button"
 			aria-pressed={value}
+			disabled={disabled}
 			onClick={() => onChange(!value)}
 			style={{
 				width: "44px",
 				height: "24px",
 				borderRadius: "12px",
-				cursor: "pointer",
+				cursor: disabled ? "not-allowed" : "pointer",
+				opacity: disabled ? 0.5 : 1,
 				background: value ? "#6366f1" : "#27272a",
 				border: `1px solid ${value ? "rgba(99,102,241,.5)" : "#3f3f46"}`,
 				boxShadow: value ? "0 0 14px rgba(99,102,241,.35)" : "none",
@@ -253,7 +256,8 @@ export const Select: React.FC<{
 	onChange: (v: string) => void;
 	description?: string;
 	optionLabels?: Record<string, string>;
-}> = ({ label, value, options, onChange, description, optionLabels }) => {
+	disabled?: boolean;
+}> = ({ label, value, options, onChange, description, optionLabels, disabled = false }) => {
 	const selectId = React.useId();
 	return (
 		<div style={{ marginBottom: "16px" }}>
@@ -285,6 +289,7 @@ export const Select: React.FC<{
 				id={selectId}
 				name={selectId}
 				value={value}
+				disabled={disabled}
 				onChange={(e) => onChange(e.target.value)}
 				style={{
 					width: "100%",
@@ -295,7 +300,8 @@ export const Select: React.FC<{
 					color: "#f4f4f5",
 					fontSize: "0.95rem",
 					outline: "none",
-					cursor: "pointer",
+					cursor: disabled ? "not-allowed" : "pointer",
+					opacity: disabled ? 0.6 : 1,
 					appearance: "none",
 					backgroundImage:
 						"url(\"data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e\")",

@@ -87,6 +87,7 @@ import {
 import { SecretRedactor } from "../security/secret-redactor.js";
 import type { Skill } from "../skills/types.js";
 import { validateMediaBytes } from "../tools/media-validation.js";
+import { convertOfficeFileToPdf } from "../tools/office-preview.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
 import { MCP_CATALOG } from "./mcp-catalog.js";
 import {
@@ -121,7 +122,7 @@ const CORS_HEADERS = {
 	"Access-Control-Allow-Headers":
 		"Content-Type, Range, Authorization, X-Octopus-Api-Key, Idempotency-Key",
 	"Access-Control-Expose-Headers":
-		"Content-Length, Content-Range, Accept-Ranges, Location",
+		"Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Location",
 };
 
 const MEMORY_FEEDBACK_TYPES = new Set<Exclude<MemoryFeedbackType, "none">>([
@@ -222,6 +223,26 @@ export interface MediaItem {
 	size: number;
 	createdAt: string;
 	description?: string;
+	metadata?: Record<string, unknown>;
+}
+
+interface ArtifactVersion {
+	id: string;
+	filename: string;
+	mimetype: string;
+	size: number;
+	createdAt: string;
+	description?: string;
+	url: string;
+}
+
+interface ArtifactProjection {
+	key: string;
+	title: string;
+	kind: "image" | "pdf" | "office" | "audio" | "video" | "document";
+	currentVersionId: string;
+	versions: ArtifactVersion[];
+	annotationCount: number;
 }
 
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
@@ -319,6 +340,59 @@ function mediaCreatedAtMs(item: MediaItem): number {
 
 function sortMediaNewestFirst(items: MediaItem[]): MediaItem[] {
 	return [...items].sort((a, b) => mediaCreatedAtMs(b) - mediaCreatedAtMs(a));
+}
+
+function artifactKeyForMedia(item: MediaItem): string {
+	const configured = item.metadata?.artifactKey;
+	return typeof configured === "string" && configured.trim() ? configured.trim() : item.id;
+}
+
+function mediaKind(mimetype: string): ArtifactProjection["kind"] {
+	if (mimetype.startsWith("image/")) return "image";
+	if (mimetype.startsWith("video/")) return "video";
+	if (mimetype.startsWith("audio/")) return "audio";
+	if (mimetype === "application/pdf") return "pdf";
+	if (/officedocument|msword|ms-excel|ms-powerpoint|opendocument/.test(mimetype)) return "office";
+	return "document";
+}
+
+function projectMediaArtifacts(
+	items: MediaItem[],
+	annotationCounts: Map<string, number> = new Map(),
+): ArtifactProjection[] {
+	const grouped = new Map<string, MediaItem[]>();
+	for (const item of items) {
+		const key = artifactKeyForMedia(item);
+		const versions = grouped.get(key) ?? [];
+		versions.push(item);
+		grouped.set(key, versions);
+	}
+	const artifacts: ArtifactProjection[] = [];
+	for (const [key, versions] of grouped) {
+		const sorted = sortMediaNewestFirst(versions);
+		const current = sorted[0];
+		if (!current) continue;
+		artifacts.push({
+				key,
+				title: typeof current.metadata?.artifactTitle === "string" ? current.metadata.artifactTitle : current.filename,
+				kind: mediaKind(current.mimetype),
+				currentVersionId: current.id,
+				versions: sorted.map((item) => {
+					const version: ArtifactVersion = {
+						id: item.id,
+						filename: item.filename,
+						mimetype: item.mimetype,
+						size: item.size,
+						createdAt: item.createdAt,
+						url: `/api/media/file/${item.id}${extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || ""}`,
+					};
+					if (item.description) version.description = item.description;
+					return version;
+				}),
+				annotationCount: annotationCounts.get(key) ?? 0,
+			});
+	}
+	return artifacts.sort((a, b) => Date.parse(b.versions[0]?.createdAt ?? "") - Date.parse(a.versions[0]?.createdAt ?? ""));
 }
 
 function parseStoredJsonObject(value: string): Record<string, unknown> {
@@ -1760,6 +1834,46 @@ export class TransportServer {
 					this.handleListMedia(res);
 					return;
 				}
+				if (req.method === "GET" && pathname === "/api/artifacts") {
+					void this.handleListArtifacts(res);
+					return;
+				}
+				if (
+					req.method === "GET" &&
+					pathname.startsWith("/api/artifacts/preview-file/")
+				) {
+					this.handleServeArtifactPreview(
+						res,
+						pathname.slice("/api/artifacts/preview-file/".length),
+					);
+					return;
+				}
+				const artifactPreviewMatch = /^\/api\/artifacts\/([^/]+)\/preview$/.exec(pathname);
+				if (req.method === "POST" && artifactPreviewMatch?.[1]) {
+					void this.handleCreateArtifactPreview(
+						req,
+						res,
+						decodeURIComponent(artifactPreviewMatch[1]),
+					);
+					return;
+				}
+				const artifactAnnotationsMatch = /^\/api\/artifacts\/([^/]+)\/annotations$/.exec(pathname);
+				if (artifactAnnotationsMatch?.[1] && req.method === "GET") {
+					void this.handleListArtifactAnnotations(
+						res,
+						decodeURIComponent(artifactAnnotationsMatch[1]),
+						url,
+					);
+					return;
+				}
+				if (artifactAnnotationsMatch?.[1] && req.method === "POST") {
+					void this.handleCreateArtifactAnnotation(
+						req,
+						res,
+						decodeURIComponent(artifactAnnotationsMatch[1]),
+					);
+					return;
+				}
 				if (req.method === "POST" && pathname === "/api/media/upload") {
 					void this.handleUploadMedia(req, res);
 					return;
@@ -1974,6 +2088,62 @@ export class TransportServer {
 			const config = this.loadConfig();
 			const router = this.system?.router;
 			const mainRuntime = this.system?.agentRuntime;
+			const availableProviders = router?.getAvailableProviders() ?? [];
+			const configuredProviders =
+				new ConfigLoader().getExplicitlyConfiguredProviderKeys();
+			const activeProviderKeys = new Set(availableProviders);
+			const configuredProviderKeys = new Set(configuredProviders);
+			const hasCredential = (...values: Array<string | undefined>): boolean =>
+				values.some((value) => Boolean(value?.trim()));
+			const openai = config.ai.providers.openai;
+			const gemini = config.ai.providers.gemini;
+			const vertex = config.ai.providers.vertex;
+			const imageGenerationProviders = {
+				openaiApi:
+					openai.authMode !== "codex" &&
+					activeProviderKeys.has("openai") &&
+					configuredProviderKeys.has("openai") &&
+					hasCredential(
+						openai.apiKey,
+						openai.apiKeyEnv ? process.env[openai.apiKeyEnv] : undefined,
+						process.env.OPENAI_API_KEY,
+					),
+				codex:
+					openai.authMode === "codex" &&
+					activeProviderKeys.has("openai") &&
+					configuredProviderKeys.has("openai") &&
+					hasCredential(
+						openai.accessToken,
+						openai.accessTokenEnv
+							? process.env[openai.accessTokenEnv]
+							: undefined,
+						process.env.CODEX_ACCESS_TOKEN,
+					),
+				geminiApi:
+					activeProviderKeys.has("gemini") &&
+					configuredProviderKeys.has("gemini") &&
+					hasCredential(
+						gemini.apiKey,
+						gemini.apiKeyEnv ? process.env[gemini.apiKeyEnv] : undefined,
+						process.env.GEMINI_API_KEY,
+						process.env.GOOGLE_API_KEY,
+					),
+				vertex:
+					activeProviderKeys.has("vertex") &&
+					configuredProviderKeys.has("vertex") &&
+					hasCredential(vertex.projectId) &&
+					hasCredential(
+						vertex.accessToken,
+						vertex.accessTokenEnv
+							? process.env[vertex.accessTokenEnv]
+							: undefined,
+						vertex.oauthAccessToken,
+						vertex.credentialsJson,
+						vertex.credentialsFile,
+						process.env.GOOGLE_VERTEX_ACCESS_TOKEN,
+						process.env.GOOGLE_APPLICATION_CREDENTIALS,
+					),
+			};
 			// Effective model/reasoning come from the main agent's runtime config
 			// (the source of truth), not the raw `config.ai.default` alias.
 			const effectiveModel =
@@ -2008,9 +2178,9 @@ export class TransportServer {
 				thinking:
 					mainRuntime?.getConfig().reasoningEffort ?? config.ai.thinking,
 				maxTokens: config.ai.maxTokens,
-				availableProviders: router?.getAvailableProviders() ?? [],
-				configuredProviders:
-					new ConfigLoader().getExplicitlyConfiguredProviderKeys(),
+				availableProviders,
+				configuredProviders,
+				imageGenerationProviders,
 				authStatus: router?.getAuthStatus() ?? {},
 				usage,
 				channels: enabledChannels,
@@ -7733,15 +7903,212 @@ export class TransportServer {
 		}
 	}
 
+	private async handleListArtifacts(res: ServerResponse): Promise<void> {
+		try {
+			const counts = new Map<string, number>();
+			if (this.system?.db) {
+				const rows = (await this.system.db
+					.all(
+						"SELECT artifact_key, COUNT(*) AS count FROM artifact_annotations GROUP BY artifact_key",
+					)
+					.catch(() => [])) as Array<{ artifact_key?: unknown; count?: unknown }>;
+				for (const row of rows) {
+					if (typeof row.artifact_key === "string") counts.set(row.artifact_key, Number(row.count ?? 0));
+				}
+			}
+			jsonRes(res, 200, projectMediaArtifacts(loadMediaMeta(), counts));
+		} catch (err) {
+			jsonRes(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
+	private async handleCreateArtifactPreview(
+		req: IncomingMessage,
+		res: ServerResponse,
+		artifactKey: string,
+	): Promise<void> {
+		try {
+			if (!artifactKey || artifactKey.length > 300) {
+				jsonRes(res, 400, { error: "Invalid artifact key" });
+				return;
+			}
+			const rawBody = await readBody(req, 128 * 1024);
+			const body = rawBody ? (JSON.parse(rawBody) as { versionId?: string }) : {};
+			const artifact = projectMediaArtifacts(loadMediaMeta()).find((item) => item.key === artifactKey);
+			if (!artifact) {
+				jsonRes(res, 404, { error: "Artifact not found" });
+				return;
+			}
+			const version = body.versionId
+				? artifact.versions.find((item) => item.id === body.versionId)
+				: artifact.versions[0];
+			if (!version || !MEDIA_ID_PATTERN.test(version.id)) {
+				jsonRes(res, 404, { error: "Artifact version not found" });
+				return;
+			}
+			if (version.mimetype === "application/pdf" || version.mimetype.startsWith("image/")) {
+				jsonRes(res, 200, { url: version.url, source: "original", versionId: version.id });
+				return;
+			}
+			if (mediaKind(version.mimetype) !== "office") {
+				jsonRes(res, 400, { error: "This artifact type does not support generated previews" });
+				return;
+			}
+			const resolved = this.resolveMediaFile(version.id);
+			if (!resolved) {
+				jsonRes(res, 404, { error: "Artifact file not found" });
+				return;
+			}
+			const previewPath = resolveRelativePathInside(MEDIA_DIR, `${version.id}.preview.pdf`);
+			if (!previewPath) {
+				jsonRes(res, 403, { error: "Preview path blocked" });
+				return;
+			}
+			if (!existsSync(previewPath)) {
+				await convertOfficeFileToPdf(resolved.filePath, previewPath);
+			}
+			jsonRes(res, 200, {
+				url: `/api/artifacts/preview-file/${version.id}.pdf`,
+				source: "converted",
+				versionId: version.id,
+			});
+		} catch (err) {
+			jsonRes(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
+	private handleServeArtifactPreview(res: ServerResponse, rawId: string): void {
+		try {
+			const id = rawId.replace(/\.pdf$/i, "");
+			if (!MEDIA_ID_PATTERN.test(id)) {
+				jsonRes(res, 400, { error: "Invalid preview id" });
+				return;
+			}
+			const previewPath = resolveRelativePathInside(MEDIA_DIR, `${id}.preview.pdf`);
+			if (!previewPath || !existsSync(previewPath)) {
+				jsonRes(res, 404, { error: "Preview not found" });
+				return;
+			}
+			const size = statSync(previewPath).size;
+			corsHeaders(res);
+			res.writeHead(200, {
+				"Content-Type": "application/pdf",
+				"Content-Length": size,
+				"Content-Disposition": "inline",
+				"X-Content-Type-Options": "nosniff",
+				"Cache-Control": "private, max-age=3600",
+			});
+			createReadStream(previewPath).pipe(res);
+		} catch (err) {
+			jsonRes(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
+	private async handleListArtifactAnnotations(
+		res: ServerResponse,
+		artifactKey: string,
+		url: URL,
+	): Promise<void> {
+		try {
+			if (!this.system?.db) {
+				jsonRes(res, 503, { error: "Artifact annotation storage unavailable" });
+				return;
+			}
+			const versionId = url.searchParams.get("versionId");
+			const sql = versionId
+				? "SELECT * FROM artifact_annotations WHERE artifact_key = ? AND version_id = ? ORDER BY created_at ASC"
+				: "SELECT * FROM artifact_annotations WHERE artifact_key = ? ORDER BY created_at ASC";
+			const params = versionId ? [artifactKey, versionId] : [artifactKey];
+			const rows = (await this.system.db.all(sql, params)) as Array<Record<string, unknown>>;
+			jsonRes(
+				res,
+				200,
+				rows.map((row) => ({
+					id: row.id,
+					artifactKey: row.artifact_key,
+					versionId: row.version_id,
+					conversationId: row.conversation_id,
+					body: row.body,
+					pageNumber: row.page_number,
+					anchor: parseStoredJsonObject(String(row.anchor_json ?? "{}")),
+					createdAt: row.created_at,
+					updatedAt: row.updated_at,
+				})),
+			);
+		} catch (err) {
+			jsonRes(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
+	private async handleCreateArtifactAnnotation(
+		req: IncomingMessage,
+		res: ServerResponse,
+		artifactKey: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.db) {
+				jsonRes(res, 503, { error: "Artifact annotation storage unavailable" });
+				return;
+			}
+			const body = JSON.parse(await readBody(req, 256 * 1024)) as {
+				versionId?: string;
+				body?: string;
+				conversationId?: string;
+				pageNumber?: number;
+				anchor?: Record<string, unknown>;
+			};
+			const text = body.body?.trim() ?? "";
+			if (!text || text.length > 10_000 || !body.versionId || !MEDIA_ID_PATTERN.test(body.versionId)) {
+				jsonRes(res, 400, { error: "versionId and annotation body (max 10000 chars) are required" });
+				return;
+			}
+			const artifact = projectMediaArtifacts(loadMediaMeta()).find((item) => item.key === artifactKey);
+			if (!artifact?.versions.some((version) => version.id === body.versionId)) {
+				jsonRes(res, 404, { error: "Artifact version not found" });
+				return;
+			}
+			const anchor = body.anchor ?? {};
+			assertSafeObjectTree(anchor);
+			const id = randomUUID();
+			const now = new Date().toISOString();
+			await this.system.db.run(
+				"INSERT INTO artifact_annotations (id, artifact_key, version_id, conversation_id, body, page_number, anchor_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				[
+					id,
+					artifactKey,
+					body.versionId,
+					body.conversationId ?? null,
+					text,
+					Number.isInteger(body.pageNumber) && Number(body.pageNumber) > 0 ? Number(body.pageNumber) : null,
+					JSON.stringify(anchor),
+					now,
+					now,
+				],
+			);
+			jsonRes(res, 201, {
+				id,
+				artifactKey,
+				versionId: body.versionId,
+				body: text,
+				pageNumber: body.pageNumber ?? null,
+				anchor,
+				createdAt: now,
+				updatedAt: now,
+			});
+		} catch (err) {
+			jsonRes(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
 	private async handleUploadMedia(
 		req: IncomingMessage,
 		res: ServerResponse,
 	): Promise<void> {
 		try {
-			const maxUploadBytes = 10 * 1024 * 1024;
+			const maxUploadBytes = 250 * 1024 * 1024;
 			const declaredLength = Number(req.headers["content-length"] ?? 0);
 			if (declaredLength > maxUploadBytes) {
-				jsonRes(res, 413, { error: "Media upload exceeds 10 MB" });
+				jsonRes(res, 413, { error: "Media upload exceeds 250 MB" });
 				return;
 			}
 			const boundary = (req.headers["content-type"] ?? "").split(
@@ -7758,7 +8125,7 @@ export class TransportServer {
 					receivedBytes += c.length;
 					if (receivedBytes > maxUploadBytes) {
 						req.pause();
-						reject(Object.assign(new Error("Media upload exceeds 10 MB"), { code: "UPLOAD_TOO_LARGE" }));
+					reject(Object.assign(new Error("Media upload exceeds 250 MB"), { code: "UPLOAD_TOO_LARGE" }));
 						return;
 					}
 					chunks.push(c);
@@ -7866,6 +8233,7 @@ export class TransportServer {
 				data: string;
 				mimetype?: string;
 				description?: string;
+				metadata?: Record<string, unknown>;
 			};
 			try {
 				parsed = JSON.parse(body);
@@ -7877,6 +8245,7 @@ export class TransportServer {
 				jsonRes(res, 400, { error: "Missing filename or data (base64)" });
 				return;
 			}
+			if (parsed.metadata) assertSafeObjectTree(parsed.metadata);
 			const id = randomUUID();
 			const mime = parsed.mimetype || guessMime(parsed.filename);
 			const ext = extname(parsed.filename) || MIME_EXTENSIONS[mime] || "";
@@ -7900,6 +8269,7 @@ export class TransportServer {
 				size: fileData.length,
 				createdAt: new Date().toISOString(),
 				description: parsed.description,
+				metadata: parsed.metadata,
 			};
 			items.push(item);
 			saveMediaMeta(items);
@@ -8008,7 +8378,8 @@ export class TransportServer {
 			const range = req.headers.range;
 			const supportsRange =
 				resolved.item.mimetype.startsWith("video/") ||
-				resolved.item.mimetype.startsWith("audio/");
+				resolved.item.mimetype.startsWith("audio/") ||
+				resolved.item.mimetype === "application/pdf";
 			const activeContent = new Set([
 				"text/html",
 				"application/xhtml+xml",
@@ -8021,7 +8392,9 @@ export class TransportServer {
 					? {
 							"Content-Disposition": `attachment; filename="${basename(resolved.item.filename).replace(/["\r\n]/g, "_")}"`,
 						}
-					: {}),
+					: {
+							"Content-Disposition": `inline; filename="${basename(resolved.item.filename).replace(/["\r\n]/g, "_")}"`,
+						}),
 			};
 
 			if (range && supportsRange) {

@@ -31,6 +31,7 @@ import * as migration029 from "./029_memory_operations_ann.js";
 import * as migration030 from "./030_resumable_memory_operations.js";
 import * as migration031 from "./031_memory_operation_control.js";
 import * as migration032 from "./032_memory_benchmarks.js";
+import * as migration033 from "./033_artifact_annotations.js";
 
 export interface Migration {
 	version: number;
@@ -71,4 +72,5 @@ export const migrations: Migration[] = [
 	{ version: 30, up: migration030.up, down: migration030.down },
 	{ version: 31, up: migration031.up, down: migration031.down },
 	{ version: 32, up: migration032.up, down: migration032.down },
+	{ version: 33, up: migration033.up, down: migration033.down },
 ];

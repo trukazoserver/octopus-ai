@@ -13,7 +13,7 @@ Esta guía explica cómo ejecutar Octopus AI en contenedores usando el `Dockerfi
 El stack levanta un único servicio `octopus` con:
 
 - Imagen multi-stage basada en Node.js 22 Bookworm Slim.
-- Runtime completo dentro del contenedor: Node.js, pnpm, Python, Build Tools, Chromium, ffmpeg, fonts, curl y tini.
+- Runtime completo dentro del contenedor: Node.js, pnpm, Python, Build Tools, Chromium, ffmpeg, LibreOffice Writer/Calc/Impress, fuentes, OCR offline `eng+spa`, curl y tini.
 - Servidor Octopus en `http://localhost:18789`.
 - API HTTP, WebSocket y UI web compilada en el mismo puerto `18789`.
 - Healthcheck contra `http://127.0.0.1:18789/api/status`.
@@ -158,10 +158,13 @@ La imagen instala explícitamente:
 - `chromium`
 - `ffmpeg`
 - `fonts-liberation`
+- `fonts-dejavu-core`, `fonts-noto-core`, `fontconfig`
+- `libreoffice-writer`, `libreoffice-calc`, `libreoffice-impress`
+- Modelos Tesseract.js `eng` y `spa` empaquetados por npm
 - `curl`
 - `tini`
 
-Esto cubre ejecución del backend, UI compilada, herramientas de media, browser automation, scripts Python y dependencias nativas.
+Esto cubre ejecución del backend, UI compilada, herramientas de media, browser automation, scripts Python, creación/edición documental, formatos legacy, conversión Office a PDF y QA visual.
 
 ---
 

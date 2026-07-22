@@ -30,3 +30,8 @@ export {
 	buildWebSelfReviewSkill,
 	WEB_SELF_REVIEW_SKILL_ID,
 } from "./builtin/web-self-review.js";
+export {
+	buildOfficeFileMasterySkills,
+	officeFileMasteryEmbeddingTexts,
+	OFFICE_FILE_MASTERY_SKILL_IDS,
+} from "./builtin/office-file-mastery.js";

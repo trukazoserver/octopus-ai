@@ -145,6 +145,18 @@ interface ConfigData {
 	};
 	tools?: {
 		disabled?: string[];
+		imageGeneration?: {
+			openai?: {
+				enabled?: boolean;
+				provider?: "openai-api" | "codex";
+				model?: string;
+			};
+			nanoBanana?: {
+				enabled?: boolean;
+				provider?: "gemini-api" | "vertex";
+				model?: string;
+			};
+		};
 		iterationLimit?: {
 			enabled?: boolean;
 			maxIterations?: number;
@@ -175,6 +187,12 @@ interface UserProfileResponse {
 interface StatusResponse {
 	availableProviders?: string[];
 	configuredProviders?: string[];
+	imageGenerationProviders?: {
+		openaiApi: boolean;
+		codex: boolean;
+		geminiApi: boolean;
+		vertex: boolean;
+	};
 }
 
 interface VertexSetupResponse {
@@ -2217,6 +2235,34 @@ export const SettingsPage: React.FC = () => {
 	// auto-detected from env). This is the "Conectado" signal — the user (or an
 	// app flow) deliberately saved credentials for it.
 	const explicitProviderKeys = new Set(status?.configuredProviders ?? []);
+	const imageGeneration = config.tools?.imageGeneration ?? {};
+	const openAIImage = imageGeneration.openai ?? {};
+	const nanoBananaImage = imageGeneration.nanoBanana ?? {};
+	const imageProviderStatus = status?.imageGenerationProviders;
+	const openaiApiReady = imageProviderStatus?.openaiApi ?? false;
+	const codexReady = imageProviderStatus?.codex ?? false;
+	const geminiApiReady = imageProviderStatus?.geminiApi ?? false;
+	const vertexReady = imageProviderStatus?.vertex ?? false;
+	const selectedOpenAIImageProvider = openAIImage.provider ?? "codex";
+	const selectedNanoProvider = nanoBananaImage.provider ?? "vertex";
+	const openAIImageProviderReady =
+		selectedOpenAIImageProvider === "openai-api" ? openaiApiReady : codexReady;
+	const nanoProviderReady =
+		selectedNanoProvider === "gemini-api" ? geminiApiReady : vertexReady;
+	const openAIImageProviderOptions = Array.from(
+		new Set([
+			selectedOpenAIImageProvider,
+			...(openaiApiReady ? (["openai-api"] as const) : []),
+			...(codexReady ? (["codex"] as const) : []),
+		]),
+	);
+	const nanoProviderOptions = Array.from(
+		new Set([
+			selectedNanoProvider,
+			...(geminiApiReady ? (["gemini-api"] as const) : []),
+			...(vertexReady ? (["vertex"] as const) : []),
+		]),
+	);
 	const configuredModels = buildConfiguredModelOptions(
 		providers,
 		activeProviderKeys,
@@ -2747,6 +2793,148 @@ export const SettingsPage: React.FC = () => {
 									</div>
 								);
 							})
+						)}
+					</div>
+				</div>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Generación de Imagen"
+				icon={<AppIcon name="spark" size={17} />}
+				category="inteligencia"
+				description="Activa los generadores integrados y elige qué proveedor configurado utiliza cada uno."
+			>
+				<div className="settings-subpanel-grid">
+					<div className="settings-provider-card">
+						<div className="settings-provider-header">
+							<div>
+								<div className="settings-provider-title">
+									<AppIcon name="image" size={18} />
+									OpenAI Image
+								</div>
+								<div className="settings-provider-meta">
+									<code>codex_generate_image</code>
+									<span>gpt-image-2</span>
+								</div>
+							</div>
+							<StatusBadge
+								ok={(openAIImage.enabled ?? true) && openAIImageProviderReady}
+								text={
+									(openAIImage.enabled ?? true)
+										? openAIImageProviderReady
+											? "Activa"
+											: "Falta proveedor"
+										: "Desactivada"
+								}
+							/>
+						</div>
+						<p className="settings-provider-description">
+							Generación y edición con transparencia nativa mediante OpenAI API o
+							 con recuperación alfa mediante una sesión Codex.
+						</p>
+						<Toggle
+							label="Activar OpenAI Image"
+							description="Los cambios de activación se aplican al reiniciar Octopus."
+							value={openAIImage.enabled ?? true}
+							disabled={!(openAIImage.enabled ?? true) && !openAIImageProviderReady}
+							onChange={(value) =>
+								save("tools.imageGeneration.openai.enabled", value)
+							}
+						/>
+						<Select
+							label="Proveedor"
+							description="Solo se habilitan proveedores con credenciales configuradas."
+							value={selectedOpenAIImageProvider}
+							options={openAIImageProviderOptions}
+							optionLabels={{
+								"openai-api": `OpenAI API${openaiApiReady ? "" : " (no configurado)"}`,
+								codex: `OpenAI Codex${codexReady ? "" : " (no configurado)"}`,
+							}}
+							onChange={(value) =>
+								save("tools.imageGeneration.openai.provider", value)
+							}
+						/>
+						<Select
+							label="Modelo"
+							value={openAIImage.model ?? "gpt-image-2"}
+							options={["gpt-image-2", "gpt-image-1.5", "gpt-image-1"]}
+							onChange={(value) =>
+								save("tools.imageGeneration.openai.model", value)
+							}
+						/>
+						{!openAIImageProviderReady && (
+							<div className="settings-inline-warning">
+								Configura {selectedOpenAIImageProvider === "codex" ? "OpenAI Codex" : "una API key de OpenAI"} en Modelos y Proveedores AI.
+							</div>
+						)}
+					</div>
+
+					<div className="settings-provider-card">
+						<div className="settings-provider-header">
+							<div>
+								<div className="settings-provider-title">
+									<AppIcon name="image" size={18} />
+									Nano Banana
+								</div>
+								<div className="settings-provider-meta">
+									<code>nano-banana-generate</code>
+									<span>512 / 1K / 2K / 4K</span>
+								</div>
+							</div>
+							<StatusBadge
+								ok={(nanoBananaImage.enabled ?? true) && nanoProviderReady}
+								text={
+									(nanoBananaImage.enabled ?? true)
+										? nanoProviderReady
+											? "Activa"
+											: "Falta proveedor"
+										: "Desactivada"
+								}
+							/>
+						</div>
+						<p className="settings-provider-description">
+							Generación, composición y edición con referencias mediante Gemini API
+							 o Vertex AI, incluyendo PNG transparente real.
+						</p>
+						<Toggle
+							label="Activar Nano Banana"
+							description="Los cambios de activación se aplican al reiniciar Octopus."
+							value={nanoBananaImage.enabled ?? true}
+							disabled={!(nanoBananaImage.enabled ?? true) && !nanoProviderReady}
+							onChange={(value) =>
+								save("tools.imageGeneration.nanoBanana.enabled", value)
+							}
+						/>
+						<Select
+							label="Proveedor"
+							description="Gemini API usa API key; Vertex AI usa proyecto y credenciales de Google Cloud."
+							value={selectedNanoProvider}
+							options={nanoProviderOptions}
+							optionLabels={{
+								"gemini-api": `Gemini API${geminiApiReady ? "" : " (no configurado)"}`,
+								vertex: `Vertex AI${vertexReady ? "" : " (no configurado)"}`,
+							}}
+							onChange={(value) =>
+								save("tools.imageGeneration.nanoBanana.provider", value)
+							}
+						/>
+						<Select
+							label="Modelo"
+							value={nanoBananaImage.model ?? "gemini-3.1-flash-image"}
+							options={[
+								"gemini-3.1-flash-image",
+								"gemini-3.1-flash-lite-image",
+								"gemini-3-pro-image",
+								"gemini-2.5-flash-image",
+							]}
+							onChange={(value) =>
+								save("tools.imageGeneration.nanoBanana.model", value)
+							}
+						/>
+						{!nanoProviderReady && (
+							<div className="settings-inline-warning">
+								Configura {selectedNanoProvider === "vertex" ? "Vertex AI" : "una API key de Gemini"} en Modelos y Proveedores AI.
+							</div>
 						)}
 					</div>
 				</div>

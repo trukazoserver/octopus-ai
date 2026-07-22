@@ -12,6 +12,8 @@
 		"install:octopus": "node scripts/install.mjs",
 		"install:octopus:auto": "node scripts/install.mjs --yes",
 		"install:octopus:skip-start": "node scripts/install.mjs --no-start",
+		"install:documents": "node scripts/install-document-runtime.mjs",
+		"check:documents": "node scripts/install-document-runtime.mjs --check --json",
 		"docker:build": "docker compose -f docker/docker-compose.yml build",
 		"docker:up": "docker compose -f docker/docker-compose.yml up -d --build",
 		"docker:down": "docker compose -f docker/docker-compose.yml down",
