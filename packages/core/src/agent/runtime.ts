@@ -3202,7 +3202,7 @@ export class AgentRuntime {
 					options.selectedAgentContext,
 					options.deliveryContext,
 				);
-		const tools = simpleGreeting ? [] : this.getAvailableTools(options);
+		const tools = simpleGreeting ? [] : this.getAvailableTools(options, message);
 
 		let ackContent = "";
 		if (!simpleGreeting && tools.length > 0 && !this.isTrivialTurn(message) && AgentRuntime.isWorkRequest(message)) {
@@ -3498,7 +3498,7 @@ export class AgentRuntime {
 					options.selectedAgentContext,
 					options.deliveryContext,
 				);
-		const tools = simpleGreeting ? [] : this.getAvailableTools(options);
+		const tools = simpleGreeting ? [] : this.getAvailableTools(options, message);
 
 		const messages = [...context];
 		let iterations = 0;
@@ -4928,18 +4928,48 @@ export class AgentRuntime {
 		};
 	}
 
-	private getAvailableTools(options: AgentProcessOptions = {}): LLMTool[] {
+	private getAvailableTools(
+		options: AgentProcessOptions = {},
+		message = "",
+	): LLMTool[] {
 		if (!this.toolRegistry) return [];
 		// Multimodal models see images natively, so they neither need nor should
 		// use the Z.AI Vision MCP tools — hide that server from their tool list.
-		const tools = this.toolRegistry.toLLMTools({
+		let tools = this.toolRegistry.toLLMTools({
 			excludeServerNames: this.modelSeesImagesNatively()
 				? ["zai-vision"]
 				: undefined,
 		});
+		if (this.isPresentationCreationRequest(message)) {
+			const unrelatedDocumentCreators = new Set([
+				"docx_create",
+				"xlsx_create",
+				"xlsx_edit",
+				"pdf_create",
+				"pdf_pages",
+			]);
+			tools = tools.filter(
+				(tool) => !unrelatedDocumentCreators.has(tool.function.name),
+			);
+		}
 		return options.disableDelegation
 			? tools.filter((tool) => tool.function.name !== "delegate_task")
 			: tools;
+	}
+
+	private isPresentationCreationRequest(content: string): boolean {
+		const normalized = content
+			.normalize("NFKD")
+			.replace(/\p{M}+/gu, "")
+			.toLowerCase();
+		return (
+			/\b(powerpoint|pptx?|presentacion|diapositivas?|slide deck|pitch deck|board deck|sales deck|keynote)\b/.test(
+				normalized,
+			) &&
+			/\b(crea|crear|creame|genera|generar|haz|hacer|prepara|preparar|disena|disenar|build|create|generate|make|design)\b/.test(
+				normalized,
+			)
+		);
 	}
 
 	private looksLikeUserFeedbackOrCorrection(content: string): boolean {

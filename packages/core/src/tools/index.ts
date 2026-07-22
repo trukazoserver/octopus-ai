@@ -50,7 +50,7 @@ export {
 	findLibreOfficeExecutable,
 	renderPdfPreviewPages,
 } from "./office-preview.js";
-export { createOfficeTools } from "./office-tools.js";
+export { createAgentFacingOfficeTools, createOfficeTools } from "./office-tools.js";
 export {
 	getOfflineOcrLanguageStatus,
 	getOfflineTessdataPath,

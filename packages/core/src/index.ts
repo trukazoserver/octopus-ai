@@ -393,6 +393,7 @@ export {
 	findLibreOfficeExecutable,
 	renderPdfPreviewPages,
 	createOfficeTools,
+	createAgentFacingOfficeTools,
 	createOpenDesignNativeTools,
 	OpenDesignNativeRegistry,
 	OPEN_DESIGN_COMMIT,

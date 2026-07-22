@@ -228,6 +228,40 @@ describe("native Open Design integration", () => {
 							],
 						},
 					},
+					{
+						layout: "content",
+						title: "Native metrics",
+						metrics: [
+							{ value: "162", label: "Skills" },
+							{ value: "460", label: "Plugin recipes" },
+						],
+					},
+					{
+						layout: "content",
+						title: "Native comparison",
+						headers: ["Layer", "Owner"],
+						rows: [
+							["Design", "Open Design catalog"],
+							["Execution", "Octopus"],
+						],
+					},
+					{
+						layout: "content",
+						title: "Native composition",
+						leftColumn: {
+							heading: "Reference first",
+							body: "Design direction from Open Design.",
+						},
+						rightColumn: {
+							heading: "Native output",
+							body: "Editable Office artifact from Octopus.",
+						},
+					},
+					{
+						layout: "statement",
+						title: "Cierre",
+						statement: "Open Design knowledge, Octopus execution.",
+					},
 				],
 			}),
 			model: "test-model",
@@ -247,16 +281,18 @@ describe("native Open Design integration", () => {
 		const generated = await getTool(tools, "open_design_generate").handler(
 			{
 				project: "native-pptx",
-				brief: "Create a three-slide integration proof.",
+				brief: "Create a three-slide Swiss integration proof.",
 				artifactType: "pptx",
-				skill: "deck-test",
 				outputName: "proof.pptx",
 			},
 			context,
 		);
 
 		expect(generated.success).toBe(true);
-		const output = JSON.parse(generated.output) as { outputPath: string };
+		const output = JSON.parse(generated.output) as {
+			outputPath: string;
+			project: { packages: Array<{ type: string; id: string }> };
+		};
 		expect(output.outputPath).toBe(
 			path.join(workspaceDir, "open-design", "native-pptx", "proof.pptx"),
 		);
@@ -292,8 +328,14 @@ describe("native Open Design integration", () => {
 			"cover",
 			"process",
 			"iconGrid",
+			"metrics",
+			"table",
+			"twoColumn",
+			"closing",
 		]);
-		expect(generatedSpec.slides.map((slide) => slide.title)).toEqual([
+		expect(
+			generatedSpec.slides.slice(0, 3).map((slide) => slide.title),
+		).toEqual([
 			"Open Design lives inside Octopus",
 			"One native workflow",
 			"One product, full design range",
@@ -301,6 +343,11 @@ describe("native Open Design integration", () => {
 		expect(generatedSpec.slides[1]?.steps).toHaveLength(3);
 		expect(generatedSpec.slides[2]?.items).toHaveLength(3);
 		expect(output.outputPath).not.toContain("Open Design.exe");
+		expect(output.project.packages).toContainEqual({
+			type: "skill",
+			id: "deck-test",
+			path: "source-cache",
+		});
 		expect(OPEN_DESIGN_COMMIT).toHaveLength(40);
 	});
 });

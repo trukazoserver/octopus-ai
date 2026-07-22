@@ -390,6 +390,7 @@ function normalizeGeneratedPptx(
 		normalized.theme = resolvedTheme;
 	}
 	if (!Array.isArray(normalized.slides)) return normalized;
+	const slideCount = normalized.slides.length;
 	normalized.slides = normalized.slides.map((rawSlide, index) => {
 		const slide =
 			rawSlide && typeof rawSlide === "object" && !Array.isArray(rawSlide)
@@ -466,6 +467,88 @@ function normalizeGeneratedPptx(
 			}
 			slide.content = undefined;
 		}
+		if (typeof slide.content === "string" && slide.body === undefined) {
+			slide.body = slide.content;
+			slide.content = undefined;
+		}
+		if (optionalString(slide.layout) === "content") {
+			if (Array.isArray(slide.metrics) && slide.metrics.length > 0) {
+				slide.layout = "metrics";
+			} else if (Array.isArray(slide.steps) && slide.steps.length > 0) {
+				slide.layout = "process";
+			} else if (Array.isArray(slide.cards) && slide.cards.length > 0) {
+				slide.items = slide.cards.slice(0, 6).map((card, cardIndex) => {
+					const item =
+						card && typeof card === "object" && !Array.isArray(card)
+							? (card as Record<string, unknown>)
+							: {};
+					return {
+						label: String(cardIndex + 1).padStart(2, "0"),
+						title: optionalString(item.title) ?? `Item ${cardIndex + 1}`,
+						description:
+							optionalString(item.description) ??
+							optionalString(item.body) ??
+							"",
+					};
+				});
+				slide.layout = "iconGrid";
+			} else if (Array.isArray(slide.headers) && Array.isArray(slide.rows)) {
+				slide.table = {
+					headers: slide.headers,
+					rows: slide.rows,
+				};
+				slide.layout = "table";
+			} else if (
+				slide.leftContent !== undefined &&
+				slide.rightContent !== undefined
+			) {
+				slide.columns = [
+					{ title: "Context", body: String(slide.leftContent) },
+					{ title: "Key points", body: String(slide.rightContent) },
+				];
+				slide.layout = "twoColumn";
+			} else if (
+				slide.leftColumn &&
+				typeof slide.leftColumn === "object" &&
+				!Array.isArray(slide.leftColumn) &&
+				slide.rightColumn &&
+				typeof slide.rightColumn === "object" &&
+				!Array.isArray(slide.rightColumn)
+			) {
+				const left = slide.leftColumn as Record<string, unknown>;
+				const right = slide.rightColumn as Record<string, unknown>;
+				slide.columns = [
+					{
+						title:
+							optionalString(left.heading) ??
+							optionalString(left.title) ??
+							"Context",
+						body:
+							optionalString(left.body) ??
+							optionalString(left.description) ??
+							"",
+					},
+					{
+						title:
+							optionalString(right.heading) ??
+							optionalString(right.title) ??
+							"Key points",
+						body:
+							optionalString(right.body) ??
+							optionalString(right.description) ??
+							"",
+					},
+				];
+				slide.layout = "twoColumn";
+			} else if (Array.isArray(slide.bullets) && slide.bullets.length >= 3) {
+				slide.items = slide.bullets.slice(0, 6).map((bullet, bulletIndex) => ({
+					label: String(bulletIndex + 1).padStart(2, "0"),
+					title: String(bullet),
+					description: "",
+				}));
+				slide.layout = "iconGrid";
+			}
+		}
 		if (slide.notes === undefined && typeof slide.speakerNotes === "string") {
 			slide.notes = slide.speakerNotes;
 		}
@@ -476,6 +559,19 @@ function normalizeGeneratedPptx(
 				PPTX_LAYOUT_ALIASES[aliasKey] ?? (index === 0 ? "cover" : "content");
 		}
 		if (!rawLayout) slide.layout = index === 0 ? "cover" : "content";
+		if (
+			index === slideCount - 1 &&
+			slide.layout === "statement" &&
+			/\b(cierre|conclusion|conclusión|gracias|next steps|call to action)\b/i.test(
+				String(slide.title ?? ""),
+			)
+		) {
+			slide.layout = "closing";
+			slide.takeaway =
+				optionalString(slide.takeaway) ??
+				optionalString(slide.statement) ??
+				optionalString(slide.subtitle);
+		}
 		const title = optionalString(slide.title) ?? `Slide ${index + 1}`;
 		slide.title = title.slice(0, 140);
 		if (typeof slide.subtitle === "string")
@@ -588,6 +684,56 @@ function packageRootName(type: OpenDesignPackageType): string {
 		case "frame":
 			return "frames";
 	}
+}
+
+function preferredOpenDesignSkills(
+	artifactType: OpenDesignArtifactType,
+	brief: string,
+): string[] {
+	const normalized = brief
+		.normalize("NFKD")
+		.replace(/\p{M}+/gu, "")
+		.toLowerCase();
+	if (artifactType === "pptx") {
+		if (
+			/swiss|international|minimal|corporate|directorio|board/.test(normalized)
+		) {
+			return [
+				"deck-swiss-international",
+				"deck-open-slide-canvas",
+				"deck-guizang-editorial",
+				"slides",
+				"pptx",
+			];
+		}
+		if (
+			/editorial|story|medical|health|salud|menstrual|education|educacion|science|ciencia/.test(
+				normalized,
+			)
+		) {
+			return [
+				"deck-guizang-editorial",
+				"deck-open-slide-canvas",
+				"deck-swiss-international",
+				"slides",
+				"pptx",
+			];
+		}
+		return [
+			"deck-open-slide-canvas",
+			"deck-guizang-editorial",
+			"deck-swiss-international",
+			"slides",
+			"pptx",
+		];
+	}
+	if (artifactType === "html") {
+		return ["frontend-design", "artifacts-builder", "frontend-skill"];
+	}
+	if (artifactType === "svg") {
+		return ["canvas-design", "algorithmic-art", "hand-drawn-diagrams"];
+	}
+	return ["creative-director", "design-brief", "design-consultation"];
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -1310,7 +1456,7 @@ export function createOpenDesignNativeTools(
 	const generateTool: ToolDefinition = {
 		name: "open_design_generate",
 		description:
-			"Generate a designed PPTX, HTML, SVG, Markdown artifact, or reusable design plan with Open Design knowledge executed by Octopus's current model and native tools. No Open Design login or provider is involved.",
+			"Required creation path for every new presentation and premium visual artifact. Generates PPTX, HTML, SVG, Markdown, or a reusable design plan with an automatically selected Open Design skill, executed by Octopus's current model and native tools. No Open Design login or provider is involved.",
 		longRunning: true,
 		managesOwnPathPolicy: true,
 		parameters: {
@@ -1332,7 +1478,8 @@ export function createOpenDesignNativeTools(
 			},
 			skill: {
 				type: "string",
-				description: "Optional Open Design skill id",
+				description:
+					"Optional Open Design skill id. When omitted, Octopus selects and applies the best matching skill automatically.",
 				required: false,
 			},
 			template: {
@@ -1391,7 +1538,32 @@ export function createOpenDesignNativeTools(
 						`## ${type}: ${selected.name}\nSource: ${selected.sourcePath}\n${(selected.primaryContent ?? "").slice(0, 48_000)}${textAssets ? `\n\n${textAssets}` : ""}`,
 					);
 				};
-				await addPackage("skill", optionalString(params.skill));
+				let selectedSkillId = optionalString(params.skill);
+				if (!selectedSkillId) {
+					const skills = await registry.list(
+						"skill",
+						"",
+						10_000,
+						context.onProgress,
+					);
+					const availableIds = new Set(skills.map((skill) => skill.id));
+					selectedSkillId = preferredOpenDesignSkills(artifactType, brief).find(
+						(id) => availableIds.has(id),
+					);
+					selectedSkillId ??= skills.find(
+						(skill) =>
+							skill.mode === "deck" ||
+							/deck|ppt|slide/i.test(`${skill.id} ${skill.name}`),
+					)?.id;
+					selectedSkillId ??= skills[0]?.id;
+				}
+				if (!selectedSkillId) {
+					throw new Error("No Open Design skill is available for generation");
+				}
+				context.onProgress?.(
+					`Open Design skill seleccionada: ${selectedSkillId}`,
+				);
+				await addPackage("skill", selectedSkillId);
 				await addPackage("template", optionalString(params.template));
 				await addPackage("design-system", optionalString(params.designSystem));
 				for (const craftId of ["typography", "color", "anti-ai-slop"]) {

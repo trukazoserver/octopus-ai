@@ -778,6 +778,15 @@ export function createOfficeTools(
 	return [docxCreate, xlsxCreate, xlsxEdit, pptxCreate, pdfCreate, pdfPages];
 }
 
+export function createAgentFacingOfficeTools(
+	allowedPaths: string[],
+	workspaceDir: string = path.join(os.homedir(), ".octopus", "workspace"),
+): ToolDefinition[] {
+	return createOfficeTools(allowedPaths, workspaceDir).filter(
+		(tool) => tool.name !== "pptx_create",
+	);
+}
+
 function emitOfficePhase(
 	context: ToolContext | undefined,
 	status:

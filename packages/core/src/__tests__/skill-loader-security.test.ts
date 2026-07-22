@@ -75,11 +75,16 @@ describe("SkillLoader content safety", () => {
 			id: "builtin:presentation-mastery",
 			name: "presentation-mastery",
 		};
+		const openDesign = {
+			...createSkill("Native Open Design workflow"),
+			id: "builtin:open-design-native-mastery",
+			name: "open-design-native-mastery",
+		};
 		const registry = {
 			search: async () => [],
 			getById: async (id: string) =>
-				id === presentation.id ? presentation : undefined,
-			list: async () => [presentation],
+				[presentation, openDesign].find((skill) => skill.id === id),
+			list: async () => [presentation, openDesign],
 		};
 		const loader = new SkillLoader(registry as never, async () => [0], {
 			maxTokenBudget: 3000,
@@ -96,6 +101,9 @@ describe("SkillLoader content safety", () => {
 			keywords: ["presentación", "directorio"],
 		});
 
-		expect(loaded[0]?.skill.id).toBe("builtin:presentation-mastery");
+		expect(loaded.map((entry) => entry.skill.id)).toEqual([
+			"builtin:presentation-mastery",
+			"builtin:open-design-native-mastery",
+		]);
 	});
 });
