@@ -206,6 +206,234 @@ function optionalString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function optionalRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function generatedItemText(value: unknown): string | undefined {
+	if (typeof value === "string") return optionalString(value);
+	if (typeof value === "number" || typeof value === "boolean")
+		return String(value);
+	const item = optionalRecord(value);
+	if (!item) return undefined;
+	const heading =
+		optionalString(item.title) ??
+		optionalString(item.name) ??
+		optionalString(item.label) ??
+		optionalString(item.phase) ??
+		optionalString(item.mood);
+	const detail =
+		optionalString(item.description) ??
+		optionalString(item.text) ??
+		optionalString(item.body) ??
+		optionalString(item.value);
+	if (heading && detail && heading !== detail) return `${heading}: ${detail}`;
+	return heading ?? detail;
+}
+
+function generatedTextList(value: unknown, limit = 8): string[] {
+	return Array.isArray(value)
+		? value
+				.map(generatedItemText)
+				.filter((item): item is string => Boolean(item))
+				.slice(0, limit)
+		: [];
+}
+
+function generatedSection(value: unknown): {
+	heading: string;
+	body?: string;
+	bullets?: string[];
+} {
+	const section = optionalRecord(value) ?? {};
+	const paragraphs = generatedTextList(section.paragraphs, 5);
+	const directBody =
+		optionalString(section.body) ??
+		optionalString(section.description) ??
+		optionalString(section.intro) ??
+		optionalString(section.text);
+	const nestedList = optionalRecord(section.symptomList);
+	const bullets = [
+		...generatedTextList(section.bullets, 8),
+		...generatedTextList(section.items, 8),
+		...generatedTextList(section.careItems, 8),
+		...generatedTextList(nestedList?.items, 8),
+	];
+	const callout = optionalString(section.highlightCallout);
+	if (callout) bullets.push(callout);
+	return {
+		heading:
+			optionalString(section.heading) ??
+			optionalString(section.title) ??
+			optionalString(section.label) ??
+			"Key points",
+		body:
+			directBody ??
+			(paragraphs.length > 0 ? paragraphs.join("\n\n") : undefined),
+		bullets: bullets.length > 0 ? bullets.slice(0, 8) : undefined,
+	};
+}
+
+function normalizeGeneratedCards(value: unknown): Record<string, unknown>[] {
+	if (!Array.isArray(value)) return [];
+	return value.slice(0, 6).map((rawCard, cardIndex) => {
+		const card = optionalRecord(rawCard) ?? {};
+		const myth = optionalString(card.myth);
+		const reality = optionalString(card.reality);
+		return {
+			label:
+				optionalString(card.days) ??
+				optionalString(card.eyebrow) ??
+				optionalString(card.tag) ??
+				optionalString(card.label) ??
+				String(cardIndex + 1).padStart(2, "0"),
+			title:
+				optionalString(card.title) ??
+				optionalString(card.phase) ??
+				optionalString(card.name) ??
+				optionalString(card.mood) ??
+				(myth ? `Mito: ${myth}` : `Item ${cardIndex + 1}`),
+			description: reality
+				? `Realidad: ${reality}`
+				: [
+						optionalString(card.mood),
+						optionalString(card.description) ?? optionalString(card.body),
+					]
+						.filter((item): item is string => Boolean(item))
+						.join(" — "),
+		};
+	});
+}
+
+function normalizeGeneratedTable(
+	value: unknown,
+): Record<string, unknown> | undefined {
+	const table = optionalRecord(value);
+	const rawRows = Array.isArray(value) ? value : table?.rows;
+	if (!Array.isArray(rawRows) || rawRows.length === 0) return undefined;
+	let headers = generatedTextList(table?.headers ?? table?.columns, 7);
+	const ignoredKeys = new Set(["color", "icon", "style", "fill", "stroke"]);
+	let objectKeys: string[] = [];
+	const firstObject = rawRows.find((row) => optionalRecord(row));
+	if (firstObject) {
+		objectKeys = Object.keys(firstObject as Record<string, unknown>)
+			.filter((key) => !ignoredKeys.has(key))
+			.slice(0, 7);
+		if (headers.length === 0) {
+			headers = objectKeys.map((key) =>
+				key
+					.replace(/([a-z])([A-Z])/g, "$1 $2")
+					.replace(/^./, (char) => char.toUpperCase()),
+			);
+		}
+	}
+	const rows = rawRows.slice(0, 10).map((row) => {
+		if (Array.isArray(row))
+			return row.slice(0, 7).map((cell) => String(cell ?? ""));
+		const record = optionalRecord(row);
+		if (record) {
+			const keys =
+				objectKeys.length > 0 ? objectKeys : Object.keys(record).slice(0, 7);
+			return keys.map((key) => String(record[key] ?? ""));
+		}
+		if (typeof row === "string" && row.includes("|")) {
+			return row
+				.split("|")
+				.map((cell) => cell.trim())
+				.filter(Boolean)
+				.slice(0, 7);
+		}
+		return [String(row ?? "")];
+	});
+	const width = headers.length || rows[0]?.length || 0;
+	if (width === 0 || width > 7) return undefined;
+	if (headers.length === 0) {
+		headers = Array.from(
+			{ length: width },
+			(_, index) => `Column ${index + 1}`,
+		);
+	}
+	return {
+		headers: headers.slice(0, width),
+		rows: rows.map((row) =>
+			Array.from({ length: width }, (_, index) => row[index] ?? ""),
+		),
+	};
+}
+
+function normalizeGeneratedChart(
+	value: unknown,
+): Record<string, unknown> | undefined {
+	const chart = optionalRecord(value);
+	if (!chart) return undefined;
+	let categories = generatedTextList(chart.categories ?? chart.labels, 20);
+	const rawSeries = Array.isArray(chart.series) ? chart.series : [];
+	const series = rawSeries
+		.map((rawSeriesItem, index) => {
+			const item = optionalRecord(rawSeriesItem);
+			if (!item) return undefined;
+			const rawValues = Array.isArray(item.values)
+				? item.values
+				: Array.isArray(item.data)
+					? item.data
+					: [];
+			const values = rawValues.map(Number);
+			if (
+				values.length === 0 ||
+				values.some((number) => !Number.isFinite(number))
+			) {
+				return undefined;
+			}
+			return {
+				name: optionalString(item.name) ?? `Series ${index + 1}`,
+				values,
+			};
+		})
+		.filter(
+			(item): item is { name: string; values: number[] } => item !== undefined,
+		)
+		.slice(0, 6);
+	if (series.length === 0) return undefined;
+	if (categories.length === 0) {
+		categories = series[0].values.map((_, index) => String(index + 1));
+	}
+	if (
+		categories.length === 0 ||
+		categories.length > 20 ||
+		series.some((item) => item.values.length !== categories.length)
+	) {
+		return undefined;
+	}
+	return {
+		type: ["bar", "column", "line", "pie", "doughnut"].includes(
+			String(chart.type),
+		)
+			? chart.type
+			: "column",
+		title: optionalString(chart.title),
+		categories,
+		series,
+		categoryAxisTitle:
+			optionalString(chart.categoryAxisTitle) ?? optionalString(chart.xAxis),
+		valueAxisTitle:
+			optionalString(chart.valueAxisTitle) ?? optionalString(chart.yAxis),
+	};
+}
+
+function extractBriefColor(text: string, names: string[]): string | undefined {
+	for (const name of names) {
+		const match = new RegExp(
+			`(?:${name})[^#\r\n]{0,80}(?:#([0-9a-f]{6})|\\b([0-9a-f]{6})\\b)`,
+			"i",
+		).exec(text);
+		const color = match?.[1] ?? match?.[2];
+		if (color) return color.toUpperCase();
+	}
+	return undefined;
+}
+
 function clampInteger(
 	value: unknown,
 	min: number,
@@ -302,11 +530,17 @@ function parseJsonResponse(content: string): Record<string, unknown> {
 
 function inferPptxStylePreset(text: string): string {
 	const normalized = text.toLowerCase();
-	if (/swiss|international|grid|helvetica/.test(normalized)) return "swiss";
-	if (/data|journalism|report|analytic/.test(normalized))
+	if (/swiss|international style|16[- ]column|helvetica/.test(normalized))
+		return "swiss";
+	if (
+		/data journalism|periodismo de datos|analytics?|anal[ií]tic|\bkpi\b|financial report|market report/.test(
+			normalized,
+		)
+	)
 		return "dataJournalism";
 	if (/cinematic|film|dramatic/.test(normalized)) return "cinematic";
-	if (/risograph|print|zine/.test(normalized)) return "risograph";
+	if (/\brisograph\b|\bprint(?:making)?\b|\bzine\b/.test(normalized))
+		return "risograph";
 	if (/memphis|playful|geometric/.test(normalized)) return "memphis";
 	if (/glass|frosted/.test(normalized)) return "glassmorphism";
 	if (/midnight|dark|night/.test(normalized)) return "midnight";
@@ -320,75 +554,129 @@ function normalizeGeneratedPptx(
 	brief: string,
 ): Record<string, unknown> {
 	const normalized = { ...generated };
+	normalized.nativeAdapterVersion = "octopus-open-design-v2";
 	const requestedStyle = optionalString(normalized.stylePreset);
-	if (!requestedStyle || !PPTX_STYLE_PRESETS.has(requestedStyle)) {
-		normalized.stylePreset = inferPptxStylePreset(
-			`${brief} ${optionalString(normalized.designBrief) ?? ""} ${requestedStyle ?? ""}`,
-		);
+	const styleText = `${brief} ${optionalString(normalized.designBrief) ?? ""}`;
+	if (
+		!requestedStyle ||
+		!PPTX_STYLE_PRESETS.has(requestedStyle) ||
+		/\b(swiss|international style|editorial|cinematic|risograph|memphis|glass|midnight|vibrant|executive|data journalism)\b/i.test(
+			styleText,
+		)
+	) {
+		normalized.stylePreset = inferPptxStylePreset(styleText);
 	}
 	const renderMode = optionalString(normalized.renderMode);
 	if (renderMode !== "editable" && renderMode !== "hybrid") {
 		normalized.renderMode = "hybrid";
 	}
-	if (
-		normalized.theme &&
-		typeof normalized.theme === "object" &&
-		!Array.isArray(normalized.theme)
-	) {
-		const theme = normalized.theme as Record<string, unknown>;
-		const colors =
-			theme.colors &&
-			typeof theme.colors === "object" &&
-			!Array.isArray(theme.colors)
-				? (theme.colors as Record<string, unknown>)
-				: {};
-		const fonts =
-			theme.fonts &&
-			typeof theme.fonts === "object" &&
-			!Array.isArray(theme.fonts)
-				? (theme.fonts as Record<string, unknown>)
-				: {};
-		const portableFonts = new Set([
-			"Arial",
-			"Bookman Old Style",
-			"Cambria",
-			"Courier New",
-			"Georgia",
-			"Times New Roman",
-			"Trebuchet MS",
-			"Verdana",
-		]);
-		const resolvedTheme: Record<string, unknown> = {};
-		for (const key of [
+	const theme = optionalRecord(normalized.theme) ?? {};
+	const colors = optionalRecord(theme.colors) ?? {};
+	const fonts = optionalRecord(theme.fonts) ?? {};
+	const portableFonts = new Set([
+		"Arial",
+		"Bookman Old Style",
+		"Calibri",
+		"Cambria",
+		"Century Schoolbook",
+		"Courier New",
+		"Georgia",
+		"Times New Roman",
+		"Trebuchet MS",
+		"Verdana",
+	]);
+	const designText = `${brief}\n${optionalString(normalized.designBrief) ?? ""}`;
+	const briefColors: Record<string, string | undefined> = {
+		background: extractBriefColor(designText, [
+			"marfil",
+			"ivory",
+			"crema",
+			"fondo",
 			"background",
+		]),
+		surface: extractBriefColor(designText, [
+			"rosado",
+			"pink",
+			"apoyo",
 			"surface",
+		]),
+		text: extractBriefColor(designText, [
+			"carb[oó]n",
+			"charcoal",
+			"texto",
 			"text",
-			"muted",
+		]),
+		muted: extractBriefColor(designText, ["gris medio", "muted"]),
+		primary: extractBriefColor(designText, [
+			"terracota",
+			"coral",
+			"dominante",
 			"primary",
+		]),
+		secondary: extractBriefColor(designText, [
+			"rosado",
+			"pink",
+			"apoyo",
 			"secondary",
+		]),
+		accent: extractBriefColor(designText, [
+			"salvia",
+			"sage",
+			"acento",
 			"accent",
+		]),
+		dark: extractBriefColor(designText, [
+			"carb[oó]n",
+			"charcoal",
+			"texto",
 			"dark",
-		]) {
-			const candidate =
-				optionalString(theme[key]) ?? optionalString(colors[key]);
-			if (candidate && /^#?[0-9A-Fa-f]{6}$/.test(candidate)) {
-				resolvedTheme[key] = candidate;
-			}
+		]),
+	};
+	const resolvedTheme: Record<string, unknown> = {};
+	for (const key of [
+		"background",
+		"surface",
+		"text",
+		"muted",
+		"primary",
+		"secondary",
+		"accent",
+		"dark",
+	]) {
+		const candidate =
+			optionalString(theme[key]) ??
+			optionalString(colors[key]) ??
+			briefColors[key];
+		if (candidate && /^#?[0-9A-Fa-f]{6}$/.test(candidate)) {
+			resolvedTheme[key] = `#${candidate.replace(/^#/, "").toUpperCase()}`;
 		}
-		const requestedHeading =
-			optionalString(theme.headingFont) ?? optionalString(fonts.heading);
-		const requestedBody =
-			optionalString(theme.bodyFont) ?? optionalString(fonts.body);
-		resolvedTheme.headingFont =
-			requestedHeading && portableFonts.has(requestedHeading)
-				? requestedHeading
-				: "Arial";
-		resolvedTheme.bodyFont =
-			requestedBody && portableFonts.has(requestedBody)
-				? requestedBody
-				: "Arial";
-		normalized.theme = resolvedTheme;
 	}
+	const requestedHeading =
+		optionalString(theme.headingFont) ?? optionalString(fonts.heading);
+	const requestedBody =
+		optionalString(theme.bodyFont) ?? optionalString(fonts.body);
+	const rejectsArial = /\b(?:no|prohibid[oa])\s+(?:usar\s+)?arial\b/i.test(
+		designText,
+	);
+	resolvedTheme.headingFont =
+		requestedHeading &&
+		portableFonts.has(requestedHeading) &&
+		!(rejectsArial && requestedHeading === "Arial")
+			? requestedHeading
+			: requestedHeading && /helvetica/i.test(requestedHeading) && !rejectsArial
+				? "Arial"
+				: (requestedHeading &&
+							/serif|playfair|garamond|baskerville/i.test(requestedHeading)) ||
+						/\bplayfair|modern serif|serif moderna\b/i.test(designText)
+					? "Cambria"
+					: "Calibri";
+	resolvedTheme.bodyFont =
+		requestedBody &&
+		portableFonts.has(requestedBody) &&
+		!(rejectsArial && requestedBody === "Arial")
+			? requestedBody
+			: "Calibri";
+	normalized.theme = resolvedTheme;
 	if (!Array.isArray(normalized.slides)) return normalized;
 	const slideCount = normalized.slides.length;
 	normalized.slides = normalized.slides.map((rawSlide, index) => {
@@ -471,26 +759,97 @@ function normalizeGeneratedPptx(
 			slide.body = slide.content;
 			slide.content = undefined;
 		}
+		const generatedHeadline = [
+			optionalString(slide.headline),
+			optionalString(slide.headlineAccent),
+		]
+			.filter((item): item is string => Boolean(item))
+			.join(" ");
+		if (
+			(!optionalString(slide.title) ||
+				/^Slide\s+\d+$/i.test(String(slide.title))) &&
+			generatedHeadline
+		) {
+			slide.title = generatedHeadline;
+		}
+		if (Array.isArray(slide.metrics)) {
+			slide.metrics = slide.metrics.slice(0, 6).map((rawMetric) => {
+				const metric = optionalRecord(rawMetric) ?? {};
+				const unit = optionalString(metric.unit);
+				return {
+					value: `${String(metric.value ?? "—")}${unit ? ` ${unit}` : ""}`,
+					label: optionalString(metric.label) ?? "Metric",
+					detail:
+						optionalString(metric.detail) ??
+						optionalString(metric.note) ??
+						optionalString(metric.description),
+				};
+			});
+		}
+		const normalizedTable = normalizeGeneratedTable(slide.table);
+		if (normalizedTable) slide.table = normalizedTable;
+		else slide.table = undefined;
+		const normalizedChart = normalizeGeneratedChart(slide.chart);
+		if (normalizedChart) slide.chart = normalizedChart;
+		else slide.chart = undefined;
+		if (Array.isArray(slide.columns)) {
+			slide.columns = slide.columns.slice(0, 2).map(generatedSection);
+		}
 		if (optionalString(slide.layout) === "content") {
 			if (Array.isArray(slide.metrics) && slide.metrics.length > 0) {
 				slide.layout = "metrics";
-			} else if (Array.isArray(slide.steps) && slide.steps.length > 0) {
-				slide.layout = "process";
-			} else if (Array.isArray(slide.cards) && slide.cards.length > 0) {
-				slide.items = slide.cards.slice(0, 6).map((card, cardIndex) => {
-					const item =
-						card && typeof card === "object" && !Array.isArray(card)
-							? (card as Record<string, unknown>)
-							: {};
+			} else if (Array.isArray(slide.segments) && slide.segments.length > 0) {
+				slide.steps = slide.segments.slice(0, 6).map((rawSegment) => {
+					const segment = optionalRecord(rawSegment) ?? {};
+					const days = optionalString(segment.days);
+					const summary = optionalString(segment.summary);
 					return {
-						label: String(cardIndex + 1).padStart(2, "0"),
-						title: optionalString(item.title) ?? `Item ${cardIndex + 1}`,
-						description:
-							optionalString(item.description) ??
-							optionalString(item.body) ??
-							"",
+						title:
+							optionalString(segment.name) ??
+							optionalString(segment.title) ??
+							"Phase",
+						description: [days, summary]
+							.filter((item): item is string => Boolean(item))
+							.join(" — "),
 					};
 				});
+				slide.layout = "process";
+			} else if (Array.isArray(slide.steps) && slide.steps.length > 0) {
+				slide.layout = "process";
+			} else if (
+				slide.leftColumn &&
+				typeof slide.leftColumn === "object" &&
+				!Array.isArray(slide.leftColumn) &&
+				slide.rightColumn &&
+				typeof slide.rightColumn === "object" &&
+				!Array.isArray(slide.rightColumn)
+			) {
+				slide.columns = [
+					generatedSection(slide.leftColumn),
+					generatedSection(slide.rightColumn),
+				];
+				slide.layout = "twoColumn";
+			} else if (slide.visualBlock && slide.textContent) {
+				slide.columns = [
+					generatedSection(slide.visualBlock),
+					generatedSection(slide.textContent),
+				];
+				slide.layout = "twoColumn";
+			} else if (optionalString(slide.leadStatement)) {
+				slide.title = optionalString(slide.leadStatement);
+				const details = generatedTextList(slide.details, 4);
+				slide.takeaway =
+					details.length > 0
+						? details.join(" • ").slice(0, 420)
+						: slide.subtitle;
+				slide.layout = "statement";
+			} else if (normalizedTable) {
+				slide.layout = "table";
+				slide.chart = undefined;
+			} else if (normalizedChart) {
+				slide.layout = "chart";
+			} else if (Array.isArray(slide.cards) && slide.cards.length > 0) {
+				slide.items = normalizeGeneratedCards(slide.cards);
 				slide.layout = "iconGrid";
 			} else if (Array.isArray(slide.headers) && Array.isArray(slide.rows)) {
 				slide.table = {
@@ -503,41 +862,8 @@ function normalizeGeneratedPptx(
 				slide.rightContent !== undefined
 			) {
 				slide.columns = [
-					{ title: "Context", body: String(slide.leftContent) },
-					{ title: "Key points", body: String(slide.rightContent) },
-				];
-				slide.layout = "twoColumn";
-			} else if (
-				slide.leftColumn &&
-				typeof slide.leftColumn === "object" &&
-				!Array.isArray(slide.leftColumn) &&
-				slide.rightColumn &&
-				typeof slide.rightColumn === "object" &&
-				!Array.isArray(slide.rightColumn)
-			) {
-				const left = slide.leftColumn as Record<string, unknown>;
-				const right = slide.rightColumn as Record<string, unknown>;
-				slide.columns = [
-					{
-						title:
-							optionalString(left.heading) ??
-							optionalString(left.title) ??
-							"Context",
-						body:
-							optionalString(left.body) ??
-							optionalString(left.description) ??
-							"",
-					},
-					{
-						title:
-							optionalString(right.heading) ??
-							optionalString(right.title) ??
-							"Key points",
-						body:
-							optionalString(right.body) ??
-							optionalString(right.description) ??
-							"",
-					},
+					{ heading: "Context", body: String(slide.leftContent) },
+					{ heading: "Key points", body: String(slide.rightContent) },
 				];
 				slide.layout = "twoColumn";
 			} else if (Array.isArray(slide.bullets) && slide.bullets.length >= 3) {
@@ -549,8 +875,55 @@ function normalizeGeneratedPptx(
 				slide.layout = "iconGrid";
 			}
 		}
+		if (
+			Array.isArray(slide.cards) &&
+			slide.cards.length > 0 &&
+			(!Array.isArray(slide.items) || slide.items.length === 0)
+		) {
+			slide.items = normalizeGeneratedCards(slide.cards);
+		}
+		if (optionalString(slide.layout) === "content") {
+			if (Array.isArray(slide.metrics) && slide.metrics.length > 0) {
+				slide.layout = "metrics";
+			} else if (Array.isArray(slide.columns) && slide.columns.length === 2) {
+				slide.layout = "twoColumn";
+			} else if (Array.isArray(slide.steps) && slide.steps.length > 0) {
+				slide.layout = "process";
+			} else if (Array.isArray(slide.events) && slide.events.length > 0) {
+				slide.layout = "timeline";
+			} else if (Array.isArray(slide.items) && slide.items.length > 0) {
+				slide.layout = "iconGrid";
+			} else if (slide.table) {
+				slide.layout = "table";
+			} else if (slide.chart) {
+				slide.layout = "chart";
+			}
+		}
+		if (slide.body === undefined && optionalString(slide.lead)) {
+			slide.body = slide.lead;
+		}
 		if (slide.notes === undefined && typeof slide.speakerNotes === "string") {
 			slide.notes = slide.speakerNotes;
+		}
+		const slideSources = generatedTextList(slide.sources, 12);
+		if (slideSources.length > 0) {
+			const speaker = optionalRecord(slide.speaker) ?? {};
+			slide.speaker = {
+				...speaker,
+				narrative:
+					optionalString(speaker.narrative) ?? optionalString(slide.notes),
+				sources: slideSources,
+			};
+		}
+		if (slide.layout === "closing") {
+			if (generatedHeadline) slide.title = generatedHeadline;
+			const cta = optionalRecord(slide.cta);
+			const reminder = optionalRecord(slide.reminder);
+			slide.takeaway =
+				optionalString(slide.takeaway) ??
+				optionalString(cta?.text) ??
+				optionalString(reminder?.text) ??
+				optionalString(slide.subtitle);
 		}
 		const rawLayout = optionalString(slide.layout);
 		if (rawLayout && !PPTX_LAYOUTS.has(rawLayout)) {
@@ -664,7 +1037,64 @@ function normalizeGeneratedPptx(
 		}
 		return slide;
 	});
+	if (
+		normalized.renderMode === "hybrid" &&
+		!(normalized.slides as Array<Record<string, unknown>>).some(
+			(slide) =>
+				Boolean(slide.imagePath) ||
+				(Array.isArray(slide.images) && slide.images.length > 0),
+		)
+	) {
+		normalized.renderMode = "editable";
+	}
 	return normalized;
+}
+
+function createSafePptxFallback(
+	generated: Record<string, unknown>,
+): Record<string, unknown> {
+	const rawSlides = Array.isArray(generated.slides) ? generated.slides : [];
+	return {
+		title: optionalString(generated.title) ?? "Open Design presentation",
+		designBrief:
+			optionalString(generated.designBrief) ??
+			"Renderer-safe recovery generated by the native Open Design adapter.",
+		renderMode: "editable",
+		stylePreset: optionalString(generated.stylePreset) ?? "editorial",
+		theme: optionalRecord(generated.theme),
+		slides: rawSlides.map((rawSlide, index) => {
+			const slide = optionalRecord(rawSlide) ?? {};
+			const semanticItems = [
+				...(Array.isArray(slide.metrics) ? slide.metrics : []),
+				...(Array.isArray(slide.steps) ? slide.steps : []),
+				...(Array.isArray(slide.events) ? slide.events : []),
+				...(Array.isArray(slide.items) ? slide.items : []),
+				...(Array.isArray(slide.columns) ? slide.columns : []),
+			];
+			const bullets = [
+				...generatedTextList(slide.bullets, 8),
+				...semanticItems
+					.map(generatedItemText)
+					.filter((item): item is string => Boolean(item)),
+			].slice(0, 8);
+			const last = index === rawSlides.length - 1;
+			return {
+				layout: index === 0 ? "cover" : last ? "closing" : "content",
+				title: optionalString(slide.title) ?? `Slide ${index + 1}`,
+				subtitle: optionalString(slide.subtitle),
+				body:
+					optionalString(slide.body) ??
+					optionalString(slide.takeaway) ??
+					optionalString(slide.leadParagraph),
+				bullets,
+				takeaway: last
+					? (optionalString(slide.takeaway) ?? optionalString(slide.subtitle))
+					: undefined,
+				notes: optionalString(slide.notes),
+				speaker: optionalRecord(slide.speaker),
+			};
+		}),
+	};
 }
 
 function packageRootName(type: OpenDesignPackageType): string {
@@ -1585,7 +2015,7 @@ export function createOpenDesignNativeTools(
 
 				const formatInstructions =
 					artifactType === "pptx"
-						? "Return ONLY a JSON object accepted by Octopus pptx_create. Required keys: title, designBrief, renderMode, stylePreset or theme, and slides. Slides must use semantic layouts and include concise visible copy, native charts/tables where appropriate, meaningful visuals, speaker notes, sources supplied in the brief, and at least three layout families. Use editable or hybrid render mode unless the brief supplies complete slide images. Do not invent sources and do not include a path key."
+						? "Return ONLY a JSON object accepted by the Octopus native PPTX renderer. Required keys: title, designBrief, renderMode, stylePreset or theme, and slides. Slides must use semantic layouts and include concise visible copy, native charts/tables where appropriate, meaningful visuals, speaker notes, sources supplied in the brief, and at least three layout families. Tables must use {headers: string[], rows: primitive[][]}; never use objects as rows. Charts must use {categories: string[], series: [{name: string, values: number[]}]}; omit a chart when numeric values are unavailable. Put visible slide content in body, bullets, columns, metrics, steps, events, items, table, chart, title, subtitle, or takeaway rather than implementation-only descriptions. Use editable or hybrid render mode unless the brief supplies complete slide images. Do not invent sources and do not include a path key."
 						: artifactType === "plan"
 							? "Return ONLY a JSON object containing audience, objective, narrativeArc, artDirection, typography, palette, imageTreatment, layoutFamilies, contentPlan, productionSteps, qaChecklist, and recommendedOctopusTools."
 							: `Return ONLY a JSON object with entryFile and files. files is an array of {path,content}. Generate a self-contained ${artifactType} artifact, with at most 20 textual files and no base64 blobs. Use local relative assets only; do not fetch credentials or private data.`;
@@ -1637,10 +2067,55 @@ export function createOpenDesignNativeTools(
 					const outputPath = path.join(project.directory, safeName);
 					const specPath = path.join(project.directory, "generation-spec.json");
 					await writeFile(specPath, JSON.stringify(generated, null, 2), "utf8");
-					const pptxResult = await pptxCreate.handler(
-						{ ...generated, path: outputPath },
-						context,
-					);
+					let pptxResult: ToolResult;
+					try {
+						pptxResult = await pptxCreate.handler(
+							{ ...generated, path: outputPath },
+							context,
+						);
+						if (!pptxResult.success) {
+							throw new Error(
+								pptxResult.error ?? "Native PPTX rendering failed",
+							);
+						}
+					} catch (firstError) {
+						context.onProgress?.(
+							"El modelo produjo una variante no estándar; aplicando recuperación segura del renderer...",
+						);
+						generated = createSafePptxFallback(generated);
+						await writeFile(
+							specPath,
+							JSON.stringify(generated, null, 2),
+							"utf8",
+						);
+						try {
+							pptxResult = await pptxCreate.handler(
+								{ ...generated, path: outputPath },
+								context,
+							);
+							if (!pptxResult.success) {
+								throw new Error(
+									pptxResult.error ?? "Native PPTX recovery rendering failed",
+								);
+							}
+						} catch (recoveryError) {
+							await writeFile(
+								path.join(project.directory, "generation-error.json"),
+								JSON.stringify(
+									{
+										initialError: String(firstError),
+										recoveryError: String(recoveryError),
+										specPath,
+										failedAt: new Date().toISOString(),
+									},
+									null,
+									2,
+								),
+								"utf8",
+							);
+							throw recoveryError;
+						}
+					}
 					if (!pptxResult.success) {
 						await writeFile(
 							path.join(project.directory, "generation-error.json"),
