@@ -539,7 +539,7 @@ export function createOfficeTools(
 	const pptxCreate: ToolDefinition = {
 		name: "pptx_create",
 		description:
-			"Create a premium .pptx from an explicit creative brief in editable, hybrid, or studio mode. Supports ten art directions, semantic layouts, process/timeline/icon grids, generated or sourced visuals, native charts, styled tables, structured notes/citations, and a Content-Design-Coherence quality report. Define visual direction first and use research tools before generation when claims need current or external evidence.",
+			"Create a premium .pptx presentation. IMPORTANT: Before calling this tool, you MUST generate at least 3 images with codex_generate_image or nano-banana-generate and save them with save-image, then reference them via imagePath or images[] in the slides. Text-only presentations look empty and unprofessional. Choose aspect ratio per slide placement (16:9 for fullImage/cover, 1:1 for imageLeft/imageRight/icons). Decide transparent vs opaque background per image. After generating images, call this tool with renderMode 'hybrid', a stylePreset, designBrief, theme, and a slides array using semantic layouts. Supports ten art directions, native charts, styled tables, process/timeline/icon grids, structured notes/citations, and a Content-Design-Coherence quality report.",
 		uiIcon: OFFICE_SVG,
 		managesOwnPathPolicy: true,
 		longRunning: true,
