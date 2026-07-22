@@ -9,21 +9,9 @@ import {
 	createOfficePreviewTools,
 	findLibreOfficeExecutable,
 } from "../tools/office-preview.js";
-import {
-	createAgentFacingOfficeTools,
-	createOfficeTools,
-} from "../tools/office-tools.js";
+import { createOfficeTools } from "../tools/office-tools.js";
 
 describe("office tools", () => {
-	it("keeps pptx_create internal so new decks must use Open Design", () => {
-		const agentTools = createAgentFacingOfficeTools([], tmpdir());
-		expect(agentTools.some((tool) => tool.name === "pptx_create")).toBe(false);
-		expect(agentTools.some((tool) => tool.name === "docx_create")).toBe(true);
-		expect(createOfficeTools([], tmpdir()).some((tool) => tool.name === "pptx_create")).toBe(
-			true,
-		);
-	});
-
 	it("creates real DOCX, XLSX, PPTX and PDF files", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "octopus-office-tools-"));
 		try {

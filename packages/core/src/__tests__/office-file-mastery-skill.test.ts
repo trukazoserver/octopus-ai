@@ -15,7 +15,7 @@ describe("office file mastery builtin skills", () => {
 		expect(skills.map((skill) => skill.id)).toEqual([
 			...OFFICE_FILE_MASTERY_SKILL_IDS,
 		]);
-		expect(skills).toHaveLength(6);
+		expect(skills).toHaveLength(5);
 		for (const skill of skills) {
 			expect(skill.instructions.length).toBeGreaterThan(1000);
 			expect(skill.description).toMatch(/Use whenever/i);
@@ -50,25 +50,5 @@ describe("office file mastery builtin skills", () => {
 		expect(presentation?.instructions).toMatch(/Do not default to Aptos/i);
 		expect(presentation?.instructions).toMatch(/Content, Design, and Coherence/i);
 		expect(presentation?.instructions).toMatch(/montage/i);
-		expect(presentation?.instructions).toContain("open_design_catalog");
-		expect(presentation?.instructions).toContain("open_design_generate");
-		expect(presentation?.instructions).toContain("open_design_apply_package");
-		expect(presentation?.instructions).toMatch(/active Octopus LLMRouter/i);
-		expect(presentation?.instructions).toMatch(/never require an Open Design application/i);
-		expect(presentation?.instructions).toMatch(/mandatory for every new deck/i);
-		expect(presentation?.instructions).toMatch(/low-level renderer is intentionally hidden/i);
-		expect(presentation?.instructions).not.toContain("pptx_create");
-
-		const openDesign = skills.find(
-			(skill) => skill.id === "builtin:open-design-native-mastery",
-		);
-		expect(openDesign?.instructions).toContain("open_design_catalog");
-		expect(openDesign?.instructions).toContain("open_design_generate");
-		expect(openDesign?.instructions).toMatch(
-			/Never ask the user to install or open Open Design/i,
-		);
-		expect(openDesign?.instructions).toMatch(
-			/image, video, office, browser, code, data/i,
-		);
 	});
 });

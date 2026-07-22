@@ -79,11 +79,10 @@ import {
 	createMediaTools,
 	createNanoBananaImageTools,
 	createOfficeAdvancedTools,
-	createAgentFacingOfficeTools,
 	createOfficeEditTools,
 	createOfficeMediaTools,
 	createOfficePreviewTools,
-	createOpenDesignNativeTools,
+	createOfficeTools,
 	createOrchestrationTools,
 	createPdfAdvancedTools,
 	createSandboxTools,
@@ -1433,15 +1432,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	for (const tool of filesystemTools) {
 		registerSystemTool(tool);
 	}
-	for (const tool of createAgentFacingOfficeTools(allowedPaths, workspaceDir)) {
-		registerSystemTool(tool);
-	}
-	for (const tool of createOpenDesignNativeTools(
-		router,
-		allowedPaths,
-		workspaceDir,
-		{ contentScanning: config.security.contentScanning },
-	)) {
+	for (const tool of createOfficeTools(allowedPaths, workspaceDir)) {
 		registerSystemTool(tool);
 	}
 	for (const tool of createOfficeAdvancedTools(allowedPaths, workspaceDir)) {

@@ -393,13 +393,6 @@ export {
 	findLibreOfficeExecutable,
 	renderPdfPreviewPages,
 	createOfficeTools,
-	createAgentFacingOfficeTools,
-	createOpenDesignNativeTools,
-	OpenDesignNativeRegistry,
-	OPEN_DESIGN_COMMIT,
-	OPEN_DESIGN_LICENSE,
-	OPEN_DESIGN_REF,
-	OPEN_DESIGN_REPOSITORY,
 	createPdfAdvancedTools,
 	getOfflineOcrLanguageStatus,
 	getOfflineTessdataPath,
@@ -426,12 +419,6 @@ export type {
 	ArtifactSearchOptions,
 	ArtifactUnit,
 	OcrLanguageStatus,
-	OpenDesignArtifactType,
-	OpenDesignCatalogItem,
-	OpenDesignPackage,
-	OpenDesignPackageType,
-	OpenDesignProject,
-	OpenDesignRegistryOptions,
 } from "./tools/index.js";
 
 export {

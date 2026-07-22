@@ -778,15 +778,6 @@ export function createOfficeTools(
 	return [docxCreate, xlsxCreate, xlsxEdit, pptxCreate, pdfCreate, pdfPages];
 }
 
-export function createAgentFacingOfficeTools(
-	allowedPaths: string[],
-	workspaceDir: string = path.join(os.homedir(), ".octopus", "workspace"),
-): ToolDefinition[] {
-	return createOfficeTools(allowedPaths, workspaceDir).filter(
-		(tool) => tool.name !== "pptx_create",
-	);
-}
-
 function emitOfficePhase(
 	context: ToolContext | undefined,
 	status:
@@ -1028,7 +1019,7 @@ function evaluatePptxQuality(
 		coherence -= 8;
 		warnings.push("Long decks should open with a deliberate cover or framing slide.");
 	}
-	if (slides.length >= 4 && layouts.at(-1) !== "closing" && !optionalString(slides.at(-1)?.spec.takeaway)) {
+	if (slides.length >= 4 && layouts.at(-1) !== "closing") {
 		coherence -= 8;
 		warnings.push("Long decks should end with a decision, call to action, or closing slide.");
 	}
@@ -1075,7 +1066,7 @@ function validatePptxChart(chart: JsonObject, prefix: string): void {
 }
 
 function inferPptxLayout(spec: JsonObject, index: number): PptxLayout {
-	if (spec.layout && spec.layout !== "content") return String(spec.layout) as PptxLayout;
+	if (spec.layout) return String(spec.layout) as PptxLayout;
 	const hasVisibleContent = Boolean(
 		spec.body ||
 			(Array.isArray(spec.bullets) && spec.bullets.length > 0) ||
@@ -1184,9 +1175,6 @@ async function renderPremiumPptxSlide(input: {
 			addPptxContentComposition(slide, body, bullets, theme);
 			if (spec.takeaway) addPptxTakeaway(slide, String(spec.takeaway), theme);
 		}
-	}
-	if (spec.takeaway && !["statement", "closing", "chart", "content"].includes(layout)) {
-		addPptxTakeaway(slide, String(spec.takeaway), theme);
 	}
 
 	const notes = serializePptxNotes(spec);
