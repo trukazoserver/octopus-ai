@@ -131,6 +131,73 @@ ${COMMON_RULES}
 15. Review the quality report from \`pptx_create\` across Content, Design, and Coherence. Revise low-scoring slides before rendering.
 16. Validate structurally with \`office_inspect\`, then render every slide with \`office_convert_preview\` and request a montage. Review overflow/font warnings and inspect the montage with vision. Fix defects and rerender changed slides. If rendering is unavailable, report that blocker rather than claiming visual validation.
 
+## Schema reference for pptx_create (CRITICAL)
+
+The renderer only accepts the fields listed below. Any other field is silently ignored and produces empty slides. Match this schema exactly.
+
+### Top-level
+\`\`\`
+{ title, designBrief, renderMode, stylePreset, theme: {headingFont, bodyFont, primary, secondary, accent, background, surface, text, muted, dark}, slides: [] }
+\`\`\`
+
+### Valid slide layout → required fields
+
+| Layout | Key fields |
+|--------|-----------|
+| cover | title, subtitle, kicker, images? |
+| section | title, subtitle, kicker |
+| statement | title, takeaway, kicker |
+| content | title, body?, bullets?, takeaway? |
+| twoColumn | title, columns: [{heading, body, bullets?}, {heading, body, bullets?}] |
+| metrics | title, metrics: [{value, label, detail?}] |
+| process | title, steps: [{title, description}] |
+| timeline | title, events: [{date, title, description}] |
+| iconGrid | title, items: [{label, title, description}] |
+| chart | title, chart: {type, categories: [], series: [{name, values: []}], valueAxisTitle?} |
+| table | title, table: {headers: [], rows: [[], ...]} |
+| quote | title, body, quoteAttribution |
+| imageLeft/imageRight | title, imagePath or images: [{path}], bullets? |
+| fullImage | title, imagePath or images: [{path}] |
+| closing | title, takeaway, subtitle? |
+
+### Chart format (MUST have numeric values)
+\`\`\`
+chart: { type: "column"|"bar"|"line"|"pie"|"doughnut", categories: ["Q1","Q2","Q3"], series: [{name: "Revenue", values: [120, 180, 240]}], valueAxisTitle: "USD (thousands)" }
+\`\`\`
+
+### Table format (rows MUST be arrays, not objects)
+\`\`\`
+table: { headers: ["Product", "Sales"], rows: [["Widget", 4500], ["Gadget", 3200]] }
+\`\`\`
+
+### Speaker notes format
+\`\`\`
+speaker: { narrative: "What to say...", talkingPoints: ["Point 1"], sources: ["Source A", "Source B"], generationNotes: ["Visual prompt for regeneration"] }
+\`\`\`
+
+### FORBIDDEN fields (silently ignored → empty slides)
+Do NOT use: cards, segments, leftColumn, rightColumn, visualBlock, textContent, headline, headlineAccent, leadStatement, details, paragraphs, symptomList, careItems, sources (slide-level), visualDescription, diagramDescription. Convert their content to the valid fields above.
+
+### Example: 8-slide deck spec
+\`\`\`
+{
+  title: "Q3 Sales Review",
+  designBrief: "Board-ready sales review. Deep navy + amber accent.",
+  renderMode: "editable",
+  stylePreset: "executive",
+  slides: [
+    { layout: "cover", title: "Q3 Sales Review", subtitle: "North America Division", kicker: "BOARD MEETING" },
+    { layout: "metrics", title: "Quarter at a glance", metrics: [{value: "$4.2M", label: "Revenue", detail: "+18% YoY"}, {value: "312", label: "Deals closed", detail: "+42 vs Q2"}] },
+    { layout: "chart", title: "Revenue trend", chart: {type: "column", categories: ["Jul","Aug","Sep"], series: [{name: "2025", values: [1300,1450,1500]}, {name: "2024", values: [1100,1200,1250]}], valueAxisTitle: "USD (K)"}, takeaway: "September set a new monthly record" },
+    { layout: "twoColumn", title: "Wins vs misses", columns: [{heading: "Top wins", bullets: ["Enterprise renewal - $800K", "New vertical - healthcare"], body: "Three deals over $500K"}, {heading: "Gaps", bullets: ["EMEA delayed to Q4", "Pricing pushback on SMB"], body: "Two slipped deals"}] },
+    { layout: "table", title: "Pipeline by stage", table: {headers: ["Stage", "Count", "Value"], rows: [["Qualified", 45, "$2.1M"], ["Proposal", 28, "$1.8M"], ["Negotiation", 12, "$1.2M"]]} },
+    { layout: "iconGrid", title: "Key initiatives", items: [{label: "01", title: "Partner program", description: "Launch 5 new channel partners"}, {label: "02", title: "Pricing pilot", description: "Test value-based pricing in SMB"}, {label: "03", title: "Upsell motion", description: "Automated renewal reminders"}] },
+    { layout: "quote", title: "Customer voice", body: "The platform paid for itself in four months.", quoteAttribution: "VP Operations, Acme Corp" },
+    { layout: "closing", title: "Next steps", takeaway: "Focus on enterprise renewals and partner-led pipeline for Q4.", subtitle: "Review next: October 15" }
+  ]
+}
+\`\`\`
+
 ## Quality checklist
 - Every slide has a single purpose and a takeaway title rather than a generic topic label.
 - The visual concept fits the topic, audience, and requested tone; it does not look like an interchangeable generic template.
