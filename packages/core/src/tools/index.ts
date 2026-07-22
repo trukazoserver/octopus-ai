@@ -68,6 +68,22 @@ export { createAgentSpawnTools } from "./agent-spawn.js";
 export { createKanbanCardTools } from "./kanban-cards.js";
 export { createCodexImageTools } from "./codex-image.js";
 export { createNanoBananaImageTools } from "./nano-banana-image.js";
+export {
+	createOpenDesignNativeTools,
+	OpenDesignNativeRegistry,
+	OPEN_DESIGN_COMMIT,
+	OPEN_DESIGN_LICENSE,
+	OPEN_DESIGN_REF,
+	OPEN_DESIGN_REPOSITORY,
+} from "./open-design-native.js";
+export type {
+	OpenDesignArtifactType,
+	OpenDesignCatalogItem,
+	OpenDesignPackage,
+	OpenDesignPackageType,
+	OpenDesignProject,
+	OpenDesignRegistryOptions,
+} from "./open-design-native.js";
 
 // Stealth browsing
 export { ProxyManager } from "./proxy-manager.js";

@@ -393,6 +393,12 @@ export {
 	findLibreOfficeExecutable,
 	renderPdfPreviewPages,
 	createOfficeTools,
+	createOpenDesignNativeTools,
+	OpenDesignNativeRegistry,
+	OPEN_DESIGN_COMMIT,
+	OPEN_DESIGN_LICENSE,
+	OPEN_DESIGN_REF,
+	OPEN_DESIGN_REPOSITORY,
 	createPdfAdvancedTools,
 	getOfflineOcrLanguageStatus,
 	getOfflineTessdataPath,
@@ -419,6 +425,12 @@ export type {
 	ArtifactSearchOptions,
 	ArtifactUnit,
 	OcrLanguageStatus,
+	OpenDesignArtifactType,
+	OpenDesignCatalogItem,
+	OpenDesignPackage,
+	OpenDesignPackageType,
+	OpenDesignProject,
+	OpenDesignRegistryOptions,
 } from "./tools/index.js";
 
 export {
@@ -609,15 +621,6 @@ export {
 	getZaiMCPConfigs,
 	resolveZaiMCPAuth,
 } from "./plugins/mcp/zai-servers.js";
-export {
-	discoverOpenDesignIntegration,
-	ensureOpenDesignSidecar,
-	isOpenDesignSidecarAvailable,
-} from "./plugins/mcp/open-design.js";
-export type {
-	OpenDesignDiscoveryOptions,
-	OpenDesignIntegration,
-} from "./plugins/mcp/open-design.js";
 
 export { ChannelManager } from "./channels/manager.js";
 export { TelegramChannel } from "./channels/telegram/index.js";

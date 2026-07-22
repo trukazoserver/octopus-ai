@@ -1,5 +1,3 @@
-import { discoverOpenDesignIntegration } from "../plugins/mcp/open-design.js";
-
 export interface MCPCatalogEntry {
 	name: string;
 	displayName: string;
@@ -20,41 +18,6 @@ export interface MCPCatalogEntry {
 }
 
 export const MCP_CATALOG: MCPCatalogEntry[] = [
-	{
-		name: "open-design",
-		displayName: "Open Design",
-		description:
-			"Genera, previsualiza, itera y exporta presentaciones y artefactos visuales mediante el sidecar local Open Design.",
-		category: "Diseno",
-		icon: "https://open-design.ai/favicon.ico",
-		tools: [
-			"list_projects",
-			"get_artifact",
-			"get_project",
-			"list_files",
-			"create_project",
-			"list_skills",
-			"list_plugins",
-			"start_run",
-			"get_run",
-			"cancel_run",
-			"list_agents",
-		],
-		config:
-			discoverOpenDesignIntegration()?.mcpConfig ??
-			({
-				type: "stdio",
-				command: "${OPEN_DESIGN_RUNTIME}",
-				args: ["${OPEN_DESIGN_CLI}", "mcp"],
-				env: {
-					OD_DATA_DIR: "${OPEN_DESIGN_DATA_DIR}",
-					OD_SIDECAR_IPC_PATH: "${OPEN_DESIGN_IPC_PATH}",
-					ELECTRON_RUN_AS_NODE: "1",
-				},
-			} as MCPCatalogEntry["config"]),
-		requiresApiKey: "Open Design desktop instalado y ejecutandose",
-		homepage: "https://github.com/nexu-io/open-design",
-	},
 	{
 		name: "zai-web-reader",
 		displayName: "Web Reader",
