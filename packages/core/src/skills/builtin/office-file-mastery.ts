@@ -4,6 +4,7 @@ export const OFFICE_FILE_MASTERY_SKILL_IDS = [
 	"builtin:word-document-mastery",
 	"builtin:spreadsheet-mastery",
 	"builtin:presentation-mastery",
+	"builtin:presentation-design-direction",
 	"builtin:pdf-data-mastery",
 	"builtin:code-and-data-file-mastery",
 ] as const;
@@ -279,73 +280,359 @@ ${COMMON_RULES}
 - Encoding/newlines are preserved unless conversion is requested.
 - Secrets are not printed or copied into outputs.
 - Generated code/data has a validation step.
-- Final answer names the changed/created files and the verification performed.`;
+ - Final answer names the changed/created files and the verification performed.`;
+
+const DESIGN_DIRECTION_INSTRUCTIONS = `# Presentation design direction by topic
+
+Use this skill BEFORE calling \`pptx_create\` to choose the right visual system for the presentation topic. Match the topic to one of the style profiles below, then apply its palette, typography, image mood, and preferred layouts when building the deck spec.
+
+## How to use
+1. Classify the topic into one of the 11 style profiles (or blend two if the topic spans categories).
+2. Copy the palette HEX values, fonts, and stylePreset into the \`pptx_create\` theme and stylePreset fields.
+3. Use the recommended layouts and image mood to guide slide composition.
+4. Adapt colors for accessibility if needed, but keep the proportional relationships (dominant/support/accent).
+
+---
+
+## 1. Educational & Health
+**Topics:** medicine, biology, health, science, education, tutorials, guides, wellness, psychology, nutrition.
+**Mood:** warm, accessible, empathetic, scientifically clear, non-clinical.
+- stylePreset: \`editorial\`
+- Palette: dominant \`#C77B6A\` (terracotta), support \`#E8B4A8\` (dusty rose), accent \`#8B9D83\` (sage green), background \`#FAF5F0\` (ivory), text \`#3D3D3D\` (charcoal).
+- Fonts: heading \`Cambria\`, body \`Calibri\`.
+- Image mood: flat vector illustrations, warm palette, clean line art, educational diagrams, NO clinical photos. Prompt base: "warm flat vector illustration, soft terracotta and sage palette, clean educational style, no text".
+- Preferred layouts: cover, twoColumn, process, iconGrid, metrics, table, closing.
+- Avoid: cold blues, clinical white, sterile aesthetics, dense text blocks.
+
+## 2. Corporate & Finance
+**Topics:** business, sales, finance, KPIs, board decks, quarterly reviews, strategy, consulting, investment.
+**Mood:** clean, confident, data-driven, trustworthy, professional.
+- stylePreset: \`executive\`
+- Palette: dominant \`#1B3A5C\` (deep navy), support \`#4A7BA8\` (steel blue), accent \`#D4A843\` (amber gold), background \`#F5F7FA\` (cool white), text \`#1A1A2E\` (near black).
+- Fonts: heading \`Calibri\`, body \`Calibri\`.
+- Image mood: clean corporate photography, abstract geometric backgrounds, city skylines, data visualizations. Prompt base: "professional corporate photography, navy and amber palette, clean modern office, abstract geometric".
+- Preferred layouts: cover, metrics, chart, table, twoColumn, closing.
+- Avoid: playful colors, decorative shapes, excessive imagery over data.
+
+## 3. Technology & Startup
+**Topics:** software, AI, SaaS, apps, programming, devops, pitch decks, product launches, innovation.
+**Mood:** futuristic, sleek, minimal, high-contrast, dark-mode friendly.
+- stylePreset: \`midnight\`
+- Palette: dominant \`#6366F1\` (indigo), support \`#06B6D4\` (cyan), accent \`#A78BFA\` (violet), background \`#0F172A\` (dark slate), text \`#E2E8F0\` (light gray).
+- Fonts: heading \`Calibri\`, body \`Calibri\`.
+- Image mood: 3D renders, glowing UI elements, abstract tech textures, isometric illustrations, gradient meshes. Prompt base: "futuristic 3D render, indigo and cyan glow, dark background, sleek tech aesthetic, isometric".
+- Preferred layouts: cover, statement, metrics, imageLeft, iconGrid, chart, closing.
+- Avoid: warm palettes, serif fonts, decorative ornaments, busy backgrounds.
+
+## 4. Creative & Marketing
+**Topics:** campaigns, branding, social media, advertising, events, content strategy, lifestyle products.
+**Mood:** vibrant, bold, energetic, playful, trend-forward.
+- stylePreset: \`vibrant\`
+- Palette: dominant \`#EC4899\` (hot pink), support \`#F59E0B\` (amber), accent \`#8B5CF6\` (purple), background \`#FFFBEB\` (warm cream), text \`#1F2937\` (dark slate).
+- Fonts: heading \`Calibri\`, body \`Calibri\`.
+- Image mood: bold photography, colorful gradients, pop-art illustrations, lifestyle shots, dynamic compositions. Prompt base: "vibrant pop illustration, hot pink and amber palette, bold dynamic composition, energetic, modern".
+- Preferred layouts: cover, fullImage, statement, imageRight, iconGrid, quote, closing.
+- Avoid: muted tones, conservative grids, overly structured layouts, corporate blue.
+
+## 5. Editorial & Cultural
+**Topics:** art, history, literature, museums, journalism, biographies, humanities, cultural heritage.
+**Mood:** elegant, sophisticated, magazine-quality, serif-driven, refined.
+- stylePreset: \`editorial\`
+- Palette: dominant \`#7C2D12\` (burgundy), support \`#A8A29E\` (warm stone), accent \`#92400E\` (caramel), background \`#FEFCE8\` (cream paper), text \`#292524\` (espresso).
+- Fonts: heading \`Cambria\`, body \`Cambria\`.
+- Image mood: editorial photography, classical art references, textured paper backgrounds, muted warm tones, vintage film aesthetic. Prompt base: "editorial magazine photography, warm burgundy and cream palette, vintage film texture, elegant composition".
+- Preferred layouts: cover, section, quote, imageLeft, twoColumn, timeline, closing.
+- Avoid: bright neon, sans-serif everywhere, sterile minimalism, clip-art style.
+
+## 6. Minimal / Swiss
+**Topics:** design systems, architecture, philosophy, abstract concepts, any topic where maximum clarity is the goal.
+**Mood:** pure, structured, grid-driven, one-accent-color, typographic hierarchy.
+- stylePreset: \`swiss\`
+- Palette: dominant \`#000000\` (black), support \`#6B7280\` (gray), accent \`#FF4D00\` (safety orange) — or choose ONE accent that fits the topic, background \`#FFFFFF\` (white), text \`#111111\` (near black).
+- Fonts: heading \`Calibri\`, body \`Calibri\`.
+- Image mood: minimal geometric shapes, generous whitespace, single bold accent color, abstract line art, grid compositions. Prompt base: "minimalist geometric illustration, black white and one accent color, clean grid, Swiss design".
+- Preferred layouts: cover, statement, metrics, iconGrid, chart, table, closing.
+- Avoid: multiple accent colors, decorative elements, gradients, background patterns, busy imagery.
+
+## 7. Industrial / Brutalist
+**Topics:** engineering, manufacturing, construction, infrastructure, raw data, security, logistics.
+**Mood:** raw, mechanical, structured, high-contrast, utilitarian.
+- stylePreset: \`swiss\`
+- Palette: dominant \`#1C1917\` (carbon black), support \`#78716C\` (steel gray), accent \`#F97316\` (construction orange), background \`#F5F5F4\` (concrete), text \`#1C1917\` (carbon black).
+- Fonts: heading \`Calibri\`, body \`Calibri\`.
+- Image mood: industrial photography, blueprint aesthetics, wireframe diagrams, raw material textures, mechanical close-ups. Prompt base: "industrial photography, carbon black and safety orange, raw concrete texture, mechanical, blueprint".
+- Preferred layouts: cover, metrics, process, timeline, table, chart, closing.
+- Avoid: soft palettes, rounded shapes, decorative flourishes, pastel colors.
+
+## 8. Natural & Organic
+**Topics:** environment, sustainability, agriculture, ecology, food, gardening, outdoors, climate.
+**Mood:** earthy, grounded, fresh, botanical, calm.
+- stylePreset: \`editorial\`
+- Palette: dominant \`#4D7C0F\` (forest green), support \`#A3A380\` (sage), accent \`#CA8A04\` (harvest gold), background \`#F7F7F2\` (natural white), text \`#3D3D29\` (deep olive).
+- Fonts: heading \`Cambria\`, body \`Calibri\`.
+- Image mood: botanical illustrations, nature photography, organic textures, leaf patterns, aerial landscapes. Prompt base: "botanical illustration, forest green and harvest gold palette, organic natural textures, watercolor style".
+- Preferred layouts: cover, twoColumn, iconGrid, process, timeline, metrics, closing.
+- Avoid: industrial colors, hard geometric shapes, cold blues, sterile aesthetics.
+
+## 9. Luxury & Premium
+**Topics:** fashion, jewelry, real estate, hospitality, automotive, premium brands, high-end services.
+**Mood:** cinematic, opulent, dark, gold-accented, exclusive.
+- stylePreset: \`cinematic\`
+- Palette: dominant \`#1A1A1A\` (obsidian), support \`#3D3D3D\` (graphite), accent \`#C5A572\` (champagne gold), background \`#0D0D0D\` (black), text \`#E8E0D4\` (ivory).
+- Fonts: heading \`Cambria\`, body \`Cambria\`.
+- Image mood: cinematic photography, dramatic lighting, gold leaf textures, luxury product shots, dark moody backgrounds. Prompt base: "cinematic luxury photography, obsidian black and champagne gold, dramatic lighting, premium product, moody".
+- Preferred layouts: cover, fullImage, statement, quote, imageLeft, closing.
+- Avoid: bright colors, playful elements, busy patterns, flat illustrations.
+
+## 10. Retro & Nostalgic
+**Topics:** vintage, nostalgia, 80s/90s, retro gaming, history of technology, pop culture, music history.
+**Mood:** warm, textured, printed, slightly faded, analog warmth.
+- stylePreset: \`risograph\`
+- Palette: dominant \`#B91C1C\` (riso red), support \`#1E40AF\` (riso blue), accent \`#CA8A04\` (mustard), background \`#FEF3C7\` (aged paper), text \`#451A03\` (dark brown).
+- Fonts: heading \`Cambria\`, body \`Calibri\`.
+- Image mood: risograph print texture, halftone patterns, retro illustrations, grain, limited-color overlays. Prompt base: "risograph print illustration, red blue and mustard overprint, halftone texture, retro 80s, grain".
+- Preferred layouts: cover, section, iconGrid, timeline, quote, imageRight, closing.
+- Avoid: clean digital gradients, glossy modern look, neon-on-dark aesthetics.
+
+## 11. Kids & Youth
+**Topics:** children education, games, school projects, youth programs, parenting, playful learning.
+**Mood:** colorful, rounded, friendly, energetic, approachable.
+- stylePreset: \`memphis\`
+- Palette: dominant \`#3B82F6\` (sky blue), support \`#FBBF24\` (sunny yellow), accent \`#EF4444\` (coral red), background \`#FFFBEB\` (warm white), text \`#374151\` (slate).
+- Fonts: heading \`Calibri\`, body \`Calibri\`.
+- Image mood: cute flat illustrations, rounded shapes, playful characters, bright primary colors, sticker style. Prompt base: "cute flat illustration for kids, bright primary colors, rounded friendly shapes, playful characters, no text".
+- Preferred layouts: cover, iconGrid, metrics, process, imageLeft, imageRight, closing.
+- Avoid: dark palettes, complex data slides, dense text, muted tones, serif fonts.
+
+---
+
+## Blending rules
+- If a topic spans two categories (e.g., "health tech" = Educational + Technology), blend the palettes by taking the dominant color from the primary category and the accent from the secondary.
+- Always keep at most 3 active colors + background + text (5 total) for visual coherence.
+- When in doubt, choose clarity over decoration. A clean Minimal/Swiss deck is always better than a mismatched decorative one.
+- Override any recommendation if the user explicitly requests a specific palette, font, or style. User preferences always win.`;
 
 const SPECS: BuiltinSkillSpec[] = [
 	{
 		id: "builtin:word-document-mastery",
 		name: "word-document-mastery",
 		description:
-		"Expert workflow for creating, editing, formatting, extracting, converting, and validating Word/DOCX documents with proper structure, styles, tables, images, headers, footers, and page layout. Use whenever the user mentions Word, DOCX, reports, contracts, formatted documents, or document templates.",
+			"Expert workflow for creating, editing, formatting, extracting, converting, and validating Word/DOCX documents with proper structure, styles, tables, images, headers, footers, and page layout. Use whenever the user mentions Word, DOCX, reports, contracts, formatted documents, or document templates.",
 		tags: ["word", "docx", "office", "documents", "formatting"],
-		keywords: ["word", "docx", "doc", "documento", "informe", "contrato", "reporte", "plantilla"],
+		keywords: [
+			"word",
+			"docx",
+			"doc",
+			"documento",
+			"informe",
+			"contrato",
+			"reporte",
+			"plantilla",
+		],
 		domains: ["office", "documents", "word"],
 		instructions: WORD_INSTRUCTIONS,
-		examples: ["Crea un informe Word con portada, tabla de contenidos, imágenes y tablas.", "Edita este contrato DOCX y conserva el formato."],
-		dependencies: ["docx", "mammoth", "officeparser", "docxtemplater", "libreoffice optional"],
-		researchSummary: "Current docs reviewed: docx supports sections, headers/footers, images, tables and declarative styles; mammoth is preferred for semantic DOCX extraction.",
+		examples: [
+			"Crea un informe Word con portada, tabla de contenidos, imágenes y tablas.",
+			"Edita este contrato DOCX y conserva el formato.",
+		],
+		dependencies: [
+			"docx",
+			"mammoth",
+			"officeparser",
+			"docxtemplater",
+			"libreoffice optional",
+		],
+		researchSummary:
+			"Current docs reviewed: docx supports sections, headers/footers, images, tables and declarative styles; mammoth is preferred for semantic DOCX extraction.",
 	},
 	{
 		id: "builtin:spreadsheet-mastery",
 		name: "spreadsheet-mastery",
 		description:
-		"Expert workflow for Excel/XLSX/CSV/ODS creation, editing, cleaning, formulas, tables, validation, styling, dashboards, and data analysis. Use whenever the user mentions Excel, spreadsheets, sheets, CSV, formulas, tables, budgets, sales data, or dashboards.",
+			"Expert workflow for Excel/XLSX/CSV/ODS creation, editing, cleaning, formulas, tables, validation, styling, dashboards, and data analysis. Use whenever the user mentions Excel, spreadsheets, sheets, CSV, formulas, tables, budgets, sales data, or dashboards.",
 		tags: ["excel", "xlsx", "csv", "data", "formulas"],
-		keywords: ["excel", "xlsx", "xls", "csv", "hoja", "spreadsheet", "formula", "tabla", "dashboard", "datos"],
+		keywords: [
+			"excel",
+			"xlsx",
+			"xls",
+			"csv",
+			"hoja",
+			"spreadsheet",
+			"formula",
+			"tabla",
+			"dashboard",
+			"datos",
+		],
 		domains: ["office", "spreadsheets", "data"],
 		instructions: SPREADSHEET_INSTRUCTIONS,
-		examples: ["Crea un XLSX con fórmulas, validaciones y dashboard.", "Limpia este CSV y genera un Excel formateado."],
-		dependencies: ["exceljs", "xlsx", "csv-parse", "csv-stringify", "sql.js", "duckdb optional"],
-		researchSummary: "Current docs reviewed: ExcelJS supports workbook metadata, worksheets, formulas, tables, validation, styling, panes, print setup and images.",
+		examples: [
+			"Crea un XLSX con fórmulas, validaciones y dashboard.",
+			"Limpia este CSV y genera un Excel formateado.",
+		],
+		dependencies: [
+			"exceljs",
+			"xlsx",
+			"csv-parse",
+			"csv-stringify",
+			"sql.js",
+			"duckdb optional",
+		],
+		researchSummary:
+			"Current docs reviewed: ExcelJS supports workbook metadata, worksheets, formulas, tables, validation, styling, panes, print setup and images.",
 	},
 	{
 		id: "builtin:presentation-mastery",
 		name: "presentation-mastery",
 		description:
-		"Premium reference-first workflow for PowerPoint/PPTX creation and editing with source research, editable/hybrid/studio output modes, audience-specific art direction, generated visual assets, semantic layouts, native charts/tables/diagrams, citations, Content-Design-Coherence evaluation, montage review, overflow checks, and font portability QA. Use whenever the user mentions PowerPoint, PPTX, slides, presentations, pitch/board/sales decks, keynote, charts, redesign, or animations, even when they only ask to make a presentation.",
+			"Premium reference-first workflow for PowerPoint/PPTX creation and editing with source research, editable/hybrid/studio output modes, audience-specific art direction, generated visual assets, semantic layouts, native charts/tables/diagrams, citations, Content-Design-Coherence evaluation, montage review, overflow checks, and font portability QA. Use whenever the user mentions PowerPoint, PPTX, slides, presentations, pitch/board/sales decks, keynote, charts, redesign, or animations, even when they only ask to make a presentation.",
 		tags: ["powerpoint", "pptx", "slides", "presentation", "design"],
-		keywords: ["powerpoint", "ppt", "pptx", "presentacion", "presentación", "diapositiva", "slide", "deck", "pitch", "keynote", "board deck", "sales deck", "animacion", "tabla", "imagen"],
+		keywords: [
+			"powerpoint",
+			"ppt",
+			"pptx",
+			"presentacion",
+			"presentación",
+			"diapositiva",
+			"slide",
+			"deck",
+			"pitch",
+			"keynote",
+			"board deck",
+			"sales deck",
+			"animacion",
+			"tabla",
+			"imagen",
+		],
 		domains: ["office", "presentations", "design"],
 		instructions: PPT_INSTRUCTIONS,
-		examples: ["Crea una presentación PPTX con imágenes, tablas, gráficos y notas.", "Rediseña estas diapositivas para que se vean profesionales."],
-		dependencies: ["pptxgenjs", "libreoffice optional", "image generation tools optional"],
-		researchSummary: "Current docs reviewed: PptxGenJS supports masters, slide sections, images with contain/cover/crop, charts, tables and speaker notes.",
+		examples: [
+			"Crea una presentación PPTX con imágenes, tablas, gráficos y notas.",
+			"Rediseña estas diapositivas para que se vean profesionales.",
+		],
+		dependencies: [
+			"pptxgenjs",
+			"libreoffice optional",
+			"image generation tools optional",
+		],
+		researchSummary:
+			"Current docs reviewed: PptxGenJS supports masters, slide sections, images with contain/cover/crop, charts, tables and speaker notes.",
+	},
+	{
+		id: "builtin:presentation-design-direction",
+		name: "presentation-design-direction",
+		description:
+		"Art-direction catalog for presentations: classifies the topic into one of 11 style profiles (educational, corporate, technology, creative, editorial, minimal, industrial, natural, luxury, retro, kids) and provides exact palette HEX values, portable fonts, image-generation mood prompts, preferred semantic layouts, and anti-patterns. Use whenever creating or designing a presentation to choose a topic-appropriate visual system instead of improvising. Always load together with presentation-mastery.",
+		tags: [
+			"presentation",
+			"design",
+			"art-direction",
+			"palette",
+			"style",
+			"color",
+			"typography",
+		],
+		keywords: [
+			"presentacion",
+			"presentación",
+			"design",
+			"diseno",
+			"diseño",
+			"estilo",
+			"style",
+			"paleta",
+			"palette",
+			"color",
+			"colores",
+			"tipografia",
+			"tipografía",
+			"layout",
+			"tema",
+			"topic",
+			"art direction",
+			"direccion de arte",
+			"dirección de arte",
+		],
+		domains: ["office", "presentations", "design", "art-direction"],
+		instructions: DESIGN_DIRECTION_INSTRUCTIONS,
+		examples: [
+			"Qué estilo le queda bien a una presentación sobre salud?",
+			"Diseña una presentación con la paleta adecuada para un tema de tecnología.",
+		],
+		dependencies: ["pptxgenjs", "image generation tools"],
+		researchSummary:
+			"Curated catalog of 11 topic-specific visual systems with proven palettes, typography, and layout recommendations for presentation design.",
 	},
 	{
 		id: "builtin:pdf-data-mastery",
 		name: "pdf-data-mastery",
 		description:
-		"Expert workflow for PDFs: reading, searching huge PDFs, OCR, full extraction, summaries with page citations, splitting, merging, forms, overlays, and PDF report creation. Use whenever the user mentions PDF, scanned pages, OCR, page ranges, extracting all pages, or searching a large document.",
+			"Expert workflow for PDFs: reading, searching huge PDFs, OCR, full extraction, summaries with page citations, splitting, merging, forms, overlays, and PDF report creation. Use whenever the user mentions PDF, scanned pages, OCR, page ranges, extracting all pages, or searching a large document.",
 		tags: ["pdf", "ocr", "search", "extraction", "documents"],
-		keywords: ["pdf", "ocr", "escaneado", "buscar", "extraer", "paginas", "page", "resumen", "formulario"],
+		keywords: [
+			"pdf",
+			"ocr",
+			"escaneado",
+			"buscar",
+			"extraer",
+			"paginas",
+			"page",
+			"resumen",
+			"formulario",
+		],
 		domains: ["pdf", "documents", "ocr"],
 		instructions: PDF_INSTRUCTIONS,
-		examples: ["Busca en este PDF de 1500 páginas todas las menciones a una cláusula.", "Extrae todo el texto OCR de este PDF escaneado a un .txt."],
-		dependencies: ["pdfjs-dist", "tesseract.js", "@napi-rs/canvas", "pdf-lib", "pdfkit"],
-		researchSummary: "Current implementation includes pdf_read, pdf_search, pdf_extract_text and OCR controls; pdf-lib/pdfkit are recommended for edit/create flows.",
+		examples: [
+			"Busca en este PDF de 1500 páginas todas las menciones a una cláusula.",
+			"Extrae todo el texto OCR de este PDF escaneado a un .txt.",
+		],
+		dependencies: [
+			"pdfjs-dist",
+			"tesseract.js",
+			"@napi-rs/canvas",
+			"pdf-lib",
+			"pdfkit",
+		],
+		researchSummary:
+			"Current implementation includes pdf_read, pdf_search, pdf_extract_text and OCR controls; pdf-lib/pdfkit are recommended for edit/create flows.",
 	},
 	{
 		id: "builtin:code-and-data-file-mastery",
 		name: "code-and-data-file-mastery",
 		description:
-		"Expert workflow for creating, editing, validating, and transforming general files: text, code, HTML/CSS/JS/TS/Python, JSON/YAML/XML, CSV, SQLite/databases, configs, logs, and archives. Use whenever the task involves mixed file operations, structured data, databases, code files, or generated project artifacts.",
+			"Expert workflow for creating, editing, validating, and transforming general files: text, code, HTML/CSS/JS/TS/Python, JSON/YAML/XML, CSV, SQLite/databases, configs, logs, and archives. Use whenever the task involves mixed file operations, structured data, databases, code files, or generated project artifacts.",
 		tags: ["files", "code", "data", "database", "html", "python", "javascript"],
-		keywords: ["archivo", "file", "txt", "json", "yaml", "xml", "html", "js", "ts", "python", "sqlite", "database", "log"],
+		keywords: [
+			"archivo",
+			"file",
+			"txt",
+			"json",
+			"yaml",
+			"xml",
+			"html",
+			"js",
+			"ts",
+			"python",
+			"sqlite",
+			"database",
+			"log",
+		],
 		domains: ["files", "code", "data", "database"],
 		instructions: CODE_DATA_INSTRUCTIONS,
-		examples: ["Edita este JSON sin romper el formato.", "Crea un proyecto HTML/JS y verifica que renderiza."],
-		dependencies: ["filesystem tools", "code executor", "cheerio", "jsdom", "sql.js", "csv-parse", "csv-stringify"],
-		researchSummary: "Current stack includes filesystem, code executor, SQL storage, browser render checks, CSV/HTML parsing dependencies and safe path policies.",
+		examples: [
+			"Edita este JSON sin romper el formato.",
+			"Crea un proyecto HTML/JS y verifica que renderiza.",
+		],
+		dependencies: [
+			"filesystem tools",
+			"code executor",
+			"cheerio",
+			"jsdom",
+			"sql.js",
+			"csv-parse",
+			"csv-stringify",
+		],
+		researchSummary:
+			"Current stack includes filesystem, code executor, SQL storage, browser render checks, CSV/HTML parsing dependencies and safe path policies.",
 	},
 ];
 
@@ -384,7 +671,10 @@ function buildSkill(spec: BuiltinSkillSpec, embedding: number[]): Skill {
 		},
 		contextEstimate: {
 			instructions: spec.instructions.length,
-			perExample: Math.max(...spec.examples.map((example) => example.length), 0),
+			perExample: Math.max(
+				...spec.examples.map((example) => example.length),
+				0,
+			),
 			templates: 0,
 		},
 		metrics: {

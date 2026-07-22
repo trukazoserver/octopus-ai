@@ -15,7 +15,7 @@ describe("office file mastery builtin skills", () => {
 		expect(skills.map((skill) => skill.id)).toEqual([
 			...OFFICE_FILE_MASTERY_SKILL_IDS,
 		]);
-		expect(skills).toHaveLength(5);
+		expect(skills).toHaveLength(OFFICE_FILE_MASTERY_SKILL_IDS.length);
 		for (const skill of skills) {
 			expect(skill.instructions.length).toBeGreaterThan(1000);
 			expect(skill.description).toMatch(/Use whenever/i);

@@ -69,20 +69,28 @@ describe("SkillLoader content safety", () => {
 		expect(loaded[0]?.content).toContain("Content safety notice");
 	});
 
-	it("pins presentation mastery for explicit Spanish presentation requests", async () => {
+	it("pins presentation mastery and design direction for explicit Spanish presentation requests", async () => {
 		const presentation = {
 			...createSkill("Premium presentation workflow"),
 			id: "builtin:presentation-mastery",
 			name: "presentation-mastery",
 		};
+		const design = {
+			...createSkill("Art direction catalog"),
+			id: "builtin:presentation-design-direction",
+			name: "presentation-design-direction",
+		};
 		const registry = {
 			search: async () => [],
-			getById: async (id: string) =>
-				id === presentation.id ? presentation : undefined,
-			list: async () => [presentation],
+			getById: async (id: string) => {
+				if (id === presentation.id) return presentation;
+				if (id === design.id) return design;
+				return undefined;
+			},
+			list: async () => [presentation, design],
 		};
 		const loader = new SkillLoader(registry as never, async () => [0], {
-			maxTokenBudget: 3000,
+			maxTokenBudget: 8000,
 			progressiveLevels: true,
 			autoUnload: false,
 			searchThreshold: 0.9,
@@ -96,6 +104,8 @@ describe("SkillLoader content safety", () => {
 			keywords: ["presentación", "directorio"],
 		});
 
-		expect(loaded[0]?.skill.id).toBe("builtin:presentation-mastery");
+		const loadedIds = loaded.map((skill) => skill.skill.id);
+		expect(loadedIds).toContain("builtin:presentation-mastery");
+		expect(loadedIds).toContain("builtin:presentation-design-direction");
 	});
 });
