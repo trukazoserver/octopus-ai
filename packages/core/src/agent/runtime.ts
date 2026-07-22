@@ -2233,6 +2233,17 @@ export class AgentRuntime {
 		return Buffer.from(value, "utf8").toString("base64");
 	}
 
+	private isResearchToolName(toolName: string): boolean {
+		const normalized = toolName.toLowerCase().replace(/_/g, "-");
+		return (
+			normalized === "browser-search" ||
+			normalized.includes("web-search") ||
+			normalized.includes("websearch") ||
+			normalized.includes("web-reader") ||
+			normalized.includes("webreader")
+		);
+	}
+
 	private stableJson(value: unknown): string {
 		const normalize = (input: unknown): unknown => {
 			if (Array.isArray(input)) return input.map(normalize);
@@ -4240,6 +4251,9 @@ export class AgentRuntime {
 						chunkContent,
 					);
 					const activityDetailB64 = this.encodeStatusField(activityDetail);
+					if (this.isResearchToolName(toolCall.function.name)) {
+						yield `\x00STATUS:phase_research:${toolCall.function.name}::${this.encodeStatusField(activityDetail)}\x00`;
+					}
 					yield `\x00STATUS:${statusType}:${toolCall.function.name}:${uiIconB64}:${activityDetailB64}\x00`;
 
 					let toolResult: ToolResult;

@@ -13,6 +13,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import AdmZip from "adm-zip";
+import sharp from "sharp";
 import {
 	assertRealPathInside,
 	expandHome,
@@ -63,7 +65,7 @@ export function createOfficePreviewTools(
 	const tool: ToolDefinition = {
 		name: "office_convert_preview",
 		description:
-			"Convert DOCX, PPTX, XLSX, ODT, ODS, or ODP to PDF with LibreOffice headless and optionally render selected PDF pages to PNG previews for visual QA. PDF input can be rendered directly. Returns output paths and validation details.",
+			"Convert DOCX, PPTX, XLSX, ODT, ODS, or ODP to PDF with LibreOffice headless, render selected pages to PNG, optionally build a labeled montage, and report PPTX canvas-overflow/font portability warnings for visual QA. PDF input can be rendered directly.",
 		uiIcon: PREVIEW_SVG,
 		managesOwnPathPolicy: true,
 		longRunning: true,
@@ -72,6 +74,7 @@ export function createOfficePreviewTools(
 			outputPath: { type: "string", description: "Output PDF path", required: true },
 			previewDir: { type: "string", description: "Optional directory for PNG page previews", required: false },
 			previewPages: { type: "string", description: "Pages to preview, e.g. 1-3,8; default 1", required: false },
+			montagePath: { type: "string", description: "Optional output PNG contact sheet assembled from preview pages; requires previewDir", required: false },
 			overwrite: { type: "boolean", description: "Overwrite output/preview files, default false", required: false },
 		},
 		handler: async (params, context): Promise<ToolResult> => {
@@ -101,6 +104,10 @@ export function createOfficePreviewTools(
 				if (pdfBytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("Converted output is not a valid PDF");
 				let previewPaths: string[] = [];
 				let previewWarning: string | undefined;
+				let montagePath: string | undefined;
+				const qualityChecks = ext === ".pptx"
+					? inspectPptxTechnicalQuality(source)
+					: undefined;
 				const previewDirRaw = optionalString(params.previewDir);
 				if (previewDirRaw) {
 					const previewDir = resolvePath(previewDirRaw);
@@ -114,6 +121,13 @@ export function createOfficePreviewTools(
 						previewWarning = err instanceof Error ? err.message : String(err);
 					}
 				}
+				const montageRaw = optionalString(params.montagePath);
+				if (montageRaw) {
+					if (previewPaths.length === 0) throw new Error("montagePath requires previewDir and at least one rendered preview page");
+					montagePath = resolvePath(montageRaw);
+					await authorizeOutput(montagePath);
+					await createPreviewMontage(previewPaths, montagePath);
+				}
 				emitPreviewPhase(context, "phase_validation", "completed", "office_convert_preview", `Vista previa validada con ${previewPaths.length} página(s) renderizada(s).`);
 				return {
 					success: true,
@@ -123,13 +137,15 @@ export function createOfficePreviewTools(
 							source,
 							pdfPath: outputPath,
 							previewPaths,
+							montagePath,
 							previewWarning,
+							qualityChecks,
 							validated: true,
 						},
 						null,
 						2,
 					),
-					metadata: { pdfPath: outputPath, previewPaths, previewWarning },
+					metadata: { pdfPath: outputPath, previewPaths, montagePath, previewWarning, qualityChecks },
 				};
 			} catch (err) {
 				emitPreviewPhase(context, "phase_validation", "failed", "office_convert_preview", err instanceof Error ? err.message : String(err));
@@ -334,6 +350,121 @@ export async function renderPdfPreviewPages(pdfPath: string, outputDir: string, 
 	} finally {
 		await loadingTask.destroy();
 	}
+}
+
+async function createPreviewMontage(
+	previewPaths: string[],
+	outputPath: string,
+): Promise<void> {
+	if (path.extname(outputPath).toLowerCase() !== ".png") {
+		throw new Error("montagePath must end with .png");
+	}
+	const tileWidth = 420;
+	const tileHeight = 236;
+	const labelHeight = 32;
+	const gap = 18;
+	const columns = Math.min(4, Math.ceil(Math.sqrt(previewPaths.length)));
+	const rows = Math.ceil(previewPaths.length / columns);
+	const composites: Array<{ input: Buffer; left: number; top: number }> = [];
+	for (const [index, previewPath] of previewPaths.entries()) {
+		const thumbnail = await sharp(previewPath)
+			.resize(tileWidth, tileHeight, {
+				fit: "contain",
+				background: "#111827",
+			})
+			.png()
+			.toBuffer();
+		const label = Buffer.from(
+			`<svg width="${tileWidth}" height="${labelHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${tileWidth}" height="${labelHeight}" fill="#05070b"/><text x="4" y="21" font-family="Arial" font-size="12" font-weight="700" fill="#d1d5db">SLIDE ${String(index + 1).padStart(2, "0")}</text></svg>`,
+		);
+		const left = (index % columns) * (tileWidth + gap);
+		const top = Math.floor(index / columns) * (tileHeight + labelHeight + gap);
+		composites.push({ input: label, left, top });
+		composites.push({ input: thumbnail, left, top: top + labelHeight });
+	}
+	await sharp({
+		create: {
+			width: columns * tileWidth + (columns - 1) * gap,
+			height: rows * (tileHeight + labelHeight) + (rows - 1) * gap,
+			channels: 4,
+			background: "#05070b",
+		},
+	})
+		.composite(composites)
+		.png()
+		.toFile(outputPath);
+}
+
+function inspectPptxTechnicalQuality(sourcePath: string): {
+	slideSize: { cx: number; cy: number } | undefined;
+	overflowWarnings: string[];
+	fontWarnings: string[];
+	fonts: string[];
+} {
+	const zip = new AdmZip(sourcePath);
+	const presentationXml = zip.readAsText("ppt/presentation.xml");
+	const sizeMatch = /<p:sldSz\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/i.exec(
+		presentationXml,
+	);
+	const slideSize = sizeMatch
+		? { cx: Number(sizeMatch[1]), cy: Number(sizeMatch[2]) }
+		: undefined;
+	const overflowWarnings: string[] = [];
+	const fonts = new Set<string>();
+	const slideEntries = zip
+		.getEntries()
+		.filter((entry) => /^ppt\/slides\/slide\d+\.xml$/.test(entry.entryName))
+		.sort((a, b) => Number(/slide(\d+)/.exec(a.entryName)?.[1]) - Number(/slide(\d+)/.exec(b.entryName)?.[1]));
+	for (const [slideIndex, entry] of slideEntries.entries()) {
+		const xml = entry.getData().toString("utf8");
+		for (const match of xml.matchAll(/\btypeface="([^"]+)"/g)) {
+			const font = match[1]?.trim();
+			if (font && !font.startsWith("+")) fonts.add(font);
+		}
+		if (!slideSize) continue;
+		for (const transform of xml.matchAll(/<a:xfrm\b[^>]*>([\s\S]*?)<\/a:xfrm>/g)) {
+			const body = transform[1] ?? "";
+			const offset = /<a:off\b[^>]*\bx="(-?\d+)"[^>]*\by="(-?\d+)"/i.exec(body);
+			const extent = /<a:ext\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/i.exec(body);
+			if (!offset || !extent) continue;
+			const x = Number(offset[1]);
+			const y = Number(offset[2]);
+			const cx = Number(extent[1]);
+			const cy = Number(extent[2]);
+			const tolerance = 9_144;
+			if (
+				x < -tolerance ||
+				y < -tolerance ||
+				x + cx > slideSize.cx + tolerance ||
+				y + cy > slideSize.cy + tolerance
+			) {
+				overflowWarnings.push(
+					`Slide ${slideIndex + 1}: object bounds (${x},${y},${cx},${cy}) extend outside the slide canvas.`,
+				);
+			}
+		}
+	}
+	const safeFonts = new Set([
+		"arial",
+		"calibri",
+		"cambria",
+		"times new roman",
+		"courier new",
+		"bookman old style",
+		"century schoolbook",
+	]);
+	const fontWarnings = [...fonts]
+		.filter((font) => !safeFonts.has(font.toLowerCase()))
+		.map(
+			(font) =>
+				`Font '${font}' may be substituted by LibreOffice or unavailable on another Office installation; verify text fit with extra slack.`,
+		);
+	return {
+		slideSize,
+		overflowWarnings: [...new Set(overflowWarnings)].slice(0, 50),
+		fontWarnings,
+		fonts: [...fonts].sort(),
+	};
 }
 
 function parsePages(spec: string, total: number): number[] {

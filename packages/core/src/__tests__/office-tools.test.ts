@@ -5,7 +5,10 @@ import AdmZip from "adm-zip";
 import { PDFDocument } from "pdf-lib";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { createOfficePreviewTools } from "../tools/office-preview.js";
+import {
+	createOfficePreviewTools,
+	findLibreOfficeExecutable,
+} from "../tools/office-preview.js";
 import { createOfficeTools } from "../tools/office-tools.js";
 
 describe("office tools", () => {
@@ -142,6 +145,10 @@ describe("office tools", () => {
 					designBrief:
 						"Audiencia ejecutiva; estilo editorial, seguro y basado en evidencia.",
 					stylePreset: "editorial",
+					renderMode: "hybrid",
+					sourceManifest: [
+						{ title: "Market research", url: "https://example.com/research" },
+					],
 					slides: [
 						{
 							layout: "cover",
@@ -166,8 +173,28 @@ describe("office tools", () => {
 								categories: ["2024", "2025", "2026"],
 								series: [{ name: "Adopción", values: [32, 49, 68] }],
 								showValues: true,
+								categoryAxisTitle: "Año",
+								valueAxisTitle: "Adopción (%)",
 							},
 							takeaway: "La mayor oportunidad está en convertir pilotos en procesos centrales.",
+						},
+						{
+							layout: "process",
+							title: "La escala exige tres decisiones coordinadas",
+							steps: [
+								{ title: "Priorizar", description: "Elegir procesos medibles" },
+								{ title: "Integrar", description: "Conectar datos y controles" },
+								{ title: "Escalar", description: "Reutilizar aprendizajes" },
+							],
+						},
+						{
+							layout: "timeline",
+							title: "El valor aparece por horizontes",
+							events: [
+								{ date: "0-90 días", title: "Base", description: "Métrica y responsable" },
+								{ date: "3-9 meses", title: "Sistema", description: "Plataforma y controles" },
+								{ date: "9-18 meses", title: "Escala", description: "Rediseño operativo" },
+							],
 						},
 						{
 							layout: "table",
@@ -181,9 +208,21 @@ describe("office tools", () => {
 							},
 						},
 						{
-							layout: "quote",
-							title: "La ventaja no proviene de adoptar primero, sino de integrar mejor.",
-							quoteAttribution: "Conclusión del análisis",
+							layout: "imageRight",
+							title: "La integración convierte experimentos en capacidad",
+							body: "Un sistema común hace reutilizables los aprendizajes.",
+							bullets: ["Datos compartidos", "Controles comunes", "Métricas comparables"],
+							imagePath,
+						},
+						{
+							layout: "fullImage",
+							title: "El cambio es operativo, no solo tecnológico",
+							imagePath,
+						},
+						{
+							layout: "closing",
+							title: "Empiece por una decisión medible en 90 días",
+							subtitle: "Un proceso, un responsable y un criterio claro para escalar.",
 							speaker: {
 								narrative: "Cerrar conectando inversión con ejecución.",
 								sources: ["https://example.com/research"],
@@ -196,18 +235,29 @@ describe("office tools", () => {
 
 			expect(result?.success).toBe(true);
 			expect(result?.output).toContain("Theme: editorial");
+			expect(result?.output).toContain("Render mode: hybrid");
 			expect(result?.output).toContain('"metrics":1');
+			expect(result?.output).toContain('"process":1');
+			expect(result?.output).toContain('"timeline":1');
+			expect(result?.output).toContain('"status":"pass"');
 			expect(progress.some((item) => item.includes("phase_visual_direction"))).toBe(true);
 			expect(progress.some((item) => item.includes("phase_generation"))).toBe(true);
 			expect(progress.some((item) => item.includes("phase_validation"))).toBe(true);
 
 			const zip = new AdmZip(outputPath);
 			const entries = zip.getEntries().map((entry) => entry.entryName);
-			expect(entries.filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))).toHaveLength(5);
+			expect(entries.filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))).toHaveLength(9);
 			expect(entries.some((name) => /^ppt\/charts\/chart\d+\.xml$/.test(name))).toBe(true);
 			expect(entries.some((name) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(name))).toBe(true);
-			const slide4 = zip.readAsText("ppt/slides/slide4.xml");
-			expect(slide4).toContain("<a:tbl>");
+			const slide6 = zip.readAsText("ppt/slides/slide6.xml");
+			expect(slide6).toContain("<a:tbl>");
+			const slideText = entries
+				.filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+				.map((name) => zip.readAsText(name))
+				.join("\n");
+			expect(slideText).toContain("Priorizar");
+			expect(slideText).toContain("0-90 días");
+			expect(slideText).not.toContain("Aptos");
 			const notes = entries
 				.filter((name) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(name))
 				.map((name) => zip.readAsText(name))
@@ -219,11 +269,127 @@ describe("office tools", () => {
 		}
 	});
 
+	it("supports studio mode with one cohesive full-slide image per page", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "octopus-studio-pptx-"));
+		try {
+			const imagePath = join(dir, "studio.png");
+			await writeFile(
+				imagePath,
+				await sharp({
+					create: {
+						width: 1600,
+						height: 900,
+						channels: 4,
+						background: { r: 15, g: 23, b: 42, alpha: 1 },
+					},
+				}).png().toBuffer(),
+			);
+			const outputPath = join(dir, "studio-deck.pptx");
+			const tool = createOfficeTools([dir], dir).find(
+				(candidate) => candidate.name === "pptx_create",
+			);
+			const result = await tool?.handler(
+				{
+					path: outputPath,
+					renderMode: "studio",
+					stylePreset: "cinematic",
+					slides: [
+						{ title: "Studio cover", imagePath },
+						{ title: "Studio conclusion", imagePath },
+					],
+				},
+				undefined as never,
+			);
+
+			expect(result?.success).toBe(true);
+			expect(result?.output).toContain("Render mode: studio");
+			expect(result?.output).toContain("not natively editable");
+			const zip = new AdmZip(outputPath);
+			expect(
+				zip.getEntries().filter((entry) => /^ppt\/slides\/slide\d+\.xml$/.test(entry.entryName)),
+			).toHaveLength(2);
+			expect(
+				zip.getEntries().filter((entry) => /^ppt\/media\/.*\.png$/.test(entry.entryName)).length,
+			).toBeGreaterThanOrEqual(1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it.runIf(Boolean(findLibreOfficeExecutable()))(
+		"renders a PPTX montage and reports canvas and font portability checks",
+		async () => {
+			const dir = await mkdtemp(join(tmpdir(), "octopus-pptx-audit-"));
+			try {
+				const pptxPath = join(dir, "audit.pptx");
+				const create = createOfficeTools([dir], dir).find(
+					(candidate) => candidate.name === "pptx_create",
+				);
+				const created = await create?.handler(
+					{
+						path: pptxPath,
+						stylePreset: "swiss",
+						renderMode: "editable",
+						slides: [
+							{ layout: "cover", title: "Audit visual", subtitle: "Native and portable" },
+							{
+								layout: "process",
+								title: "Tres pasos mantienen la calidad",
+								steps: [
+									{ title: "Plan", description: "Brief" },
+									{ title: "Build", description: "Native objects" },
+									{ title: "Review", description: "Render and inspect" },
+								],
+							},
+							{ layout: "closing", title: "Ship only after review" },
+						],
+					},
+					undefined as never,
+				);
+				expect(created?.success).toBe(true);
+
+				const preview = createOfficePreviewTools([dir], dir).find(
+					(candidate) => candidate.name === "office_convert_preview",
+				);
+				const result = await preview?.handler(
+					{
+						source: pptxPath,
+						outputPath: join(dir, "audit.pdf"),
+						previewDir: join(dir, "previews"),
+						previewPages: "1-3",
+						montagePath: join(dir, "audit-montage.png"),
+					},
+					undefined as never,
+				);
+				expect(result?.success).toBe(true);
+				const output = JSON.parse(result?.output ?? "{}") as {
+					montagePath?: string;
+					qualityChecks?: {
+						overflowWarnings: string[];
+						fontWarnings: string[];
+						fonts: string[];
+					};
+				};
+				expect(output.montagePath).toMatch(/audit-montage\.png$/);
+				expect(output.qualityChecks?.overflowWarnings).toEqual([]);
+				expect(output.qualityChecks?.fontWarnings).toEqual([]);
+				expect(output.qualityChecks?.fonts).toEqual(
+					expect.arrayContaining(["Arial"]),
+				);
+			} finally {
+				await rm(dir, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
 	it("streams typed generation and validation phases for Office previews", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "octopus-office-progress-"));
 		try {
 			const sourcePath = join(dir, "source.pdf");
 			const outputPath = join(dir, "validated.pdf");
+			const previewDir = join(dir, "previews");
+			const montagePath = join(dir, "montage.png");
 			const pdf = await PDFDocument.create();
 			pdf.addPage();
 			await writeFile(sourcePath, await pdf.save());
@@ -232,7 +398,7 @@ describe("office tools", () => {
 				(candidate) => candidate.name === "office_convert_preview",
 			);
 			const result = await tool?.handler(
-				{ source: sourcePath, outputPath },
+				{ source: sourcePath, outputPath, previewDir, previewPages: "1", montagePath },
 				{ onProgress: (status: string) => progress.push(status) } as never,
 			);
 
@@ -240,6 +406,8 @@ describe("office tools", () => {
 			expect(progress.some((item) => item.includes("phase_generation"))).toBe(true);
 			expect(progress.some((item) => item.includes("phase_validation"))).toBe(true);
 			expect(progress.every((item) => item.startsWith("\x00STATUS:"))).toBe(true);
+			expect((await stat(montagePath)).size).toBeGreaterThan(100);
+			expect(result?.output).toContain("montagePath");
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}

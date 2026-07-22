@@ -115,26 +115,35 @@ ${COMMON_RULES}
 
 ## Premium workflow
 1. Establish source mode before writing the outline. Inspect supplied material first. When facts are missing, current, or explicitly requested, research with available search/read tools and keep a source manifest. Map important claims and numbers to sources before generation.
-2. Write a presentation brief before calling \`pptx_create\`: audience, decision/action, duration, slide count, thesis, narrative arc, and evidence plan.
-3. Define the visual system explicitly: a topic-appropriate concept in 2-3 adjectives; palette roles with HEX values; heading/body fonts; type scale; grid/margins; spacing rhythm; shape/line vocabulary; image treatment; chart palette; table treatment; footer, numbering, and citation style. Infer a distinctive direction when the user gives no style.
-4. Build a slide map with assertion titles and at least three reusable layout families. Avoid more than two consecutive slides with the same composition. Do not default to title-and-bullets when a statement, metric grid, comparison, process, timeline, chart, table, quote, or image-led slide communicates better.
-5. Call \`pptx_create\` with \`designBrief\`, a theme preset or custom theme, and an explicit semantic \`layout\` for each slide. Use concise visible copy; put supporting detail and sources in structured speaker notes.
-6. Images must be intentional, high-resolution, aspect-correct, and relevant. Generate or source visuals when they materially improve comprehension; never add generic decorative imagery merely to fill space.
-7. Keep tables small and readable. Convert dense comparisons to a chart, metric cards, or multiple slides. Charts need labeled units, honest scales, readable legends, and source notes.
-8. Speaker notes explain what to say, transitions, caveats, and sources; they should not duplicate the visible slide.
-9. Search screenshots/scans embedded in slides with \`office_extract_media\` OCR when relevant.
-10. Validate structurally with \`office_inspect\`, then render every slide with \`office_convert_preview\` in batches of at most 20. Inspect previews directly with vision, or call an image-analysis tool when the active model is text-only. Fix defects and rerender changed slides. If rendering is unavailable, report that blocker rather than claiming visual validation.
+2. Prefer a reference-first workflow. If the user supplies a deck, template, screenshot, PDF, brand guide, or example, inspect its slide size and render a thumbnail grid before planning. Extract functional slide types, content schemas, palette, typography, spacing, image treatment, and reusable motifs. Use \`pptx_template_fill\` when preserving an existing visual language is better than starting over.
+3. Select an output mode explicitly. \`editable\` keeps text, charts, tables, and simple diagrams native; \`hybrid\` keeps those native while adding generated/source visuals; \`studio\` uses one cohesive high-resolution generated composition per slide for maximum visual fidelity but limited editability. Default to hybrid for premium requests and disclose the tradeoff.
+4. Write a presentation brief before calling \`pptx_create\`: audience, decision/action, duration, slide count, thesis, narrative arc, evidence plan, output mode, and which slides require custom visuals.
+5. Define the visual system explicitly: a topic-appropriate art direction in 2-3 adjectives; dominant/support/accent palette roles with HEX values; safe heading/body fonts; type scale; grid/margins; spacing rhythm; one recurring visual motif; image-generation style prompt; chart palette; table treatment; footer, numbering, and citation style. Infer a distinctive direction when the user gives no style.
+6. Build a slide map with assertion titles and at least three reusable layout families. Treat each slide as a separate communication decision. Do not default to title-and-bullets when a statement, metric grid, comparison, process, timeline, chart, table, quote, diagram, or image-led slide communicates better.
+7. Call \`pptx_create\` with \`designBrief\`, \`renderMode\`, a theme preset or custom theme, and an explicit semantic \`layout\` for each slide. Use concise visible copy; put supporting detail, generation notes, and sources in structured speaker notes.
+8. Every slide needs a meaningful visual device: image, native chart/table, diagram, process/timeline, metric composition, icon system, or intentionally composed shapes. Avoid text-only slides. For related generated images, reuse one art-direction prompt and save generation notes so the deck remains extendable.
+9. Acquire images in this order: user-provided high-resolution assets; AI-generated visuals tailored to the narrative; licensed stock/search results. Track source and attribution requirements. Never use generic filler imagery.
+10. Keep native objects editable when practical. Text stays text; simple charts stay PowerPoint charts; diagrams combine separate visual assets with native labels/connectors. Use studio mode only when fidelity is more important than editability.
+11. Avoid presentation patterns that look machine-generated: no decorative edge stripes, no automatic underline/accent line below every title, no identical layout repeated throughout, and no generic blue palette unrelated to the topic. Do not default to Aptos; use fonts that render reliably in both Office and LibreOffice unless the user supplies brand fonts.
+12. Keep tables small and readable. Convert dense comparisons to a chart, metric cards, or multiple slides. Charts need labeled units, honest scales, readable legends, and source notes.
+13. Speaker notes explain what to say, transitions, caveats, visual-generation prompts, and sources; they should not duplicate the visible slide.
+14. Search screenshots/scans embedded in slides with \`office_extract_media\` OCR when relevant.
+15. Review the quality report from \`pptx_create\` across Content, Design, and Coherence. Revise low-scoring slides before rendering.
+16. Validate structurally with \`office_inspect\`, then render every slide with \`office_convert_preview\` and request a montage. Review overflow/font warnings and inspect the montage with vision. Fix defects and rerender changed slides. If rendering is unavailable, report that blocker rather than claiming visual validation.
 
 ## Quality checklist
 - Every slide has a single purpose and a takeaway title rather than a generic topic label.
 - The visual concept fits the topic, audience, and requested tone; it does not look like an interchangeable generic template.
 - Palette, typography, spacing, image treatment, chart colors, and shape language are consistent.
 - Layouts vary with the narrative and at least three layout families are used when the deck length permits.
+- Every slide has a meaningful visual device; no plain title-and-bullets pages remain.
 - Title and key visual align to the grid; whitespace is intentional.
 - No text overflow; fonts are readable from a distance.
 - Images are not distorted and are high enough resolution.
 - Tables/charts are understandable in under 10 seconds.
 - Factual claims and numbers have traceable sources in notes, footnotes, or a sources slide.
+- No objects extend outside the slide canvas and font-substitution warnings are resolved or disclosed.
+- The final quality report passes Content, Design, and Coherence, and the rendered montage has been reviewed.
 - Final response includes output path, slide count, sources used, design direction, and validation performed.`;
 
 const PDF_INSTRUCTIONS = `# PDF mastery
@@ -221,7 +230,7 @@ const SPECS: BuiltinSkillSpec[] = [
 		id: "builtin:presentation-mastery",
 		name: "presentation-mastery",
 		description:
-		"Premium workflow for PowerPoint/PPTX creation and editing with source research when needed, an explicit audience-specific visual system, semantic slide layouts, images, metrics, editable charts, styled tables, speaker notes, citations, and all-slide visual QA. Use whenever the user mentions PowerPoint, PPTX, slides, presentations, pitch/board/sales decks, keynote, charts, redesign, or animations, even when they only ask to make a presentation.",
+		"Premium reference-first workflow for PowerPoint/PPTX creation and editing with source research, editable/hybrid/studio output modes, audience-specific art direction, generated visual assets, semantic layouts, native charts/tables/diagrams, citations, Content-Design-Coherence evaluation, montage review, overflow checks, and font portability QA. Use whenever the user mentions PowerPoint, PPTX, slides, presentations, pitch/board/sales decks, keynote, charts, redesign, or animations, even when they only ask to make a presentation.",
 		tags: ["powerpoint", "pptx", "slides", "presentation", "design"],
 		keywords: ["powerpoint", "ppt", "pptx", "presentacion", "presentación", "diapositiva", "slide", "deck", "pitch", "keynote", "board deck", "sales deck", "animacion", "tabla", "imagen"],
 		domains: ["office", "presentations", "design"],
@@ -279,7 +288,7 @@ function buildSkill(spec: BuiltinSkillSpec, embedding: number[]): Skill {
 	return {
 		id: spec.id,
 		name: spec.name,
-		version: "1.1.0",
+		version: "1.2.0",
 		description: spec.description,
 		tags: spec.tags,
 		embedding,

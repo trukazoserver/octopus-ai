@@ -2550,6 +2550,7 @@ describe("AgentRuntime", () => {
 			// guard still forces the tool call, which runs and completes.
 			expect(output).toContain("Actividad actual");
 			expect(output).toContain("La búsqueda devolvió opciones verificadas.");
+			expect(output).toContain("STATUS:phase_research:web_search_prime");
 			expect(mockExecutor.execute).toHaveBeenCalledTimes(1);
 		});
 
