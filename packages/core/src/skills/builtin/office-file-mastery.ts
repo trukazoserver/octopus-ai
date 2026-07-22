@@ -123,10 +123,18 @@ ${COMMON_RULES}
 7. **Generate images BEFORE calling pptx_create.** This is mandatory for visually engaging decks. For at least 30% of slides (minimum: cover + 2 content slides + closing), generate a relevant image:
    a. Identify which slides need images: cover always; slides explaining a concept or process; section dividers; closing slide.
    b. Pick a consistent art-direction prompt derived from the visual system (style, palette, mood). Example: "Flat vector illustration, warm terracotta and sage palette, clean lines, educational, no text".
-   c. Call \`codex_generate_image\` or \`nano-banana-generate\` with a specific prompt per image. Generate at 1024x576 or 1920x1080 for 16:9 slides.
-   d. Save each generated image with \`save-image\` to a local path (e.g., the workspace directory).
-   e. Reference each saved path in the slide spec via \`imagePath\` or \`images: [{path, alt, fit}]\`.
-   f. Use layouts that showcase images: \`imageLeft\`, \`imageRight\`, \`fullImage\` for image-led slides, and \`cover\` with \`images\` for the title slide.
+   c. **Choose the right aspect ratio per image** based on where it will be placed on the slide — do not default to 16:9 for everything:
+      - \`fullImage\` / \`cover\` background: 16:9 (e.g. 1920x1080) — fills the whole slide.
+      - \`imageLeft\` / \`imageRight\`: 4:3 or 1:1 (e.g. 1024x1024) — a portrait/square image alongside text.
+      - \`iconGrid\` item icons / small accents: 1:1 (e.g. 512x512).
+      - \`statement\` decorative background: 16:9 but composed with negative space for text overlay.
+   d. **Decide background transparency per image** based on how it will be used — the agent must choose deliberately:
+      - Transparent background (PNG with alpha): icons, illustrations, diagrams, decorative shapes, logos, and any element that sits on top of a colored slide background. Prompt with "isolated on transparent background" or "no background, PNG alpha".
+      - Opaque background: full-bleed photographs, full-slide composites, and any image meant to fill its container edge-to-edge. Use the slide's palette or a natural scene as the background.
+   e. Call \`codex_generate_image\` or \`nano-banana-generate\` with the chosen prompt, aspect ratio, and transparency decision. Both tools accept width/height parameters.
+   f. Save each generated image with \`save-image\` to a local path (e.g., the workspace directory).
+   g. Reference each saved path in the slide spec via \`imagePath\` or \`images: [{path, alt, fit}]\`.
+   h. Use layouts that showcase images: \`imageLeft\`, \`imageRight\`, \`fullImage\` for image-led slides, and \`cover\` with \`images\` for the title slide.
 8. Call \`pptx_create\` with \`designBrief\`, \`renderMode: "hybrid"\`, a theme preset or custom theme, and an explicit semantic \`layout\` for each slide. Use concise visible copy; put supporting detail, generation notes, and sources in structured speaker notes. Include \`imagePath\` or \`images\` on every slide that has a generated visual.
 9. Every slide needs a meaningful visual device: image, native chart/table, diagram, process/timeline, metric composition, icon system, or intentionally composed shapes. Avoid text-only slides. For related generated images, reuse one art-direction prompt and save generation notes so the deck remains extendable.
 10. Acquire images in this order: user-provided high-resolution assets; AI-generated visuals tailored to the narrative; licensed stock/search results. Track source and attribution requirements. Never use generic filler imagery.
