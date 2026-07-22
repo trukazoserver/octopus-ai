@@ -50,5 +50,11 @@ describe("office file mastery builtin skills", () => {
 		expect(presentation?.instructions).toMatch(/Do not default to Aptos/i);
 		expect(presentation?.instructions).toMatch(/Content, Design, and Coherence/i);
 		expect(presentation?.instructions).toMatch(/montage/i);
+		expect(presentation?.instructions).toContain("list_skills");
+		expect(presentation?.instructions).toContain("start_run");
+		expect(presentation?.instructions).toContain("open-design__*");
+		expect(presentation?.instructions).toMatch(
+			/native PPTX workflow as fallback/i,
+		);
 	});
 });

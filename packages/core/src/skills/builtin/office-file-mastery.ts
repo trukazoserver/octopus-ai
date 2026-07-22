@@ -107,6 +107,7 @@ Use this skill whenever the user asks to create, edit, redesign, format, or gene
 ${COMMON_RULES}
 
 ## Preferred stack
+- When the Open Design MCP tools are available, use Open Design as the preferred sidecar for high-fidelity new decks and substantial redesigns. It owns its design skills, templates, preview, iteration, and export pipeline while Octopus remains the orchestrator and keeps the native PPTX workflow as fallback.
 - Create PPTX with \`pptxgenjs\`: slide masters, layouts, text, images, tables, charts, speaker notes, sections, shapes, hyperlinks.
 - Use images from local paths or generated media; preserve aspect ratio with contain/cover/crop sizing.
 - Fill existing presentation templates with \`pptx_template_fill\`; preserve masters, layouts, geometry, media, and animations.
@@ -130,6 +131,17 @@ ${COMMON_RULES}
 14. Search screenshots/scans embedded in slides with \`office_extract_media\` OCR when relevant.
 15. Review the quality report from \`pptx_create\` across Content, Design, and Coherence. Revise low-scoring slides before rendering.
 16. Validate structurally with \`office_inspect\`, then render every slide with \`office_convert_preview\` and request a montage. Review overflow/font warnings and inspect the montage with vision. Fix defects and rerender changed slides. If rendering is unavailable, report that blocker rather than claiming visual validation.
+
+## Open Design sidecar workflow
+Use this route for a new premium deck or a major visual redesign when the Open Design tools are present. Octopus normally publishes their short names (for example \`list_skills\`); if a name collides with another tool, use its \`open-design__*\` alias. Keep using the native workflow for small edits, strict native editability, or whenever the sidecar is unavailable.
+1. Call \`list_skills\` and select a deck recipe that matches the brief. Strong general options include \`deck-open-slide-canvas\`, \`deck-swiss-international\`, \`slides\`, \`pptx\`, and \`pptx-generator\`; do not choose by name alone when the descriptions indicate a better fit.
+2. Call \`list_agents\` and use an available agent. Do not assume a specific provider, model, or authenticated agent is configured.
+3. Create a named project with \`create_project\`, attaching the selected skill. Preserve the returned project id.
+4. Call \`start_run\` with the project id, skill, agent, and the complete researched brief: audience, narrative, source manifest, visual system, slide map, editability requirement, speaker notes, and output format.
+5. Poll \`get_run\` until the status is terminal. Do not claim completion while it is queued or running. On authentication, provider, model, or generation failure, surface the error and fall back to \`pptx_create\` rather than silently stopping.
+6. On success, inspect \`get_project\`, \`list_files\`, and \`get_artifact\`. Use the returned resolved project directory to copy the exported PPTX/PDF into the Octopus workspace when the binary is not embedded in the MCP response.
+7. Run the same Octopus structural and visual QA on the exported PPTX: \`office_inspect\`, \`office_convert_preview\`, montage vision review, overflow, font portability, source checks, and at least one correction pass when defects are found.
+8. Report both the final deliverable path and the Open Design preview URL when available. Never leave the user with only a preview URL when they asked for a downloadable presentation.
 
 ## Quality checklist
 - Every slide has a single purpose and a takeaway title rather than a generic topic label.

@@ -609,6 +609,15 @@ export {
 	getZaiMCPConfigs,
 	resolveZaiMCPAuth,
 } from "./plugins/mcp/zai-servers.js";
+export {
+	discoverOpenDesignIntegration,
+	ensureOpenDesignSidecar,
+	isOpenDesignSidecarAvailable,
+} from "./plugins/mcp/open-design.js";
+export type {
+	OpenDesignDiscoveryOptions,
+	OpenDesignIntegration,
+} from "./plugins/mcp/open-design.js";
 
 export { ChannelManager } from "./channels/manager.js";
 export { TelegramChannel } from "./channels/telegram/index.js";

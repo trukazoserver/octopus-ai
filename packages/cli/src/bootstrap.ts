@@ -91,6 +91,8 @@ import {
 	createTeamTools,
 	createVectorStore,
 	createWorkflowTools,
+	discoverOpenDesignIntegration,
+	ensureOpenDesignSidecar,
 	expandTildePath,
 	generateEncryptionKey,
 	getCachedQuota,
@@ -2308,6 +2310,39 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		| undefined;
 	const zaiMcpAuth = resolveZaiMCPAuth(zhipuProvider, process.env);
 	const mcpAutoDisabled = (config.mcp?.autoDisabled || []) as string[];
+	const openDesign = discoverOpenDesignIntegration();
+	if (openDesign && !mcpAutoDisabled.includes("open-design")) {
+		config.mcp = config.mcp ?? { servers: {}, autoDisabled: [] };
+		config.mcp.servers = config.mcp.servers ?? {};
+		const existingOpenDesign = config.mcp.servers["open-design"] as
+			| MCPServerConfig
+			| undefined;
+		if (!existingOpenDesign) {
+			config.mcp.servers["open-design"] = openDesign.mcpConfig;
+		}
+		const configuredOpenDesign = config.mcp.servers[
+			"open-design"
+		] as MCPServerConfig;
+		if (configuredOpenDesign.enabled !== false) {
+			const ready = await ensureOpenDesignSidecar(openDesign);
+			if (ready) {
+				console.log("  Open Design sidecar ready");
+			} else {
+				console.warn(
+					"  Open Design is installed but its sidecar could not be started; disabling its MCP server until it is re-enabled.",
+				);
+				config.mcp.servers["open-design"] = {
+					...configuredOpenDesign,
+					enabled: false,
+				};
+			}
+		}
+		try {
+			new ConfigLoader().save(config);
+		} catch {
+			/* config will still be used in-memory for this boot */
+		}
+	}
 	if (zaiMcpAuth) {
 		const officialZaiConfigs = getZaiMCPConfigs(
 			zaiMcpAuth.apiKey,
