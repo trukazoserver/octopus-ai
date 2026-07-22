@@ -1447,7 +1447,7 @@ export async function runStart(options: StartOptions): Promise<void> {
 						channel: "chat",
 						payload: {
 							execution,
-							agentStatus: execution.current_status ?? "thinking",
+							agentStatus: execution.current_status ?? "working",
 							conversationId: execution.conversation_id,
 							executionId: execution.id,
 						},

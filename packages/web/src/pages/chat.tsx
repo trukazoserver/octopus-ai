@@ -234,12 +234,17 @@ type AgentActivityStatus =
 	| "worker_progress"
 	| "worker_done"
 	| "worker_error"
+	| "phase_research"
+	| "phase_visual_direction"
+	| "phase_generation"
+	| "phase_validation"
 	| "tool"
 	| "code"
 	| "responding"
 	| "tool_done"
 	| "tool_error"
-	| "tool_skipped";
+	| "tool_skipped"
+	| "tool_reused";
 
 type AgentStatus = "idle" | AgentActivityStatus;
 
@@ -295,12 +300,17 @@ const AGENT_ACTIVITY_STATUSES = new Set<string>([
 	"worker_progress",
 	"worker_done",
 	"worker_error",
+	"phase_research",
+	"phase_visual_direction",
+	"phase_generation",
+	"phase_validation",
 	"tool",
 	"code",
 	"responding",
 	"tool_done",
 	"tool_error",
 	"tool_skipped",
+	"tool_reused",
 ]);
 
 interface Conversation {
@@ -654,8 +664,9 @@ function getActivityCopy(
 			};
 		case "working":
 			return {
-				label: "Trabajando",
-				detail: "Procesando la solicitud y preparando la siguiente acción.",
+				label: "Planificando la entrega",
+				detail:
+					"Analizando requisitos, fuentes, contenido y la mejor estrategia antes de ejecutar herramientas.",
 			};
 		case "orchestrating":
 			return {
@@ -682,6 +693,26 @@ function getActivityCopy(
 			return {
 				label: `Brazo ${toolLabel} falló`,
 				detail: "Brazo vivo reportó un error en su subtarea.",
+			};
+		case "phase_research":
+			return {
+				label: "Investigando contenido",
+				detail: "Buscando y contrastando fuentes para sustentar el archivo.",
+			};
+		case "phase_visual_direction":
+			return {
+				label: "Definiendo dirección visual",
+				detail: "Seleccionando concepto, tipografía, paleta y sistema de layouts.",
+			};
+		case "phase_generation":
+			return {
+				label: `Generando con ${toolLabel}`,
+				detail: "Construyendo el archivo y sus elementos visuales.",
+			};
+		case "phase_validation":
+			return {
+				label: "Validando el resultado",
+				detail: "Comprobando estructura, assets y calidad del archivo generado.",
 			};
 		case "tool":
 			return {
@@ -714,6 +745,11 @@ function getActivityCopy(
 				label: `${toolLabel} omitida`,
 				detail:
 					"Se evitó repetir una acción o exceder el presupuesto de herramientas.",
+			};
+		case "tool_reused":
+			return {
+				label: `${toolLabel} reutilizada`,
+				detail: "Se reutilizó un resultado válido de la misma ejecución.",
 			};
 	}
 }
@@ -1012,11 +1048,15 @@ function isExecutionActive(state?: ConversationExecutionState): boolean {
 
 function activityColor(status: AgentActivityStatus): string {
 	if (status === "orchestrating") return "#a78bfa";
+	if (status === "phase_research") return "#38bdf8";
+	if (status === "phase_visual_direction") return "#c084fc";
+	if (status === "phase_generation") return "#f59e0b";
+	if (status === "phase_validation") return "#34d399";
 	if (status === "worker_start" || status === "worker_progress")
 		return "#38bdf8";
 	if (status === "worker_done") return "#34d399";
 	if (status === "worker_error") return "#ef4444";
-	if (status === "tool_skipped") return "#a1a1aa";
+	if (status === "tool_skipped" || status === "tool_reused") return "#a1a1aa";
 	if (status === "tool" || status === "tool_done") return "#f59e0b";
 	if (status === "code") return "#10b981";
 	if (status === "tool_error") return "#ef4444";
@@ -1052,10 +1092,14 @@ type AgentActionKind =
 function getActivityActionKind(activity: AgentActivity): AgentActionKind {
 	const status = activity.status;
 	if (status === "thinking") return "thinking";
+	if (status === "phase_research") return "web";
+	if (status === "phase_visual_direction") return "plan";
+	if (status === "phase_generation") return "media";
+	if (status === "phase_validation") return "reading";
 	if (status === "responding") return "responding";
 	if (status === "tool_done" || status === "worker_done") return "done";
 	if (status === "tool_error" || status === "worker_error") return "error";
-	if (status === "tool_skipped") return "skipped";
+	if (status === "tool_skipped" || status === "tool_reused") return "skipped";
 	if (status === "orchestrating") return "orchestrating";
 
 	const tool = (activity.toolName ?? "").toLowerCase();

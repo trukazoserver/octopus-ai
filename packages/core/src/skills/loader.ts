@@ -60,6 +60,13 @@ export class SkillLoader {
 			threshold: this.config.searchThreshold,
 			limit: 5,
 		});
+		const explicitSkillId = this.explicitOfficeSkillId(task.description);
+		if (explicitSkillId && !matches.some((match) => match.skill.id === explicitSkillId)) {
+			const explicitSkill = await this.registry.getById(explicitSkillId);
+			if (explicitSkill && !explicitSkill.tags.includes("disabled")) {
+				matches.unshift({ skill: explicitSkill, similarity: 1, rankScore: Number.MAX_SAFE_INTEGER });
+			}
+		}
 
 		if (matches.length === 0) {
 			return [];
@@ -92,6 +99,26 @@ export class SkillLoader {
 		}
 
 		return loadedSkills;
+	}
+
+	private explicitOfficeSkillId(description: string): string | undefined {
+		const normalized = description
+			.normalize("NFD")
+			.replace(/\p{M}+/gu, "")
+			.toLowerCase();
+		if (/\b(powerpoint|pptx?|presentacion|diapositivas?|slide deck|pitch deck|board deck|sales deck|keynote)\b/.test(normalized)) {
+			return "builtin:presentation-mastery";
+		}
+		if (/\b(docx?|word|documento de word|informe word)\b/.test(normalized)) {
+			return "builtin:word-document-mastery";
+		}
+		if (/\b(xlsx?|excel|spreadsheet|hoja de calculo|libro de excel)\b/.test(normalized)) {
+			return "builtin:spreadsheet-mastery";
+		}
+		if (/\b(pdf|documento pdf)\b/.test(normalized)) {
+			return "builtin:pdf-data-mastery";
+		}
+		return undefined;
 	}
 
 	async listSkills(): Promise<Skill[]> {

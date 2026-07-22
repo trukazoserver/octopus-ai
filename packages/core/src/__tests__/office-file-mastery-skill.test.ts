@@ -23,4 +23,25 @@ describe("office file mastery builtin skills", () => {
 			expect(skill.dependencies.length).toBeGreaterThan(0);
 		}
 	});
+
+	it("requires research, visual direction, layout diversity, and rendered QA", () => {
+		const embeddings = Object.fromEntries(
+			officeFileMasteryEmbeddingTexts().map(({ id }) => [id, [1, 0, 0]]),
+		);
+		const skills = buildOfficeFileMasterySkills(embeddings);
+		const presentation = skills.find(
+			(skill) => skill.id === "builtin:presentation-mastery",
+		);
+
+		expect(presentation?.instructions).toMatch(/source mode/i);
+		expect(presentation?.instructions).toMatch(/source manifest/i);
+		expect(presentation?.instructions).toMatch(/visual system/i);
+		expect(presentation?.instructions).toMatch(/palette roles with HEX/i);
+		expect(presentation?.instructions).toMatch(/at least three reusable layout families/i);
+		expect(presentation?.instructions).toContain("designBrief");
+		expect(presentation?.instructions).toContain("office_inspect");
+		expect(presentation?.instructions).toMatch(/render every slide/i);
+		expect(presentation?.instructions).toMatch(/text-only/i);
+		expect(presentation?.instructions).toMatch(/traceable sources/i);
+	});
 });

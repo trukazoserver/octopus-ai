@@ -68,4 +68,34 @@ describe("SkillLoader content safety", () => {
 		expect(loaded).toHaveLength(1);
 		expect(loaded[0]?.content).toContain("Content safety notice");
 	});
+
+	it("pins presentation mastery for explicit Spanish presentation requests", async () => {
+		const presentation = {
+			...createSkill("Premium presentation workflow"),
+			id: "builtin:presentation-mastery",
+			name: "presentation-mastery",
+		};
+		const registry = {
+			search: async () => [],
+			getById: async (id: string) =>
+				id === presentation.id ? presentation : undefined,
+			list: async () => [presentation],
+		};
+		const loader = new SkillLoader(registry as never, async () => [0], {
+			maxTokenBudget: 3000,
+			progressiveLevels: true,
+			autoUnload: false,
+			searchThreshold: 0.9,
+		});
+
+		const loaded = await loader.resolveSkillsForTask({
+			description:
+				"Crea una presentación para el directorio con gráficos y fuentes actuales",
+			complexity: 4,
+			domains: ["presentations"],
+			keywords: ["presentación", "directorio"],
+		});
+
+		expect(loaded[0]?.skill.id).toBe("builtin:presentation-mastery");
+	});
 });

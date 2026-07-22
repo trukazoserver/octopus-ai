@@ -18,7 +18,7 @@ import {
 	expandHome,
 	isPathInsideAny,
 } from "../utils/path-safety.js";
-import type { ToolDefinition, ToolResult } from "./registry.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./registry.js";
 
 const PREVIEW_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M2 12s3-4 7-4 7 4 7 4-3 4-7 4-7-4-7-4Z"/><circle cx="9" cy="12" r="1"/></svg>`;
 const SUPPORTED_OFFICE = new Set([".doc", ".docx", ".rtf", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".ods", ".odp"]);
@@ -26,6 +26,17 @@ const CONVERSION_TARGETS = new Set(["pdf", "docx", "xlsx", "pptx", "odt", "ods",
 const MAX_INPUT_BYTES = 250 * 1024 * 1024;
 const CONVERSION_TIMEOUT_MS = 150_000;
 const MAX_PREVIEW_PAGES = 20;
+
+function emitPreviewPhase(
+	context: ToolContext | undefined,
+	status: "phase_generation" | "phase_validation",
+	state: "started" | "completed" | "failed",
+	toolName: string,
+	message: string,
+): void {
+	const detail = Buffer.from(JSON.stringify({ phase: status, state, message })).toString("base64");
+	context?.onProgress?.(`\x00STATUS:${status}:${toolName}::${detail}\x00`);
+}
 
 export function createOfficePreviewTools(
 	allowedPaths: string[],
@@ -76,7 +87,7 @@ export function createOfficePreviewTools(
 				if (info.size > MAX_INPUT_BYTES) throw new Error(`Input exceeds ${MAX_INPUT_BYTES / 1024 / 1024} MB`);
 				const ext = path.extname(source).toLowerCase();
 				if (ext !== ".pdf" && !SUPPORTED_OFFICE.has(ext)) throw new Error(`Unsupported preview format: ${ext}`);
-				context?.onProgress?.("Preparing Office preview conversion");
+				emitPreviewPhase(context, "phase_generation", "started", "office_convert_preview", "Convirtiendo el archivo de Office a PDF para revisión visual.");
 				if (ext === ".pdf") {
 					if (!samePath(source, outputPath)) await copyFile(source, outputPath);
 				} else {
@@ -84,6 +95,8 @@ export function createOfficePreviewTools(
 						abortSignal: context?.agent?.abortSignal,
 					});
 				}
+				emitPreviewPhase(context, "phase_generation", "completed", "office_convert_preview", "Conversión a PDF completada.");
+				emitPreviewPhase(context, "phase_validation", "started", "office_convert_preview", "Validando PDF y renderizando las páginas solicitadas.");
 				const pdfBytes = await readFile(outputPath);
 				if (pdfBytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("Converted output is not a valid PDF");
 				let previewPaths: string[] = [];
@@ -95,13 +108,13 @@ export function createOfficePreviewTools(
 					if (!params.overwrite && (await directoryHasFiles(previewDir))) {
 						throw new Error(`Preview directory is not empty: ${previewDir}`);
 					}
-					context?.onProgress?.("Rendering PDF preview pages");
 					try {
 						previewPaths = await renderPdfPreviewPages(outputPath, previewDir, optionalString(params.previewPages) ?? "1");
 					} catch (err) {
 						previewWarning = err instanceof Error ? err.message : String(err);
 					}
 				}
+				emitPreviewPhase(context, "phase_validation", "completed", "office_convert_preview", `Vista previa validada con ${previewPaths.length} página(s) renderizada(s).`);
 				return {
 					success: true,
 					output: JSON.stringify(
@@ -119,6 +132,7 @@ export function createOfficePreviewTools(
 					metadata: { pdfPath: outputPath, previewPaths, previewWarning },
 				};
 			} catch (err) {
+				emitPreviewPhase(context, "phase_validation", "failed", "office_convert_preview", err instanceof Error ? err.message : String(err));
 				return {
 					success: false,
 					output: "",
@@ -150,14 +164,17 @@ export function createOfficePreviewTools(
 				if (!SUPPORTED_OFFICE.has(sourceExt)) throw new Error(`Unsupported Office input: ${sourceExt}`);
 				if (!CONVERSION_TARGETS.has(target)) throw new Error(`Unsupported conversion target: ${target}`);
 				if (!params.overwrite && await pathExists(outputPath)) throw new Error(`Output already exists: ${outputPath}`);
-				context?.onProgress?.(`Converting ${sourceExt.slice(1).toUpperCase()} to ${target.toUpperCase()}`);
+				emitPreviewPhase(context, "phase_generation", "started", "office_convert", `Convirtiendo ${sourceExt.slice(1).toUpperCase()} a ${target.toUpperCase()}.`);
 				await convertOfficeFile(source, outputPath, target, { abortSignal: context?.agent?.abortSignal });
+				emitPreviewPhase(context, "phase_generation", "completed", "office_convert", "Conversión de formato completada.");
+				emitPreviewPhase(context, "phase_validation", "completed", "office_convert", "Archivo de salida verificado.");
 				return {
 					success: true,
 					output: JSON.stringify({ operation: "office_convert", source, outputPath, target, validated: true }, null, 2),
 					metadata: { outputPath, target },
 				};
 			} catch (error) {
+				emitPreviewPhase(context, "phase_validation", "failed", "office_convert", error instanceof Error ? error.message : String(error));
 				return { success: false, output: "", error: error instanceof Error ? error.message : String(error) };
 			}
 		},

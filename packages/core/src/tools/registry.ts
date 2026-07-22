@@ -109,7 +109,13 @@ export interface ToolDefinition {
 	longRunning?: boolean;
 	parameters: Record<
 		string,
-		{ type: string; description: string; required?: boolean }
+		{
+			type: string;
+			description: string;
+			required?: boolean;
+			/** Additional JSON Schema constraints exposed to the model. */
+			schema?: Record<string, unknown>;
+		}
 	>;
 	handler: (
 		params: Record<string, unknown>,
@@ -181,6 +187,7 @@ export class ToolRegistry {
 							Object.entries(tool.parameters).map(([key, param]) => [
 								key,
 								{
+									...(param.schema ?? {}),
 									type: normalizeSchemaType(param.type),
 									description:
 										typeof param.description === "string"

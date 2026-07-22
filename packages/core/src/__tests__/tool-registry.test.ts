@@ -96,5 +96,32 @@ describe("ToolRegistry", () => {
 			const llmTools = registry.toLLMTools();
 			expect(llmTools[0]?.function.parameters.required).toContain("input");
 		});
+
+		it("preserves nested JSON Schema constraints", () => {
+			const tool = createTool("structured");
+			tool.parameters.items = {
+				type: "array",
+				description: "Structured items",
+				schema: {
+					minItems: 1,
+					items: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							layout: { type: "string", enum: ["cover", "chart"] },
+						},
+					},
+				},
+			};
+			registry.register(tool);
+
+			const property = registry.toLLMTools()[0]?.function.parameters.properties
+				?.items as Record<string, unknown>;
+			expect(property.minItems).toBe(1);
+			expect(property.items).toMatchObject({
+				type: "object",
+				additionalProperties: false,
+			});
+		});
 	});
 });

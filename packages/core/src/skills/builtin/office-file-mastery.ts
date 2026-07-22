@@ -23,6 +23,10 @@ type BuiltinSkillSpec = {
 
 const COMMON_RULES = `## Operating rules
 - First classify the user's intent: read/extract, search, create, edit, convert, validate, or repair.
+- Before creating a polished artifact, define a compact creative brief: audience, purpose, desired action, tone, content hierarchy, visual concept, typography, palette, layout system, and the role of images, tables, charts, and callouts. Infer sensible choices from the topic when the user did not specify them; do not fall back to a generic template without considering fit.
+- Choose a source mode before outlining: (a) user-provided sources, (b) external research required, or (c) creative/internal content that needs no external claims. If factual material is missing, time-sensitive, or explicitly requested, use available web/search/read tools and collect authoritative current sources before generation. Never imply research occurred when no research tool ran.
+- Convert research into a source manifest and claim-to-source map. Preserve URLs, titles, and dates in notes, footnotes, citations, or a sources section appropriate to the file type.
+- Treat visual direction as part of correctness, not decoration. The artifact should look intentionally designed for its subject and audience, with a coherent system rather than ad-hoc formatting.
 - Preserve the original file unless the user explicitly asks to overwrite it. Write a new version with a clear suffix.
 - For binary formats, prefer a library or dedicated tool over manual byte/string editing.
 - Use deterministic scripts for generation/edits. Save scripts only when useful for repeatability; otherwise keep them temporary.
@@ -109,26 +113,29 @@ ${COMMON_RULES}
 - For localized changes in an existing deck, use \`pptx_edit\` with selected slides and a new output path.
 - Convert to PDF/PNGs with \`office_convert_preview\` for visual QA when LibreOffice is available.
 
-## Workflow
-1. Start with a slide map: audience, goal, duration, number of slides, narrative arc, and visual style.
-2. Choose layout size and theme before slide creation: 16:9 default, brand colors, fonts, title/body sizes, footer/slide numbers.
-3. Use masters/reusable layout constants so every slide aligns. Avoid manually inventing coordinates per slide unless necessary.
-4. For each slide, define one main message. Use concise titles, 3-5 bullets max, and visual hierarchy.
-5. Images: fit into reserved boxes, never stretch; crop intentionally; add alt text where supported. Place captions or labels when needed.
-6. Tables: keep them small. For dense data, create a summary chart or split across slides.
-7. Charts: label axes/units, use readable legends, avoid too many series, and ensure colors contrast.
-8. Speaker notes: include what to say, not duplicate slide text.
-9. Animations/transitions: use sparingly. If native library support is limited, design static build-ready slides and note intended animation sequence.
-10. Search screenshots/scans embedded in slides with \`office_extract_media\` OCR when relevant.
-11. Validate with \`office_inspect\`, then export/render with \`office_convert_preview\`. Inspect each slide preview for overflow, alignment, missing images, tables, and slide count before delivery.
+## Premium workflow
+1. Establish source mode before writing the outline. Inspect supplied material first. When facts are missing, current, or explicitly requested, research with available search/read tools and keep a source manifest. Map important claims and numbers to sources before generation.
+2. Write a presentation brief before calling \`pptx_create\`: audience, decision/action, duration, slide count, thesis, narrative arc, and evidence plan.
+3. Define the visual system explicitly: a topic-appropriate concept in 2-3 adjectives; palette roles with HEX values; heading/body fonts; type scale; grid/margins; spacing rhythm; shape/line vocabulary; image treatment; chart palette; table treatment; footer, numbering, and citation style. Infer a distinctive direction when the user gives no style.
+4. Build a slide map with assertion titles and at least three reusable layout families. Avoid more than two consecutive slides with the same composition. Do not default to title-and-bullets when a statement, metric grid, comparison, process, timeline, chart, table, quote, or image-led slide communicates better.
+5. Call \`pptx_create\` with \`designBrief\`, a theme preset or custom theme, and an explicit semantic \`layout\` for each slide. Use concise visible copy; put supporting detail and sources in structured speaker notes.
+6. Images must be intentional, high-resolution, aspect-correct, and relevant. Generate or source visuals when they materially improve comprehension; never add generic decorative imagery merely to fill space.
+7. Keep tables small and readable. Convert dense comparisons to a chart, metric cards, or multiple slides. Charts need labeled units, honest scales, readable legends, and source notes.
+8. Speaker notes explain what to say, transitions, caveats, and sources; they should not duplicate the visible slide.
+9. Search screenshots/scans embedded in slides with \`office_extract_media\` OCR when relevant.
+10. Validate structurally with \`office_inspect\`, then render every slide with \`office_convert_preview\` in batches of at most 20. Inspect previews directly with vision, or call an image-analysis tool when the active model is text-only. Fix defects and rerender changed slides. If rendering is unavailable, report that blocker rather than claiming visual validation.
 
 ## Quality checklist
-- Every slide has a single purpose.
-- Title and key visual align to grid.
-- No text overflow; fonts readable from a distance.
+- Every slide has a single purpose and a takeaway title rather than a generic topic label.
+- The visual concept fits the topic, audience, and requested tone; it does not look like an interchangeable generic template.
+- Palette, typography, spacing, image treatment, chart colors, and shape language are consistent.
+- Layouts vary with the narrative and at least three layout families are used when the deck length permits.
+- Title and key visual align to the grid; whitespace is intentional.
+- No text overflow; fonts are readable from a distance.
 - Images are not distorted and are high enough resolution.
 - Tables/charts are understandable in under 10 seconds.
-- Final response includes output path, slide count, and validation performed.`;
+- Factual claims and numbers have traceable sources in notes, footnotes, or a sources slide.
+- Final response includes output path, slide count, sources used, design direction, and validation performed.`;
 
 const PDF_INSTRUCTIONS = `# PDF mastery
 
@@ -214,9 +221,9 @@ const SPECS: BuiltinSkillSpec[] = [
 		id: "builtin:presentation-mastery",
 		name: "presentation-mastery",
 		description:
-		"Expert workflow for PowerPoint/PPTX creation and editing with professional slide layouts, images, tables, charts, speaker notes, themes, masters, and visual QA. Use whenever the user mentions PowerPoint, PPTX, slides, presentation, pitch deck, tables/images in slides, charts, or animations.",
+		"Premium workflow for PowerPoint/PPTX creation and editing with source research when needed, an explicit audience-specific visual system, semantic slide layouts, images, metrics, editable charts, styled tables, speaker notes, citations, and all-slide visual QA. Use whenever the user mentions PowerPoint, PPTX, slides, presentations, pitch/board/sales decks, keynote, charts, redesign, or animations, even when they only ask to make a presentation.",
 		tags: ["powerpoint", "pptx", "slides", "presentation", "design"],
-		keywords: ["powerpoint", "ppt", "pptx", "presentacion", "diapositiva", "slide", "pitch", "animacion", "tabla", "imagen"],
+		keywords: ["powerpoint", "ppt", "pptx", "presentacion", "presentación", "diapositiva", "slide", "deck", "pitch", "keynote", "board deck", "sales deck", "animacion", "tabla", "imagen"],
 		domains: ["office", "presentations", "design"],
 		instructions: PPT_INSTRUCTIONS,
 		examples: ["Crea una presentación PPTX con imágenes, tablas, gráficos y notas.", "Rediseña estas diapositivas para que se vean profesionales."],
@@ -272,7 +279,7 @@ function buildSkill(spec: BuiltinSkillSpec, embedding: number[]): Skill {
 	return {
 		id: spec.id,
 		name: spec.name,
-		version: "1.0.0",
+		version: "1.1.0",
 		description: spec.description,
 		tags: spec.tags,
 		embedding,

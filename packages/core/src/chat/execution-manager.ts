@@ -257,7 +257,7 @@ export class ChatExecutionManager {
 		};
 
 		try {
-			await updateExecution({ status: "running", currentStatus: "thinking" });
+			await updateExecution({ status: "running", currentStatus: "working" });
 			targetAgent.stm.clear();
 			const history = await this.opts.chatManager.getConversationMessages(
 				conversationId,
