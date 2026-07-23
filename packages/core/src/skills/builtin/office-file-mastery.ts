@@ -109,6 +109,7 @@ ${COMMON_RULES}
 
 ## Preferred stack
 - Create PPTX with \`pptxgenjs\`: slide masters, layouts, text, images, tables, charts, speaker notes, sections, shapes, hyperlinks.
+- **PREFER the HTML→PPTX route for visually rich decks**: write slides as HTML/CSS (each slide a \`<div class="slide">\` sized to 1280x720px), then call \`html_to_pptx\` to render each slide in headless Chromium and compose a clean PPTX. This gives you complete control over layout, typography, colors, gradients, image placement, and visual design — far beyond what fixed PPTX layouts allow.
 - Use images from local paths or generated media; preserve aspect ratio with contain/cover/crop sizing.
 - Fill existing presentation templates with \`pptx_template_fill\`; preserve masters, layouts, geometry, media, and animations.
 - For localized changes in an existing deck, use \`pptx_edit\` with selected slides and a new output path.
@@ -121,31 +122,31 @@ ${COMMON_RULES}
 4. Write a presentation brief before calling \`pptx_create\`: audience, decision/action, duration, slide count, thesis, narrative arc, evidence plan, output mode, and which slides require custom visuals.
 5. Define the visual system explicitly: a topic-appropriate art direction in 2-3 adjectives; dominant/support/accent palette roles with HEX values; safe heading/body fonts; type scale; grid/margins; spacing rhythm; one recurring visual motif; image-generation style prompt; chart palette; table treatment; footer, numbering, and citation style. Infer a distinctive direction when the user gives no style.
 6. Build a slide map with assertion titles and at least three reusable layout families. Treat each slide as a separate communication decision. Do not default to title-and-bullets when a statement, metric grid, comparison, process, timeline, chart, table, quote, diagram, or image-led slide communicates better.
-7. **Generate images BEFORE calling pptx_create.** This is mandatory for visually engaging decks. For at least 30% of slides (minimum: cover + 2 content slides + closing), generate a relevant image:
+7. **Generate images BEFORE building the HTML.** This is mandatory for visually engaging decks. For at least 30% of slides (minimum: cover + 2 content slides + closing), generate a relevant image:
    a. Identify which slides need images: cover always; slides explaining a concept or process; section dividers; closing slide.
-   b. Pick a consistent art-direction prompt derived from the visual system (style, palette, mood). Example: "Flat vector illustration, warm terracotta and sage palette, clean lines, educational, no text".
-   c. **Choose the right aspect ratio per image** based on where it will be placed on the slide — do not default to 16:9 for everything:
-      - \`fullImage\` / \`cover\` background: 16:9 (e.g. 1920x1080) — fills the whole slide.
-      - \`imageLeft\` / \`imageRight\`: 4:3 or 1:1 (e.g. 1024x1024) — a portrait/square image alongside text.
-      - \`iconGrid\` item icons / small accents: 1:1 (e.g. 512x512).
-      - \`statement\` decorative background: 16:9 but composed with negative space for text overlay.
-   d. **Decide background transparency per image** based on how it will be used — the agent must choose deliberately:
-      - Transparent background (PNG with alpha): icons, illustrations, diagrams, decorative shapes, logos, and any element that sits on top of a colored slide background. Prompt with "isolated on transparent background" or "no background, PNG alpha".
-      - Opaque background: full-bleed photographs, full-slide composites, and any image meant to fill its container edge-to-edge. Use the slide's palette or a natural scene as the background.
-   e. Call \`codex_generate_image\` or \`nano-banana-generate\` with the chosen prompt, aspect ratio, and transparency decision. Both tools accept width/height parameters.
-   f. Save each generated image with \`save-image\` to a local path (e.g., the workspace directory).
-   g. Reference each saved path in the slide spec via \`imagePath\` or \`images: [{path, alt, fit}]\`.
-   h. Use layouts that showcase images: \`imageLeft\`, \`imageRight\`, \`fullImage\` for image-led slides, and \`cover\` with \`images\` for the title slide.
-8. Call \`pptx_create\` with \`designBrief\`, \`renderMode: "hybrid"\`, a theme preset or custom theme, and an explicit semantic \`layout\` for each slide. Use concise visible copy; put supporting detail, generation notes, and sources in structured speaker notes. Include \`imagePath\` or \`images\` on every slide that has a generated visual.
-9. Every slide needs a meaningful visual device: image, native chart/table, diagram, process/timeline, metric composition, icon system, or intentionally composed shapes. Avoid text-only slides. For related generated images, reuse one art-direction prompt and save generation notes so the deck remains extendable.
-10. Acquire images in this order: user-provided high-resolution assets; AI-generated visuals tailored to the narrative; licensed stock/search results. Track source and attribution requirements. Never use generic filler imagery.
-11. Keep native objects editable when practical. Text stays text; simple charts stay PowerPoint charts; diagrams combine separate visual assets with native labels/connectors. Use studio mode only when fidelity is more important than editability.
-12. Avoid presentation patterns that look machine-generated: no decorative edge stripes, no automatic underline/accent line below every title, no identical layout repeated throughout, and no generic blue palette unrelated to the topic. Do not default to Aptos; use fonts that render reliably in both Office and LibreOffice unless the user supplies brand fonts.
-13. Keep tables small and readable. Convert dense comparisons to a chart, metric cards, or multiple slides. Charts need labeled units, honest scales, readable legends, and source notes.
-14. Speaker notes explain what to say, transitions, caveats, visual-generation prompts, and sources; they should not duplicate the visible slide.
-15. Search screenshots/scans embedded in slides with \`office_extract_media\` OCR when relevant.
-16. Review the quality report from \`pptx_create\` across Content, Design, and Coherence. Revise low-scoring slides before rendering.
-17. Validate structurally with \`office_inspect\`, then render every slide with \`office_convert_preview\` and request a montage. Review overflow/font warnings and inspect the montage with vision. Fix defects and rerender changed slides. If rendering is unavailable, report that blocker rather than claiming visual validation.
+   b. Pick a consistent art-direction prompt derived from the visual system (style, palette, mood).
+   c. **Choose the right aspect ratio per image** based on where it will be placed in the HTML layout — do not default to 16:9 for everything: full-width hero (16:9), side-by-side (4:3 or 1:1), small icons (1:1), decorative background (16:9 with negative space).
+   d. **Decide background transparency per image**: transparent (PNG alpha) for icons, illustrations, decorative shapes that sit on a colored background; opaque for full-bleed photographs and hero composites.
+   e. **Decide whether each image needs embedded text or not** — this is critical for clean design:
+      - Image WITHOUT text: use when you will overlay the slide title, labels, or body text using HTML/CSS on top of or beside the image. This is the DEFAULT — generate clean visuals and add all text in HTML.
+      - Image WITH text: use only when the text is intrinsic to the visual (e.g. an infographic, a labeled diagram, a chart, a poster). Prompt with "include the text '...' in the image" explicitly.
+   f. Call \`codex_generate_image\` or \`nano-banana-generate\` with the chosen prompt, aspect ratio, and transparency/text decision.
+   g. Save each generated image with \`save-image\` to a local path.
+8. **Build the slides as a single HTML file.** Write one HTML file containing all slides:
+   a. Each slide is \`<div class="slide" style="width:1280px;height:720px;">\`.
+   b. Use any CSS: flexbox, grid, absolute positioning, gradients, shadows, Google Fonts (via \`<link>\` or \`@import\`), SVG shapes, background images.
+   c. Reference your generated images with \`<img src="path/to/image.png">\` or CSS \`background-image: url(...)\`.
+   d. Place text, titles, captions exactly where you want them — no layout constraints.
+   e. Save the HTML file to the workspace with \`save-image\` or \`write_file\`.
+9. **Render the HTML to PPTX** by calling \`html_to_pptx\` with \`htmlPath\` pointing to your HTML file and \`outputPath\` for the final .pptx. The tool renders each slide at 2x DPI in headless Chromium and composes a clean PPTX with zero corruption risk (each slide is a single image).
+10. Validate structurally with \`office_inspect\`, then render with \`office_convert_preview\` to render every slide and request a montage. Review and fix if needed.
+11. Publish the final PPTX with \`import_media_file\`.
+12. Every slide needs a meaningful visual device: image, native chart/table, diagram, process/timeline, metric composition, icon system, or intentionally composed shapes. Avoid text-only slides.
+13. Avoid presentation patterns that look machine-generated: no decorative edge stripes, no automatic underline/accent line below every title, no identical layout repeated throughout, and no generic blue palette unrelated to the topic. Do not default to Aptos; use fonts that render reliably in both Office and LibreOffice unless the user supplies brand fonts.
+14. Keep tables small and readable. Charts need labeled units, honest scales, readable legends, and source notes.
+15. Speaker notes: provide them via the \`notes\` parameter of \`html_to_pptx\` as a JSON array (one string per slide).
+16. Review Content, Design, and Coherence in the montage. Fix defects and rerender.
+17. Factual claims and numbers must have traceable sources in notes or a sources slide.
 
 ## Schema reference for pptx_create (CRITICAL)
 

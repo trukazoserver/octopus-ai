@@ -46,9 +46,9 @@ describe("office file mastery builtin skills", () => {
 		expect(presentation?.instructions).toMatch(/reference-first workflow/i);
 		expect(presentation?.instructions).toContain("studio");
 		expect(presentation?.instructions).toMatch(/Every slide needs a meaningful visual device/i);
-		expect(presentation?.instructions).toMatch(/no decorative edge stripes/i);
-		expect(presentation?.instructions).toMatch(/Do not default to Aptos/i);
 		expect(presentation?.instructions).toMatch(/Content, Design, and Coherence/i);
 		expect(presentation?.instructions).toMatch(/montage/i);
+		expect(presentation?.instructions).toContain("html_to_pptx");
+		expect(presentation?.instructions).toMatch(/embedded text or not/i);
 	});
 });

@@ -384,6 +384,7 @@ export {
 	ArtifactIndex,
 	hashArtifactUnits,
 	createDataFileTools,
+	createHtmlToPptxTools,
 	createOfficeAdvancedTools,
 	createOfficeEditTools,
 	createOfficeMediaTools,

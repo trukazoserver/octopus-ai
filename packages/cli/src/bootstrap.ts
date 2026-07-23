@@ -78,6 +78,7 @@ import {
 	createLogger,
 	createMediaTools,
 	createNanoBananaImageTools,
+	createHtmlToPptxTools,
 	createOfficeAdvancedTools,
 	createOfficeEditTools,
 	createOfficeMediaTools,
@@ -1445,6 +1446,9 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		registerSystemTool(tool);
 	}
 	for (const tool of createOfficePreviewTools(allowedPaths, workspaceDir)) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createHtmlToPptxTools(allowedPaths, workspaceDir)) {
 		registerSystemTool(tool);
 	}
 	for (const tool of createDataFileTools(allowedPaths, workspaceDir)) {

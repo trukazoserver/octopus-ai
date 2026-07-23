@@ -40,6 +40,7 @@ export type {
 	ArtifactUnit,
 } from "./artifact-index.js";
 export { createDataFileTools } from "./data-file-tools.js";
+export { createHtmlToPptxTools } from "./html-to-pptx.js";
 export { createOfficeAdvancedTools } from "./office-advanced-tools.js";
 export { createOfficeEditTools } from "./office-edit-tools.js";
 export { createOfficeMediaTools } from "./office-media-tools.js";
