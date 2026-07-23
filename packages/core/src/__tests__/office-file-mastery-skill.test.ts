@@ -41,11 +41,11 @@ describe("office file mastery builtin skills", () => {
 		expect(presentation?.instructions).toContain("designBrief");
 		expect(presentation?.instructions).toContain("office_inspect");
 		expect(presentation?.instructions).toMatch(/render every slide/i);
-		expect(presentation?.instructions).toMatch(/text-only/i);
+		expect(presentation?.instructions).toMatch(/EVERY slide MUST have a visual element/i);
 		expect(presentation?.instructions).toMatch(/traceable sources/i);
 		expect(presentation?.instructions).toMatch(/reference-first workflow/i);
 		expect(presentation?.instructions).toContain("studio");
-		expect(presentation?.instructions).toMatch(/Every slide needs a meaningful visual device/i);
+		expect(presentation?.instructions).toMatch(/EVERY slide MUST have a visual element/i);
 		expect(presentation?.instructions).toMatch(/Content, Design, and Coherence/i);
 		expect(presentation?.instructions).toMatch(/montage/i);
 		expect(presentation?.instructions).toContain("html_to_pptx");
