@@ -539,7 +539,7 @@ export function createOfficeTools(
 	const pptxCreate: ToolDefinition = {
 		name: "pptx_create",
 		description:
-			"Create a premium .pptx presentation. IMPORTANT: Before calling this tool, you MUST generate at least 3 images with codex_generate_image or nano-banana-generate and save them with save-image, then reference them via imagePath or images[] in the slides. Text-only presentations look empty and unprofessional. Choose aspect ratio per slide placement (16:9 for fullImage/cover, 1:1 for imageLeft/imageRight/icons). Decide transparent vs opaque background per image. After generating images, call this tool with renderMode 'hybrid', a stylePreset, designBrief, theme, and a slides array using semantic layouts. Supports ten art directions, native charts, styled tables, process/timeline/icon grids, structured notes/citations, and a Content-Design-Coherence quality report.",
+			"Create a .pptx using fixed semantic layouts (cover, content, chart, table, etc). USE THIS ONLY for data-heavy decks with charts/tables, or quick simple presentations. For visually rich or designed presentations, DO NOT USE THIS TOOL — instead write slides as HTML/CSS and use the html_to_pptx tool, which gives complete design control (gradients, Google Fonts, custom layouts, precise image placement) and produces PPTX files that will not show as 'damaged' in PowerPoint. If you do use pptx_create, you MUST generate images first with codex_generate_image or nano-banana-generate.",
 		uiIcon: OFFICE_SVG,
 		managesOwnPathPolicy: true,
 		longRunning: true,
