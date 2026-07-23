@@ -36,7 +36,7 @@ describe("office file mastery builtin skills", () => {
 		expect(presentation?.instructions).toMatch(/source mode/i);
 		expect(presentation?.instructions).toMatch(/source manifest/i);
 		expect(presentation?.instructions).toMatch(/visual system/i);
-		expect(presentation?.instructions).toMatch(/palette roles with HEX/i);
+		expect(presentation?.instructions).toMatch(/HEX values/i);
 		expect(presentation?.instructions).toMatch(/at least three reusable layout families/i);
 		expect(presentation?.instructions).toContain("designBrief");
 		expect(presentation?.instructions).toContain("office_inspect");
