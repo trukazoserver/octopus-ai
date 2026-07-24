@@ -1434,6 +1434,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		registerSystemTool(tool);
 	}
 	for (const tool of createOfficeTools(allowedPaths, workspaceDir)) {
+		if (tool.name === "pptx_create") continue;
 		registerSystemTool(tool);
 	}
 	for (const tool of createOfficeAdvancedTools(allowedPaths, workspaceDir)) {
