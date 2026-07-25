@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { chromium } from "playwright";
 import pptxgen from "pptxgenjs";
 import { mkdir, readFile } from "node:fs/promises";
@@ -123,12 +124,31 @@ export function createHtmlToPptxTools(
 					};
 				}
 
-				let browser;
+			let browser;
+			try {
+				const launchOptions: { headless: boolean; args: string[]; executablePath?: string } = {
+					headless: true,
+					args: ["--no-sandbox", "--disable-setuid-sandbox"],
+				};
 				try {
-					browser = await chromium.launch({
-						headless: true,
-						args: ["--no-sandbox", "--disable-setuid-sandbox"],
-					});
+					browser = await chromium.launch(launchOptions);
+				} catch (_firstLaunchError) {
+					const fallbacks = [
+						"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+						"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+						"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+						"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+					];
+					const systemBrowser = fallbacks.find((p) => existsSync(p));
+					if (systemBrowser) {
+						browser = await chromium.launch({
+							...launchOptions,
+							executablePath: systemBrowser,
+						});
+					} else {
+						throw _firstLaunchError;
+					}
+				}
 					const context = await browser.newContext({
 						viewport: { width, height },
 						deviceScaleFactor: scale,
