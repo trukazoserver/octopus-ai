@@ -2148,26 +2148,43 @@ const ChatMessage = memo(function ChatMessage({
 			return getMediaFilename(url);
 		};
 
+		const activeDownloads = new Set<string>();
+
 		const downloadMedia = async (link: HTMLAnchorElement) => {
 			const href = link.href;
 			if (!href) return;
 
+			if (activeDownloads.has(href)) return;
+			activeDownloads.add(href);
+
+			const originalHTML = link.innerHTML;
+			const originalOpacity = link.style.opacity;
+			const originalPointerEvents = link.style.pointerEvents;
+			link.style.opacity = "0.5";
+			link.style.pointerEvents = "none";
+			if (!link.classList.contains("media-download-corner")) {
+				link.textContent = "Descargando...";
+			}
+
 			try {
-				const response = await fetch(href);
-				if (!response.ok) throw new Error(`HTTP ${response.status}`);
-				const blob = await response.blob();
-				const objectUrl = URL.createObjectURL(blob);
-				const filename = getDownloadFilename(href, response);
 				const tempLink = document.createElement("a");
-				tempLink.href = objectUrl;
-				tempLink.download = filename;
+				tempLink.href = href;
+				tempLink.download = getMediaFilename(href);
 				tempLink.style.display = "none";
 				document.body.appendChild(tempLink);
 				tempLink.click();
 				document.body.removeChild(tempLink);
-				window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 			} catch {
 				showToast("error", "No se pudo descargar el archivo");
+			} finally {
+				window.setTimeout(() => {
+					activeDownloads.delete(href);
+					link.style.opacity = originalOpacity;
+					link.style.pointerEvents = originalPointerEvents;
+					if (!link.classList.contains("media-download-corner")) {
+						link.innerHTML = originalHTML;
+					}
+				}, 2000);
 			}
 		};
 
