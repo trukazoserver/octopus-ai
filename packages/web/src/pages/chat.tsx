@@ -2805,6 +2805,7 @@ export const ChatPage: React.FC<{
 	const notifiedExecutionRef = useRef<Set<string>>(new Set());
 	const draftNewChatRef = useRef(false);
 	const markedRespondingRef = useRef<string>("");
+	const stoppedExecutionsRef = useRef<Set<string>>(new Set());
 	const [editingConvId, setEditingConvId] = useState<string | null>(null);
 	const [visibleMessageCount, setVisibleMessageCount] = useState(
 		INITIAL_VISIBLE_MESSAGES,
@@ -3363,10 +3364,11 @@ export const ChatPage: React.FC<{
 				) {
 					void loadConversationMessages(conversationId, { merge: true, signal: options?.signal });
 				}
-				if (
-					conversationId === activeConvRef.current &&
-					isExecutionActive(nextState)
-				) {
+			if (
+				conversationId === activeConvRef.current &&
+				isExecutionActive(nextState) &&
+				!stoppedExecutionsRef.current.has(nextState.executionId ?? "")
+			) {
 					setIsLoading(true);
 					setIsStreaming(Boolean(execution.assistant_message_id));
 					setAgentStatus(
@@ -3817,8 +3819,9 @@ export const ChatPage: React.FC<{
 					pendingIdRef.current = "";
 					loadConversations();
 					inputRef.current?.focus();
-				} else if (msg.type === "stream") {
-					const chunk = getPayloadText(msg.payload);
+			} else if (msg.type === "stream") {
+				if (executionId && stoppedExecutionsRef.current.has(executionId)) return;
+				const chunk = getPayloadText(msg.payload);
 					lastResponseChunkAtRef.current = Date.now();
 					const fallbackStreamId = `stream-${executionId ?? msg.id}`;
 					const streamId = assistantMessageId ?? fallbackStreamId;
@@ -3913,11 +3916,12 @@ export const ChatPage: React.FC<{
 						// Never let a flush error block the streaming-state reset below,
 						// which would leave the UI stuck "loading" forever.
 					}
-					setIsLoading(false);
-					setIsStreaming(false);
-					lastResponseChunkAtRef.current = 0;
-					markedRespondingRef.current = "";
-					resetAgentTrace();
+				setIsLoading(false);
+				setIsStreaming(false);
+				lastResponseChunkAtRef.current = 0;
+				markedRespondingRef.current = "";
+				if (executionId) stoppedExecutionsRef.current.delete(executionId);
+				resetAgentTrace();
 					pendingIdRef.current = "";
 					if (conversationId)
 						void loadConversationMessages(conversationId, { merge: true });
@@ -4461,6 +4465,13 @@ export const ChatPage: React.FC<{
 
 	const handleStopExecution = async () => {
 		if (!activeConversationId || !activeBusy) return;
+		const execId = activeExecution?.executionId;
+		if (execId) stoppedExecutionsRef.current.add(execId);
+		markedRespondingRef.current = "";
+		setIsLoading(false);
+		setIsStreaming(false);
+		setAgentStatus("idle");
+		resetAgentTrace();
 		try {
 			await apiPost(`/api/conversations/${activeConversationId}/stop`);
 			updateConversationExecution(activeConversationId, (prev) =>
@@ -4473,9 +4484,6 @@ export const ChatPage: React.FC<{
 						}
 					: prev,
 			);
-			setIsLoading(false);
-			setIsStreaming(false);
-			resetAgentTrace();
 			showToast("warning", "Tarea del agente detenida.");
 		} catch (error) {
 			showToast(
