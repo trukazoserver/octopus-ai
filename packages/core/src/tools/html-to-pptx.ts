@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import pptxgen from "pptxgenjs";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join, isAbsolute, resolve } from "node:path";
