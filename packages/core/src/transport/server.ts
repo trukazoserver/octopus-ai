@@ -249,6 +249,19 @@ const MEDIA_DIR = join(homedir(), ".octopus", "media");
 const MEDIA_META_PATH = join(MEDIA_DIR, "meta.json");
 const MEDIA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
+let cachedMediaMeta: MediaItem[] | null = null;
+let cachedMediaMetaMtime: number | null = null;
+let cachedMediaIndex: Map<string, MediaItem> | null = null;
+
+function getMediaIndex(): Map<string, MediaItem> {
+	const items = loadMediaMeta();
+	if (cachedMediaIndex && cachedMediaMeta) {
+		return cachedMediaIndex;
+	}
+	cachedMediaIndex = new Map(items.map((item) => [item.id, item]));
+	return cachedMediaIndex;
+}
+
 const MIME_EXTENSIONS: Record<string, string> = {
 	"image/png": ".png",
 	"image/jpeg": ".jpg",
@@ -307,8 +320,19 @@ function ensureMediaDir(): void {
 function loadMediaMeta(): MediaItem[] {
 	ensureMediaDir();
 	try {
+		const stat = statSync(MEDIA_META_PATH);
+		if (
+			cachedMediaMeta &&
+			cachedMediaMetaMtime &&
+			stat.mtimeMs === cachedMediaMetaMtime
+		) {
+			return cachedMediaMeta;
+		}
 		const data = readFileSync(MEDIA_META_PATH, "utf-8");
-		return JSON.parse(data) as MediaItem[];
+		cachedMediaMeta = JSON.parse(data) as MediaItem[];
+		cachedMediaMetaMtime = stat.mtimeMs;
+		cachedMediaIndex = null;
+		return cachedMediaMeta;
 	} catch {
 		return [];
 	}
@@ -317,6 +341,9 @@ function loadMediaMeta(): MediaItem[] {
 function saveMediaMeta(items: MediaItem[]): void {
 	ensureMediaDir();
 	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
+	cachedMediaMeta = items;
+	cachedMediaMetaMtime = statSync(MEDIA_META_PATH).mtimeMs;
+	cachedMediaIndex = null;
 }
 
 // Run a child process without blocking the event loop (unlike spawnSync, which
@@ -8290,8 +8317,7 @@ export class TransportServer {
 		// Strip any extension from the id (e.g. "uuid.png" -> "uuid")
 		const pureId = id.replace(/\.[^.]+$/, "");
 		if (!MEDIA_ID_PATTERN.test(pureId)) return null;
-		const items = loadMediaMeta();
-		const item = items.find((m) => m.id === pureId);
+		const item = getMediaIndex().get(pureId);
 		if (!item) return null;
 		const ext = extname(item.filename) || MIME_EXTENSIONS[item.mimetype] || "";
 		const filePath = resolveRelativePathInside(MEDIA_DIR, pureId + ext);
