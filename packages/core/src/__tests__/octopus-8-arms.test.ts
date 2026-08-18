@@ -54,6 +54,7 @@ function createMockLLMRouter(
 function createMockToolRegistry(): ToolRegistry {
 	return {
 		list: vi.fn().mockReturnValue([]),
+		listForModel: vi.fn().mockReturnValue([]),
 		has: vi.fn().mockReturnValue(false),
 		get: vi.fn().mockReturnValue(undefined),
 		register: vi.fn(),

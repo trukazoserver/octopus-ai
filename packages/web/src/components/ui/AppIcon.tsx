@@ -19,6 +19,7 @@ export type AppIconName =
 	| "image"
 	| "key"
 	| "lock"
+	| "logout"
 	| "menu"
 	| "message"
 	| "music"
@@ -118,6 +119,12 @@ const paths: Record<AppIconName, React.ReactNode> = {
 		<>
 			<rect x="5" y="10" width="14" height="10" rx="2" />
 			<path d="M8 10V7a4 4 0 0 1 8 0v3" />
+		</>
+	),
+	logout: (
+		<>
+			<path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4" />
+			<path d="m15 8 4 4-4 4M19 12H9" />
 		</>
 	),
 	menu: <path d="M4 7h16M4 12h16M4 17h16" />,

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chromium } from "patchright";
+import { chromium, type Browser } from "patchright";
 import pptxgen from "pptxgenjs";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join, isAbsolute, resolve } from "node:path";
@@ -26,7 +26,7 @@ export function createHtmlToPptxTools(
 			name: "html_to_pptx",
 			uiIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M3 8h18M8 21h8M12 17v4"/></svg>`,
 			description:
-				"THE PREFERRED WAY to create presentations. Write slides as HTML/CSS, this tool renders them into a pixel-perfect PPTX. Each '<div class=\"slide\">' (1280x720px) is captured at 2x DPI and placed as a full-slide image. This gives you COMPLETE design control: custom layouts, Google Fonts, gradients, precise image placement, shadows, any visual style you can imagine. The output PPTX never shows as 'damaged' because it contains only clean images. WORKFLOW: (1) Generate images with codex_generate_image or nano-banana-generate. (2) Write ONE HTML file containing all slides as divs. (3) Call this tool. Use this instead of pptx_create for all designed presentations.",
+				"THE PREFERRED WAY to create presentations. Write slides as HTML/CSS, this tool renders them into a pixel-perfect PPTX. Each '<div class=\"slide\">' (1280x720px) is captured at 2x DPI and placed as a full-slide image. This gives you COMPLETE design control: custom layouts, Google Fonts, gradients, precise image placement, shadows, any visual style you can imagine. The output PPTX never shows as 'damaged' because it contains only clean images. WORKFLOW: (1) Generate images with generate_image. (2) Write ONE HTML file containing all slides as divs. (3) Call this tool. Use this instead of pptx_create for all designed presentations.",
 			parameters: {
 				htmlPath: {
 					type: "string",
@@ -124,7 +124,7 @@ export function createHtmlToPptxTools(
 					};
 				}
 
-			let browser;
+			let browser: Browser | null = null;
 			try {
 				const launchOptions: { headless: boolean; args: string[]; executablePath?: string } = {
 					headless: true,
@@ -149,6 +149,7 @@ export function createHtmlToPptxTools(
 						throw _firstLaunchError;
 					}
 				}
+					if (!browser) throw new Error("Failed to launch browser");
 					const context = await browser.newContext({
 						viewport: { width, height },
 						deviceScaleFactor: scale,

@@ -12,6 +12,7 @@ import {
 	useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { UserMenu } from "../components/UserMenu.js";
 import { showToast } from "../components/ui/Toast.js";
 import {
 	API_BASE,
@@ -4925,7 +4926,7 @@ export const ChatPage: React.FC<{
 							borderTop: "1px solid #111",
 							display: "grid",
 							gap: "10px",
-							overflowX: "hidden",
+							overflow: "visible",
 							boxSizing: "border-box",
 						}}
 					>
@@ -4984,104 +4985,10 @@ export const ChatPage: React.FC<{
 							</span>
 							<span style={{ flex: 1 }}>Biblioteca de medios</span>
 						</button>
-						<button
-							type="button"
-							onClick={() => onNavigate?.("settings")}
-							style={{
-								width: "100%",
-								boxSizing: "border-box",
-								padding: "10px 12px",
-								borderRadius: "14px",
-								border: "none",
-								background: "transparent",
-								color: "#f4f4f5",
-								fontFamily: "inherit",
-								cursor: "pointer",
-								display: "flex",
-								alignItems: "center",
-								gap: "10px",
-								textAlign: "left",
-							}}
-							data-tooltip="Configuración y resto de secciones"
-						>
-							<span
-								style={{
-									width: "30px",
-									height: "30px",
-									borderRadius: "999px",
-									background: "#27272a",
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "center",
-									flexShrink: 0,
-								}}
-							>
-								<svg
-									aria-hidden="true"
-									width="17"
-									height="17"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="#c4b5fd"
-									strokeWidth="2"
-									strokeLinecap="round"
-									strokeLinejoin="round"
-								>
-									<path d="M20 21a8 8 0 0 0-16 0" />
-									<circle cx="12" cy="8" r="4" />
-								</svg>
-							</span>
-							<span style={{ flex: 1, minWidth: 0 }}>
-								<span
-									style={{
-										display: "block",
-										fontSize: "0.84rem",
-										fontWeight: 800,
-									}}
-								>
-									Usuario Local
-								</span>
-								<span
-									style={{
-										display: "block",
-										fontSize: "0.7rem",
-										color: "#71717a",
-									}}
-								>
-									Auto-hospedado
-								</span>
-							</span>
-							<span
-								aria-hidden="true"
-								style={{
-									width: "34px",
-									height: "34px",
-									borderRadius: "12px",
-									border: "1px solid #2f2f35",
-									background: "#17171b",
-									color: "#d4d4d8",
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "center",
-									flexShrink: 0,
-								}}
-							>
-								<svg
-									aria-hidden="true"
-									width="17"
-									height="17"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									strokeWidth="2"
-									strokeLinecap="round"
-									strokeLinejoin="round"
-								>
-									<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
-									<path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.08a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.08a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.11.35.39.72 1.55 1H21a2 2 0 1 1 0 4h-.08a1.7 1.7 0 0 0-1.52 1Z" />
-								</svg>
-							</span>
-						</button>
+						<UserMenu
+							compact
+							onOpenSettings={() => onNavigate?.("settings")}
+						/>
 					</div>
 				</div>
 			)}

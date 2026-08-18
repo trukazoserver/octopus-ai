@@ -369,6 +369,7 @@ export class AgentRuntime {
 	private rollingContexts = new Map<string, RollingContextManager>();
 	private rollingContextHydrated = new Set<string>();
 	private lastMemoryTrace?: RuntimeMemoryTrace;
+	private memoryEnabled = true;
 
 	constructor(
 		config: AgentConfig,
@@ -482,7 +483,7 @@ export class AgentRuntime {
 		trace?: RuntimeMemoryTrace;
 		explanations: MemoryExplanation[];
 	}> {
-		if (!this.lastMemoryTrace || !this.memoryOrchestrator) {
+		if (!this.memoryEnabled || !this.lastMemoryTrace || !this.memoryOrchestrator) {
 			return { trace: this.lastMemoryTrace, explanations: [] };
 		}
 		const explanations = await this.memoryOrchestrator.explain(
@@ -760,7 +761,16 @@ export class AgentRuntime {
 		if (this.durableEventStream) scope.setDurableEventStream(this.durableEventStream);
 		if (this.subtaskTracker) scope.setSubtaskTracker(this.subtaskTracker);
 		if (this.orchestratorConfig) scope.enableOrchestrator(this.orchestratorConfig);
+		scope.setMemoryEnabled(this.memoryEnabled);
 		return scope;
+	}
+
+	setMemoryEnabled(enabled: boolean): void {
+		this.memoryEnabled = enabled;
+		if (!enabled) {
+			this.lastMemoryTrace = undefined;
+			this.userProfileCache = null;
+		}
 	}
 
 	setToolIterationLimit(
@@ -924,6 +934,7 @@ export class AgentRuntime {
 		assistantTurn: ConversationTurn,
 		channelId?: string,
 	): void {
+		if (!this.memoryEnabled) return;
 		if (this.userProfileManager) {
 			this.userProfileManager
 				.updateFromConversation(
@@ -1198,10 +1209,20 @@ export class AgentRuntime {
 							actionId,
 							JSON.stringify(result),
 						);
+					} else if (
+						result.metadata?.submissionState === "accepted" ||
+						result.metadata?.submissionState === "unknown"
+					) {
+						await this.chatManager.markToolActionUncertain(
+							actionId,
+							result.error ?? "Tool completion state is uncertain",
+							JSON.stringify(result),
+						);
 					} else {
 						await this.chatManager.failToolAction(
 							actionId,
 							result.error ?? "Tool returned an unsuccessful result",
+							JSON.stringify(result),
 						);
 					}
 				} catch (error) {
@@ -2018,7 +2039,9 @@ export class AgentRuntime {
 		signal?: AbortSignal,
 		selectedAgent?: RuntimeSelectedAgentContext | null,
 	): Promise<LLMMessage[]> {
-		const memories = await this.memoryRetrieval.retrieveForContext(userMessage);
+		const memories = this.memoryEnabled
+			? await this.memoryRetrieval.retrieveForContext(userMessage)
+			: { memories: [], totalTokens: 0, fromSTM: [], combined: [] };
 		throwIfAborted(signal);
 
 		const skills = await this.skillLoader.resolveSkillsForTask({
@@ -3305,7 +3328,7 @@ export class AgentRuntime {
 				learningInsights: [],
 			};
 		}
-		const legacyMemoryLookup = this.contextAssembler
+		const legacyMemoryLookup = !this.memoryEnabled || this.contextAssembler
 			? Promise.resolve<MemoryContext>({
 					memories: [],
 					totalTokens: 0,
@@ -5195,7 +5218,7 @@ export class AgentRuntime {
 	private async getCachedUserProfile(): Promise<Awaited<
 		ReturnType<UserProfileManager["getProfile"]>
 	> | null> {
-		if (!this.userProfileManager) return null;
+		if (!this.memoryEnabled || !this.userProfileManager) return null;
 		const now = Date.now();
 		if (this.userProfileCache && now - this.userProfileCache.at < 60_000) {
 			return this.userProfileCache.value;
@@ -5275,8 +5298,13 @@ export class AgentRuntime {
 								budgetTokens: 900,
 								knowledgeCollectionIds:
 									selectedAgent?.knowledgeBaseIds ?? this.config.knowledgeBaseIds,
+								includeMemory: this.memoryEnabled,
 							})
 							.then((assembled) => {
+								if (!this.memoryEnabled) {
+									this.lastMemoryTrace = undefined;
+									return assembled;
+								}
 								const generatedAt = new Date();
 								this.lastMemoryTrace = {
 									responseId: `memory-${generatedAt.getTime()}-${Math.random()
@@ -5306,8 +5334,8 @@ export class AgentRuntime {
 								return undefined;
 							})
 					: Promise.resolve(undefined),
-				this.getCachedUserProfile(),
-				this.dailyMemory
+				this.memoryEnabled ? this.getCachedUserProfile() : Promise.resolve(null),
+				this.memoryEnabled && this.dailyMemory
 					? this.dailyMemory.getCurrentContext().catch(() => undefined)
 					: Promise.resolve(undefined),
 				toolHealth
@@ -5324,9 +5352,11 @@ export class AgentRuntime {
 					: Promise.resolve(undefined),
 			]);
 		if (assembledResult) {
-			advancedMemoryPack = assembledResult.memoryPack;
-			proactiveMemoryNotices = assembledResult.proactiveNotices;
-			degradedMemorySections = assembledResult.degradedSections;
+			if (this.memoryEnabled) {
+				advancedMemoryPack = assembledResult.memoryPack;
+				proactiveMemoryNotices = assembledResult.proactiveNotices;
+				degradedMemorySections = assembledResult.degradedSections;
+			}
 			for (const chunk of assembledResult.knowledgeChunks ?? []) {
 				untrustedContext.push({
 					provenance: {
@@ -5339,7 +5369,7 @@ export class AgentRuntime {
 					data: chunk,
 				});
 			}
-		} else if (this.contextAssembler) {
+		} else if (this.memoryEnabled && this.contextAssembler) {
 			effectiveMemories = await this.memoryRetrieval.retrieveForContext(userMessage);
 		}
 		if (profile) {
@@ -5452,7 +5482,7 @@ export class AgentRuntime {
 		// inspect the screenshot directly; text-only models use the analyze_image MCP.
 		if (this.isWebDeliverableRequest(userMessage)) {
 			systemContent +=
-				"\n\n# Web self-review (mandatory before finishing)\nBefore declaring this web/HTML deliverable done, you MUST visually verify it: open the file with `browser_open_file` (use the absolute path from write_file), screenshot EACH section (scroll + browser_screenshot), and analyze every screenshot for flaws — layout, broken/missing images, overflow, contrast, responsiveness, and fit to the requested style. If you are a text-only model, call the `analyze_image` MCP tool on each screenshot. Fix every flaw you find (edit the HTML/CSS; regenerate images with codex_generate_image using a relative `path`, never base64), then re-screenshot the fixed section to confirm. Do NOT claim the task is finished until you have seen the page render correctly end-to-end, and report the final absolute path.";
+				"\n\n# Web self-review (mandatory before finishing)\nBefore declaring this web/HTML deliverable done, you MUST visually verify it: open the file with `browser_open_file` (use the absolute path from write_file), screenshot EACH section (scroll + browser_screenshot), and analyze every screenshot for flaws — layout, broken/missing images, overflow, contrast, responsiveness, and fit to the requested style. If you are a text-only model, call the `analyze_image` MCP tool on each screenshot. Fix every flaw you find (edit the HTML/CSS; regenerate images with generate_image using a relative `path`, never base64), then re-screenshot the fixed section to confirm. Do NOT claim the task is finished until you have seen the page render correctly end-to-end, and report the final absolute path.";
 		}
 
 		if (healthSummary) {
@@ -5580,9 +5610,11 @@ export class AgentRuntime {
 			}
 		}
 
-		if (this.toolRegistry && this.toolRegistry.list().length > 0) {
-			const toolNames = this.toolRegistry
-				.list()
+		const modelVisibleTools = this.toolRegistry
+			?.list()
+			.filter((tool) => tool.metadata?.hiddenFromModel !== true);
+		if (modelVisibleTools && modelVisibleTools.length > 0) {
+			const toolNames = modelVisibleTools
 				.map((t) => `- ${t.name}: ${t.description}`)
 				.join("\n");
 			systemContent += `\n\n# Available Tools\nYou have access to the following tools. Use them when needed to help the user:\n${toolNames}`;
@@ -5598,7 +5630,7 @@ export class AgentRuntime {
 			systemContent +=
 				"\n\nIMPORTANT: When using the `create_tool` tool to create new tools, ALWAYS provide an animated SVG icon in the `uiIcon` parameter. The icon should be relevant to the tool's purpose and contain CSS animations like 'animation: pulse 2s infinite ease-in-out' on relevant elements.";
 			systemContent +=
-				"\n\nMANDATORY MEDIA OUTPUT RULE (PERSISTENT, NON-NEGOTIABLE): Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description, metadata)`), the `save_media` tool ONLY for small base64 payloads that already come from an external API, or `import_media_file` for any existing local file and any large output such as ffmpeg videos. If a file already exists on disk, NEVER convert it to base64; ALWAYS call `import_media_file` with the local path. For user-attached images or Octopus media URLs, pass the existing `/api/media/file/...` URL directly to tools that accept image URLs. For `nano-banana-generate`, use attached/reference images directly in `reference_images` as `/api/media/file/...`, http(s)://, or gs:// URLs; NEVER call or invent an image-to-base64 conversion step and NEVER pass `data:image/...;base64` as a tool argument. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. For multi-step media workflows, every saved item MUST have a semantic description and metadata such as `workflowId`, `imageNumber`/`sceneNumber`, `stage`, `role`, `prompt`, and `parentMediaIds` so later steps can identify the correct file. Example description: `Construction timelapse Img 03 - sobre-cimientos final keyframe`; example metadata: `{ workflowId: 'construction-house-timelapse', imageNumber: 3, stage: 'sobre-cimientos', role: 'video-keyframe' }`. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
+				"\n\nMANDATORY MEDIA OUTPUT RULE (PERSISTENT, NON-NEGOTIABLE): Any tool that generates or transforms images, audio, video, PDFs, documents, archives, or other binary media MUST save the generated file to the Octopus media library via the provided tool context (`context.media.save(buffer, mimeType, description, metadata)`), the `save_media` tool ONLY for small base64 payloads that already come from an external API, or `import_media_file` for any existing local file and any large output such as ffmpeg videos. If a file already exists on disk, NEVER convert it to base64; ALWAYS call `import_media_file` with the local path. For user-attached images or Octopus media URLs, pass the existing `/api/media/file/...` URL directly to tools that accept image URLs. For `generate_image`, use attached/reference images directly in `reference_images` as `/api/media/file/...` or approved http(s) URLs; NEVER call or invent an image-to-base64 conversion step and NEVER pass `data:image/...;base64` as a tool argument. The tool result shown to the agent/user must contain only the saved `/api/media/file/...` URL and concise metadata. NEVER return raw base64, `data:` URLs, or large binary payloads in `output`, `metadata`, final answers, or follow-up tool arguments. For multi-step media workflows, every saved item MUST have a semantic description and metadata such as `workflowId`, `imageNumber`/`sceneNumber`, `stage`, `role`, `prompt`, and `parentMediaIds` so later steps can identify the correct file. Example description: `Construction timelapse Img 03 - sobre-cimientos final keyframe`; example metadata: `{ workflowId: 'construction-house-timelapse', imageNumber: 3, stage: 'sobre-cimientos', role: 'video-keyframe' }`. If creating a new media-generating dynamic tool, design it with `export default async function(params, context = {})` and save media before returning.";
 			if (this.shouldUseZaiVisionToolsForImages()) {
 				systemContent +=
 					"\n\nATTACHED IMAGE ANALYSIS ROUTING (MANDATORY): `/api/media/file/...` is an Octopus attachment reference, not a web page. NEVER use `browser_navigate`, `browser_open_file`, or `browser_screenshot` to inspect an attached/local image. Call `analyze_image` or the matching specialized Z.AI Vision tool directly with the path from `octopus-local-media-paths`. Runtime has already replaced oversized inputs with an analysis copy capped at 4,500,000 bytes, so do not resize, convert, reopen, or screenshot it first. Browser tools remain appropriate only for actual web pages and their visual state.";

@@ -45,14 +45,32 @@ export class ContextAssembler {
 	}
 
 	async assemble(input: ContextAssemblyInput): Promise<ContextAssemblyResult> {
+		const includeMemory = input.includeMemory !== false;
 		const effectiveBudget = Math.max(
 			64,
 			input.budgetTokens - this.config.reserveTokens,
 		);
 		const knowledgeReserve =
 			this.knowledgeManager && (input.knowledgeCollectionIds?.length ?? 0) > 0
-				? Math.min(this.config.maxKnowledgeTokens, Math.floor(effectiveBudget / 2))
+				? Math.min(
+						this.config.maxKnowledgeTokens,
+						includeMemory ? Math.floor(effectiveBudget / 2) : effectiveBudget,
+					)
 				: 0;
+		if (!includeMemory) {
+			return {
+				memoryPack: emptyMemoryPack(input.objective, effectiveBudget),
+				proactiveNotices: [],
+				proactiveMemoryIds: [],
+				degradedSections: [],
+				mandatorySectionsPreserved: [],
+				budgetExceeded: false,
+				knowledgeChunks: await this.retrieveKnowledgeChunks(
+					input,
+					knowledgeReserve,
+				),
+			};
+		}
 		const memoryBudget = Math.max(64, effectiveBudget - knowledgeReserve);
 		const memoryPack = await this.orchestrator.read(
 			input.objective,
@@ -252,6 +270,24 @@ export class ContextAssembler {
 		}
 		return Array.from(deduped.values()).sort((a, b) => b.score - a.score);
 	}
+}
+
+function emptyMemoryPack(objective: string, budget: number): MemoryPack {
+	return {
+		taskObjective: objective,
+		uncertaintyLevel: "NO_COVERAGE",
+		memories: [],
+		userMemory: [],
+		projectMemory: [],
+		similarEpisodes: [],
+		agentLessons: [],
+		prospectiveReminders: [],
+		knownGaps: [],
+		toolRecommendations: [],
+		knownRisks: [],
+		tokenBudgetUsed: 0,
+		tokenBudgetRemaining: budget,
+	};
 }
 
 function estimatePackTokens(memories: ScoredMemory[]): number {

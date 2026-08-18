@@ -14,6 +14,7 @@ function renderChannelConfig(
 	enabled: boolean,
 	config: Record<string, unknown>,
 	onSave: (cfg: Record<string, unknown>) => Promise<void>,
+	onReload: () => Promise<void>,
 ): React.ReactNode {
 	switch (type) {
 		case "telegram":
@@ -28,7 +29,12 @@ function renderChannelConfig(
 			return <SlackConfig enabled={enabled} config={config} onSave={onSave} />;
 		case "whatsapp":
 			return (
-				<WhatsAppConfig enabled={enabled} config={config} onSave={onSave} />
+				<WhatsAppConfig
+					enabled={enabled}
+					config={config}
+					onSave={onSave}
+					onReload={onReload}
+				/>
 			);
 		default:
 			return null;
@@ -176,6 +182,7 @@ export const ChannelsPage: React.FC = () => {
 											true,
 											channel.config,
 											(cfg) => handleSaveConfig(channel.name, cfg),
+											reload,
 										)}
 									</ChannelCard>
 								))}
@@ -202,6 +209,7 @@ export const ChannelsPage: React.FC = () => {
 											channel.enabled,
 											channel.config,
 											(cfg) => handleSaveConfig(channel.name, cfg),
+											reload,
 										)}
 									</ChannelCard>
 								))}

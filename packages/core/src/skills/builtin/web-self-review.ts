@@ -29,7 +29,7 @@ it, and judge it with vision. Repeat the loop until it looks right.
    visual hierarchy, responsiveness at the captured viewport, and whether it
    matches the user's stated style (colors, mood, e.g. "green glam").
 5. FIX — for each flaw, edit the HTML/CSS/assets with \`write_file\`. Re-create
-   any image with \`codex_generate_image {path:"<relative>"}\` and reference it
+   any image with \`generate_image {path:"<relative>"}\` and reference it
    by relative path — NEVER embed images as base64 data URIs (it bloats the file
    and breaks the conversation).
 6. RE-VERIFY — re-open / re-scroll + re-screenshot ONLY the fixed section and

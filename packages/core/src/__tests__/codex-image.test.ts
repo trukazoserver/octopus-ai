@@ -72,13 +72,13 @@ describe("codex_generate_image workspace-path save", () => {
 		expect(existsSync(join(WORKSPACE, TEST_SUB, "hero.png"))).toBe(true);
 	});
 
-	it("retries a transient server error at medium quality", async () => {
+	it("retries only a definitive rate-limit rejection with identical quality", async () => {
 		const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
 		fetchMock
 			.mockReset()
 			.mockResolvedValueOnce(
 				new Response('{"error":{"message":"temporary failure"}}', {
-					status: 500,
+					status: 429,
 					headers: { "retry-after": "0" },
 				}),
 			)
@@ -100,16 +100,16 @@ describe("codex_generate_image workspace-path save", () => {
 		const retryBody = JSON.parse(
 			String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body),
 		);
-		expect(retryBody.quality).toBe("medium");
+		expect(retryBody.quality).toBe("high");
 		expect(result.metadata).toMatchObject({
-			quality: "medium",
+			quality: "high",
 			requestedQuality: "high",
 			retried: true,
 		});
 		expect(existsSync(join(WORKSPACE, TEST_SUB, "retry.png"))).toBe(true);
 	});
 
-	it("retries a timed-out high-quality request at medium quality", async () => {
+	it("does not retry a timed-out request with ambiguous acceptance", async () => {
 		const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
 		fetchMock
 			.mockReset()
@@ -132,13 +132,30 @@ describe("codex_generate_image workspace-path save", () => {
 			path: `${TEST_SUB}/timeout-retry.png`,
 		});
 
-		expect(result.success).toBe(true);
-		expect(fetchMock).toHaveBeenCalledTimes(2);
-		const retryBody = JSON.parse(
-			String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body),
+		expect(result.success).toBe(false);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.metadata).toMatchObject({ submissionState: "unknown" });
+	});
+
+	it("reports malformed paid outputs as a partial persistence failure", async () => {
+		const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+		fetchMock.mockReset().mockResolvedValue(
+			Response.json({
+				data: [{ b64_json: responseBytes.toString("base64") }, {}],
+			}),
 		);
-		expect(retryBody.quality).toBe("medium");
-		expect(result.metadata).toMatchObject({ retried: true });
+		const { createCodexImageTools } = await import("../tools/codex-image.js");
+		const result = await createCodexImageTools()[0].handler({
+			prompt: "two outputs",
+			path: `${TEST_SUB}/partial.png`,
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.output).toContain("1 paid output(s) could not be saved");
+		expect(result.metadata).toMatchObject({
+			submissionState: "accepted",
+			failedOutputCount: 1,
+		});
 	});
 
 	it("rejects a destination path that escapes the workspace", async () => {
@@ -152,6 +169,7 @@ describe("codex_generate_image workspace-path save", () => {
 		expect(res.success).toBe(false);
 		expect(res.error ?? "").toMatch(/escapes the Octopus workspace/i);
 		expect(existsSync(join(WORKSPACE, "..", "etc", "evil.png"))).toBe(false);
+		expect(globalThis.fetch).not.toHaveBeenCalled();
 	});
 
 	it("requests transparency and preserves native alpha when returned", async () => {

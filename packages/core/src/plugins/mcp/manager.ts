@@ -45,10 +45,12 @@ export class MCPManager {
 	private servers: Map<string, MCPManagedServer> = new Map();
 	private clients: Map<string, MCPClient> = new Map();
 	private toolToServer: Map<string, string> = new Map();
+	private persistedConfigs = new Map<string, MCPServerConfig>();
 	private persistCallback?: (servers: Record<string, MCPServerConfig>) => void;
 	private toolRegistry?: ToolRegistry;
 	private envFilter: EnvironmentFilter;
 	private redactor: SecretRedactor;
+	private suppressPersistence = 0;
 
 	constructor(options: MCPManagerOptions = {}) {
 		this.envFilter = options.envFilter ?? new EnvironmentFilter();
@@ -65,50 +67,76 @@ export class MCPManager {
 		this.persistCallback = cb;
 	}
 
+	setConfiguredServers(configs: Record<string, MCPServerConfig>): void {
+		this.persistedConfigs = new Map(Object.entries(configs));
+	}
+
 	private persist(): void {
-		if (!this.persistCallback) return;
+		if (!this.persistCallback || this.suppressPersistence > 0) return;
 		const entries: Record<string, MCPServerConfig> = {};
-		for (const [name, entry] of this.servers) {
-			entries[name] = entry.config;
+		for (const [name, config] of this.persistedConfigs) {
+			entries[name] = config;
 		}
 		this.persistCallback(entries);
 	}
 
 	async loadPersisted(configs: Record<string, MCPServerConfig>): Promise<void> {
-		for (const [name, config] of Object.entries(configs)) {
-			if (this.servers.has(name)) continue;
-			await this.addServer(name, config);
+		this.persistedConfigs = new Map(Object.entries(configs));
+		this.suppressPersistence++;
+		try {
+			for (const [name, config] of Object.entries(configs)) {
+				if (this.servers.has(name)) continue;
+				await this.addServer(name, config, { persist: false });
+			}
+		} finally {
+			this.suppressPersistence--;
 		}
 	}
 
-	async syncServers(configs: Record<string, MCPServerConfig>): Promise<void> {
+	async syncServers(
+		configs: Record<string, MCPServerConfig>,
+		options: { persist?: boolean } = {},
+	): Promise<void> {
+		const persist = options.persist !== false;
+		if (!persist) this.suppressPersistence++;
+		try {
 		const currentNames = new Set(this.servers.keys());
 		const targetNames = new Set(Object.keys(configs));
 
 		for (const name of currentNames) {
 			if (!targetNames.has(name)) {
-				await this.removeServer(name);
+				await this.removeServer(name, { persist: false });
 			}
 		}
 
 		for (const [name, config] of Object.entries(configs)) {
 			const existing = this.servers.get(name);
 			if (!existing) {
-				await this.addServer(name, config);
+				await this.addServer(name, config, { persist: false });
 			} else if (JSON.stringify(existing.config) !== JSON.stringify(config)) {
-				await this.removeServer(name);
-				await this.addServer(name, config);
+				await this.removeServer(name, { persist: false });
+				await this.addServer(name, config, { persist: false });
 			}
 		}
 
-		this.persist();
+		} finally {
+			if (!persist) this.suppressPersistence--;
+		}
+		if (persist) {
+			this.persistedConfigs = new Map(Object.entries(configs));
+			this.persist();
+		}
 	}
 
 	async addServer(
 		name: string,
 		config: MCPServerConfig,
+		options: { persist?: boolean } = {},
 	): Promise<MCPManagedServer> {
-		if (this.servers.has(name)) await this.removeServer(name);
+		const persist = options.persist !== false;
+		if (this.servers.has(name)) {
+			await this.removeServer(name, { persist: false });
+		}
 		const entry: MCPManagedServer = {
 			name,
 			config,
@@ -124,7 +152,10 @@ export class MCPManager {
 				entry.error = this.redactError(err);
 			}
 		}
-		this.persist();
+		if (persist) {
+			this.persistedConfigs.set(name, config);
+			this.persist();
+		}
 		return entry;
 	}
 
@@ -135,6 +166,10 @@ export class MCPManager {
 		const entry = this.servers.get(name);
 		if (!entry) return null;
 		entry.config.enabled = enabled;
+		const persisted = this.persistedConfigs.get(name);
+		if (persisted) {
+			this.persistedConfigs.set(name, { ...persisted, enabled });
+		}
 
 		const client = this.clients.get(name);
 		if (!enabled) {
@@ -168,7 +203,10 @@ export class MCPManager {
 		return entry;
 	}
 
-	async removeServer(name: string): Promise<boolean> {
+	async removeServer(
+		name: string,
+		options: { persist?: boolean } = {},
+	): Promise<boolean> {
 		const client = this.clients.get(name);
 		if (client) {
 			try {
@@ -182,7 +220,10 @@ export class MCPManager {
 		if (!existing) return false;
 		this.unregisterPublishedTools(existing.tools);
 		this.servers.delete(name);
-		this.persist();
+		if (options.persist !== false) {
+			this.persistedConfigs.delete(name);
+			this.persist();
+		}
 		return true;
 	}
 

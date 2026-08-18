@@ -59,12 +59,22 @@ const CONVERSATION_HISTORY_LIMIT = getPositiveIntEnv(
 export function buildTransportSystemContext(
 	system: OctopusSystem,
 	chatExecutionManager: ChatExecutionManager,
+	channelRuntime?: {
+		channelManager: ChannelManager;
+		syncChannel: (
+			name: string,
+			config: Record<string, unknown>,
+		) => Promise<unknown>;
+		setMemoryEnabled?: (enabled: boolean) => void;
+	},
 ): Pick<OctopusSystem, "config"> & Record<string, unknown> {
 	return {
 		config: system.config,
+		configLoader: system.configLoader,
 		db: system.db,
 		router: system.router,
 		usageStore: system.usageStore,
+		mediaGenerationManager: system.mediaGenerationManager,
 		/**
 		 * When the main agent (Octavio) model/reasoning changes from the UI, mirror
 		 * it onto the legacy `config.ai.default` / `config.ai.thinking` aliases and
@@ -77,7 +87,7 @@ export function buildTransportSystemContext(
 			try {
 				system.config.ai.default = model;
 				system.config.ai.thinking = reasoning as typeof system.config.ai.thinking;
-				new ConfigLoader().save(system.config);
+				system.configLoader.savePreservingEnv(system.config);
 			} catch (err) {
 				console.error("[start] failed to sync main agent config:", err);
 			}
@@ -107,11 +117,46 @@ export function buildTransportSystemContext(
 		learningEngine: system.learningEngine,
 		agentRuntime: system.agentRuntime,
 		toolRegistry: system.toolRegistry,
+		toolExecutor: system.toolExecutor,
+		memoryRetentionScheduler: system.memoryRetentionScheduler,
 		dailyMemory: system.dailyMemory,
 		kanbanDispatcher: system.kanbanDispatcher,
 		kanbanPlanner: system.kanbanPlanner,
 		requirementResolver: system.requirementResolver,
+		...channelRuntime,
 	};
+}
+
+function createConfiguredChannel(
+	name: string,
+	config: Record<string, unknown>,
+): Channel | undefined {
+	if (name === "telegram") {
+		const botToken = String(config.botToken ?? "").trim();
+		if (!botToken) throw new Error("Telegram botToken is required");
+		return new TelegramChannel("telegram", botToken);
+	}
+	if (name === "whatsapp") {
+		const authPath = String(
+			config.authPath ?? join(homedir(), ".octopus", "channels", "whatsapp"),
+		);
+		return new WhatsAppChannel("whatsapp", authPath);
+	}
+	if (name === "discord") {
+		const botToken = String(config.botToken ?? "").trim();
+		if (!botToken) throw new Error("Discord botToken is required");
+		return new DiscordChannel("discord", botToken);
+	}
+	if (name === "slack") {
+		const botToken = String(config.botToken ?? "").trim();
+		const signingSecret = String(config.signingSecret ?? "").trim();
+		const appToken = String(config.appToken ?? "").trim();
+		if (!botToken || !signingSecret || !appToken) {
+			throw new Error("Slack botToken, signingSecret and appToken are required");
+		}
+		return new SlackChannel("slack", botToken, signingSecret, appToken);
+	}
+	return undefined;
 }
 
 function getPositiveIntEnv(name: string, fallback: number): number {
@@ -1033,52 +1078,36 @@ export async function runStart(options: StartOptions): Promise<void> {
 		const channels = system.config.channels;
 		channelManager = new ChannelManager(system.connectionManager);
 		const activeChannelManager = channelManager;
+		const syncChannel = async (
+			name: string,
+			channelConfig: Record<string, unknown>,
+			start = true,
+		) => {
+			if (options.channel && options.channel !== name) {
+				return { registered: false, connected: false, status: "disconnected" };
+			}
+			if (channelConfig.enabled !== true) {
+				await activeChannelManager.unregister(name);
+				const index = enabledChannels.indexOf(name);
+				if (index >= 0) enabledChannels.splice(index, 1);
+				return activeChannelManager.getStatus(name);
+			}
+			const configured = createConfiguredChannel(name, channelConfig);
+			if (!configured) {
+				system?.connectionManager.registerChannel(name);
+				return { registered: false, connected: false, status: "disconnected" };
+			}
+			if (!enabledChannels.includes(name)) enabledChannels.push(name);
+			if (start) await activeChannelManager.replace(configured, true);
+			else activeChannelManager.register(configured);
+			return activeChannelManager.getStatus(name);
+		};
 		for (const [name, ch] of Object.entries(channels)) {
 			if (!ch.enabled) continue;
 			if (options.channel && options.channel !== name) continue;
-			enabledChannels.push(name);
 			try {
-				if (name === "telegram") {
-					const botToken = (ch as Record<string, unknown>).botToken as
-						| string
-						| undefined;
-					if (botToken) {
-						activeChannelManager.register(
-							new TelegramChannel("telegram", botToken),
-						);
-						console.log(chalk.green("  ✓ Telegram channel registered"));
-					} else {
-						console.log(
-							chalk.yellow("  ⚠ Telegram enabled but no botToken configured"),
-						);
-					}
-				} else if (name === "whatsapp") {
-					const authPath = String(
-						(ch as Record<string, unknown>).authPath ??
-							join(homedir(), ".octopus", "channels", "whatsapp"),
-					);
-					activeChannelManager.register(new WhatsAppChannel("whatsapp", authPath));
-					console.log(chalk.green("  ✓ WhatsApp channel registered"));
-				} else if (name === "discord") {
-					const botToken = String((ch as Record<string, unknown>).botToken ?? "");
-					if (!botToken) throw new Error("Discord botToken is required");
-					activeChannelManager.register(new DiscordChannel("discord", botToken));
-					console.log(chalk.green("  ✓ Discord channel registered"));
-				} else if (name === "slack") {
-					const config = ch as Record<string, unknown>;
-					const botToken = String(config.botToken ?? "");
-					const signingSecret = String(config.signingSecret ?? "");
-					const appToken = String(config.appToken ?? "");
-					if (!botToken || !signingSecret || !appToken) {
-						throw new Error("Slack botToken, signingSecret and appToken are required");
-					}
-					activeChannelManager.register(
-						new SlackChannel("slack", botToken, signingSecret, appToken),
-					);
-					console.log(chalk.green("  ✓ Slack channel registered"));
-				} else {
-					system.connectionManager.registerChannel(name);
-				}
+				await syncChannel(name, ch as Record<string, unknown>, false);
+				console.log(chalk.green(`  ✓ ${name} channel registered`));
 			} catch (err) {
 				console.log(
 					chalk.red(`  ✗ Failed to register channel ${name}: ${err}`),
@@ -1348,7 +1377,17 @@ export async function runStart(options: StartOptions): Promise<void> {
 			host: runningSystem.config.server.host,
 		});
 		server.setSystemContext(
-			buildTransportSystemContext(system, chatExecutionManager),
+			buildTransportSystemContext(system, chatExecutionManager, {
+				channelManager: activeChannelManager,
+				syncChannel: (name, config) => syncChannel(name, config),
+				setMemoryEnabled: (enabled) => {
+					system?.agentRuntime.setMemoryEnabled(enabled);
+					system?.agentManager.setMemoryEnabled(enabled);
+					for (const runtime of mainConversationRuntimes.values()) {
+						runtime.setMemoryEnabled(enabled);
+					}
+				},
+			}),
 		);
 		server.onMessage((clientId, message) => {
 			void (async () => {

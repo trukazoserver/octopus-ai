@@ -79,12 +79,18 @@ import type {
 	MemoryReadContext,
 	MemoryRelationType,
 } from "../memory/types.js";
+import { getMultimediaCatalog } from "../multimedia/catalog.js";
+import { MediaGenerationStore } from "../multimedia/media-generation-store.js";
+import { normalizeVideoGenerationRequest } from "../multimedia/types.js";
 import type { MCPManagedServer } from "../plugins/mcp/manager.js";
+import type { MCPServerConfig } from "../plugins/types.js";
 import {
 	getZaiMCPConfigs,
 	resolveZaiMCPAuth,
 } from "../plugins/mcp/zai-servers.js";
 import { SecretRedactor } from "../security/secret-redactor.js";
+import { SettingsService } from "../settings/service.js";
+import type { SettingsSectionId } from "../settings/types.js";
 import type { Skill } from "../skills/types.js";
 import { validateMediaBytes } from "../tools/media-validation.js";
 import { convertOfficeFileToPdf } from "../tools/office-preview.js";
@@ -122,7 +128,7 @@ const CORS_HEADERS = {
 	"Access-Control-Allow-Headers":
 		"Content-Type, Range, Authorization, X-Octopus-Api-Key, Idempotency-Key",
 	"Access-Control-Expose-Headers":
-		"Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Location",
+		"Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Location, X-Octopus-Export-Truncated",
 };
 
 const MEMORY_FEEDBACK_TYPES = new Set<Exclude<MemoryFeedbackType, "none">>([
@@ -718,7 +724,7 @@ function maskApiKeys(config: OctopusConfig): Record<string, unknown> {
 
 function configuredApiKey(config: OctopusConfig | undefined): string {
 	return (
-		config?.security.memoryApiKey?.trim() ||
+		config?.security?.memoryApiKey?.trim() ||
 		process.env.OCTOPUS_MEMORY_API_KEY?.trim() ||
 		process.env.OCTOPUS_API_KEY?.trim() ||
 		""
@@ -776,6 +782,120 @@ function emptyUsageAggregate() {
 	};
 }
 
+function emptyMediaUsageAggregate() {
+	return {
+		requests: 0,
+		outputs: 0,
+		requestedOutputs: 0,
+		generatedDurationSeconds: 0,
+		requestedDurationSeconds: 0,
+		knownCost: 0,
+		unknownCostEvents: 0,
+		byProvider: {} as Record<string, unknown>,
+	};
+}
+
+function parseMediaType(value: string | null): "image" | "video" | undefined {
+	return value === "image" || value === "video" ? value : undefined;
+}
+
+function parseUsageFilters(url: URL):
+	| {
+			filters: {
+				from?: string;
+				to?: string;
+				agentId?: string;
+				provider?: string;
+				mediaType?: "image" | "video";
+			};
+	  }
+	| { error: string } {
+	const rawFrom = url.searchParams.get("from") ?? undefined;
+	const rawTo = url.searchParams.get("to") ?? undefined;
+	const from = normalizeUsageFilterDate(rawFrom, false);
+	const to = normalizeUsageFilterDate(rawTo, true);
+	for (const [name, value] of [
+		["from", rawFrom],
+		["to", rawTo],
+	] as const) {
+		if (value && !(name === "from" ? from : to)) {
+			return { error: `${name} must be a valid ISO date` };
+		}
+	}
+	if (from && to && new Date(from).getTime() > new Date(to).getTime()) {
+		return { error: "from must be earlier than or equal to to" };
+	}
+	const rawMediaType = url.searchParams.get("mediaType");
+	if (rawMediaType && !parseMediaType(rawMediaType)) {
+		return { error: "mediaType must be image or video" };
+	}
+	return {
+		filters: {
+			from,
+			to,
+			agentId: url.searchParams.get("agentId") ?? undefined,
+			provider: url.searchParams.get("provider") ?? undefined,
+			mediaType: parseMediaType(rawMediaType),
+		},
+	};
+}
+
+function normalizeUsageFilterDate(
+	value: string | undefined,
+	inclusiveEnd: boolean,
+): string | undefined {
+	if (!value) return undefined;
+	const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value)
+		? `${value}T${inclusiveEnd ? "23:59:59.999" : "00:00:00.000"}Z`
+		: value;
+	const date = new Date(normalized);
+	return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+const USAGE_EXPORT_COLUMNS = [
+	"createdAt",
+	"category",
+	"eventId",
+	"mediaType",
+	"provider",
+	"model",
+	"status",
+	"requestId",
+	"jobId",
+	"agentId",
+	"conversationId",
+	"promptTokens",
+	"completionTokens",
+	"reasoningTokens",
+	"totalTokens",
+	"requestedOutputs",
+	"outputCount",
+	"requestedDurationSeconds",
+	"generatedDurationSeconds",
+	"estimatedCost",
+	"costSource",
+	"costKnown",
+] as const;
+
+function usageRowsToCsv(rows: unknown[]): string {
+	const lines = [USAGE_EXPORT_COLUMNS.join(",")];
+	for (const value of rows) {
+		const row = value as Record<string, unknown>;
+		lines.push(
+			USAGE_EXPORT_COLUMNS.map((column) => csvCell(row[column])).join(","),
+		);
+	}
+	return `\uFEFF${lines.join("\r\n")}\r\n`;
+}
+
+function csvCell(value: unknown): string {
+	if (value === null || value === undefined) return "";
+	const raw = String(value);
+	const text =
+		typeof value === "string" && /^\s*[=+\-@]/.test(raw) ? `'${raw}` : raw;
+	return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
 function describeModelRef(
 	config: OctopusConfig,
 	router: LLMRouter | undefined,
@@ -829,6 +949,15 @@ function describeModelRef(
 	};
 }
 
+function replaceObjectContents<T extends object>(target: T, source: T): void {
+	const targetRecord = target as Record<string, unknown>;
+	const sourceRecord = source as Record<string, unknown>;
+	for (const key of Object.keys(targetRecord)) {
+		if (!Object.hasOwn(sourceRecord, key)) delete targetRecord[key];
+	}
+	Object.assign(targetRecord, sourceRecord);
+}
+
 export class TransportServer {
 	private port: number;
 	private host: string;
@@ -840,6 +969,8 @@ export class TransportServer {
 	private liveSockets = new WeakSet<WSWebSocket>();
 	private heartbeatTimer?: ReturnType<typeof setInterval>;
 	private system: SystemContext | null = null;
+	private readonly pendingRestartKeys = new Set<string>();
+	private runtimeBaselineConfig?: OctopusConfig;
 
 	constructor(opts: TransportServerOptions = {}) {
 		this.port = opts.port ?? 18789;
@@ -848,12 +979,19 @@ export class TransportServer {
 
 	setSystemContext(system: SystemContext): void {
 		this.system = system;
+		this.runtimeBaselineConfig = JSON.parse(
+			JSON.stringify(system.config),
+		) as OctopusConfig;
 	}
 
 	private authorizeSensitiveApiRequest(
 		req: IncomingMessage,
 		res: ServerResponse,
 	): boolean {
+		if (!this.isAllowedRequestOrigin(req)) {
+			jsonRes(res, 403, { error: "Request origin is not allowed" });
+			return false;
+		}
 		const expectedKey = configuredApiKey(this.system?.config);
 		if (!expectedKey) {
 			if (isLoopbackHost(this.host)) return true;
@@ -875,6 +1013,12 @@ export class TransportServer {
 		if (!origin) return true;
 		try {
 			const parsed = new URL(origin);
+			if (isLoopbackHost(this.host)) {
+				return (
+					isLoopbackHost(parsed.hostname) &&
+					isLoopbackAddress(req.socket.remoteAddress)
+				);
+			}
 			const requestHost = headerValue(req.headers.host).toLowerCase();
 			if (parsed.host.toLowerCase() === requestHost) return true;
 			return isLoopbackHost(parsed.hostname) && isLoopbackAddress(req.socket.remoteAddress);
@@ -930,21 +1074,31 @@ export class TransportServer {
 				}
 
 				if (req.method === "GET" && pathname === "/api/status") {
+					if (!this.authorizeApiRequest(req, res)) return;
 					this.handleStatus(res);
 					return;
 				}
 
 				if (req.method === "GET" && pathname === "/api/models") {
+					if (!this.authorizeApiRequest(req, res)) return;
 					this.handleGetModels(res);
 					return;
 				}
 
 				if (req.method === "GET" && pathname === "/api/usage") {
+					if (!this.authorizeApiRequest(req, res)) return;
 					void this.handleGetUsage(res, url);
 					return;
 				}
 
+				if (req.method === "GET" && pathname === "/api/usage/export") {
+					if (!this.authorizeApiRequest(req, res)) return;
+					void this.handleGetUsageExport(res, url);
+					return;
+				}
+
 				if (req.method === "GET" && pathname === "/api/quotas") {
+					if (!this.authorizeApiRequest(req, res)) return;
 					void this.handleGetQuotas(res);
 					return;
 				}
@@ -960,6 +1114,62 @@ export class TransportServer {
 				if (req.method === "GET" && pathname === "/api/config") {
 					this.handleGetConfig(res);
 					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/settings/status") {
+					this.handleGetSettingsStatus(res);
+					return;
+				}
+
+				if (req.method === "GET" && pathname === "/api/multimedia/catalog") {
+					this.handleGetMultimediaCatalog(res);
+					return;
+				}
+
+				if (pathname === "/api/multimedia/jobs") {
+					if (req.method === "GET") {
+						void this.handleListMediaGenerationJobs(res, url);
+						return;
+					}
+					if (req.method === "POST") {
+						void this.handleCreateMediaGenerationJob(req, res);
+						return;
+					}
+				}
+
+				const mediaJobMatch = pathname.match(/^\/api\/multimedia\/jobs\/([^/]+)(?:\/(retry|cancel))?$/);
+				if (mediaJobMatch) {
+					const jobId = decodeURIComponent(mediaJobMatch[1] ?? "");
+					const action = mediaJobMatch[2];
+					if (req.method === "GET" && !action) {
+						void this.handleGetMediaGenerationJob(res, jobId);
+						return;
+					}
+					if (req.method === "POST" && action === "cancel") {
+						void this.handleCancelMediaGenerationJob(res, jobId);
+						return;
+					}
+					if (req.method === "POST" && action === "retry") {
+						void this.handleRetryMediaGenerationJob(res, jobId);
+						return;
+					}
+				}
+
+				const settingsMatch = pathname.match(/^\/api\/settings\/([^/]+)$/);
+				if (settingsMatch) {
+					const section = decodeURIComponent(settingsMatch[1] ?? "");
+					if (!SettingsService.isSectionId(section)) {
+						jsonRes(res, 404, { error: "Unknown settings section" });
+						return;
+					}
+					if (req.method === "GET") {
+						this.handleGetSettingsSection(res, section);
+						return;
+					}
+					if (req.method === "PUT") {
+						void this.handlePutSettingsSection(req, res, section);
+						return;
+					}
 				}
 
 				if (
@@ -1861,6 +2071,20 @@ export class TransportServer {
 					this.handleListMedia(res);
 					return;
 				}
+				if (
+					req.method === "GET" &&
+					pathname === "/api/channels/whatsapp/status"
+				) {
+					void this.handleWhatsAppStatus(res);
+					return;
+				}
+				if (
+					req.method === "POST" &&
+					pathname === "/api/channels/whatsapp/logout"
+				) {
+					void this.handleWhatsAppLogout(res);
+					return;
+				}
 				if (req.method === "GET" && pathname === "/api/artifacts") {
 					void this.handleListArtifacts(res);
 					return;
@@ -2117,7 +2341,7 @@ export class TransportServer {
 			const mainRuntime = this.system?.agentRuntime;
 			const availableProviders = router?.getAvailableProviders() ?? [];
 			const configuredProviders =
-				new ConfigLoader().getExplicitlyConfiguredProviderKeys();
+				this.settingsConfigLoader().getExplicitlyConfiguredProviderKeys();
 			const activeProviderKeys = new Set(availableProviders);
 			const configuredProviderKeys = new Set(configuredProviders);
 			const hasCredential = (...values: Array<string | undefined>): boolean =>
@@ -2304,25 +2528,57 @@ export class TransportServer {
 					total: emptyUsageAggregate(),
 					byProvider: [],
 					byAgent: [],
+					multimedia: emptyMediaUsageAggregate(),
+					mediaByProvider: [],
+					series: [],
 					persisted: false,
 				});
 				return;
 			}
-			const filters = {
-				from: url.searchParams.get("from") ?? undefined,
-				to: url.searchParams.get("to") ?? undefined,
-				agentId: url.searchParams.get("agentId") ?? undefined,
-				provider: url.searchParams.get("provider") ?? undefined,
+			const parsedFilters = parseUsageFilters(url);
+			if ("error" in parsedFilters) {
+				jsonRes(res, 400, { error: parsedFilters.error });
+				return;
+			}
+			const { filters } = parsedFilters;
+			const granularity =
+				url.searchParams.get("granularity") === "hour" ? "hour" : "day";
+			const seriesToMs = filters.to
+				? new Date(filters.to).getTime()
+				: Date.now();
+			const earliestSeriesMs = seriesToMs - 30 * 24 * 60 * 60 * 1000;
+			const requestedSeriesFromMs = filters.from
+				? new Date(filters.from).getTime()
+				: earliestSeriesMs;
+			const effectiveSeriesFromMs = Math.max(
+				requestedSeriesFromMs,
+				earliestSeriesMs,
+			);
+			const seriesFilters = {
+				...filters,
+				from: new Date(effectiveSeriesFromMs).toISOString(),
+				to: filters.to ?? new Date(seriesToMs).toISOString(),
 			};
-			const [total, byProvider, byAgent] = await Promise.all([
+			const [total, byProvider, byAgent, multimedia, mediaByProvider, series] =
+				await Promise.all([
 				usageStore.aggregate(filters),
 				usageStore.byProvider(filters),
 				usageStore.byAgent(filters),
+				usageStore.mediaAggregate(filters),
+				usageStore.mediaByProvider(filters),
+				usageStore.timeSeries(seriesFilters, granularity),
 			]);
 			jsonRes(res, 200, {
 				total,
 				byProvider,
 				byAgent,
+				multimedia,
+				mediaByProvider,
+				series,
+				seriesFrom: seriesFilters.from,
+				seriesTo: seriesFilters.to,
+				seriesCapped: requestedSeriesFromMs < earliestSeriesMs,
+				granularity,
 				filters,
 				persisted: true,
 			});
@@ -2422,7 +2678,7 @@ export class TransportServer {
 				parsed.clientSecret,
 			);
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const configObj = config as unknown as Record<string, unknown>;
 			const providerConfig = (configObj.ai as Record<string, unknown>)
@@ -2431,7 +2687,7 @@ export class TransportServer {
 			prov.oauthClientId = parsed.clientId;
 			if (parsed.clientSecret) prov.oauthClientSecret = parsed.clientSecret;
 			providerConfig[provider] = prov;
-			loader.save(config);
+			loader.savePreservingEnv(config);
 
 			jsonRes(res, 200, { authorizationUrl: url });
 		} catch (err) {
@@ -2447,7 +2703,7 @@ export class TransportServer {
 		provider: string,
 	): Promise<void> {
 		try {
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const configObj = config as unknown as Record<string, unknown>;
 			const providerConfig = (configObj.ai as Record<string, unknown>)
@@ -2474,7 +2730,8 @@ export class TransportServer {
 			if (tokens.refresh_token) prov.oauthRefreshToken = tokens.refresh_token;
 			prov.oauthExpiresAt = Date.now() + tokens.expires_in * 1000;
 			providerConfig[provider] = prov;
-			loader.save(config);
+			loader.savePreservingEnv(config);
+			await this.applyRuntimeConfigChanges(config, ["ai"]);
 
 			jsonRes(res, 200, {
 				accessToken: tokens.access_token,
@@ -2514,7 +2771,7 @@ export class TransportServer {
 
 			const tokens = await exchangeCodeForToken(provider, code, stateParam);
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const configObj = config as unknown as Record<string, unknown>;
 			const providerConfig = (configObj.ai as Record<string, unknown>)
@@ -2527,13 +2784,8 @@ export class TransportServer {
 			prov.authMode = "oauth";
 
 			providerConfig[provider] = prov;
-			loader.save(config);
-
-			if (this.system) this.system.config = config;
-			clearQuotaCache();
-			if (this.system?.router) {
-				await this.system.router.reconfigure(config.ai);
-			}
+			loader.savePreservingEnv(config);
+			await this.applyRuntimeConfigChanges(config, ["ai"]);
 
 			renderOAuthCallbackPage(res, true);
 		} catch (err) {
@@ -2564,7 +2816,7 @@ export class TransportServer {
 				return;
 			}
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const configObj = config as unknown as Record<string, unknown>;
 			const providerConfig = (configObj.ai as Record<string, unknown>)
@@ -2650,11 +2902,8 @@ export class TransportServer {
 				embeddings.credentialsFile = String(prov.credentialsFile ?? "");
 				embeddings.credentialsJson = "";
 			}
-			loader.save(config);
-
-			if (this.system?.router) {
-				await this.system.router.reconfigure(config.ai);
-			}
+			loader.savePreservingEnv(config);
+			await this.applyRuntimeConfigChanges(config, ["ai", "memory.embeddings"]);
 			await this.system?.refreshEmbeddingProvider?.(config);
 
 			// Never echo the raw key JSON back to the client.
@@ -2769,7 +3018,7 @@ export class TransportServer {
 				// Body is optional; ignore parse failures.
 			}
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const configObj = config as unknown as Record<string, unknown>;
 			const providerConfig = (configObj.ai as Record<string, unknown>)
@@ -2813,11 +3062,8 @@ export class TransportServer {
 				embeddings.credentialsFile = String(prov.credentialsFile ?? "");
 				embeddings.credentialsJson = "";
 			}
-			loader.save(config);
-
-			if (this.system?.router) {
-				await this.system.router.reconfigure(config.ai);
-			}
+			loader.savePreservingEnv(config);
+			await this.applyRuntimeConfigChanges(config, ["ai", "memory.embeddings"]);
 			await this.system?.refreshEmbeddingProvider?.(config);
 
 			resetGcloudLoginSession();
@@ -2883,7 +3129,7 @@ export class TransportServer {
 				// empty/invalid body — validate whatever is already saved
 			}
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const providers = config.ai.providers as unknown as Record<
 				string,
@@ -2934,7 +3180,7 @@ export class TransportServer {
 				return;
 			}
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const providers = config.ai.providers as unknown as Record<
 				string,
@@ -2969,15 +3215,8 @@ export class TransportServer {
 
 			clearProviderCredentials(prov, provider);
 			providers[provider] = prov;
-			loader.save(config);
-			// Update the in-memory config so /api/config reflects the disconnect
-			// immediately (not just the file on disk).
-			if (this.system) this.system.config = config;
-			clearQuotaCache();
-
-			if (this.system?.router) {
-				await this.system.router.reconfigure(config.ai);
-			}
+			loader.savePreservingEnv(config);
+			await this.applyRuntimeConfigChanges(config, ["ai"]);
 			jsonRes(res, 200, { ok: true });
 		} catch (err) {
 			jsonRes(res, 500, {
@@ -3038,7 +3277,7 @@ export class TransportServer {
 					jsonRes(res, 400, { error: "No auth result available" });
 					return;
 				}
-				const loader = new ConfigLoader();
+				const loader = this.settingsConfigLoader();
 				const config = loader.load();
 				const configObj = config as unknown as Record<string, unknown>;
 				const providerConfig = (configObj.ai as Record<string, unknown>)
@@ -3060,16 +3299,8 @@ export class TransportServer {
 				prov.browserCookies = undefined;
 				prov.browserUserAgent = undefined;
 				providerConfig.openai = prov;
-				loader.save(config);
-				// Update the in-memory config + clear the quota cache so /api/config,
-				// /api/quotas and the model selector reflect the new token immediately
-				// (loadConfig() serves this.system.config; without this, quota sees the
-				// stale pre-connect config and omits the provider).
-				if (this.system) this.system.config = config;
-				clearQuotaCache();
-				if (this.system?.router) {
-					await this.system.router.reconfigure(config.ai);
-				}
+				loader.savePreservingEnv(config);
+				await this.applyRuntimeConfigChanges(config, ["ai"]);
 				jsonRes(res, 200, { success: true, hasToken: true });
 				return;
 			}
@@ -3082,7 +3313,7 @@ export class TransportServer {
 				return;
 			}
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const configObj = config as unknown as Record<string, unknown>;
 			const providerConfig = (configObj.ai as Record<string, unknown>)
@@ -3101,13 +3332,8 @@ export class TransportServer {
 			prov.authMode =
 				provider === "openai" && result.interceptedToken ? "codex" : "browser";
 			providerConfig[provider] = prov;
-			loader.save(config);
-
-			if (this.system) this.system.config = config;
-			clearQuotaCache();
-			if (this.system?.router) {
-				await this.system.router.reconfigure(config.ai);
-			}
+			loader.savePreservingEnv(config);
+			await this.applyRuntimeConfigChanges(config, ["ai"]);
 
 			jsonRes(res, 200, {
 				success: true,
@@ -3119,6 +3345,581 @@ export class TransportServer {
 			jsonRes(res, 500, {
 				error:
 					err instanceof Error ? err.message : "Failed to save browser auth",
+			});
+		}
+	}
+
+	private async applyRuntimeConfigChanges(
+		nextConfig: OctopusConfig,
+		changedKeys: string[],
+		options: {
+			embeddingAlreadyApplied?: boolean;
+			channelsAlreadyApplied?: boolean;
+		} = {},
+	): Promise<{ applied: boolean; warnings: string[] }> {
+		const warnings: string[] = [];
+		let applied = false;
+		if (!this.system) return { applied, warnings };
+
+		let runtimeConfig = nextConfig;
+		if (this.system.config !== nextConfig) {
+			replaceObjectContents(this.system.config, nextConfig);
+			runtimeConfig = this.system.config;
+		}
+		const changed = (key: string) =>
+			changedKeys.some(
+				(item) =>
+					item === key || item.startsWith(`${key}.`) || key.startsWith(`${item}.`),
+			);
+
+		if (changed("ai")) {
+			clearQuotaCache();
+			await this.system.router?.reconfigure({
+				default: runtimeConfig.ai.default,
+				fallback: runtimeConfig.ai.fallback,
+				providers: runtimeConfig.ai.providers,
+				thinking: runtimeConfig.ai.thinking,
+			});
+			this.system.mediaGenerationManager?.updateConfig?.(runtimeConfig);
+			applied = true;
+		}
+
+		if (changed("browser")) {
+			await this.system.refreshBrowserTools?.(runtimeConfig);
+			applied = true;
+		}
+
+		if (changed("memory.embeddings")) {
+			if (options.embeddingAlreadyApplied) {
+				applied = true;
+			} else if (this.system.refreshEmbeddingProvider) {
+				await this.system.refreshEmbeddingProvider(runtimeConfig);
+				applied = true;
+			}
+		}
+
+		if (changed("memory.enabled")) {
+			const enabled = runtimeConfig.memory.enabled;
+			if (this.system.setMemoryEnabled) {
+				this.system.setMemoryEnabled(enabled);
+				applied = true;
+			} else if (this.system.agentRuntime?.setMemoryEnabled) {
+				this.system.agentRuntime.setMemoryEnabled(enabled);
+				applied = true;
+				this.system.agentManager?.setMemoryEnabled?.(enabled);
+			} else if (this.system.agentManager?.setMemoryEnabled) {
+				this.system.agentManager.setMemoryEnabled(enabled);
+				applied = true;
+			}
+			if (this.system.memoryRetentionScheduler) {
+				if (enabled) this.system.memoryRetentionScheduler.start?.();
+				else this.system.memoryRetentionScheduler.stop?.();
+				applied = true;
+			}
+		}
+
+		if (changed("tools")) {
+			if (this.system.toolRegistry?.setDisabled) {
+				this.system.toolRegistry.setDisabled(runtimeConfig.tools.disabled ?? []);
+				applied = true;
+			}
+			if (this.system.agentRuntime?.setToolIterationLimit) {
+				this.system.agentRuntime.setToolIterationLimit(
+					runtimeConfig.tools.iterationLimit,
+				);
+				applied = true;
+			}
+			if (this.system.toolExecutor?.updateConfig) {
+				this.system.toolExecutor.updateConfig({
+					timeouts: runtimeConfig.tools.timeouts,
+					rateLimits: runtimeConfig.tools.rateLimits,
+				});
+				applied = true;
+			}
+		}
+
+		if (changed("mcp") && this.system.mcpManager?.syncServers) {
+			const autoDisabled = new Set(runtimeConfig.mcp?.autoDisabled ?? []);
+			const configuredServers = Object.fromEntries(
+				Object.entries(runtimeConfig.mcp?.servers ?? {}).map(([name, server]) => [
+					name,
+					{
+						...server,
+						enabled: server.enabled !== false && !autoDisabled.has(name),
+					},
+				]),
+			) as Record<string, MCPServerConfig>;
+			this.system.mcpManager.setConfiguredServers?.(
+				runtimeConfig.mcp?.servers ?? {},
+			);
+			const servers = { ...configuredServers };
+			const zaiAuth = resolveZaiMCPAuth(
+				runtimeConfig.ai?.providers?.zhipu,
+				process.env,
+			);
+			if (zaiAuth) {
+				for (const [name, server] of Object.entries(
+					getZaiMCPConfigs(zaiAuth.apiKey, zaiAuth.platform),
+				)) {
+					if (!autoDisabled.has(name)) servers[name] = server;
+				}
+			}
+			await this.system.mcpManager.syncServers(servers, { persist: false });
+			applied = true;
+		}
+
+		if (changed("channels")) {
+			if (options.channelsAlreadyApplied) applied = true;
+			else if (await this.syncChangedChannels(runtimeConfig, changedKeys)) {
+				applied = true;
+			}
+		}
+
+		if (changed("learning") || changed("skills")) {
+			this.system.skillLoader?.updateConfig?.({
+				enabled: runtimeConfig.skills.enabled,
+				...runtimeConfig.skills.loading,
+			});
+			this.system.skillImprover?.updateConfig?.({
+				enabled: runtimeConfig.skills.autoImprove,
+				...runtimeConfig.skills.improvement,
+			});
+			this.system.learningEngine?.updateConfig?.({
+				...runtimeConfig.learning,
+				autoCreateSkills:
+					runtimeConfig.learning.autoCreateSkills &&
+					runtimeConfig.skills.autoCreate,
+			});
+			applied = true;
+		}
+
+		if (changed("multimedia")) {
+			this.system.mediaGenerationManager?.updateConfig?.(runtimeConfig);
+			applied = true;
+		}
+
+		if (changed("server") || changed("storage")) {
+			warnings.push("Server and storage changes require a process restart.");
+		}
+		return { applied, warnings };
+	}
+
+	private async syncChangedChannels(
+		config: OctopusConfig,
+		changedKeys: string[],
+	): Promise<boolean> {
+		if (!this.system?.syncChannel) return false;
+		const changedChannelNames = new Set(
+			changedKeys
+				.filter((key) => key === "channels" || key.startsWith("channels."))
+				.map((key) => key.split(".")[1])
+				.filter((name): name is string => Boolean(name)),
+		);
+		const names =
+			changedChannelNames.size > 0
+				? [...changedChannelNames]
+				: Object.keys(config.channels);
+		for (const name of names) {
+			const channel = (config.channels as Record<string, Record<string, unknown>>)[
+				name
+			];
+			if (channel) await this.system.syncChannel(name, channel);
+		}
+		return true;
+	}
+
+	private handleGetSettingsStatus(res: ServerResponse): void {
+		try {
+			const config = this.system?.config ?? this.settingsConfigLoader().load();
+			const status = SettingsService.getStatus(config, [
+				...this.pendingRestartKeys,
+			]);
+			if (this.runtimeBaselineConfig) {
+				status.runtime.server = this.runtimeBaselineConfig.server;
+			}
+			jsonRes(res, 200, status);
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetUsageExport(
+		res: ServerResponse,
+		url: URL,
+	): Promise<void> {
+		try {
+			const format = url.searchParams.get("format") ?? "csv";
+			if (format !== "csv" && format !== "json") {
+				jsonRes(res, 400, { error: "format must be csv or json" });
+				return;
+			}
+			const parsedFilters = parseUsageFilters(url);
+			if ("error" in parsedFilters) {
+				jsonRes(res, 400, { error: parsedFilters.error });
+				return;
+			}
+			const { filters } = parsedFilters;
+			const requestedLimit = Number(url.searchParams.get("limit") ?? 10_000);
+			if (
+				!Number.isInteger(requestedLimit) ||
+				requestedLimit < 1 ||
+				requestedLimit > 50_000
+			) {
+				jsonRes(res, 400, { error: "limit must be an integer from 1 to 50000" });
+				return;
+			}
+			const exported = this.system?.usageStore
+				? await this.system.usageStore.exportRows(filters, requestedLimit)
+				: { rows: [], truncated: false, limit: requestedLimit };
+			const date = new Date().toISOString().slice(0, 10);
+			const body =
+				format === "json"
+					? JSON.stringify(
+							{
+								exportedAt: new Date().toISOString(),
+								filters,
+								truncated: exported.truncated,
+								limit: exported.limit,
+								events: exported.rows,
+							},
+							null,
+							2,
+						)
+					: usageRowsToCsv(exported.rows);
+			res.writeHead(200, {
+				...CORS_HEADERS,
+				"Content-Type":
+					format === "json"
+						? "application/json; charset=utf-8"
+						: "text/csv; charset=utf-8",
+				"Content-Disposition": `attachment; filename="octopus-usage-${date}.${format}"`,
+				"Content-Length": Buffer.byteLength(body),
+				"X-Octopus-Export-Truncated": String(exported.truncated),
+			});
+			res.end(body);
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private handleGetSettingsSection(
+		res: ServerResponse,
+		section: SettingsSectionId,
+	): void {
+		try {
+			const config = this.system?.config ?? this.settingsConfigLoader().load();
+			jsonRes(res, 200, SettingsService.getSection(config, section));
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handlePutSettingsSection(
+		req: IncomingMessage,
+		res: ServerResponse,
+		section: SettingsSectionId,
+	): Promise<void> {
+		try {
+			const payload = parseJsonRecord(await readBody(req));
+			const loader = this.settingsConfigLoader();
+			const currentConfig = loader.load();
+			const { config: nextConfig, changedKeys } = SettingsService.applySectionUpdate(
+				currentConfig,
+				section,
+				payload,
+			);
+			const validator = new ConfigValidator();
+			const result = validator.validate(nextConfig);
+			if (!result.valid) {
+				jsonRes(res, 400, {
+					error: "Validation failed",
+					details: result.errors,
+				});
+				return;
+			}
+			const changesEmbeddings = changedKeys.some(
+				(key) =>
+					key === "memory.embeddings" || key.startsWith("memory.embeddings."),
+			);
+			const embeddingApplied = Boolean(
+				changesEmbeddings && this.system?.refreshEmbeddingProvider,
+			);
+			if (embeddingApplied) {
+				await this.system?.refreshEmbeddingProvider?.(nextConfig);
+			}
+			const channelsApplied = changedKeys.some(
+				(key) => key === "channels" || key.startsWith("channels."),
+			)
+				? await this.syncChangedChannels(nextConfig, changedKeys)
+				: false;
+
+			try {
+				loader.savePreservingEnv(nextConfig);
+			} catch (error) {
+				if (channelsApplied) {
+					await this.syncChangedChannels(currentConfig, changedKeys).catch(
+						() => undefined,
+					);
+				}
+				throw error;
+			}
+			const runtime = await this.applyRuntimeConfigChanges(nextConfig, changedKeys, {
+				embeddingAlreadyApplied: embeddingApplied,
+				channelsAlreadyApplied: channelsApplied,
+			});
+			const restartKeys = this.updatePendingRestartKeys(nextConfig, changedKeys);
+			if (restartKeys.length > 0) {
+				runtime.warnings.push(
+					`Restart required to apply: ${restartKeys.join(", ")}`,
+				);
+			}
+			jsonRes(
+				res,
+				200,
+				SettingsService.saveResponse(
+					nextConfig,
+					section,
+					runtime.applied,
+					runtime.warnings,
+				),
+			);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (message === "SETTINGS_REVISION_CONFLICT") {
+				jsonRes(res, 409, { error: "Settings revision conflict" });
+				return;
+			}
+			const bad = badRequestMessage(err);
+			jsonRes(res, bad ? 400 : 500, { error: bad ?? message });
+		}
+	}
+
+	private settingsConfigLoader(): ConfigLoader {
+		return this.system?.configLoader ?? new ConfigLoader();
+	}
+
+	private refreshSharedConfigFromDisk(): void {
+		if (!this.system) return;
+		replaceObjectContents(this.system.config, this.settingsConfigLoader().load());
+	}
+
+	private updatePendingRestartKeys(
+		nextConfig: OctopusConfig,
+		changedKeys: string[],
+	): string[] {
+		const restartKeys = SettingsService.restartKeysForChangedPaths(changedKeys);
+		const baseline = this.runtimeBaselineConfig;
+		if (!baseline) return restartKeys;
+		for (const key of restartKeys) {
+			const previous = getNestedValue(
+				baseline as unknown as Record<string, unknown>,
+				key,
+			);
+			const next = getNestedValue(
+				nextConfig as unknown as Record<string, unknown>,
+				key,
+			);
+			if (JSON.stringify(previous) === JSON.stringify(next)) {
+				this.pendingRestartKeys.delete(key);
+			} else {
+				this.pendingRestartKeys.add(key);
+			}
+		}
+		return restartKeys.filter((key) => this.pendingRestartKeys.has(key));
+	}
+
+	private mediaGenerationStore(): MediaGenerationStore | null {
+		const db = this.system?.db;
+		if (!db) return null;
+		return new MediaGenerationStore(db);
+	}
+
+	private handleGetMultimediaCatalog(res: ServerResponse): void {
+		try {
+			const config = this.system?.config ?? this.settingsConfigLoader().load();
+			jsonRes(res, 200, getMultimediaCatalog(config));
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleListMediaGenerationJobs(
+		res: ServerResponse,
+		url: URL,
+	): Promise<void> {
+		try {
+			if (this.system?.mediaGenerationManager) {
+				const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+				jsonRes(res, 200, {
+					jobs: await this.system.mediaGenerationManager.list(
+						Number.isFinite(limit) ? limit : 50,
+					),
+				});
+				return;
+			}
+			const store = this.mediaGenerationStore();
+			if (!store) {
+				jsonRes(res, 501, { error: "Media job store is not available" });
+				return;
+			}
+			const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+			jsonRes(res, 200, { jobs: await store.list(Number.isFinite(limit) ? limit : 50) });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleGetMediaGenerationJob(
+		res: ServerResponse,
+		jobId: string,
+	): Promise<void> {
+		try {
+			if (this.system?.mediaGenerationManager) {
+				const job = await this.system.mediaGenerationManager.get(jobId);
+				if (!job) {
+					jsonRes(res, 404, { error: "Media job not found" });
+					return;
+				}
+				jsonRes(res, 200, { job });
+				return;
+			}
+			const store = this.mediaGenerationStore();
+			if (!store) {
+				jsonRes(res, 501, { error: "Media job store is not available" });
+				return;
+			}
+			const job = await store.get(jobId);
+			if (!job) {
+				jsonRes(res, 404, { error: "Media job not found" });
+				return;
+			}
+			jsonRes(res, 200, { job });
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleCreateMediaGenerationJob(
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const body = parseJsonRecord(await readBody(req));
+			const mediaType = body.mediaType;
+			if (mediaType !== undefined && mediaType !== "video") {
+				jsonRes(res, 400, { error: "The durable generation endpoint currently supports video jobs" });
+				return;
+			}
+			const idempotencyKey =
+				typeof body.idempotencyKey === "string"
+					? body.idempotencyKey
+					: headerValue(req.headers["idempotency-key"]) || undefined;
+			if (this.system?.mediaGenerationManager) {
+				const request = normalizeVideoGenerationRequest(body);
+				if (
+					(body.provider === "gemini" || body.provider === "vertex") &&
+					typeof body.model === "string" &&
+					(body.transport === "video-lro" || body.transport === "interactions")
+				) {
+					request.routes = [
+						{
+							provider: body.provider,
+							model: body.model,
+							transport: body.transport,
+						},
+					];
+				}
+				const job = await this.system.mediaGenerationManager.createVideoJob(request, {
+					idempotencyKey,
+					toolName: "api.generate_video",
+				});
+				jsonRes(res, 202, { job });
+				return;
+			}
+
+			jsonRes(res, 503, {
+				error:
+					"Media generation worker is unavailable; the job was not queued or submitted",
+			});
+		} catch (err) {
+			const bad = badRequestMessage(err);
+			jsonRes(res, bad ? 400 : 500, {
+				error: bad ?? (err instanceof Error ? err.message : String(err)),
+			});
+		}
+	}
+
+	private async handleCancelMediaGenerationJob(
+		res: ServerResponse,
+		jobId: string,
+	): Promise<void> {
+		try {
+			if (this.system?.mediaGenerationManager) {
+				const result = await this.system.mediaGenerationManager.cancel(jobId);
+				jsonRes(res, result.job ? 200 : 404, result);
+				return;
+			}
+			const store = this.mediaGenerationStore();
+			if (!store) {
+				jsonRes(res, 501, { error: "Media job store is not available" });
+				return;
+			}
+			const job = await store.get(jobId);
+			if (!job) {
+				jsonRes(res, 404, { error: "Media job not found" });
+				return;
+			}
+			if (job.status === "queued") {
+				await store.cancelQueued(jobId);
+				jsonRes(res, 200, {
+					job: await store.get(jobId),
+					cancelledRemote: false,
+					message: "The queued job was cancelled before provider submission.",
+				});
+				return;
+			}
+			jsonRes(res, 503, {
+				error:
+					"Remote cancellation requires the media generation worker for submitting or running jobs; no local state was changed.",
+				job,
+			});
+		} catch (err) {
+			jsonRes(res, 500, {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	private async handleRetryMediaGenerationJob(
+		res: ServerResponse,
+		jobId: string,
+	): Promise<void> {
+		try {
+			if (!this.system?.mediaGenerationManager) {
+				jsonRes(res, 501, { error: "Media job retry is not available" });
+				return;
+			}
+			const job = await this.system.mediaGenerationManager.retry(jobId);
+			if (!job) {
+				jsonRes(res, 404, { error: "Media job not found" });
+				return;
+			}
+			jsonRes(res, 202, { job });
+		} catch (err) {
+			jsonRes(res, 400, {
+				error: err instanceof Error ? err.message : String(err),
 			});
 		}
 	}
@@ -3138,7 +3939,7 @@ export class TransportServer {
 				return;
 			}
 
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const configObj = config as unknown as Record<string, unknown>;
 
@@ -3171,9 +3972,11 @@ export class TransportServer {
 			const changesEmbeddings =
 				keyPath === "memory.embeddings" ||
 				keyPath.startsWith("memory.embeddings.");
-			if (changesEmbeddings) {
+			let embeddingApplied = false;
+			if (changesEmbeddings && this.system?.refreshEmbeddingProvider) {
 				try {
-					await this.system?.refreshEmbeddingProvider?.(nextConfig);
+					await this.system.refreshEmbeddingProvider(nextConfig);
+					embeddingApplied = true;
 				} catch (err) {
 					jsonRes(res, 400, {
 						error: err instanceof Error ? err.message : String(err),
@@ -3183,64 +3986,23 @@ export class TransportServer {
 				}
 			}
 
-			loader.save(nextConfig);
-
-			if (this.system) {
-				this.system.config = nextConfig;
-				if (keyPath === "ai" || keyPath.startsWith("ai.")) {
-					clearQuotaCache();
-					await this.system.router?.reconfigure({
-						default: nextConfig.ai.default,
-						fallback: nextConfig.ai.fallback,
-						providers: nextConfig.ai.providers,
-						thinking: nextConfig.ai.thinking,
-					});
-				}
-				if (keyPath === "browser" || keyPath.startsWith("browser.")) {
-					await this.system.refreshBrowserTools?.(this.system.config);
-				}
-				if (keyPath === "tools" || keyPath.startsWith("tools.iterationLimit")) {
-					this.system.agentRuntime?.setToolIterationLimit?.(
-						this.system.config.tools.iterationLimit,
-					);
-				}
-				if (
-					keyPath === "tools" ||
-					keyPath.startsWith("tools.timeouts") ||
-					keyPath.startsWith("tools.rateLimits")
-				) {
-					this.system.toolExecutor?.updateConfig?.({
-						timeouts: this.system.config.tools.timeouts,
-						rateLimits: this.system.config.tools.rateLimits,
-					});
-				}
-				if (keyPath === "learning" || keyPath.startsWith("learning.")) {
-					this.system.learningEngine?.updateConfig?.({
-						...this.system.config.learning,
-						autoCreateSkills:
-							this.system.config.learning.autoCreateSkills &&
-							this.system.config.skills.autoCreate,
-					});
-				}
-				if (keyPath === "skills" || keyPath.startsWith("skills.")) {
-					this.system.skillLoader?.updateConfig?.({
-						enabled: this.system.config.skills.enabled,
-						...this.system.config.skills.loading,
-					});
-					this.system.skillImprover?.updateConfig?.({
-						enabled: this.system.config.skills.autoImprove,
-						...this.system.config.skills.improvement,
-					});
-					this.system.learningEngine?.updateConfig?.({
-						...this.system.config.learning,
-						autoCreateSkills:
-							this.system.config.learning.autoCreateSkills &&
-							this.system.config.skills.autoCreate,
-					});
-				}
+			loader.savePreservingEnv(nextConfig);
+			const runtime = await this.applyRuntimeConfigChanges(nextConfig, [keyPath], {
+				embeddingAlreadyApplied: embeddingApplied,
+			});
+			const restartKeys = this.updatePendingRestartKeys(nextConfig, [keyPath]);
+			if (restartKeys.length > 0) {
+				runtime.warnings.push(
+					`Restart required to apply: ${restartKeys.join(", ")}`,
+				);
 			}
 
-			jsonRes(res, 200, { ok: true, key: keyPath, applied: changesEmbeddings });
+			jsonRes(res, 200, {
+				ok: true,
+				key: keyPath,
+				applied: runtime.applied,
+				warnings: runtime.warnings,
+			});
 		} catch (err) {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
@@ -3256,10 +4018,9 @@ export class TransportServer {
 				});
 				return;
 			}
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
-			this.system.config = config;
-			await this.system.refreshEmbeddingProvider(config);
+			await this.applyRuntimeConfigChanges(config, ["memory.embeddings"]);
 			jsonRes(res, 200, {
 				ok: true,
 				message: "Embedding provider applied without restart",
@@ -4991,14 +5752,25 @@ export class TransportServer {
 				try {
 					const skills = (await skillRegistry.list()) as Skill[];
 					dbSkills = await Promise.all(
-						skills.map(async (skill) => ({
-							...skill,
-							recentUsage: skillRegistry.getUsageHistory
-								? await skillRegistry
-										.getUsageHistory(skill.id, 5)
-										.catch(() => [])
-								: [],
-						})),
+						skills.map(async (skill) => {
+							// embedding/examples/templates no se renderizan en la UI
+							// (la única consumidora es la página de skills de la web);
+							// con 160+ skills sumaban ~2.2MB de payload por request.
+							const {
+								embedding: _embedding,
+								examples: _examples,
+								templates: _templates,
+								...rest
+							} = skill;
+							return {
+								...rest,
+								recentUsage: skillRegistry.getUsageHistory
+									? await skillRegistry
+											.getUsageHistory(skill.id, 5)
+											.catch(() => [])
+									: [],
+							};
+						}),
 					);
 				} catch {
 					/* table may not exist yet */
@@ -5194,9 +5966,11 @@ export class TransportServer {
 
 			// 1. Get System & Dynamic Tools from ToolRegistry
 			if (this.system?.toolRegistry) {
-				const registeredTools = this.system.toolRegistry.list();
+				const registeredTools =
+					this.system.toolRegistry.listAll?.() ?? this.system.toolRegistry.list();
 				for (const t of registeredTools) {
 					const metadata = t.metadata || {};
+					if (metadata.hiddenFromModel === true) continue;
 					const source = metadata.source || "system";
 
 					if (source === "system" || source === "dynamic") {
@@ -5358,7 +6132,7 @@ export class TransportServer {
 		name: string,
 	): Promise<void> {
 		try {
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			config.tools.disabled = config.tools.disabled ?? [];
 
@@ -5371,17 +6145,15 @@ export class TransportServer {
 				config.tools.disabled.push(name);
 				isEnabled = false;
 			}
-			loader.save(config);
-
-			if (this.system) {
-				this.system.config = config;
-			}
+			loader.savePreservingEnv(config);
+			const runtime = await this.applyRuntimeConfigChanges(config, ["tools.disabled"]);
 
 			jsonRes(res, 200, {
 				ok: true,
 				name,
 				enabled: isEnabled,
-				requiresRestart: true,
+				requiresRestart: false,
+				applied: runtime.applied,
 			});
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -5460,7 +6232,7 @@ export class TransportServer {
 				jsonRes(res, 503, { error: "MCP Manager not available" });
 				return;
 			}
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
 			const isAutoManaged = name.startsWith("zai-");
 
@@ -5476,12 +6248,16 @@ export class TransportServer {
 					config.mcp.autoDisabled.push(name);
 					enabled = false;
 				}
-				loader.save(config);
-				this.system.config = config;
+				loader.savePreservingEnv(config);
+				replaceObjectContents(this.system.config, config);
 
-				if (!enabled) {
-					await this.system.mcpManager.removeServer(name);
-				} else {
+				const effectiveServers = Object.fromEntries(
+					this.system.mcpManager
+						.listServers()
+						.filter((server: MCPManagedServer) => server.name !== name)
+						.map((server: MCPManagedServer) => [server.name, server.config]),
+				) as Record<string, MCPServerConfig>;
+				if (enabled) {
 					const auth = resolveZaiMCPAuth(
 						config.ai?.providers?.zhipu,
 						process.env,
@@ -5490,10 +6266,13 @@ export class TransportServer {
 						const zaiConfigs = getZaiMCPConfigs(auth.apiKey, auth.platform);
 						const serverConfig = zaiConfigs[name];
 						if (serverConfig) {
-							await this.system.mcpManager.addServer(name, serverConfig);
+							effectiveServers[name] = serverConfig;
 						}
 					}
 				}
+				await this.system.mcpManager.syncServers(effectiveServers, {
+					persist: false,
+				});
 				jsonRes(res, 200, { ok: true, enabled });
 			} else {
 				const server = this.system.mcpManager.getServer(name);
@@ -5507,8 +6286,8 @@ export class TransportServer {
 				config.mcp = config.mcp || { servers: {}, autoDisabled: [] };
 				config.mcp.servers = config.mcp.servers || {};
 				config.mcp.servers[name] = { ...server.config, enabled: newState };
-				loader.save(config);
-				this.system.config = config;
+				loader.savePreservingEnv(config);
+				replaceObjectContents(this.system.config, config);
 
 				await this.system.mcpManager.setServerEnabled(name, newState);
 				jsonRes(res, 200, { ok: true, enabled: newState });
@@ -5613,6 +6392,7 @@ export class TransportServer {
 
 			await this.system.mcpManager.removeServer(name);
 			const newServer = await this.system.mcpManager.addServer(name, newConfig);
+			this.refreshSharedConfigFromDisk();
 			jsonRes(res, 200, { ok: true, server: newServer });
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -7740,6 +8520,7 @@ export class TransportServer {
 				env: body.env,
 				enabled: body.enabled,
 			});
+			this.refreshSharedConfigFromDisk();
 			jsonRes(res, 201, server);
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -7756,6 +8537,7 @@ export class TransportServer {
 				return;
 			}
 			const ok = await this.system.mcpManager.removeServer(name);
+			this.refreshSharedConfigFromDisk();
 			jsonRes(res, ok ? 200 : 404, { ok });
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -7793,6 +8575,7 @@ export class TransportServer {
 			}
 			const body = JSON.parse(await readBody(req));
 			await this.system.mcpManager.syncServers(body);
+			this.refreshSharedConfigFromDisk();
 			jsonRes(res, 200, { ok: true });
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -7806,13 +8589,24 @@ export class TransportServer {
 	private async handleListChannels(res: ServerResponse): Promise<void> {
 		try {
 			const config = this.loadConfig();
-			const channels = Object.entries(config.channels).map(([name, ch]) => {
-				const { enabled, ...rest } = ch as {
-					enabled: boolean;
-					[k: string]: unknown;
-				};
-				return { name, enabled, type: name, config: redactChannelConfig(rest) };
-			});
+			const channels = await Promise.all(
+				Object.entries(config.channels).map(async ([name, ch]) => {
+					const { enabled, ...rest } = ch as {
+						enabled: boolean;
+						[k: string]: unknown;
+					};
+					const runtime = await this.system?.channelManager?.getStatus?.(name);
+					return {
+						name,
+						enabled,
+						type: name,
+						status: runtime?.status ?? "disconnected",
+						connected: runtime?.connected ?? false,
+						registered: runtime?.registered ?? false,
+						config: redactChannelConfig(rest),
+					};
+				}),
+			);
 			jsonRes(res, 200, channels);
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -7828,8 +8622,9 @@ export class TransportServer {
 			const raw = JSON.parse(await readBody(req));
 			const body =
 				raw && typeof raw === "object" && "value" in raw ? raw.value : raw;
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
+			const previousConfig = JSON.parse(JSON.stringify(config)) as OctopusConfig;
 			const channel =
 				config.channels[channelName as keyof typeof config.channels];
 			if (!channel) {
@@ -7839,12 +8634,28 @@ export class TransportServer {
 			(config.channels as Record<string, Record<string, unknown>>)[
 				channelName
 			] = {
-				enabled: channel.enabled,
+				...(channel as Record<string, unknown>),
 				...(typeof body === "object" && body !== null ? body : {}),
+				enabled: channel.enabled,
 			};
-			loader.save(config);
-			if (this.system) this.system.config = config;
-			jsonRes(res, 200, { ok: true, channel: channelName });
+			const changedKeys = [`channels.${channelName}`];
+			const channelsApplied = await this.syncChangedChannels(config, changedKeys);
+			try {
+				loader.savePreservingEnv(config);
+			} catch (error) {
+				await this.syncChangedChannels(previousConfig, changedKeys).catch(
+					() => undefined,
+				);
+				throw error;
+			}
+			const runtime = await this.applyRuntimeConfigChanges(config, changedKeys, {
+				channelsAlreadyApplied: channelsApplied,
+			});
+			jsonRes(res, 200, {
+				ok: true,
+				channel: channelName,
+				applied: runtime.applied,
+			});
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
 		}
@@ -7855,8 +8666,9 @@ export class TransportServer {
 		channelName: string,
 	): Promise<void> {
 		try {
-			const loader = new ConfigLoader();
+			const loader = this.settingsConfigLoader();
 			const config = loader.load();
+			const previousConfig = JSON.parse(JSON.stringify(config)) as OctopusConfig;
 			const channels = config.channels as Record<string, { enabled: boolean }>;
 			const channel = channels[channelName];
 			if (!channel) {
@@ -7864,12 +8676,24 @@ export class TransportServer {
 				return;
 			}
 			channel.enabled = !channel.enabled;
-			loader.save(config);
-			if (this.system) this.system.config = config;
+			const changedKeys = [`channels.${channelName}.enabled`];
+			const channelsApplied = await this.syncChangedChannels(config, changedKeys);
+			try {
+				loader.savePreservingEnv(config);
+			} catch (error) {
+				await this.syncChangedChannels(previousConfig, changedKeys).catch(
+					() => undefined,
+				);
+				throw error;
+			}
+			const runtime = await this.applyRuntimeConfigChanges(config, changedKeys, {
+				channelsAlreadyApplied: channelsApplied,
+			});
 			jsonRes(res, 200, {
 				ok: true,
 				channel: channelName,
 				enabled: channel.enabled,
+				applied: runtime.applied,
 			});
 		} catch (err) {
 			jsonRes(res, 500, { error: String(err) });
@@ -7927,6 +8751,48 @@ export class TransportServer {
 			jsonRes(res, 500, {
 				error: err instanceof Error ? err.message : String(err),
 			});
+		}
+	}
+
+	private async handleWhatsAppStatus(res: ServerResponse): Promise<void> {
+		try {
+			const channel = this.system?.channelManager?.get?.("whatsapp") as
+				| { getStatus?: () => Record<string, unknown> }
+				| undefined;
+			const runtime = channel?.getStatus?.();
+			if (runtime) {
+				jsonRes(res, 200, runtime);
+				return;
+			}
+			const status = await this.system?.channelManager?.getStatus?.("whatsapp");
+			jsonRes(res, 200, status ?? {
+				status: "disconnected",
+				connected: false,
+				registered: false,
+			});
+		} catch (err) {
+			jsonRes(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+
+	private async handleWhatsAppLogout(res: ServerResponse): Promise<void> {
+		try {
+			const channel = this.system?.channelManager?.get?.("whatsapp") as
+				| { logout?: () => Promise<void> }
+				| undefined;
+			if (!channel?.logout) {
+				jsonRes(res, 409, { error: "WhatsApp is not registered" });
+				return;
+			}
+			await channel.logout();
+			const loader = this.settingsConfigLoader();
+			const config = loader.load();
+			config.channels.whatsapp.enabled = false;
+			loader.savePreservingEnv(config);
+			await this.applyRuntimeConfigChanges(config, ["channels.whatsapp.enabled"]);
+			jsonRes(res, 200, { ok: true, status: "logged_out" });
+		} catch (err) {
+			jsonRes(res, 500, { error: err instanceof Error ? err.message : String(err) });
 		}
 	}
 
@@ -8506,7 +9372,7 @@ export class TransportServer {
 
 	private loadConfig(): OctopusConfig {
 		if (this.system?.config) return this.system.config;
-		return new ConfigLoader().load();
+		return this.settingsConfigLoader().load();
 	}
 
 	async stop(): Promise<void> {

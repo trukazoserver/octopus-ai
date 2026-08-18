@@ -32,6 +32,11 @@ import * as migration030 from "./030_resumable_memory_operations.js";
 import * as migration031 from "./031_memory_operation_control.js";
 import * as migration032 from "./032_memory_benchmarks.js";
 import * as migration033 from "./033_artifact_annotations.js";
+import * as migration034 from "./034_media_generation_jobs.js";
+import * as migration035 from "./035_media_generation_job_safety.js";
+import * as migration036 from "./036_multimedia_usage_events.js";
+import * as migration037 from "./037_usage_event_identity_and_cost_basis.js";
+import * as migration038 from "./038_media_submission_sequence.js";
 
 export interface Migration {
 	version: number;
@@ -73,4 +78,9 @@ export const migrations: Migration[] = [
 	{ version: 31, up: migration031.up, down: migration031.down },
 	{ version: 32, up: migration032.up, down: migration032.down },
 	{ version: 33, up: migration033.up, down: migration033.down },
+	{ version: 34, up: migration034.up, down: migration034.down },
+	{ version: 35, up: migration035.up, down: migration035.down },
+	{ version: 36, up: migration036.up, down: migration036.down },
+	{ version: 37, up: migration037.up, down: migration037.down },
+	{ version: 38, up: migration038.up, down: migration038.down },
 ];

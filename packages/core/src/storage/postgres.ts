@@ -90,10 +90,12 @@ export class PostgresDatabase implements DatabaseAdapter {
 
 		for (const migration of migrations) {
 			if (appliedVersions.has(migration.version)) continue;
-			await migration.up(this);
-			await this.run("INSERT INTO _migrations (version) VALUES (?)", [
-				migration.version,
-			]);
+			await this.transaction(async () => {
+				await migration.up(this);
+				await this.run("INSERT INTO _migrations (version) VALUES (?)", [
+					migration.version,
+				]);
+			});
 		}
 	}
 
@@ -135,6 +137,10 @@ function preparePostgresSql(
 		})
 		.replace(/\bBLOB\b/gi, "BYTEA")
 		.replace(/datetime\('now'\)/gi, "CURRENT_TIMESTAMP")
+		.replace(
+			/\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b/gi,
+			"BIGSERIAL PRIMARY KEY",
+		)
 		.replace(/\bMAX\(\s*([^,()]+)\s*,\s*([^)]+)\)/gi, "GREATEST($1, $2)")
 		.replace(
 			/SELECT\s+rowid,\s+\*\s+FROM\s+(\w+)\s+ORDER\s+BY\s+rowid\s+ASC/gi,

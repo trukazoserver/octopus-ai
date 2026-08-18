@@ -119,6 +119,18 @@ describe("OpenAI image API provider", () => {
 		expect(result.metadata).toMatchObject({ provider: "openai-api" });
 	});
 
+	it("rejects absolute edit inputs outside the Octopus workspace", async () => {
+		const { createCodexImageTools } = await import("../tools/codex-image.js");
+		const result = await createCodexImageTools()[1].handler({
+			image: join(homedir(), "outside-workspace.png"),
+			prompt: "Do not read this path",
+		});
+
+		expect(result.success).toBe(false);
+		expect(result.error).toContain("must stay inside the Octopus workspace");
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+	});
+
 	it("falls back to OPENAI_API_KEY when the config field is empty", async () => {
 		state.apiKey = "";
 		vi.stubEnv("OPENAI_API_KEY", "openai-env-key");

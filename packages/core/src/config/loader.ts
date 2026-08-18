@@ -24,7 +24,9 @@ export class ConfigLoader {
 
 		const raw = readFileSync(this.configPath, "utf-8").replace(/^\uFEFF/, "");
 		const parsed = JSON.parse(raw) as Record<string, unknown>;
-		if (this.migrateGoogleProvider(parsed)) {
+		const migratedGoogle = this.migrateGoogleProvider(parsed);
+		const migratedMultimedia = this.migrateMultimediaConfig(parsed);
+		if (migratedGoogle || migratedMultimedia) {
 			writeFileSync(this.configPath, JSON.stringify(parsed, null, 2), "utf-8");
 		}
 		const resolved = this.resolveEnvVars(parsed);
@@ -98,6 +100,35 @@ export class ConfigLoader {
 		if (process.platform !== "win32") chmodSync(this.configPath, 0o600);
 	}
 
+	savePreservingEnv(config: OctopusConfig): void {
+		const result = this.validator.validate(config);
+		if (!result.valid) {
+			throw new Error(
+				`Cannot save invalid configuration: ${result.errors.join("; ")}`,
+			);
+		}
+		let persisted: unknown = config;
+		if (existsSync(this.configPath)) {
+			try {
+				const raw = readFileSync(this.configPath, "utf-8").replace(/^\uFEFF/, "");
+				persisted = this.restoreUnchangedEnvTemplates(
+					JSON.parse(raw),
+					config,
+				);
+			} catch {
+				persisted = config;
+			}
+		}
+		assertSafeObjectTree(persisted);
+		const dir = dirname(this.configPath);
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+		writeFileSync(this.configPath, JSON.stringify(persisted, null, 2), {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+		if (process.platform !== "win32") chmodSync(this.configPath, 0o600);
+	}
+
 	/**
 	 * Migrate the legacy `ai.providers.google` entry into the split `gemini`
 	 * (API key) and `vertex` (service account) providers. Idempotent: no-op when
@@ -155,6 +186,91 @@ export class ConfigLoader {
 		return true;
 	}
 
+	private migrateMultimediaConfig(parsed: Record<string, unknown>): boolean {
+		let changed = parsed.version !== 2;
+		parsed.version = 2;
+		if (parsed.multimedia && typeof parsed.multimedia === "object") return changed;
+		const tools = parsed.tools as Record<string, unknown> | undefined;
+		const imageGeneration = tools?.imageGeneration as
+			| Record<string, Record<string, unknown>>
+			| undefined;
+		if (!imageGeneration) {
+			parsed.multimedia = getDefaults().multimedia;
+			return true;
+		}
+		const openai = imageGeneration.openai ?? {};
+		const nanoBanana = imageGeneration.nanoBanana ?? {};
+		const imageRoutes: Array<{
+			provider: "openai" | "gemini" | "vertex";
+			model: string;
+			transport: "openai-images" | "generate-content";
+		}> = [];
+		if (openai.enabled !== false) {
+			imageRoutes.push({
+				provider: "openai",
+				model: typeof openai.model === "string" ? openai.model : "gpt-image-2",
+				transport: "openai-images",
+			});
+		}
+		if (nanoBanana.enabled !== false) {
+			imageRoutes.push({
+				provider: nanoBanana.provider === "gemini-api" ? "gemini" : "vertex",
+				model:
+					typeof nanoBanana.model === "string"
+						? nanoBanana.model
+						: "gemini-3.1-flash-image",
+				transport: "generate-content",
+			});
+		}
+		const defaultImageRoute = {
+			provider: "openai" as const,
+			model: "gpt-image-2",
+			transport: "openai-images" as const,
+		};
+		parsed.multimedia = {
+			image: {
+				enabled: imageRoutes.length > 0,
+				openaiAuthMode:
+					openai.provider === "codex"
+						? "codex"
+						: openai.provider === "openai-api"
+							? "api-key"
+							: "inherit",
+				primary: imageRoutes[0] ?? defaultImageRoute,
+				fallbacks: imageRoutes.slice(1),
+			},
+			video: {
+				enabled: true,
+				primary: {
+					provider: "vertex",
+					model: "veo-3.1-generate-001",
+					transport: "video-lro",
+				},
+				fallbacks: [
+					{
+						provider: "vertex",
+						model: "veo-3.1-fast-generate-001",
+						transport: "video-lro",
+					},
+					{
+						provider: "vertex",
+						model: "veo-3.1-lite-generate-001",
+						transport: "video-lro",
+					},
+					{
+						provider: "gemini",
+						model: "gemini-omni-flash-preview",
+						transport: "interactions",
+					},
+				],
+				pollIntervalMs: 5000,
+				maxPollMs: 1800000,
+			},
+		};
+		changed = true;
+		return changed;
+	}
+
 	private resolveEnvVars(obj: unknown): unknown {
 		assertSafeObjectTree(obj);
 		if (typeof obj === "string") {
@@ -177,6 +293,38 @@ export class ConfigLoader {
 		}
 
 		return obj;
+	}
+
+	private restoreUnchangedEnvTemplates(raw: unknown, next: unknown): unknown {
+		if (
+			typeof raw === "string" &&
+			raw.includes("${") &&
+			JSON.stringify(this.resolveEnvVars(raw)) === JSON.stringify(next)
+		) {
+			return raw;
+		}
+		if (Array.isArray(raw) && Array.isArray(next)) {
+			return next.map((item, index) =>
+				this.restoreUnchangedEnvTemplates(raw[index], item),
+			);
+		}
+		if (
+			raw &&
+			next &&
+			typeof raw === "object" &&
+			typeof next === "object" &&
+			!Array.isArray(raw) &&
+			!Array.isArray(next)
+		) {
+			const rawRecord = raw as Record<string, unknown>;
+			return Object.fromEntries(
+				Object.entries(next as Record<string, unknown>).map(([key, value]) => [
+					key,
+					this.restoreUnchangedEnvTemplates(rawRecord[key], value),
+				]),
+			);
+		}
+		return next;
 	}
 
 	private deepMerge<T extends Record<string, unknown>>(

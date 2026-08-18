@@ -408,7 +408,7 @@ export class WorkerPool {
 	 * toolScope se conserva como señal de recomendación para el prompt, no como restricción.
 	 */
 	private getScopedTools(_toolScope: string[]): ToolDefinition[] {
-		const allTools = this.toolRegistry.list();
+		const allTools = this.toolRegistry.listForModel();
 		return allTools.filter(
 			(tool) =>
 				tool.name !== "delegate_task" &&
@@ -462,23 +462,28 @@ export class WorkerPool {
 			},
 		});
 
-		const liveRuntime = task.agentId
-			? this.options.getAgentRuntime?.(task.agentId, fullConfig.channelId)
-			: undefined;
-		const systemPrompt = liveRuntime
-			? ""
-			: this.buildWorkerSystemPrompt(task, fullConfig);
-		const scopedTools = liveRuntime ? [] : this.getScopedTools(task.toolScope);
-
-		state.messages = liveRuntime
-			? []
-			: [
-					{ role: "system", content: systemPrompt },
-					...(fullConfig.sharedContext ?? []),
-					{ role: "user", content: task.description },
-				];
-
+		// El setup (runtime vivo, prompt, tools) puede lanzar antes del loop;
+		// va dentro del try para que el fallo se reporte como evento de error
+		// de la tarea en vez de rechazar executeWorker y colgar el run.
+		let liveRuntime: LiveAgentRuntime | undefined;
+		let scopedTools: ToolDefinition[] = [];
 		try {
+			liveRuntime = task.agentId
+				? this.options.getAgentRuntime?.(task.agentId, fullConfig.channelId)
+				: undefined;
+			const systemPrompt = liveRuntime
+				? ""
+				: this.buildWorkerSystemPrompt(task, fullConfig);
+			scopedTools = liveRuntime ? [] : this.getScopedTools(task.toolScope);
+
+			state.messages = liveRuntime
+				? []
+				: [
+						{ role: "system", content: systemPrompt },
+						...(fullConfig.sharedContext ?? []),
+						{ role: "user", content: task.description },
+					];
+
 			const result = liveRuntime
 				? await this.runLiveAgentRuntime(state, fullConfig, liveRuntime)
 				: await this.runWorkerLoop(state, scopedTools, fullConfig);

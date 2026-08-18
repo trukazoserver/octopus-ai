@@ -1,5 +1,11 @@
 /** OpenAI image generation/editing through either the public API or Codex. */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import {
 	dirname,
@@ -10,6 +16,11 @@ import {
 	resolve,
 } from "node:path";
 import { ConfigLoader } from "../config/loader.js";
+import type { OctopusConfig } from "../config/schema.js";
+import type { MediaRoute } from "../multimedia/catalog.js";
+import { UrlSafetyPolicy } from "../security/url-safety.js";
+import { fetchSafeImage } from "../security/safe-image-fetch.js";
+import { assertRealPathInside } from "../utils/path-safety.js";
 import { mediaContext } from "./media.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
@@ -35,6 +46,8 @@ const MIME_BY_EXT: Record<string, string> = {
 	".webp": "image/webp",
 	".gif": "image/gif",
 };
+const MAX_REFERENCE_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_REFERENCE_TOTAL_BYTES = 64 * 1024 * 1024;
 
 type ImageBackground = "auto" | "opaque" | "transparent";
 type OpenAIImageProvider = "openai-api" | "codex";
@@ -164,6 +177,25 @@ function validateTransparentDestination(
 	return undefined;
 }
 
+async function validateWorkspaceDestination(
+	destPath: string,
+): Promise<string | undefined> {
+	if (!destPath) return undefined;
+	const absolute = resolve(
+		isAbsolute(destPath) ? destPath : resolve(WORKSPACE_DIR, destPath),
+	);
+	const rel = relative(WORKSPACE_DIR, absolute);
+	if (rel.startsWith("..") || isAbsolute(rel)) {
+		return `Destination path '${destPath}' escapes the Octopus workspace. Use a relative path inside the workspace.`;
+	}
+	try {
+		await assertRealPathInside(absolute, [WORKSPACE_DIR]);
+		return undefined;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+}
+
 function inferMime(p: string): string {
 	return MIME_BY_EXT[extname(p).toLowerCase()] ?? "image/png";
 }
@@ -187,18 +219,40 @@ function codexImageHeaders(
 	return h;
 }
 
-function loadOpenAIImageConnection():
+function loadOpenAIImageConnection(
+	config: OctopusConfig = new ConfigLoader().load(),
+	route?: MediaRoute,
+):
 	| OpenAIImageConnection
 	| { error: string } {
-	const config = new ConfigLoader().load();
+	if (config.multimedia?.image.enabled === false) {
+		return { error: "Image generation is disabled in Ajustes > Multimedia." };
+	}
 	const openai = config.ai.providers.openai;
 	const settings = config.tools.imageGeneration.openai;
-	if (settings.provider === "openai-api") {
-		const apiKey = firstConfigured(
-			openai.apiKey,
-			openai.apiKeyEnv ? process.env[openai.apiKeyEnv] : undefined,
-			process.env.OPENAI_API_KEY,
-		);
+	if (!route && settings.enabled === false) {
+		return { error: "The legacy OpenAI image alias is disabled." };
+	}
+	const apiKey = firstConfigured(
+		openai.apiKey,
+		openai.apiKeyEnv ? process.env[openai.apiKeyEnv] : undefined,
+		process.env.OPENAI_API_KEY,
+	);
+	const accessToken = firstConfigured(
+		openai.accessToken,
+		openai.accessTokenEnv ? process.env[openai.accessTokenEnv] : undefined,
+		process.env.CODEX_ACCESS_TOKEN,
+	);
+	const imageAuthMode = config.multimedia?.image.openaiAuthMode ?? "inherit";
+	const selectedProvider: OpenAIImageProvider = route
+		? imageAuthMode === "codex" ||
+			(imageAuthMode === "inherit" &&
+				(openai.authMode === "codex" || (!apiKey && Boolean(accessToken))))
+			? "codex"
+			: "openai-api"
+		: settings.provider;
+	const model = route?.model || settings.model || "gpt-image-2";
+	if (selectedProvider === "openai-api") {
 		if (!apiKey) {
 			return {
 				error: "OpenAI API key is required for the selected image provider.",
@@ -206,7 +260,7 @@ function loadOpenAIImageConnection():
 		}
 		return {
 			provider: "openai-api",
-			model: settings.model || "gpt-image-2",
+			model,
 			baseUrl: (openai.baseUrl || "https://api.openai.com/v1").replace(
 				/\/+$/,
 				"",
@@ -218,11 +272,6 @@ function loadOpenAIImageConnection():
 		};
 	}
 
-	const accessToken = firstConfigured(
-		openai.accessToken,
-		openai.accessTokenEnv ? process.env[openai.accessTokenEnv] : undefined,
-		process.env.CODEX_ACCESS_TOKEN,
-	);
 	if (!accessToken) {
 		return {
 			error: "Codex login is required. Sign in with your OpenAI account first.",
@@ -230,7 +279,7 @@ function loadOpenAIImageConnection():
 	}
 	return {
 		provider: "codex",
-		model: settings.model || "gpt-image-2",
+		model,
 		baseUrl: CODEX_BASE_URL.replace(/\/+$/, ""),
 		headers: codexImageHeaders(accessToken, openai.accountId),
 	};
@@ -244,24 +293,41 @@ function loadOpenAIImageConnection():
  */
 async function resolveInputImage(
 	input: string,
+	urlSafetyPolicy: UrlSafetyPolicy,
 ): Promise<{ buffer: Buffer; mimeType: string }> {
 	const s = input.trim();
+	if (s.startsWith("/api/media/file/")) {
+		return mediaContext.resolve(s, { maxBytes: MAX_REFERENCE_IMAGE_BYTES });
+	}
 	if (
-		s.startsWith("/api/media/file/") ||
-		/^[\w.-]+\.(png|jpe?g|webp|gif)$/i.test(s)
+		/^[\w.-]+\.(png|jpe?g|webp|gif)$/i.test(s) &&
+		!existsSync(resolve(WORKSPACE_DIR, s))
 	) {
-		return mediaContext.resolve(s);
+		return mediaContext.resolve(s, { maxBytes: MAX_REFERENCE_IMAGE_BYTES });
 	}
 	if (/^https?:\/\//i.test(s)) {
-		const r = await fetch(s);
-		if (!r.ok) throw new Error(`Image fetch failed (${r.status})`);
+		const fetched = await fetchSafeImage(s, {
+			policy: urlSafetyPolicy,
+			context: "Image input URL",
+			maxBytes: MAX_REFERENCE_IMAGE_BYTES,
+		});
 		return {
-			buffer: Buffer.from(await r.arrayBuffer()),
-			mimeType: r.headers.get("content-type") || inferMime(s),
+			buffer: fetched.buffer,
+			mimeType: fetched.mimeType || inferMime(s),
 		};
 	}
 	const abs = isAbsolute(s) ? s : resolve(WORKSPACE_DIR, s);
+	const rel = relative(WORKSPACE_DIR, abs);
+	if (rel.startsWith("..") || isAbsolute(rel)) {
+		throw new Error("Input image path must stay inside the Octopus workspace.");
+	}
 	if (!existsSync(abs)) throw new Error(`Image not found: ${input}`);
+	await assertRealPathInside(abs, [WORKSPACE_DIR]);
+	if (statSync(abs).size > MAX_REFERENCE_IMAGE_BYTES) {
+		throw new Error(
+			`Input image exceeds the ${MAX_REFERENCE_IMAGE_BYTES}-byte limit: ${input}`,
+		);
+	}
 	return { buffer: readFileSync(abs), mimeType: inferMime(abs) };
 }
 
@@ -559,9 +625,24 @@ async function persistImageOutputs(
 		size: string;
 		background?: ImageBackground;
 		chromaKey?: ChromaKey;
+		urlSafetyPolicy: UrlSafetyPolicy;
 	},
-): Promise<{ urls: string[]; error?: string; alphaPostProcessed: boolean }> {
-	const { destPath, prompt, model, provider, size, background, chromaKey } =
+): Promise<{
+	urls: string[];
+	error?: string;
+	failedCount: number;
+	alphaPostProcessed: boolean;
+}> {
+	const {
+		destPath,
+		prompt,
+		model,
+		provider,
+		size,
+		background,
+		chromaKey,
+		urlSafetyPolicy,
+	} =
 		opts;
 	let destAbs = "";
 	let destStem = "";
@@ -574,8 +655,19 @@ async function persistImageOutputs(
 		if (rel.startsWith("..") || isAbsolute(rel)) {
 			return {
 				urls: [],
+				failedCount: 0,
 				alphaPostProcessed: false,
 				error: `Destination path '${destPath}' escapes the Octopus workspace. Use a relative path inside the workspace (e.g. 'site/assets/hero.png').`,
+			};
+		}
+		try {
+			await assertRealPathInside(abs, [WORKSPACE_DIR]);
+		} catch (error) {
+			return {
+				urls: [],
+				failedCount: 0,
+				alphaPostProcessed: false,
+				error: error instanceof Error ? error.message : String(error),
 			};
 		}
 		destAbs = abs;
@@ -584,16 +676,21 @@ async function persistImageOutputs(
 	}
 	const urls: string[] = [];
 	let persistError: string | undefined;
+	let failedCount = 0;
 	let alphaPostProcessed = false;
 	for (const [idx, item] of data.entries()) {
 		try {
 			let buffer: Buffer | undefined;
 			if (item.b64_json) buffer = Buffer.from(item.b64_json, "base64");
 			else if (item.url) {
-				const imgResp = await fetch(item.url);
-				if (imgResp.ok) buffer = Buffer.from(await imgResp.arrayBuffer());
+				buffer = (
+					await fetchSafeImage(item.url, {
+						policy: urlSafetyPolicy,
+						context: "Image output URL",
+					})
+				).buffer;
 			}
-			if (!buffer) continue;
+			if (!buffer) throw new Error("Image output is missing data and URL payloads.");
 			if (background === "transparent") {
 				const transparent = await ensureTransparentImage(buffer, chromaKey);
 				buffer = transparent.buffer;
@@ -602,6 +699,7 @@ async function persistImageOutputs(
 			if (destPath) {
 				const finalAbs =
 					idx === 0 ? destAbs : `${destStem}_${idx + 1}${destExt}`;
+				await assertRealPathInside(finalAbs, [WORKSPACE_DIR]);
 				mkdirSync(dirname(finalAbs), { recursive: true });
 				writeFileSync(finalAbs, buffer);
 				const relPath = relative(WORKSPACE_DIR, finalAbs).split("\\").join("/");
@@ -619,11 +717,12 @@ async function persistImageOutputs(
 				urls.push(saved.url);
 			}
 		} catch (err) {
+			failedCount++;
 			persistError =
 				err instanceof Error ? err.message : "Failed to save generated image.";
 		}
 	}
-	return { urls, error: persistError, alphaPostProcessed };
+	return { urls, error: persistError, failedCount, alphaPostProcessed };
 }
 
 function fetchErrorResult(err: unknown, label: string): ToolResult {
@@ -636,6 +735,38 @@ function fetchErrorResult(err: unknown, label: string): ToolResult {
 		error: aborted
 			? `${label} timed out (no response in 180s). The service may be overloaded — retry shortly.`
 			: `${label} failed: ${msg}`,
+		metadata: { submissionState: "unknown" },
+	};
+}
+
+/**
+ * Build a ToolResult for a non-OK image API HTTP response. For 401/403 it
+ * appends actionable guidance: the single most common cause is a ChatGPT/Codex
+ * login whose backend refuses image generation, which otherwise surfaces as an
+ * opaque "Forbidden" that hides the real remedy (use a platform API key with
+ * the auth mode off 'codex', or fall back to the Google route).
+ */
+function imageApiErrorResult(
+	status: number,
+	bodyText: string,
+	label: string,
+	prompt: string,
+): ToolResult {
+	const detail = bodyText.slice(0, 300);
+	console.error(
+		`[openai-image] ${label} error ${status} (prompt=${prompt.slice(0, 80)}): ${detail}`,
+	);
+	const refused = status === 401 || status === 403;
+	const guidance = refused
+		? " The ChatGPT/Codex backend refused image generation for this account (401/403) — it serves chat but gates images behind an eligible plan. Sign in (Settings > IA > OpenAI) with a ChatGPT Plus/Pro/Team account that includes image generation. Alternatively, set a platform OpenAI API key and switch the image auth mode off 'codex', or use the configured Google (Gemini/Vertex) fallback route."
+		: "";
+	return {
+		success: false,
+		output: "",
+		error: `${label} error (${status}): ${detail}${guidance}`,
+		metadata: {
+			submissionState: status < 500 && status !== 408 ? "rejected" : "unknown",
+		},
 	};
 }
 
@@ -645,7 +776,7 @@ function isTimeoutError(err: unknown): boolean {
 }
 
 function isRetryableImageStatus(status: number): boolean {
-	return status === 408 || status === 429 || status >= 500;
+	return status === 429;
 }
 
 function retryDelayMs(response: Response): number {
@@ -664,23 +795,12 @@ async function requestImageWithRetry(
 	| { response: Response; quality: string; retried: boolean }
 	| { error: ToolResult }
 > {
-	let quality = requestedQuality;
+	const quality = requestedQuality;
 	for (let attempt = 0; attempt < 2; attempt++) {
 		let response: Response;
 		try {
 			response = await request(quality);
 		} catch (err) {
-			const timedOut = isTimeoutError(err);
-			if (attempt === 0 && (timedOut || err instanceof TypeError)) {
-				quality = requestedQuality === "high" ? "medium" : requestedQuality;
-				console.warn(
-					`[codex-image] ${label} failed transiently; retrying once with quality=${quality}`,
-				);
-				if (!timedOut) {
-					await new Promise((resolve) => setTimeout(resolve, 1_000));
-				}
-				continue;
-			}
 			return { error: fetchErrorResult(err, label) };
 		}
 
@@ -693,9 +813,8 @@ async function requestImageWithRetry(
 		}
 
 		const details = await response.text().catch(() => response.statusText);
-		quality = requestedQuality === "high" ? "medium" : requestedQuality;
 		console.warn(
-			`[codex-image] ${label} received ${response.status}; retrying once with quality=${quality}: ${details.slice(0, 200)}`,
+			`[codex-image] ${label} received ${response.status}; retrying once with unchanged quality=${quality}: ${details.slice(0, 200)}`,
 		);
 		const delay = retryDelayMs(response);
 		if (delay > 0) {
@@ -712,7 +831,9 @@ async function requestImageWithRetry(
 	};
 }
 
-export function createCodexImageTools(): ToolDefinition[] {
+export function createCodexImageTools(options: {
+	getConfig?: () => OctopusConfig;
+} = {}): ToolDefinition[] {
 	const sharedImageParams = {
 		model: {
 			type: "string",
@@ -756,6 +877,10 @@ export function createCodexImageTools(): ToolDefinition[] {
 				"Generate images with OpenAI gpt-image-2 using the provider selected in Settings: OpenAI API or OpenAI Codex. Supports native API transparency and safe chroma recovery for Codex. By default returns media-library URLs; pass `path` only for workspace assets used by generated HTML/sites.",
 			uiIcon: IMAGE_SVG,
 			managesOwnPathPolicy: true,
+			metadata: {
+				hiddenFromModel: true,
+				compatibilityAliasFor: "generate_image",
+			},
 			parameters: {
 				prompt: {
 					type: "string",
@@ -769,18 +894,35 @@ export function createCodexImageTools(): ToolDefinition[] {
 				if (!prompt) {
 					return { success: false, output: "", error: "Missing 'prompt'." };
 				}
-				const connection = loadOpenAIImageConnection();
+				const runtimeConfig = options.getConfig?.() ?? new ConfigLoader().load();
+				const connection = loadOpenAIImageConnection(
+					runtimeConfig,
+					params.__octopus_image_route as MediaRoute | undefined,
+				);
 				if ("error" in connection) {
-					return { success: false, output: "", error: connection.error };
+					return {
+						success: false,
+						output: "",
+						error: connection.error,
+						metadata: { submissionState: "rejected" },
+					};
 				}
 				const imageOptions = resolveImageOptions(
 					{ ...params, model: params.model ?? connection.model },
 					prompt,
 				);
 				if (imageOptions.error) {
-					return { success: false, output: "", error: imageOptions.error };
+					return {
+						success: false,
+						output: "",
+						error: imageOptions.error,
+						metadata: { submissionState: "rejected" },
+					};
 				}
 				const { model, background } = imageOptions;
+				const urlSafetyPolicy = new UrlSafetyPolicy(
+					runtimeConfig.security?.urlPolicy,
+				);
 				const transparency =
 					background === "transparent" && connection.provider === "codex"
 						? prepareTransparentImagePrompt(prompt)
@@ -791,12 +933,16 @@ export function createCodexImageTools(): ToolDefinition[] {
 				const n = Math.min(Math.max(Number(params.n ?? 1) || 1, 1), 4);
 				const quality = String(params.quality ?? "auto");
 				const destPath = params.path ? String(params.path).trim() : "";
-				const destinationError = validateTransparentDestination(
-					destPath,
-					background,
-				);
+				const destinationError =
+					validateTransparentDestination(destPath, background) ??
+					(await validateWorkspaceDestination(destPath));
 				if (destinationError) {
-					return { success: false, output: "", error: destinationError };
+					return {
+						success: false,
+						output: "",
+						error: destinationError,
+						metadata: { submissionState: "rejected" },
+					};
 				}
 
 				const requestResult = await requestImageWithRetry(
@@ -830,23 +976,25 @@ export function createCodexImageTools(): ToolDefinition[] {
 				const { response, quality: effectiveQuality, retried } = requestResult;
 				if (!response.ok) {
 					const text = await response.text().catch(() => response.statusText);
-					console.error(
-						`[openai-image] API error ${response.status} (provider=${connection.provider}, prompt=${prompt.slice(0, 80)}): ${text.slice(0, 300)}`,
+					return imageApiErrorResult(
+						response.status,
+						text,
+						"OpenAI image API",
+						prompt,
 					);
-					return {
-						success: false,
-						output: "",
-						error: `OpenAI image API error (${response.status}): ${text.slice(0, 300)}`,
-					};
 				}
 
 				let json: { data?: Array<{ b64_json?: string; url?: string }> };
 				try {
 					json = (await response.json()) as typeof json;
 				} catch (err) {
-					return fetchErrorResult(err, "OpenAI image response");
+					return {
+						...fetchErrorResult(err, "OpenAI image response"),
+						metadata: { submissionState: "accepted" },
+					};
 				}
-				const { urls, error, alphaPostProcessed } = await persistImageOutputs(
+				const { urls, error, failedCount, alphaPostProcessed } =
+					await persistImageOutputs(
 					json.data ?? [],
 					{
 						destPath,
@@ -856,6 +1004,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 						size,
 						background,
 						chromaKey,
+						urlSafetyPolicy,
 					},
 				);
 				if (urls.length === 0) {
@@ -863,12 +1012,23 @@ export function createCodexImageTools(): ToolDefinition[] {
 						success: false,
 						output: "",
 						error: error ?? "OpenAI image API returned no image data.",
+						metadata: { submissionState: "accepted" },
 					};
 				}
 				return {
 					success: true,
-					output: urls.map((u, i) => `Image ${i + 1}: ${u}`).join("\n"),
+					output: [
+						urls.map((u, i) => `Image ${i + 1}: ${u}`).join("\n"),
+						error
+							? `Warning: ${failedCount} paid output(s) could not be saved (${error}).`
+							: "",
+					]
+						.filter(Boolean)
+						.join("\n"),
 					metadata: {
+						submissionState: "accepted",
+						partialFailure: error,
+						failedOutputCount: failedCount,
 						count: urls.length,
 						urls,
 						model,
@@ -890,6 +1050,10 @@ export function createCodexImageTools(): ToolDefinition[] {
 				"Edit one or more images with OpenAI gpt-image-2 using the provider selected in Settings: OpenAI API or OpenAI Codex. Accepts Octopus media URLs, HTTP URLs, and workspace paths, including multiple inputs for compositing.",
 			uiIcon: EDIT_SVG,
 			managesOwnPathPolicy: true,
+			metadata: {
+				hiddenFromModel: true,
+				compatibilityAliasFor: "generate_image",
+			},
 			parameters: {
 				image: {
 					type: "string",
@@ -928,18 +1092,35 @@ export function createCodexImageTools(): ToolDefinition[] {
 						error: "Missing 'image' (the image to edit).",
 					};
 				}
-				const connection = loadOpenAIImageConnection();
+				const runtimeConfig = options.getConfig?.() ?? new ConfigLoader().load();
+				const connection = loadOpenAIImageConnection(
+					runtimeConfig,
+					params.__octopus_image_route as MediaRoute | undefined,
+				);
 				if ("error" in connection) {
-					return { success: false, output: "", error: connection.error };
+					return {
+						success: false,
+						output: "",
+						error: connection.error,
+						metadata: { submissionState: "rejected" },
+					};
 				}
 				const imageOptions = resolveImageOptions(
 					{ ...params, model: params.model ?? connection.model },
 					prompt,
 				);
 				if (imageOptions.error) {
-					return { success: false, output: "", error: imageOptions.error };
+					return {
+						success: false,
+						output: "",
+						error: imageOptions.error,
+						metadata: { submissionState: "rejected" },
+					};
 				}
 				const { model, background } = imageOptions;
+				const urlSafetyPolicy = new UrlSafetyPolicy(
+					runtimeConfig.security?.urlPolicy,
+				);
 				const transparency =
 					background === "transparent" && connection.provider === "codex"
 						? prepareTransparentImagePrompt(prompt)
@@ -950,12 +1131,16 @@ export function createCodexImageTools(): ToolDefinition[] {
 				const n = Math.min(Math.max(Number(params.n ?? 1) || 1, 1), 4);
 				const quality = String(params.quality ?? "auto");
 				const destPath = params.path ? String(params.path).trim() : "";
-				const destinationError = validateTransparentDestination(
-					destPath,
-					background,
-				);
+				const destinationError =
+					validateTransparentDestination(destPath, background) ??
+					(await validateWorkspaceDestination(destPath));
 				if (destinationError) {
-					return { success: false, output: "", error: destinationError };
+					return {
+						success: false,
+						output: "",
+						error: destinationError,
+						metadata: { submissionState: "rejected" },
+					};
 				}
 
 				// Resolve each input image -> {image_url: data URL}. The Codex
@@ -964,9 +1149,19 @@ export function createCodexImageTools(): ToolDefinition[] {
 				// images that the backend cannot fetch directly.
 				const images: Array<{ image_url: string }> = [];
 				const resolvedImages: Array<{ buffer: Buffer; mimeType: string }> = [];
+				let totalReferenceBytes = 0;
 				for (const inp of inputs) {
 					try {
-						const { buffer, mimeType } = await resolveInputImage(inp);
+						const { buffer, mimeType } = await resolveInputImage(
+							inp,
+							urlSafetyPolicy,
+						);
+						totalReferenceBytes += buffer.length;
+						if (totalReferenceBytes > MAX_REFERENCE_TOTAL_BYTES) {
+							throw new Error(
+								`Reference images exceed the ${MAX_REFERENCE_TOTAL_BYTES}-byte aggregate limit.`,
+							);
+						}
 						resolvedImages.push({ buffer, mimeType });
 						images.push({
 							image_url: `data:${mimeType};base64,${buffer.toString("base64")}`,
@@ -976,6 +1171,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 							success: false,
 							output: "",
 							error: `Could not load input image '${inp}': ${err instanceof Error ? err.message : String(err)}`,
+							metadata: { submissionState: "rejected" },
 						};
 					}
 				}
@@ -1029,23 +1225,25 @@ export function createCodexImageTools(): ToolDefinition[] {
 				const { response, quality: effectiveQuality, retried } = requestResult;
 				if (!response.ok) {
 					const text = await response.text().catch(() => response.statusText);
-					console.error(
-						`[openai-image] edit API error ${response.status} (provider=${connection.provider}, prompt=${prompt.slice(0, 80)}): ${text.slice(0, 300)}`,
+					return imageApiErrorResult(
+						response.status,
+						text,
+						"OpenAI image edit API",
+						prompt,
 					);
-					return {
-						success: false,
-						output: "",
-						error: `OpenAI image edit API error (${response.status}): ${text.slice(0, 300)}`,
-					};
 				}
 
 				let json: { data?: Array<{ b64_json?: string; url?: string }> };
 				try {
 					json = (await response.json()) as typeof json;
 				} catch (err) {
-					return fetchErrorResult(err, "OpenAI image edit response");
+					return {
+						...fetchErrorResult(err, "OpenAI image edit response"),
+						metadata: { submissionState: "accepted" },
+					};
 				}
-				const { urls, error, alphaPostProcessed } = await persistImageOutputs(
+				const { urls, error, failedCount, alphaPostProcessed } =
+					await persistImageOutputs(
 					json.data ?? [],
 					{
 						destPath,
@@ -1055,6 +1253,7 @@ export function createCodexImageTools(): ToolDefinition[] {
 						size,
 						background,
 						chromaKey,
+						urlSafetyPolicy,
 					},
 				);
 				if (urls.length === 0) {
@@ -1062,12 +1261,23 @@ export function createCodexImageTools(): ToolDefinition[] {
 						success: false,
 						output: "",
 						error: error ?? "OpenAI image edit returned no image data.",
+						metadata: { submissionState: "accepted" },
 					};
 				}
 				return {
 					success: true,
-					output: urls.map((u, i) => `Edited image ${i + 1}: ${u}`).join("\n"),
+					output: [
+						urls.map((u, i) => `Edited image ${i + 1}: ${u}`).join("\n"),
+						error
+							? `Warning: ${failedCount} paid output(s) could not be saved (${error}).`
+							: "",
+					]
+						.filter(Boolean)
+						.join("\n"),
 					metadata: {
+						submissionState: "accepted",
+						partialFailure: error,
+						failedOutputCount: failedCount,
 						count: urls.length,
 						urls,
 						model,

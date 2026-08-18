@@ -46,7 +46,16 @@
       "Bash(powershell -NoProfile -Command \"Stop-Process -Id 26432,32516,10808,29828,36660 -Force -ErrorAction SilentlyContinue; Write-Output 'Done'\")",
       "Bash(Start-Sleep -Seconds 5)",
       "Bash(Get-Content \"C:\\\\Users\\\\edfer\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Aplicaciones-Visual-Estudio-code-octopus-ai\\\\dd8a9701-46ae-42f4-b313-d555349a6466\\\\tasks\\\\b94cyrgn1.output\" -Tail 30)",
-      "Bash(powershell -c \"\\(Get-Content 'packages/web/src/pages/tasks.tsx'\\)[841]\")"
+      "Bash(powershell -c \"\\(Get-Content 'packages/web/src/pages/tasks.tsx'\\)[841]\")",
+      "Bash(pnpm --filter @octopus-ai/core typecheck)",
+      "Bash(pnpm --filter @octopus-ai/core exec vitest run src/__tests__/image-generation-router.test.ts src/__tests__/codex-image.test.ts src/__tests__/openai-image-api.test.ts)",
+      "Bash(pnpm --filter @octopus-ai/core --filter @octopus-ai/cli build)",
+      "Bash(break)",
+      "Bash(curl -s -m 3 http://127.0.0.1:18789/api/status)",
+      "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{try{const j=JSON.parse\\(s\\);console.log\\('status:',j.status,'| model:',j.model,'| imgProviders:',JSON.stringify\\(j.imageGenerationProviders\\)\\)}catch{console.log\\('not ready yet'\\)}}\\)\")",
+      "Bash(node .dev-logs/verify-fix.mjs)",
+      "Bash(node .verify-fix.mjs)",
+      "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{try{const j=JSON.parse\\(s\\);console.log\\('server:',j.status,'| model:',j.model,'| codex imgs OK \\(Plus acct\\)'\\)}catch{console.log\\('not ready'\\)}}\\)\")"
     ]
   }
 }

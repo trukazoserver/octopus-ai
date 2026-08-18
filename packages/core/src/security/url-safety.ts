@@ -19,6 +19,11 @@ export interface UrlSafetyDecision {
 	url?: URL;
 }
 
+export interface UrlSafetyResolution {
+	url: URL;
+	addresses: Array<{ address: string; family: 4 | 6 }>;
+}
+
 export interface UrlSafetyPolicyOptions {
 	lookup?: (hostname: string) => Promise<Array<{ address: string }>>;
 }
@@ -71,22 +76,46 @@ export class UrlSafetyPolicy {
 	}
 
 	async assertAllowedAsync(rawUrl: string, context = "URL"): Promise<URL> {
-		const decision = await this.evaluateAsync(rawUrl);
+		return (await this.resolveAllowedAsync(rawUrl, context)).url;
+	}
+
+	async resolveAllowedAsync(
+		rawUrl: string,
+		context = "URL",
+	): Promise<UrlSafetyResolution> {
+		const { decision, addresses } = await this.evaluateAsyncWithAddresses(rawUrl);
 		if (!decision.allowed || !decision.url) {
 			throw new Error(
 				`${context} blocked by URL safety policy: ${decision.reason}`,
 			);
 		}
-		return decision.url;
+		return { url: decision.url, addresses };
 	}
 
 	async evaluateAsync(rawUrl: string): Promise<UrlSafetyDecision> {
+		return (await this.evaluateAsyncWithAddresses(rawUrl)).decision;
+	}
+
+	private async evaluateAsyncWithAddresses(rawUrl: string): Promise<{
+		decision: UrlSafetyDecision;
+		addresses: Array<{ address: string; family: 4 | 6 }>;
+	}> {
 		const decision = this.evaluate(rawUrl);
-		if (!decision.allowed || !decision.url || !this.enabled) return decision;
-		if (this.allowPrivateNetworks || !this.dnsLookupEnabled) return decision;
+		if (!decision.allowed || !decision.url || !this.enabled) {
+			return { decision, addresses: [] };
+		}
+		if (this.allowPrivateNetworks || !this.dnsLookupEnabled) {
+			return { decision, addresses: [] };
+		}
 
 		const hostname = normalizeHostname(decision.url.hostname);
-		if (isIP(hostname)) return decision;
+		const literalFamily = isIP(hostname);
+		if (literalFamily) {
+			return {
+				decision,
+				addresses: [{ address: hostname, family: literalFamily as 4 | 6 }],
+			};
+		}
 
 		try {
 			const records = await this.lookup(hostname);
@@ -95,18 +124,35 @@ export class UrlSafetyPolicy {
 			);
 			if (privateRecord) {
 				return {
-					allowed: false,
-					reason: `host '${hostname}' resolves to private or local address '${privateRecord.address}'`,
-					url: decision.url,
+					decision: {
+						allowed: false,
+						reason: `host '${hostname}' resolves to private or local address '${privateRecord.address}'`,
+						url: decision.url,
+					},
+					addresses: [],
 				};
 			}
-			return decision;
-		} catch (error) {
-			if (!this.dnsLookupFailClosed) return decision;
 			return {
-				allowed: false,
-				reason: `DNS lookup failed for host '${hostname}': ${error instanceof Error ? error.message : String(error)}`,
-				url: decision.url,
+				decision,
+				addresses: records
+					.map((record) => ({
+						address: record.address,
+						family: isIP(record.address),
+					}))
+					.filter(
+						(record): record is { address: string; family: 4 | 6 } =>
+							record.family === 4 || record.family === 6,
+					),
+			};
+		} catch (error) {
+			if (!this.dnsLookupFailClosed) return { decision, addresses: [] };
+			return {
+				decision: {
+					allowed: false,
+					reason: `DNS lookup failed for host '${hostname}': ${error instanceof Error ? error.message : String(error)}`,
+					url: decision.url,
+				},
+				addresses: [],
 			};
 		}
 	}

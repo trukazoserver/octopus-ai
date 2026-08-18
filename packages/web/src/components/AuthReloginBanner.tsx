@@ -73,6 +73,7 @@ export function AuthReloginBanner() {
 				border: "1px solid #5a4410",
 				boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
 				fontSize: 13,
+				pointerEvents: "none",
 				display: "flex",
 				gap: 10,
 				alignItems: "center",

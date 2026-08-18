@@ -41,7 +41,10 @@ export interface ToolContext {
 		/**
 		 * Resuelve un archivo local o URL nativa de Octopus, y devuelve su Buffer.
 		 */
-		resolve: (url: string) => Promise<{ buffer: Buffer; mimeType: string }>;
+		resolve: (
+			url: string,
+			options?: { maxBytes?: number },
+		) => Promise<{ buffer: Buffer; mimeType: string }>;
 		/** Shared chroma-key processing for image-generating dynamic tools. */
 		transparency?: {
 			isRequested: (prompt: string, background?: string) => boolean;
@@ -75,10 +78,12 @@ export interface ToolContext {
 		taskId?: string;
 		role?: string;
 		channelId?: string;
+		conversationId?: string;
 		runId?: string;
 		toolScope?: string[];
 		fileScope?: string[];
 		abortSignal?: AbortSignal;
+		idempotencyKey?: string;
 	};
 	/**
 	 * Canal de progreso para tools de larga duración (longRunning). El runtime
@@ -125,6 +130,7 @@ export interface ToolDefinition {
 
 export type ToolErrorCode =
 	| "TOOL_NOT_FOUND"
+	| "TOOL_DISABLED"
 	| "INVALID_ARGUMENTS"
 	| "ABORTED"
 	| "TIMEOUT"
@@ -147,6 +153,7 @@ export interface ToolResult {
 
 export class ToolRegistry {
 	private tools: Map<string, ToolDefinition> = new Map();
+	private disabled = new Set<string>();
 
 	register(tool: ToolDefinition): void {
 		this.tools.set(tool.name, tool);
@@ -161,7 +168,33 @@ export class ToolRegistry {
 	}
 
 	list(): ToolDefinition[] {
+		return this.listAll().filter((tool) => this.isEnabled(tool.name));
+	}
+
+	listForModel(): ToolDefinition[] {
+		return this.list().filter((tool) => tool.metadata?.hiddenFromModel !== true);
+	}
+
+	listAll(): ToolDefinition[] {
 		return Array.from(this.tools.values());
+	}
+
+	setDisabled(names: Iterable<string>): void {
+		this.disabled.clear();
+		for (const name of names) this.disabled.add(name);
+	}
+
+	shareEnablementFrom(registry: ToolRegistry): void {
+		this.disabled = registry.disabled;
+	}
+
+	setEnabled(name: string, enabled: boolean): void {
+		if (enabled) this.disabled.delete(name);
+		else this.disabled.add(name);
+	}
+
+	isEnabled(name: string): boolean {
+		return !this.disabled.has(name);
 	}
 
 	has(name: string): boolean {
@@ -170,7 +203,7 @@ export class ToolRegistry {
 
 	toLLMTools(options?: { excludeServerNames?: string[] }): LLMTool[] {
 		const exclude = options?.excludeServerNames;
-		return this.list()
+		return this.listForModel()
 			.filter((tool) => {
 				if (!exclude || exclude.length === 0) return true;
 				const serverName = String(tool.metadata?.serverName ?? "");

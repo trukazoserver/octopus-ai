@@ -1,7 +1,7 @@
 import type { OctopusConfig } from "./schema.js";
 
 export const DEFAULT_CONFIG: OctopusConfig = {
-	version: 1,
+	version: 2,
 	server: {
 		port: 18789,
 		host: "127.0.0.1",
@@ -21,6 +21,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 		captchaTimeoutMs: 120000,
 		persistCookies: true,
 		sessionTtlHours: 168,
+		idleCloseMs: 120000,
 		autoFallbackOnBlock: false,
 		blockFallbackProvider: "decodo",
 		confirmBlockWithVision: true,
@@ -314,6 +315,66 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			extraPatterns: [],
 		},
 	},
+	multimedia: {
+		image: {
+			enabled: true,
+			openaiAuthMode: "inherit",
+			primary: {
+				provider: "openai",
+				model: "gpt-image-2",
+				transport: "openai-images",
+			},
+			fallbacks: [
+				{
+					provider: "vertex",
+					model: "gemini-3.1-flash-image",
+					transport: "generate-content",
+				},
+			],
+		},
+		video: {
+			enabled: true,
+			primary: {
+				provider: "vertex",
+				model: "veo-3.1-generate-001",
+				transport: "video-lro",
+			},
+			fallbacks: [
+				{
+					provider: "vertex",
+					model: "veo-3.1-fast-generate-001",
+					transport: "video-lro",
+				},
+				{
+					provider: "vertex",
+					model: "veo-3.1-lite-generate-001",
+					transport: "video-lro",
+				},
+				{
+					provider: "gemini",
+					model: "gemini-omni-flash-preview",
+					transport: "interactions",
+				},
+				{
+					provider: "gemini",
+					model: "veo-3.1-generate-preview",
+					transport: "video-lro",
+				},
+				{
+					provider: "gemini",
+					model: "veo-3.1-fast-generate-preview",
+					transport: "video-lro",
+				},
+				{
+					provider: "gemini",
+					model: "veo-3.1-lite-generate-preview",
+					transport: "video-lro",
+				},
+			],
+			pollIntervalMs: 5000,
+			maxPollMs: 1800000,
+		},
+	},
 	tools: {
 		disabled: [],
 		imageGeneration: {
@@ -345,6 +406,7 @@ export const DEFAULT_CONFIG: OctopusConfig = {
 			byTool: {
 				delegate_task: 300000,
 				execute_code: 120000,
+				generate_image: 600000,
 				"nano-banana-generate": 600000,
 				"veo-video-generator": 600000,
 				office_convert_preview: 180000,

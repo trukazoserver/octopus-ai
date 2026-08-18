@@ -88,6 +88,7 @@ export interface ToolExecutionContext {
 	taskId?: string;
 	role?: string;
 	channelId?: string;
+	conversationId?: string;
 	runId?: string;
 	executionId?: string;
 	actionId?: string;
@@ -597,6 +598,14 @@ export class ToolExecutor {
 				output: "",
 				error: `Tool not found: ${toolName}`,
 				errorCode: "TOOL_NOT_FOUND",
+			};
+		}
+		if (!this.registry.isEnabled(toolName)) {
+			return {
+				success: false,
+				output: "",
+				error: `Tool disabled: ${toolName}`,
+				errorCode: "TOOL_DISABLED",
 			};
 		}
 

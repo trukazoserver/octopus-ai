@@ -1,26 +1,18 @@
 import type React from "react";
 import { Suspense, lazy, useEffect, useState } from "react";
 import { AuthReloginBanner } from "../components/AuthReloginBanner.js";
+import { UserMenu } from "../components/UserMenu.js";
 import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
+import type { SettingsSectionId } from "../pages/settings.js";
 import { ToastContainer } from "../components/ui/Toast.js";
 import { publicAsset } from "../utils/assets.js";
 import "./app.css";
 
 const LOGO_SRC = publicAsset("mascotas/Pulpo_octavio.png");
 
-const AgentsPage = lazy(() =>
-	import("../pages/agents.js").then(({ AgentsPage }) => ({
-		default: AgentsPage,
-	})),
-);
 const AutomationsPage = lazy(() =>
 	import("../pages/automations.js").then(({ AutomationsPage }) => ({
 		default: AutomationsPage,
-	})),
-);
-const ChannelsPage = lazy(() =>
-	import("../pages/channels/Channels.js").then(({ ChannelsPage }) => ({
-		default: ChannelsPage,
 	})),
 );
 const ChatPage = lazy(() =>
@@ -31,42 +23,18 @@ const DashboardPage = lazy(() =>
 		default: DashboardPage,
 	})),
 );
-const MemoryPage = lazy(() =>
-	import("../pages/memory.js").then(({ MemoryPage }) => ({
-		default: MemoryPage,
-	})),
-);
 const SettingsPage = lazy(() =>
 	import("../pages/settings.js").then(({ SettingsPage }) => ({
 		default: SettingsPage,
 	})),
 );
-const SkillsPage = lazy(() =>
-	import("../pages/skills.js").then(({ SkillsPage }) => ({
-		default: SkillsPage,
-	})),
-);
 const TasksPage = lazy(() =>
 	import("../pages/tasks.js").then(({ TasksPage }) => ({ default: TasksPage })),
-);
-const ToolsPage = lazy(() =>
-	import("../pages/tools.js").then(({ ToolsPage }) => ({ default: ToolsPage })),
-);
-const VariablesPage = lazy(() =>
-	import("../pages/variables.js").then(({ VariablesPage }) => ({
-		default: VariablesPage,
-	})),
 );
 
 type TabId =
 	| "dashboard"
 	| "chat"
-	| "channels"
-	| "variables"
-	| "tools"
-	| "memory"
-	| "skills"
-	| "agents"
 	| "tasks"
 	| "automations"
 	| "settings";
@@ -98,33 +66,36 @@ const NAV_GROUPS: NavGroup[] = [
 		],
 	},
 	{
-		label: "Comunicación",
-		items: [{ id: "channels", icon: "message", label: "Canales" }],
-	},
-	{
 		label: "Producción",
 		items: [
-			{ id: "agents", icon: "agent", label: "Agentes" },
 			{ id: "tasks", icon: "check", label: "Tablero de Tareas" },
 			{ id: "automations", icon: "automation", label: "Automatizaciones" },
-			{ id: "tools", icon: "tools", label: "Herramientas" },
-		],
-	},
-	{
-		label: "Conocimiento",
-		items: [
-			{ id: "memory", icon: "brain", label: "Base de Memoria" },
-			{ id: "skills", icon: "spark", label: "Habilidades" },
 		],
 	},
 	{
 		label: "Sistema",
-		items: [
-			{ id: "variables", icon: "key", label: "Variables" },
-			{ id: "settings", icon: "settings", label: "Configuración" },
-		],
+		items: [{ id: "settings", icon: "settings", label: "Ajustes" }],
 	},
 ];
+
+const REMOVED_ADMIN_TABS = new Set([
+	"channels",
+	"variables",
+	"tools",
+	"memory",
+	"skills",
+	"agents",
+]);
+
+const SETTINGS_DESTINATIONS: Record<string, SettingsSectionId> = {
+	settings: "overview",
+	agents: "agents",
+	channels: "integrations",
+	variables: "system",
+	tools: "tools",
+	memory: "memory",
+	skills: "skills",
+};
 
 const PageLoading: React.FC = () => (
 	<div
@@ -157,7 +128,10 @@ export const App: React.FC = () => {
 		try {
 			const stored = localStorage.getItem("octopus-active-tab");
 			if (stored && stored === "code") {
-				return "tools";
+				return "settings";
+			}
+			if (stored && REMOVED_ADMIN_TABS.has(stored)) {
+				return "settings";
 			}
 			if (
 				stored &&
@@ -179,6 +153,8 @@ export const App: React.FC = () => {
 	const [chatLoaded, setChatLoaded] = useState(activeTab === "chat");
 	const [chatWorkspaceRequest, setChatWorkspaceRequest] =
 		useState<ChatWorkspaceRequest>({ id: 0, view: "chat" });
+	const [settingsSection, setSettingsSection] =
+		useState<SettingsSectionId>("overview");
 
 	const selectTab = (tab: TabId) => {
 		if (tab === "chat") {
@@ -192,6 +168,13 @@ export const App: React.FC = () => {
 		if (tab === "media") {
 			setChatWorkspaceRequest((prev) => ({ id: prev.id + 1, view: "media" }));
 			setActiveTab("chat");
+			setMenuOpen(false);
+			return;
+		}
+		const settingsDestination = SETTINGS_DESTINATIONS[tab];
+		if (settingsDestination) {
+			setSettingsSection(settingsDestination);
+			setActiveTab("settings");
 			setMenuOpen(false);
 			return;
 		}
@@ -260,24 +243,17 @@ export const App: React.FC = () => {
 		switch (activeTab) {
 			case "dashboard":
 				return <DashboardPage onNavigate={selectDestination} />;
-			case "channels":
-				return <ChannelsPage />;
-			case "tools":
-				return <ToolsPage />;
-			case "memory":
-				return <MemoryPage />;
-			case "skills":
-				return <SkillsPage />;
-			case "agents":
-				return <AgentsPage />;
 			case "tasks":
 				return <TasksPage />;
 			case "automations":
 				return <AutomationsPage />;
-			case "variables":
-				return <VariablesPage />;
 			case "settings":
-				return <SettingsPage />;
+				return (
+					<SettingsPage
+						initialSection={settingsSection}
+						onBack={() => selectTab("chat")}
+					/>
+				);
 			default:
 				if (activeTab !== "chat") {
 					return <DashboardPage onNavigate={selectDestination} />;
@@ -287,7 +263,9 @@ export const App: React.FC = () => {
 	};
 
 	return (
-		<div className={`app-shell${isDesktop ? " is-electron" : ""}`}>
+		<div
+			className={`app-shell${isDesktop ? " is-electron" : ""}${activeTab === "chat" || activeTab === "settings" ? " is-focus-view" : ""}`}
+		>
 			<AuthReloginBanner />
 			{isDesktop && (
 				<div className="app-electron-titlebar">
@@ -320,6 +298,7 @@ export const App: React.FC = () => {
 					</div>
 				</div>
 			)}
+			{activeTab !== "chat" && activeTab !== "settings" && (
 			<header className="app-mobile-header">
 				<button
 					type="button"
@@ -339,6 +318,7 @@ export const App: React.FC = () => {
 					</div>
 				</div>
 			</header>
+			)}
 
 			{menuOpen && (
 				<button
@@ -349,7 +329,7 @@ export const App: React.FC = () => {
 				/>
 			)}
 
-			{activeTab !== "chat" && (
+			{activeTab !== "chat" && activeTab !== "settings" && (
 				<aside className={`app-sidebar${menuOpen ? " is-open" : ""}`}>
 					<div className="app-sidebar-header">
 						<div className="app-logo">
@@ -403,11 +383,7 @@ export const App: React.FC = () => {
 					</nav>
 
 					<div className="app-user-card">
-						<div className="app-user-avatar">U</div>
-						<div>
-							<div className="app-user-name">Usuario Local</div>
-							<div className="app-user-role">Auto-hospedado</div>
-						</div>
+						<UserMenu onOpenSettings={() => selectDestination("settings")} />
 					</div>
 				</aside>
 			)}

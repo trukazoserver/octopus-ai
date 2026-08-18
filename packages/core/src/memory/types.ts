@@ -549,6 +549,7 @@ export interface ContextAssemblyInput extends MemoryReadContext {
 	budgetTokens: number;
 	now?: Date;
 	knowledgeCollectionIds?: string[];
+	includeMemory?: boolean;
 }
 
 export interface ContextKnowledgeChunk {

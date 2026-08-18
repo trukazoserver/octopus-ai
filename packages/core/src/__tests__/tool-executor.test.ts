@@ -92,6 +92,25 @@ describe("ToolExecutor", () => {
 			);
 		});
 
+		it("blocks a disabled tool without losing its registered definition", async () => {
+			const tool = createTestTool();
+			registry.register(tool);
+			registry.setDisabled([tool.name]);
+			const executor = new ToolExecutor(registry, {
+				sandboxCommands: false,
+				allowedPaths: [],
+			});
+
+			const result = await executor.execute(tool.name, { input: "blocked" });
+
+			expect(result).toMatchObject({
+				success: false,
+				errorCode: "TOOL_DISABLED",
+			});
+			expect(tool.handler).not.toHaveBeenCalled();
+			expect(registry.get(tool.name)).toBe(tool);
+		});
+
 		it("exposes shared transparency processing to dynamic tools", async () => {
 			registry.register(
 				createTestTool({

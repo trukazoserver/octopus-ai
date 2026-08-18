@@ -18,7 +18,25 @@ function resolveApiBase(): string {
 
 export const API_BASE = resolveApiBase();
 
-async function readApiError(res: Response): Promise<Error> {
+function apiHeaders(headers?: HeadersInit): HeadersInit {
+	const apiKey = sessionStorage.getItem("octopus-api-key")?.trim();
+	return {
+		...(apiKey ? { "X-Octopus-Api-Key": apiKey } : {}),
+		...(headers ?? {}),
+	};
+}
+
+export class ApiError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+	) {
+		super(message);
+		this.name = "ApiError";
+	}
+}
+
+async function readApiError(res: Response): Promise<ApiError> {
 	const body = await res.json().catch(() => ({ error: res.statusText }));
 	const message =
 		typeof body?.error === "string"
@@ -26,11 +44,14 @@ async function readApiError(res: Response): Promise<Error> {
 			: typeof body?.message === "string"
 				? body.message
 				: `API error: ${res.status}`;
-	return new Error(message);
+	return new ApiError(message, res.status);
 }
 
 export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
-	const res = await fetch(`${API_BASE}${path}`, init);
+	const res = await fetch(`${API_BASE}${path}`, {
+		...init,
+		headers: apiHeaders(init?.headers),
+	});
 	if (!res.ok) throw await readApiError(res);
 	return res.json();
 }
@@ -41,7 +62,7 @@ export async function apiPut(
 ): Promise<Record<string, unknown>> {
 	const res = await fetch(`${API_BASE}${path}`, {
 		method: "PUT",
-		headers: { "Content-Type": "application/json" },
+		headers: apiHeaders({ "Content-Type": "application/json" }),
 		body: JSON.stringify({ value }),
 	});
 	if (!res.ok) throw await readApiError(res);
@@ -54,7 +75,7 @@ export async function apiPutJson(
 ): Promise<Record<string, unknown>> {
 	const res = await fetch(`${API_BASE}${path}`, {
 		method: "PUT",
-		headers: { "Content-Type": "application/json" },
+		headers: apiHeaders({ "Content-Type": "application/json" }),
 		body: JSON.stringify(body),
 	});
 	if (!res.ok) throw await readApiError(res);
@@ -69,10 +90,10 @@ export async function apiPost(
 	const res = await fetch(`${API_BASE}${path}`, {
 		...init,
 		method: "POST",
-		headers: {
+		headers: apiHeaders({
 			...(body ? { "Content-Type": "application/json" } : {}),
 			...(init?.headers ?? {}),
-		},
+		}),
 		body: body ? JSON.stringify(body) : undefined,
 	});
 	if (!res.ok) throw await readApiError(res);
@@ -84,9 +105,36 @@ export async function apiDelete(
 ): Promise<Record<string, unknown>> {
 	const res = await fetch(`${API_BASE}${path}`, {
 		method: "DELETE",
+		headers: apiHeaders(),
 	});
 	if (!res.ok) throw await readApiError(res);
 	return res.json();
+}
+
+export async function apiDownload(
+	path: string,
+	fallbackFilename: string,
+): Promise<{ filename: string; truncated: boolean }> {
+	const res = await fetch(`${API_BASE}${path}`, { headers: apiHeaders() });
+	if (!res.ok) throw await readApiError(res);
+	const disposition = res.headers.get("content-disposition") ?? "";
+	const filename =
+		disposition.match(/filename="([^"]+)"/i)?.[1] ?? fallbackFilename;
+	const objectUrl = URL.createObjectURL(await res.blob());
+	try {
+		const anchor = document.createElement("a");
+		anchor.href = objectUrl;
+		anchor.download = filename;
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+	} finally {
+		URL.revokeObjectURL(objectUrl);
+	}
+	return {
+		filename,
+		truncated: res.headers.get("x-octopus-export-truncated") === "true",
+	};
 }
 
 export async function apiPatch(
@@ -95,7 +143,7 @@ export async function apiPatch(
 ): Promise<Record<string, unknown>> {
 	const res = await fetch(`${API_BASE}${path}`, {
 		method: "PATCH",
-		headers: body ? { "Content-Type": "application/json" } : {},
+		headers: apiHeaders(body ? { "Content-Type": "application/json" } : {}),
 		body: body ? JSON.stringify(body) : undefined,
 	});
 	if (!res.ok) throw await readApiError(res);

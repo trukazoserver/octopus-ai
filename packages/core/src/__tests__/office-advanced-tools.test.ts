@@ -151,6 +151,8 @@ describe("advanced office tools", () => {
 	it.runIf(Boolean(findLibreOfficeExecutable()))(
 		"converts a real DOCX to validated PDF and PNG with LibreOffice",
 		async () => {
+			// LibreOffice arranca un proceso completo por conversión; con el
+			// equipo cargado supera el timeout default de 10s y el test flaquea.
 			const dir = await mkdtemp(join(tmpdir(), "octopus-libreoffice-preview-"));
 			try {
 				const sourcePath = join(dir, "report.docx");
@@ -174,6 +176,7 @@ describe("advanced office tools", () => {
 				await rm(dir, { recursive: true, force: true });
 			}
 		},
+		60_000,
 	);
 });
 

@@ -201,7 +201,7 @@ export const mediaContext = {
 			url: `/api/media/file/${filename}`,
 		};
 	},
-	resolve: async (urlStr: string) => {
+	resolve: async (urlStr: string, options?: { maxBytes?: number }) => {
 		let filename = "";
 		if (urlStr.startsWith("/api/media/file/")) {
 			filename = urlStr.slice("/api/media/file/".length);
@@ -214,6 +214,12 @@ export const mediaContext = {
 		}
 		if (!existsSync(filePath)) {
 			throw new Error(`Media not found: ${urlStr}`);
+		}
+		const size = statSync(filePath).size;
+		if (options?.maxBytes !== undefined && size > options.maxBytes) {
+			throw new Error(
+				`Media file exceeds the ${options.maxBytes}-byte input limit: ${urlStr}`,
+			);
 		}
 		const buffer = readFileSync(filePath);
 

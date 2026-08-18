@@ -74,9 +74,11 @@ import {
 	createDataFileTools,
 	createDatabaseAdapter,
 	createFileSystemTools,
+	createImageGenerationTools,
 	createKanbanCardTools,
 	createLogger,
 	createMediaTools,
+	createVideoGenerationTools,
 	createNanoBananaImageTools,
 	createHtmlToPptxTools,
 	createOfficeAdvancedTools,
@@ -98,6 +100,8 @@ import {
 	getModelCapabilitiesFromRef,
 	getZaiMCPConfigs,
 	handleProviderResponseHeaders,
+	mediaContext,
+	MediaGenerationManager,
 	officeFileMasteryEmbeddingTexts,
 	refreshCodexToken,
 	resolveZaiMCPAuth,
@@ -117,6 +121,7 @@ import { acquireFileLock } from "./auth/file-lock.js";
 
 export interface OctopusSystem {
 	config: OctopusConfig;
+	configLoader: ConfigLoader;
 	db: DatabaseAdapter;
 	router: LLMRouter;
 	usageStore: UsageStore;
@@ -158,6 +163,7 @@ export interface OctopusSystem {
 	automationRunner: AutomationRunner;
 	systemScheduler: Scheduler;
 	mcpManager: MCPManager;
+	mediaGenerationManager: MediaGenerationManager;
 	browserTool: BrowserSessionPool | null;
 	refreshBrowserTools: (nextConfig?: OctopusConfig) => Promise<boolean>;
 	refreshEmbeddingProvider: (nextConfig?: OctopusConfig) => Promise<boolean>;
@@ -214,6 +220,7 @@ type BrowserRuntimeConfig = {
 	persistCookies?: boolean;
 	sessionStorageDir?: string;
 	sessionTtlHours?: number;
+	idleCloseMs?: number;
 	autoFallbackOnBlock?: boolean;
 	blockFallbackProvider?: string;
 	confirmBlockWithVision?: boolean;
@@ -906,6 +913,17 @@ export async function bootstrap(options?: {
 		},
 	);
 	await db.initialize();
+	const usageStore = new UsageStore(db, {
+		spoolPath: join(homedir(), ".octopus", "data", "usage-outbox"),
+	});
+	await usageStore.replaySpool();
+	await usageStore.reconcileImageToolReceipts();
+	const mediaGenerationManager = new MediaGenerationManager({
+		db,
+		config,
+		media: mediaContext,
+		usage: usageStore,
+	});
 
 	const tokenCounter = new TokenCounter();
 
@@ -1020,7 +1038,6 @@ export async function bootstrap(options?: {
 	await router.initialize();
 
 	// Durable usage ledger — persists token/cost events across restarts.
-	const usageStore = new UsageStore(db);
 	router.setUsageSink(usageStore);
 	// Capture real quota headers (Codex x-codex-*) from provider responses and
 	// persist the snapshot so it survives restarts.
@@ -1045,7 +1062,6 @@ export async function bootstrap(options?: {
 		const lockPath = join(homedir(), ".octopus", "data", ".codex-refresh.lock");
 		const release = await acquireFileLock(lockPath).catch(() => null);
 		try {
-			const loader = new ConfigLoader();
 			const cfg = loader.load();
 			const openai = cfg.ai.providers.openai as Record<string, unknown>;
 			if (openai.authMode !== "codex" || !openai.oauthRefreshToken) {
@@ -1075,7 +1091,7 @@ export async function bootstrap(options?: {
 			if (refreshed.expiresAt) {
 				openai.oauthExpiresAt = refreshed.expiresAt;
 			}
-			loader.save(cfg);
+			loader.savePreservingEnv(cfg);
 			router.clearAuthStatus("openai");
 			console.log("[codex-auth] access_token refreshed and persisted");
 			return {
@@ -1290,7 +1306,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			security: { ...config.security, encryptionKey: envEncryptionKey },
 		};
 		try {
-			loader.save(config);
+			loader.savePreservingEnv(config);
 		} catch {
 			/* config will still be used in-memory for this boot */
 		}
@@ -1323,6 +1339,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		allowedPaths?: string[];
 	};
 	const disabledTools = toolConfig.disabled || [];
+	toolRegistry.setDisabled(disabledTools);
 	// Canonical workspace for agent-generated projects and files. Relative paths
 	// in the filesystem tools resolve here, and it is the only place the agent
 	// should write by default; other locations require an explicit user request
@@ -1373,20 +1390,18 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 
 	mcpManager.setPersistCallback((servers) => {
 		try {
-			const loader = new ConfigLoader();
 			const cfg = loader.load();
 			const currentMcp = (cfg as Record<string, unknown>).mcp as
 				| Record<string, unknown>
 				| undefined;
 			(cfg as Record<string, unknown>).mcp = { ...currentMcp, servers };
-			loader.save(cfg);
+			loader.savePreservingEnv(cfg);
 		} catch {
 			/* ignore persist errors */
 		}
 	});
 
 	const registerSystemTool = (tool: ToolDefinition) => {
-		if (disabledTools.includes(tool.name)) return;
 		tool.metadata = { ...tool.metadata, source: "system" };
 		toolRegistry.register(tool);
 	};
@@ -1479,15 +1494,35 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		registerSystemTool(tool);
 	}
 
-	if (config.tools.imageGeneration.openai.enabled) {
-		for (const tool of createCodexImageTools()) {
-			registerSystemTool(tool);
-		}
+	const imageToolOptions = { getConfig: () => config };
+	const codexImageTools = createCodexImageTools(imageToolOptions);
+	const nanoImageTools = createNanoBananaImageTools(imageToolOptions);
+	const openaiGenerate = codexImageTools.find(
+		(tool) => tool.name === "codex_generate_image",
+	);
+	const openaiEdit = codexImageTools.find(
+		(tool) => tool.name === "codex_edit_image",
+	);
+	const googleImage = nanoImageTools.find(
+		(tool) => tool.name === "nano-banana-generate",
+	);
+	if (!openaiGenerate || !openaiEdit || !googleImage) {
+		throw new Error("Built-in image generation implementations are incomplete");
 	}
-	if (config.tools.imageGeneration.nanoBanana.enabled) {
-		for (const tool of createNanoBananaImageTools()) {
-			registerSystemTool(tool);
-		}
+	const imageTools = createImageGenerationTools({
+		getConfig: () => config,
+		usage: usageStore,
+		implementations: {
+			openaiGenerate: { ...openaiGenerate },
+			openaiEdit: { ...openaiEdit },
+			google: { ...googleImage },
+		},
+	});
+	for (const tool of imageTools) {
+		registerSystemTool(tool);
+	}
+	for (const tool of createVideoGenerationTools(mediaGenerationManager)) {
+		registerSystemTool(tool);
 	}
 
 	const kanbanCardTools = createKanbanCardTools(
@@ -1808,7 +1843,6 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			},
 		},
 		handler: async (params: Record<string, unknown>) => {
-			const loader = new ConfigLoader();
 			const cfg = loader.load();
 			cfg.tools.timeouts = {
 				...cfg.tools.timeouts,
@@ -1864,7 +1898,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			}
 
 			if (action !== "get") {
-				loader.save(cfg);
+				loader.savePreservingEnv(cfg);
 				config.tools.timeouts = cfg.tools.timeouts;
 				toolExecutor.updateConfig({ timeouts: cfg.tools.timeouts });
 			}
@@ -1910,11 +1944,13 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			memoryConsolidator,
 			skillLoader,
 		);
+		workerRuntime.setMemoryEnabled(config.memory.enabled);
 
 		// Workers get tools but NOT delegate_task / orchestrate_parallel to
 		// prevent infinite recursion (a worker must not spawn its own swarm).
 		const workerToolRegistry = new ToolRegistry();
-		for (const tool of toolRegistry.list()) {
+		workerToolRegistry.shareEnablementFrom(toolRegistry);
+		for (const tool of toolRegistry.listAll()) {
 			if (
 				tool.name !== "delegate_task" &&
 				tool.name !== "orchestrate_parallel"
@@ -2073,6 +2109,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			persistCookies: browserCfg.persistCookies,
 			sessionStorageDir: browserCfg.sessionStorageDir,
 			sessionTtlHours: browserCfg.sessionTtlHours,
+			idleCloseMs: browserCfg.idleCloseMs,
 			autoFallbackOnBlock: browserCfg.autoFallbackOnBlock,
 			blockFallbackProvider: browserCfg.blockFallbackProvider,
 			confirmBlockWithVision: browserCfg.confirmBlockWithVision,
@@ -2109,6 +2146,21 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	};
 
 	await refreshBrowserTools();
+
+	// Al terminar una ejecución de chat (y si no queda ninguna otra activa),
+	// cerrar el navegador del agente principal de inmediato guardando su
+	// sesión, para no dejar consumiendo recursos hasta el idle timeout.
+	chatManager.onExecutionSettled(() => {
+		void (async () => {
+			try {
+				const active = await chatManager.listActiveExecutions();
+				if (active.length > 0) return;
+				await browserTool?.releaseDefaultSession();
+			} catch {
+				/* el cierre del navegador no debe fallar la transición */
+			}
+		})();
+	});
 
 	// Sandbox tools (Docker-based isolated execution)
 	const sandboxTools = createSandboxTools();
@@ -2274,6 +2326,15 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			for (const entry of toolDirs) {
 				if (!entry.isDirectory()) continue;
 				try {
+					if (
+						entry.name === "veo-video-generator" &&
+						toolRegistry.has("veo-video-generator")
+					) {
+						console.log(
+							"  Dynamic tool veo-video-generator is shadowed by the built-in durable implementation",
+						);
+						continue;
+					}
 					const toolDir = join(dynamicToolsDir, entry.name);
 					const toolName = registerDynamicTool(
 						toolRegistry,
@@ -2313,35 +2374,42 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 		| undefined;
 	const zaiMcpAuth = resolveZaiMCPAuth(zhipuProvider, process.env);
 	const mcpAutoDisabled = (config.mcp?.autoDisabled || []) as string[];
+	const effectiveMcpServers = {
+		...(config.mcp?.servers ?? {}),
+	} as Record<string, MCPServerConfig>;
 	if (zaiMcpAuth) {
 		const officialZaiConfigs = getZaiMCPConfigs(
 			zaiMcpAuth.apiKey,
 			zaiMcpAuth.platform,
 		);
-		config.mcp = config.mcp ?? { servers: {}, autoDisabled: [] };
-		config.mcp.servers = config.mcp.servers ?? {};
-		// Force-enable every official Z.ai server each boot so "all MCPs
-		// activate" holds; users disable via the mcp.autoDisabled list.
 		for (const [serverName, officialConfig] of Object.entries(
 			officialZaiConfigs,
 		)) {
 			if (mcpAutoDisabled.includes(serverName)) continue;
-			config.mcp.servers[serverName] = {
+			effectiveMcpServers[serverName] = {
 				...officialConfig,
 				enabled: true,
 			};
 		}
-		try {
-			new ConfigLoader().save(config);
-		} catch {
-			/* config will still be used in-memory for this boot */
+	}
+	for (const name of mcpAutoDisabled) {
+		if (effectiveMcpServers[name]) {
+			effectiveMcpServers[name] = {
+				...effectiveMcpServers[name],
+				enabled: false,
+			};
 		}
 	}
 
-	if (config.mcp?.servers && Object.keys(config.mcp.servers).length > 0) {
-		await mcpManager.loadPersisted(
-			config.mcp.servers as Record<string, MCPServerConfig>,
-		);
+	const configuredMcpServers = (config.mcp?.servers ?? {}) as Record<
+		string,
+		MCPServerConfig
+	>;
+	if (Object.keys(configuredMcpServers).length > 0) {
+		await mcpManager.loadPersisted(configuredMcpServers);
+	}
+	if (Object.keys(effectiveMcpServers).length > 0) {
+		await mcpManager.syncServers(effectiveMcpServers, { persist: false });
 	}
 
 	if (zaiMcpAuth) {
@@ -2406,7 +2474,7 @@ IMPORTANT - Tool Usage Guidelines:
 1. When calling execute_code, you MUST provide BOTH "code" (the source code) AND "language" (one of: javascript, typescript, python, bash).
 2. When calling run_command, you MUST provide "command" (the shell command string).
 3. When calling manage_workspace, you MUST provide "action" (list/read/write/delete/mkdir) AND "path".
-4. When generating images, audio, or video: use the dedicated generation tool (for example veo-video-generator, nano-banana-generate, nano-banana-edit, or TTS/audio tools) and reuse the media URL it returns. Do NOT build provider API calls manually with execute_code/run_command when a dedicated tool exists.
+4. When generating images, audio, or video: use the canonical generation tool (generate_image, generate_video, or the relevant TTS/audio tool) and reuse the media URL it returns. Do NOT build provider API calls manually with execute_code/run_command when a dedicated tool exists.
 5. When managing API keys or environment variables, ALWAYS use manage_env. NEVER try shell commands like export/set and NEVER write .env files manually.
 6. If a tool already returns a saved media URL, use that URL directly and DO NOT call save_media again.
 7. To find previously generated media, use the list_media tool. NEVER use manage_workspace to search for media files — media is stored in a separate library, not the workspace.
@@ -2500,7 +2568,7 @@ IMPORTANT - File Creation & Workspace (two explicit roots, never derived from pr
 				- Use the local read_file tool for files in the current workspace. Use zai-zread__read_file only for remote/public GitHub repository content.
 
 				IMAGE GENERATION (infographics, posters, visuals):
-				- When the user asks for an image, infographic, poster, banner, card, or any visual artwork, ALWAYS use your image generation tool (generate_image / nano-banana-generate). That is the expected default.
+				- When the user asks for an image, infographic, poster, banner, card, or any visual artwork, ALWAYS use generate_image. That is the expected default.
 				- Do NOT fall back to HTML + screenshot, canvas, or any code-based rendering to produce the image. The user wants a real generated image.
 				- Use the HTML/screenshot approach ONLY when the user explicitly asks for it (e.g. "hazlo en HTML", "usa HTML", "diseñalo con código").
 
@@ -2532,6 +2600,7 @@ Always be concise, helpful, and thorough.`,
 		memoryConsolidator,
 		skillLoader,
 	);
+	agentRuntime.setMemoryEnabled(config.memory.enabled);
 	agentRuntime.setToolSystem(toolRegistry, toolExecutor);
 	agentRuntime.setResearcher(skillResearcher);
 	agentRuntime.setDailyMemory(dailyMemory);
@@ -2698,6 +2767,7 @@ Always be concise, helpful, and thorough.`,
 			memoryConsolidator,
 			skillLoader,
 		);
+		runtime.setMemoryEnabled(config.memory.enabled);
 		runtime.setToolSystem(toolRegistry, toolExecutor);
 		runtime.setResearcher(skillResearcher);
 		runtime.setDailyMemory(dailyMemory);
@@ -2974,7 +3044,7 @@ Always be concise, helpful, and thorough.`,
 		config.memory.retention,
 		bootstrapLogger,
 	);
-	memoryRetentionScheduler.start();
+	if (config.memory.enabled) memoryRetentionScheduler.start();
 
 	// Re-probe web tool quota on a schedule (default daily ~03:17) so the
 	// cached health stays fresh and the agent keeps steering correctly.
@@ -2991,6 +3061,7 @@ Always be concise, helpful, and thorough.`,
 	);
 
 	systemScheduler.schedule("daily-memory-dump", "0 0 * * *", async () => {
+		if (!config.memory.enabled) return;
 		try {
 			bootstrapLogger.info("Executing End-of-Day Global Memory Flush...");
 			const todayStr = new Date().toISOString().split("T")[0];
@@ -3033,8 +3104,11 @@ Always be concise, helpful, and thorough.`,
 		}
 	});
 
+	await mediaGenerationManager.start();
+
 	return {
 		config,
+		configLoader: loader,
 		db,
 		router,
 		usageStore,
@@ -3075,6 +3149,7 @@ Always be concise, helpful, and thorough.`,
 		systemScheduler,
 		envVarManager,
 		mcpManager,
+		mediaGenerationManager,
 		browserTool,
 		refreshBrowserTools,
 		refreshEmbeddingProvider,
@@ -3089,9 +3164,11 @@ Always be concise, helpful, and thorough.`,
 			systemScheduler.cancel("web-tools-health");
 			await browserTool?.closeAll();
 			await mcpManager.shutdown();
+			await mediaGenerationManager.stop();
 			connectionManager.shutdown();
 			await vectorStore.close();
 			await learningEngine.flush();
+			await usageStore.drain();
 			await db.close();
 		},
 	};

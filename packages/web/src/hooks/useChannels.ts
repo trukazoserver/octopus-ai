@@ -5,25 +5,16 @@ export interface Channel {
 	name: string;
 	type: string;
 	enabled: boolean;
-	status: "connected" | "disconnected" | "error" | "idle" | "unconfigured";
+	status:
+		| "connecting"
+		| "qr"
+		| "connected"
+		| "disconnected"
+		| "logged_out"
+		| "error"
+		| "idle"
+		| "unconfigured";
 	config: Record<string, unknown>;
-}
-
-function deriveStatus(ch: {
-	enabled: boolean;
-	config: Record<string, unknown>;
-	type: string;
-}): Channel["status"] {
-	if (!ch.enabled) return "disconnected";
-	const cfg = ch.config;
-	// Check if channel has its required config
-	if (ch.type === "telegram" && cfg.botTokenConfigured) return "connected";
-	if (ch.type === "discord" && cfg.botTokenConfigured) return "connected";
-	if (ch.type === "slack" && cfg.botTokenConfigured) return "connected";
-	if (ch.type === "whatsapp" && cfg.phoneNumber) return "connected";
-	if (ch.type === "webchat") return "connected";
-	if (ch.enabled) return "unconfigured";
-	return "idle";
 }
 
 export function useChannels() {
@@ -41,6 +32,8 @@ export function useChannels() {
 						name: string;
 						type: string;
 						enabled: boolean;
+						status?: Channel["status"];
+						connected?: boolean;
 						config: Record<string, unknown>;
 					}>
 				>("/api/channels");
@@ -48,7 +41,7 @@ export function useChannels() {
 				name: ch.name,
 				type: ch.type,
 				enabled: ch.enabled,
-				status: deriveStatus(ch),
+				status: ch.status ?? (ch.connected ? "connected" : "disconnected"),
 				config: ch.config ?? {},
 			}));
 			setChannels(mapped);

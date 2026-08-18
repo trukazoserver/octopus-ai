@@ -323,6 +323,25 @@ export type {
 } from "./memory/index.js";
 
 export {
+	getMultimediaCatalog,
+	MediaGenerationManager,
+	MediaGenerationStore,
+	normalizeVideoGenerationRequest,
+} from "./multimedia/index.js";
+export type {
+	MediaCatalogEntry,
+	MediaGenerationJob,
+	MediaGenerationJobInput,
+	MediaGenerationJobStatus,
+	MediaGenerationManagerOptions,
+	MediaProvider,
+	MediaRoute,
+	MediaTransport,
+	VideoGenerationRequest,
+	VideoProviderAdapter,
+} from "./multimedia/index.js";
+
+export {
 	SkillRegistry,
 	SkillLoader,
 	SkillForge,
@@ -380,6 +399,8 @@ export {
 	createCodeTools,
 	createCodexImageTools,
 	createNanoBananaImageTools,
+	createImageGenerationTools,
+	createVideoGenerationTools,
 	createMediaTools,
 	ArtifactIndex,
 	hashArtifactUnits,

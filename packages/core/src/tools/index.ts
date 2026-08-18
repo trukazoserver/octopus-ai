@@ -69,6 +69,8 @@ export { createAgentSpawnTools } from "./agent-spawn.js";
 export { createKanbanCardTools } from "./kanban-cards.js";
 export { createCodexImageTools } from "./codex-image.js";
 export { createNanoBananaImageTools } from "./nano-banana-image.js";
+export { createImageGenerationTools } from "./image-generation.js";
+export { createVideoGenerationTools } from "./google-video.js";
 
 // Stealth browsing
 export { ProxyManager } from "./proxy-manager.js";

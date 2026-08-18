@@ -4,7 +4,7 @@ import { DEFAULT_CONFIG, getDefaults } from "../config/defaults.js";
 describe("Config Defaults", () => {
 	describe("DEFAULT_CONFIG", () => {
 		it("should have a version", () => {
-			expect(DEFAULT_CONFIG.version).toBe(1);
+			expect(DEFAULT_CONFIG.version).toBe(2);
 		});
 
 		it("should have server config", () => {

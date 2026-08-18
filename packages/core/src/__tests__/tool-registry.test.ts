@@ -67,6 +67,33 @@ describe("ToolRegistry", () => {
 			registry.register(createTool("c"));
 			expect(registry.list()).toHaveLength(3);
 		});
+
+		it("keeps disabled definitions registered while hiding them from active lists", () => {
+			registry.register(createTool("a"));
+			registry.register(createTool("b"));
+			registry.setDisabled(["b"]);
+
+			expect(registry.list().map((tool) => tool.name)).toEqual(["a"]);
+			expect(registry.listAll().map((tool) => tool.name)).toEqual(["a", "b"]);
+			expect(registry.get("b")).toBeDefined();
+			expect(registry.toLLMTools().map((tool) => tool.function.name)).toEqual(["a"]);
+
+			registry.setEnabled("b", true);
+			expect(registry.list()).toHaveLength(2);
+		});
+
+		it("shares hot enablement policy with worker registries", () => {
+			const worker = new ToolRegistry();
+			worker.shareEnablementFrom(registry);
+			registry.register(createTool("billable-tool"));
+			worker.register(createTool("billable-tool"));
+
+			registry.setDisabled(["billable-tool"]);
+
+			expect(registry.list()).toEqual([]);
+			expect(worker.list()).toEqual([]);
+			expect(worker.isEnabled("billable-tool")).toBe(false);
+		});
 	});
 
 	describe("has", () => {
@@ -122,6 +149,15 @@ describe("ToolRegistry", () => {
 				type: "object",
 				additionalProperties: false,
 			});
+		});
+
+		it("keeps compatibility tools executable without advertising them to the model", () => {
+			const hidden = createTool("legacy-tool");
+			hidden.metadata = { hiddenFromModel: true };
+			registry.register(hidden);
+
+			expect(registry.get("legacy-tool")).toBe(hidden);
+			expect(registry.toLLMTools()).toEqual([]);
 		});
 	});
 });

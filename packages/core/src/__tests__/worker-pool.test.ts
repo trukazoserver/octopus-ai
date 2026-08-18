@@ -131,4 +131,58 @@ describe("WorkerPool", () => {
 			),
 		).toBe(true);
 	});
+
+	it("reports a task error event instead of hanging when worker setup throws", async () => {
+		// Regresión: un throw durante el setup del worker (p. ej. un registry
+		// sin listForModel) salía del try/catch, el evento de error nunca se
+		// emitía y executeParallel quedaba colgado esperando completion.
+		const chat = vi.fn(async () => ({ content: "never reached" }));
+		const registry = {
+			list: () => [],
+			listForModel: () => {
+				throw new Error("boom: broken registry");
+			},
+		};
+		const eventStream = new EventStream();
+		const pool = new WorkerPool(
+			{ chat } as never,
+			registry as never,
+			{
+				execute: vi.fn(),
+			} as never,
+			eventStream,
+			{
+				id: "default-agent",
+				name: "Octavio",
+				description: "root",
+				systemPrompt: "root",
+				model: "test-model",
+			},
+			2,
+		);
+
+		const task = {
+			id: "task_setup_throw",
+			description: "Setup explodes before the loop",
+			role: "engineer",
+			toolScope: [],
+			priority: 1,
+			status: "pending",
+		};
+		const result = await pool.executeWorker(task, {
+			maxToolIterations: 1,
+			timeoutMs: 10_000,
+		});
+
+		expect(result).toContain("Error en tarea");
+		expect(result).toContain("boom: broken registry");
+		expect(task.status).toBe("failed");
+		expect(chat).not.toHaveBeenCalled();
+		const errorEvents = eventStream.query({
+			taskId: "task_setup_throw",
+			types: ["error"],
+		});
+		expect(errorEvents).toHaveLength(1);
+		expect(errorEvents[0]?.data.error).toContain("boom: broken registry");
+	});
 });

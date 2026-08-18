@@ -53,6 +53,7 @@ const BrowserSchema = Type.Object({
 	persistCookies: Type.Boolean({ default: true }),
 	sessionStorageDir: Type.Optional(Type.String()),
 	sessionTtlHours: Type.Number({ default: 168 }),
+	idleCloseMs: Type.Number({ default: 120000 }),
 	autoFallbackOnBlock: Type.Boolean({ default: false }),
 	blockFallbackProvider: Type.Union(
 		[
@@ -707,6 +708,46 @@ const ImageGenerationConfigSchema = Type.Object({
 	}),
 });
 
+const MediaRouteSchema = Type.Object({
+	provider: Type.Union([
+		Type.Literal("openai"),
+		Type.Literal("gemini"),
+		Type.Literal("vertex"),
+	]),
+	model: Type.String(),
+	transport: Type.Union([
+		Type.Literal("openai-images"),
+		Type.Literal("generate-content"),
+		Type.Literal("interactions"),
+		Type.Literal("video-lro"),
+	]),
+});
+
+const MultimediaConfigSchema = Type.Object({
+	image: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		openaiAuthMode: Type.Optional(
+			Type.Union(
+				[
+					Type.Literal("inherit"),
+					Type.Literal("api-key"),
+					Type.Literal("codex"),
+				],
+				{ default: "inherit" },
+			),
+		),
+		primary: MediaRouteSchema,
+		fallbacks: Type.Array(MediaRouteSchema, { default: [] }),
+	}),
+	video: Type.Object({
+		enabled: Type.Boolean({ default: true }),
+		primary: MediaRouteSchema,
+		fallbacks: Type.Array(MediaRouteSchema, { default: [] }),
+		pollIntervalMs: Type.Number({ default: 5000, minimum: 1000 }),
+		maxPollMs: Type.Number({ default: 1800000, minimum: 1000 }),
+	}),
+});
+
 const ToolsConfigSchema = Type.Object({
 	disabled: Type.Array(Type.String(), { default: [] }),
 	imageGeneration: ImageGenerationConfigSchema,
@@ -821,7 +862,7 @@ const ToolLoopGuardrailsSchema = Type.Object({
 });
 
 export const ConfigSchema = Type.Object({
-	version: Type.Number({ default: 1 }),
+	version: Type.Number({ default: 2 }),
 	server: ServerSchema,
 	browser: BrowserSchema,
 	mascots: MascotsConfigSchema,
@@ -834,6 +875,7 @@ export const ConfigSchema = Type.Object({
 	plugins: PluginsSchema,
 	storage: StorageSchema,
 	security: SecuritySchema,
+	multimedia: Type.Optional(MultimediaConfigSchema),
 	tools: ToolsConfigSchema,
 	context: Type.Optional(ContextSchema),
 	orchestration: Type.Optional(OrchestrationConfigSchema),

@@ -92,6 +92,7 @@
 	},
 	"dependencies": {
 		"@fastify/cors": "^11.2.0",
+		"@google/genai": "^2.0.1",
 		"@napi-rs/canvas": "^1.0.0",
 		"@sinclair/typebox": "^0.34.33",
 		"@slack/bolt": "^4.7.0",

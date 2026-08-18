@@ -1,20 +1,29 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KanbanPlanner } from "../agent/kanban-planner.js";
 import { RequirementResolver } from "../agent/requirement-resolver.js";
 import { WorkflowManager } from "../agent/workflow-manager.js";
 import { getDefaults } from "../config/defaults.js";
+import { ConfigLoader } from "../config/loader.js";
 import { createDatabaseAdapter } from "../storage/database.js";
+import { ToolRegistry } from "../tools/registry.js";
 import { TransportServer } from "../transport/server.js";
 
 type JsonObject = Record<string, unknown>;
 
 let server: TransportServer | undefined;
+const tempDirectories: string[] = [];
 
 afterEach(async () => {
 	await server?.stop();
 	server = undefined;
+	for (const directory of tempDirectories.splice(0)) {
+		rmSync(directory, { recursive: true, force: true });
+	}
 	vi.unstubAllEnvs();
 });
 
@@ -69,6 +78,22 @@ async function postJson(
 	};
 }
 
+async function putJson(
+	url: string,
+	body: JsonObject,
+	headers: Record<string, string> = {},
+): Promise<{ status: number; body: JsonObject }> {
+	const response = await fetch(url, {
+		method: "PUT",
+		headers: { "Content-Type": "application/json", ...headers },
+		body: JSON.stringify(body),
+	});
+	return {
+		status: response.status,
+		body: (await response.json()) as JsonObject,
+	};
+}
+
 describe("memory API endpoints", () => {
 	it("rejects hostile browser origins without blocking local owner requests", async () => {
 		const baseUrl = await startServer({});
@@ -76,6 +101,14 @@ describe("memory API endpoints", () => {
 			headers: { Origin: "https://attacker.example" },
 		});
 		expect(hostile.status).toBe(403);
+		const port = new URL(baseUrl).port;
+		const rebinding = await fetch(`${baseUrl}/api/status`, {
+			headers: {
+				Origin: `http://attacker.example:${port}`,
+				Host: `attacker.example:${port}`,
+			},
+		});
+		expect(rebinding.status).toBe(403);
 		const local = await fetch(`${baseUrl}/api/status`, {
 			headers: { Origin: "http://localhost:3000" },
 		});
@@ -414,17 +447,21 @@ describe("memory API endpoints", () => {
 		expect(envVarManager.set).not.toHaveBeenCalled();
 	});
 
-	it("keeps health and status public when an API key is configured", async () => {
+	it("keeps health public and protects status when an API key is configured", async () => {
 		const config = getDefaults();
 		config.security.memoryApiKey = "test-api-key";
 		const baseUrl = await startServer({}, { config });
 
 		const health = await getJson(`${baseUrl}/health`);
 		const status = await getJson(`${baseUrl}/api/status`);
+		const allowedStatus = await getJson(`${baseUrl}/api/status`, {
+			"X-Octopus-Api-Key": "test-api-key",
+		});
 
 		expect(health.status).toBe(200);
-		expect(status.status).toBe(200);
-		expect(status.body.status).toBe("running");
+		expect(status.status).toBe(401);
+		expect(allowedStatus.status).toBe(200);
+		expect(allowedStatus.body.status).toBe("running");
 	});
 
 	it("requires the configured API key for non-memory sensitive endpoints", async () => {
@@ -443,7 +480,7 @@ describe("memory API endpoints", () => {
 		expect(missing.status).toBe(401);
 		expect(wrong.status).toBe(401);
 		expect(allowed.status).toBe(200);
-		expect(allowed.body.version).toBe(1);
+		expect(allowed.body.version).toBe(2);
 	});
 
 	it("redacts secrets from the config API response", async () => {
@@ -474,6 +511,303 @@ describe("memory API endpoints", () => {
 		expect(body).not.toContain("ya29.testSecretValue12345");
 		expect(body).not.toContain("url-user");
 		expect(body).not.toContain("url-password");
+	});
+
+	it("saves settings through the bootstrap config loader path", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "octopus-settings-path-"));
+		tempDirectories.push(directory);
+		const configPath = join(directory, "custom-config.json");
+		vi.stubEnv("TEST_SETTINGS_OPENAI_KEY", "resolved-openai-secret");
+		const rawConfig = getDefaults();
+		rawConfig.ai.providers.openai.apiKey = "${TEST_SETTINGS_OPENAI_KEY}";
+		rawConfig.mcp!.servers.secure = {
+			type: "http",
+			url: "https://mcp.example.test",
+			args: ["--api-key", "argument-secret"],
+			headers: { Authorization: "Bearer header-secret" },
+			env: { Z_AI_API_KEY: "environment-secret" },
+		};
+		writeFileSync(configPath, JSON.stringify(rawConfig, null, 2), "utf8");
+		const configLoader = new ConfigLoader(configPath);
+		const config = configLoader.load();
+		const mediaGenerationManager = { updateConfig: vi.fn() };
+		const baseUrl = await startServer(
+			{},
+			{ config, configLoader, mediaGenerationManager },
+		);
+
+		const section = await getJson(`${baseUrl}/api/settings/multimedia`);
+		const mcpSection = await getJson(`${baseUrl}/api/settings/mcp`);
+		const data = section.body.data as {
+			video: { enabled: boolean };
+		};
+		data.video.enabled = false;
+		const saved = await putJson(`${baseUrl}/api/settings/multimedia`, {
+			revision: section.body.revision,
+			data,
+		});
+		const providerSaved = await putJson(
+			`${baseUrl}/api/config/ai.providers.gemini.apiKey`,
+			{ value: "custom-path-key" },
+		);
+		const mcpRoundTrip = await putJson(`${baseUrl}/api/settings/mcp`, {
+			revision: mcpSection.body.revision,
+			data: mcpSection.body.data,
+		});
+		const persisted = JSON.parse(readFileSync(configPath, "utf8")) as {
+			multimedia: { video: { enabled: boolean } };
+			ai: {
+				providers: {
+					gemini: { apiKey: string };
+					openai: { apiKey: string };
+				};
+			};
+			mcp: { servers: { secure: { args: string[]; headers: JsonObject; env: JsonObject } } };
+		};
+
+		expect(saved.status).toBe(200);
+		expect(providerSaved.status).toBe(200);
+		expect(mcpRoundTrip.status).toBe(200);
+		expect(persisted.multimedia.video.enabled).toBe(false);
+		expect(persisted.ai.providers.gemini.apiKey).toBe("custom-path-key");
+		expect(persisted.ai.providers.openai.apiKey).toBe(
+			"${TEST_SETTINGS_OPENAI_KEY}",
+		);
+		expect(JSON.stringify(mcpSection.body)).not.toContain("header-secret");
+		expect(JSON.stringify(mcpSection.body)).not.toContain("environment-secret");
+		expect(JSON.stringify(mcpSection.body)).not.toContain("argument-secret");
+		expect(persisted.mcp.servers.secure).toMatchObject({
+			args: ["--api-key", "argument-secret"],
+			headers: { Authorization: "Bearer header-secret" },
+			env: { Z_AI_API_KEY: "environment-secret" },
+		});
+		expect(mediaGenerationManager.updateConfig).toHaveBeenCalled();
+	});
+
+	it("hot-applies tool toggles and MCP section reconciliation", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "octopus-runtime-settings-"));
+		tempDirectories.push(directory);
+		const configPath = join(directory, "custom-config.json");
+		writeFileSync(configPath, JSON.stringify(getDefaults(), null, 2), "utf8");
+		const configLoader = new ConfigLoader(configPath);
+		const config = configLoader.load();
+		const toolRegistry = new ToolRegistry();
+		toolRegistry.register({
+			name: "runtime-tool",
+			description: "Runtime toggle test",
+			parameters: {},
+			handler: async () => ({ success: true, output: "ok" }),
+			metadata: { source: "system" },
+		});
+		const mcpManager = {
+			syncServers: vi.fn(async () => undefined),
+			listServers: vi.fn(() => []),
+		};
+		const baseUrl = await startServer(
+			{},
+			{ config, configLoader, toolRegistry, mcpManager },
+		);
+
+		const toggled = await postJson(
+			`${baseUrl}/api/tools/system/runtime-tool/toggle`,
+			{},
+		);
+		const tools = await getJson(`${baseUrl}/api/tools`);
+		const mcpSection = await getJson(`${baseUrl}/api/settings/mcp`);
+		const mcpData = mcpSection.body.data as {
+			servers: Record<string, JsonObject>;
+			autoDisabled: string[];
+		};
+		mcpData.servers["runtime-server"] = {
+			command: "node",
+			args: ["server.js"],
+			enabled: false,
+		};
+		const mcpSaved = await putJson(`${baseUrl}/api/settings/mcp`, {
+			revision: mcpSection.body.revision,
+			data: mcpData,
+		});
+
+		expect(toggled).toMatchObject({
+			status: 200,
+			body: { enabled: false, requiresRestart: false, applied: true },
+		});
+		expect(toolRegistry.list()).toEqual([]);
+		expect(toolRegistry.listAll()).toHaveLength(1);
+		expect(config.tools.disabled).toContain("runtime-tool");
+		expect((tools.body.items as JsonObject[])[0]).toMatchObject({
+			name: "runtime-tool",
+			enabled: false,
+			registered: true,
+		});
+		expect(mcpSaved.status).toBe(200);
+		expect(mcpSaved.body.applied).toBe(true);
+		expect(mcpManager.syncServers).toHaveBeenCalledWith({
+			"runtime-server": {
+				command: "node",
+				args: ["server.js"],
+				enabled: false,
+			},
+		}, { persist: false });
+	});
+
+	it("hot-applies memory enablement and refreshes embeddings exactly once", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "octopus-memory-settings-"));
+		tempDirectories.push(directory);
+		const configPath = join(directory, "custom-config.json");
+		writeFileSync(configPath, JSON.stringify(getDefaults(), null, 2), "utf8");
+		const configLoader = new ConfigLoader(configPath);
+		const config = configLoader.load();
+		const agentRuntime = { setMemoryEnabled: vi.fn() };
+		const agentManager = { setMemoryEnabled: vi.fn() };
+		const setMemoryEnabled = vi.fn((enabled: boolean) => {
+			agentRuntime.setMemoryEnabled(enabled);
+			agentManager.setMemoryEnabled(enabled);
+		});
+		const memoryRetentionScheduler = { start: vi.fn(), stop: vi.fn() };
+		const refreshEmbeddingProvider = vi.fn(async () => undefined);
+		const baseUrl = await startServer(
+			{},
+			{
+				config,
+				configLoader,
+				agentRuntime,
+				agentManager,
+				setMemoryEnabled,
+				memoryRetentionScheduler,
+				refreshEmbeddingProvider,
+			},
+		);
+		const section = await getJson(`${baseUrl}/api/settings/memory`);
+
+		const saved = await putJson(`${baseUrl}/api/settings/memory`, {
+			revision: section.body.revision,
+			patch: {
+				enabled: false,
+				embeddings: {
+					failureRetryMs: config.memory.embeddings.failureRetryMs + 1,
+				},
+			},
+		});
+		const status = await getJson(`${baseUrl}/api/settings/status`);
+
+		expect(saved.status).toBe(200);
+		expect(saved.body.applied).toBe(true);
+		expect(agentRuntime.setMemoryEnabled).toHaveBeenCalledOnce();
+		expect(setMemoryEnabled).toHaveBeenCalledWith(false);
+		expect(agentRuntime.setMemoryEnabled).toHaveBeenCalledWith(false);
+		expect(agentManager.setMemoryEnabled).toHaveBeenCalledWith(false);
+		expect(memoryRetentionScheduler.stop).toHaveBeenCalledOnce();
+		expect(memoryRetentionScheduler.start).not.toHaveBeenCalled();
+		expect(refreshEmbeddingProvider).toHaveBeenCalledOnce();
+		expect(config.memory.enabled).toBe(false);
+		expect(status.body).toMatchObject({
+			restartRequired: false,
+			restartKeys: [],
+		});
+
+		const updatedSection = await getJson(`${baseUrl}/api/settings/memory`);
+		const structural = await putJson(`${baseUrl}/api/settings/memory`, {
+			revision: updatedSection.body.revision,
+			patch: {
+				shortTerm: {
+					maxTokens: config.memory.shortTerm.maxTokens + 1,
+				},
+			},
+		});
+		const pendingRestart = await getJson(`${baseUrl}/api/settings/status`);
+		expect(structural.body.warnings).toContain(
+			"Restart required to apply: memory.shortTerm",
+		);
+		expect(pendingRestart.body).toMatchObject({
+			restartRequired: true,
+			restartKeys: ["memory.shortTerm"],
+		});
+
+		const structuralSection = await getJson(`${baseUrl}/api/settings/memory`);
+		await putJson(`${baseUrl}/api/settings/memory`, {
+			revision: structuralSection.body.revision,
+			patch: {
+				shortTerm: {
+					maxTokens: getDefaults().memory.shortTerm.maxTokens,
+				},
+			},
+		});
+		const reverted = await getJson(`${baseUrl}/api/settings/status`);
+		expect(reverted.body).toMatchObject({
+			restartRequired: false,
+			restartKeys: [],
+		});
+	});
+
+	it("hot-applies channels, preserves stored secrets, and reports runtime status", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "octopus-channel-settings-"));
+		tempDirectories.push(directory);
+		const configPath = join(directory, "custom-config.json");
+		const initial = getDefaults();
+		initial.channels.slack.signingSecret = "signing-secret";
+		initial.channels.slack.appToken = "app-token";
+		writeFileSync(configPath, JSON.stringify(initial, null, 2), "utf8");
+		const configLoader = new ConfigLoader(configPath);
+		const config = configLoader.load();
+		const syncChannel = vi.fn(async () => undefined);
+		const channelManager = {
+			getStatus: vi.fn(async (name: string) => ({
+				registered: name === "telegram",
+				connected: name === "telegram",
+				status: name === "telegram" ? "connected" : "disconnected",
+			})),
+		};
+		const baseUrl = await startServer(
+			{},
+			{ config, configLoader, syncChannel, channelManager },
+		);
+
+		const toggled = await postJson(
+			`${baseUrl}/api/channels/telegram/toggle`,
+			{},
+		);
+		const saved = await putJson(`${baseUrl}/api/channels/slack/config`, {
+			value: { botToken: "new-bot-token" },
+		});
+		const channels = await getJson(`${baseUrl}/api/channels`);
+		const persisted = JSON.parse(readFileSync(configPath, "utf8")) as {
+			channels: {
+				slack: { botToken: string; signingSecret: string; appToken: string };
+			};
+		};
+
+		expect(toggled).toMatchObject({
+			status: 200,
+			body: { enabled: true, applied: true },
+		});
+		expect(saved).toMatchObject({ status: 200, body: { applied: true } });
+		expect(syncChannel).toHaveBeenCalledWith(
+			"telegram",
+			expect.objectContaining({ enabled: true }),
+		);
+		expect(syncChannel).toHaveBeenCalledWith(
+			"slack",
+			expect.objectContaining({
+				botToken: "new-bot-token",
+				signingSecret: "signing-secret",
+				appToken: "app-token",
+			}),
+		);
+		expect(persisted.channels.slack).toMatchObject({
+			botToken: "new-bot-token",
+			signingSecret: "signing-secret",
+			appToken: "app-token",
+		});
+		expect(
+			(channels.body as unknown as JsonObject[]).find(
+				(channel) => channel.name === "telegram",
+			),
+		).toMatchObject({
+			status: "connected",
+			connected: true,
+			registered: true,
+		});
 	});
 
 	it("returns active conversation execution for reconnect recovery", async () => {

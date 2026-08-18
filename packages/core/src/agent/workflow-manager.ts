@@ -497,8 +497,6 @@ export class WorkflowManager {
 			"SELECT * FROM agent_workflow_runs WHERE status = 'running' AND (lease_expires_at < ? OR (lease_expires_at IS NULL AND updated_at < ?)) ORDER BY updated_at ASC",
 			[now, cutoff],
 		);
-		if (staleRuns.length === 0) return { runs: 0, tasks: 0 };
-
 		let taskCount = 0;
 		let runCount = 0;
 		for (const run of staleRuns) {
@@ -523,6 +521,26 @@ export class WorkflowManager {
 				message:
 					"Workflow was marked interrupted during recovery because it was left running by a previous process.",
 				metadata: { staleAfterMs, cutoff, recoveredTasks: runningTasks.length },
+			});
+		}
+
+		// Tareas huérfanas: quedaron 'running' bajo un run ya terminal (p. ej.
+		// un crash entre updateTaskStatus y updateRunStatus). El sweep anterior
+		// solo cubre runs en 'running', así que estas tareas jamás se cerraban.
+		const orphanedTasks = await this.db.all<{ id: string; run_id: string }>(
+			"SELECT t.id, t.run_id FROM agent_workflow_tasks t JOIN agent_workflow_runs r ON r.id = t.run_id WHERE t.status = 'running' AND r.status IN ('done', 'failed', 'blocked', 'cancelled', 'partial', 'interrupted', 'timed_out') AND t.updated_at < ?",
+			[cutoff],
+		);
+		for (const orphan of orphanedTasks) {
+			await this.updateTaskStatus(orphan.id, "failed");
+			taskCount++;
+			await this.recordEvent({
+				runId: orphan.run_id,
+				taskId: orphan.id,
+				eventType: "task_failed",
+				message:
+					"Orphaned task was marked failed during recovery: its run already reached a terminal status.",
+				metadata: { cutoff, orphanedByRecovery: true },
 			});
 		}
 		return { runs: runCount, tasks: taskCount };

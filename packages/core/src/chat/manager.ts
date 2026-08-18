@@ -169,7 +169,46 @@ function taskSearchTerms(query: string): string[] {
 }
 
 export class ChatManager {
+	private executionSettledHandlers: Array<
+		(executionId: string, status: ChatExecutionStatus) => void
+	> = [];
+
 	constructor(private db: DatabaseAdapter) {}
+
+	/**
+	 * Registra un callback que se dispara cuando una ejecución pasa a un
+	 * estado terminal (completed/failed/cancelled/interrupted). Se usa p. ej.
+	 * para cerrar el navegador del agente en cuanto termina su trabajo.
+	 * Devuelve una función para desuscribirse.
+	 */
+	onExecutionSettled(
+		handler: (executionId: string, status: ChatExecutionStatus) => void,
+	): () => void {
+		this.executionSettledHandlers.push(handler);
+		return () => {
+			this.executionSettledHandlers = this.executionSettledHandlers.filter(
+				(candidate) => candidate !== handler,
+			);
+		};
+	}
+
+	private notifyExecutionSettled(
+		executionId: string,
+		status: ChatExecutionStatus,
+	): void {
+		if (
+			!["completed", "failed", "cancelled", "interrupted"].includes(status)
+		) {
+			return;
+		}
+		for (const handler of this.executionSettledHandlers) {
+			try {
+				handler(executionId, status);
+			} catch {
+				/* los handlers de ciclo de vida no deben romper la transición */
+			}
+		}
+	}
 
 	async createConversation(opts?: {
 		title?: string;
@@ -686,24 +725,32 @@ export class ChatManager {
 		await this.db.flush?.();
 	}
 
-	async failToolAction(id: string, error: string): Promise<void> {
+	async failToolAction(
+		id: string,
+		error: string,
+		resultJson?: string,
+	): Promise<void> {
 		const now = new Date().toISOString();
 		await this.db.run(
 			`UPDATE chat_tool_actions
-				SET status = 'failed', error = ?, updated_at = ?, completed_at = ?
+				SET status = 'failed', result_json = ?, error = ?, updated_at = ?, completed_at = ?
 				WHERE id = ? AND status = 'running'`,
-			[error, now, now, id],
+			[resultJson ?? null, error, now, now, id],
 		);
 		await this.db.flush?.();
 	}
 
-	async markToolActionUncertain(id: string, error: string): Promise<void> {
+	async markToolActionUncertain(
+		id: string,
+		error: string,
+		resultJson?: string,
+	): Promise<void> {
 		const now = new Date().toISOString();
 		await this.db.run(
 			`UPDATE chat_tool_actions
-				SET status = 'uncertain', error = ?, updated_at = ?, completed_at = NULL
+				SET status = 'uncertain', result_json = ?, error = ?, updated_at = ?, completed_at = NULL
 				WHERE id = ? AND status = 'running'`,
-			[error, now, id],
+			[resultJson ?? null, error, now, id],
 		);
 		await this.db.flush?.();
 	}
@@ -817,6 +864,9 @@ export class ChatManager {
 			],
 		);
 		await this.db.flush?.();
+		if (transitioned && updates.status && updates.status !== current.status) {
+			this.notifyExecutionSettled(id, updates.status);
+		}
 		return Boolean(transitioned);
 	}
 

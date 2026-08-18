@@ -68,6 +68,15 @@ export class BrowserSessionPool {
 		);
 	}
 
+	/**
+	 * Cierra la sesión del navegador del agente principal (guardando su
+	 * estado). Se llama cuando la ejecución de chat termina y no queda
+	 * ninguna otra activa, para liberar recursos de inmediato.
+	 */
+	async releaseDefaultSession(): Promise<void> {
+		await this.defaultSession.browser.shutdown();
+	}
+
 	async closeAll(): Promise<void> {
 		const sessions = [
 			this.defaultSession,

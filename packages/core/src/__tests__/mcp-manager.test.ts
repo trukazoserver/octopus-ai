@@ -191,4 +191,52 @@ describe("MCPManager", () => {
 		expect(result?.error).toContain("[REDACTED]");
 		expect(result?.error).not.toContain("sk-testSecretValue12345");
 	});
+
+	it("reconciles effective runtime servers without persisting derived secrets", async () => {
+		mockRequest.mockResolvedValue({ tools: [] });
+		const persist = vi.fn();
+		const manager = new MCPManager();
+		manager.setPersistCallback(persist);
+
+		await manager.loadPersisted({
+			configured: { command: "node", args: [], env: { API_KEY: "secret" } },
+		});
+		expect(persist).not.toHaveBeenCalled();
+
+		const updatedConfigured = {
+				configured: {
+					command: "node",
+					args: [],
+					env: { API_KEY: "different-secret" },
+				},
+		};
+		manager.setConfiguredServers(updatedConfigured);
+		await manager.syncServers(
+			{
+				...updatedConfigured,
+				"derived-zai": {
+					url: "https://derived.example.test",
+					args: [],
+					headers: { Authorization: "Bearer derived-secret" },
+				},
+			},
+			{ persist: false },
+		);
+
+		expect(persist).not.toHaveBeenCalled();
+		expect(manager.getServer("configured")?.config.env?.API_KEY).toBe(
+			"different-secret",
+		);
+
+		await manager.addServer("custom", { command: "node", args: [] });
+		expect(persist).toHaveBeenLastCalledWith({
+			configured: {
+				command: "node",
+				args: [],
+				env: { API_KEY: "different-secret" },
+			},
+			custom: { command: "node", args: [] },
+		});
+		expect(JSON.stringify(persist.mock.calls)).not.toContain("derived-secret");
+	});
 });

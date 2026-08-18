@@ -109,7 +109,7 @@ export const OCTOPUS_ARM_PROFILES: OctopusArmProfile[] = [
 			"storyboard",
 			"creative-direction",
 		],
-		defaultTools: ["nano-banana-generate", "veo-video-generator", "list_media"],
+		defaultTools: ["generate_image", "generate_video", "list_media"],
 		defaultSkills: ["media-generation", "prompt-engineering"],
 		canSpawnSubagents: true,
 		maxSpawnDepth: 2,

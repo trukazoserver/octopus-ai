@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { createLogger } from "../utils/logger.js";
 import { getModelContextWindow } from "./model-context.js";
-import { estimateCost } from "./pricing.js";
+import { estimateCostWithSource } from "./pricing.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import type { BaseLLMProvider } from "./providers/base.js";
 import { clearModelsListCache } from "./providers/base.js";
@@ -1054,12 +1055,19 @@ export class LLMRouter {
 		entry.tokens += tokens;
 		entry.promptTokens += prompt;
 		entry.completionTokens += completion;
-		const cost = estimateCost(provider, model, prompt, completion);
+		const estimate = estimateCostWithSource(
+			provider,
+			model,
+			prompt,
+			completion,
+		);
+		const cost = estimate.cost;
 		if (cost > 0) {
 			this.usage.totalCost += cost;
 			entry.cost += cost;
 		}
 		this.usageSink?.record({
+			eventId: randomUUID(),
 			provider,
 			model,
 			agentId: metadata?.agentId,
@@ -1070,6 +1078,7 @@ export class LLMRouter {
 			reasoningTokens: reasoning,
 			totalTokens: tokens,
 			estimatedCost: cost,
+			costSource: estimate.source,
 		});
 	}
 

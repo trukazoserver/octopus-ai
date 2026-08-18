@@ -232,7 +232,7 @@ describe("Kanban Swarm artifact dependencies", () => {
 		};
 		const orchestrator = new OctopusOrchestrator(
 			router as never,
-			{ list: () => [] } as never,
+			{ list: () => [], listForModel: () => [] } as never,
 			{ execute: vi.fn() } as never,
 			{
 				id: "root-agent",

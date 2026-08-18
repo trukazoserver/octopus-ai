@@ -48,6 +48,84 @@ export class ChannelManager {
 		return Array.from(this.channels.values());
 	}
 
+	public async start(id: string): Promise<boolean> {
+		const channel = this.channels.get(id);
+		if (!channel) return false;
+		await channel.connect();
+		return channel.isHealthy();
+	}
+
+	public async stop(id: string): Promise<boolean> {
+		const channel = this.channels.get(id);
+		if (!channel) return false;
+		await channel.disconnect();
+		return true;
+	}
+
+	public async replace(channel: Channel, start = true): Promise<void> {
+		const existing = this.channels.get(channel.id);
+		if (start) {
+			await channel.connect();
+			const detailed = (
+				channel as Channel & { getStatus?: () => { status: string } }
+			).getStatus?.();
+			const ready =
+				(await channel.isHealthy()) ||
+				(channel.type === "whatsapp" &&
+					(detailed?.status === "connecting" || detailed?.status === "qr"));
+			if (!ready) {
+				await channel.disconnect().catch(() => undefined);
+				throw new Error(`Channel ${channel.id} did not become ready`);
+			}
+		}
+		if (existing) await existing.disconnect().catch(() => undefined);
+		this.register(channel);
+	}
+
+	public async unregister(id: string): Promise<boolean> {
+		const existing = this.channels.get(id);
+		if (!existing) return false;
+		await existing.disconnect().catch(() => undefined);
+		this.channels.delete(id);
+		return true;
+	}
+
+	public async getStatus(id: string): Promise<{
+		registered: boolean;
+		connected: boolean;
+		status:
+			| "connecting"
+			| "qr"
+			| "connected"
+			| "disconnected"
+			| "logged_out"
+			| "error";
+	}> {
+		const channel = this.channels.get(id);
+		if (!channel) {
+			return { registered: false, connected: false, status: "disconnected" };
+		}
+		try {
+			const detailed = (
+				channel as Channel & {
+					getStatus?: () => {
+						status: "connecting" | "qr" | "connected" | "disconnected" | "logged_out";
+						connected: boolean;
+					};
+				}
+			).getStatus?.();
+			if (detailed) return { registered: true, ...detailed };
+			const connected = await channel.isHealthy();
+			return {
+				registered: true,
+				connected,
+				status: connected ? "connected" : "disconnected",
+			};
+		} catch {
+			return { registered: true, connected: false, status: "error" };
+		}
+	}
+
 	public async send(
 		channelId: string,
 		to: string,
@@ -78,7 +156,7 @@ export class ChannelManager {
 
 	public async startAll(): Promise<void> {
 		const connectPromises = Array.from(this.channels.values()).map((channel) =>
-			channel.connect().catch((err) => {
+			this.start(channel.id).catch((err) => {
 				console.error(`Failed to connect channel ${channel.id}:`, err);
 			}),
 		);
@@ -88,7 +166,7 @@ export class ChannelManager {
 	public async stopAll(): Promise<void> {
 		const disconnectPromises = Array.from(this.channels.values()).map(
 			(channel) =>
-				channel.disconnect().catch((err) => {
+				this.stop(channel.id).catch((err) => {
 					console.error(`Failed to disconnect channel ${channel.id}:`, err);
 				}),
 		);

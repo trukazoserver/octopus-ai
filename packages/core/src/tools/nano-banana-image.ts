@@ -1,8 +1,13 @@
-import { createSign } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash, createSign } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { ConfigLoader } from "../config/loader.js";
+import type { OctopusConfig } from "../config/schema.js";
+import type { MediaRoute } from "../multimedia/catalog.js";
+import { UrlSafetyPolicy } from "../security/url-safety.js";
+import { fetchSafeImage } from "../security/safe-image-fetch.js";
+import { assertRealPathInside } from "../utils/path-safety.js";
 import {
 	ensureTransparentImage,
 	isTransparentImageRequested,
@@ -45,15 +50,16 @@ const VALID_ASPECT_RATIOS = [
 	"21:9",
 ] as const;
 const VALID_RESOLUTIONS = ["512", "1K", "2K", "4K"] as const;
-const WORKSPACE_DIR = join(homedir(), ".octopus", "workspace");
-let vertexTokenCache: { token: string; expiresAt: number } | undefined;
+const MAX_REFERENCE_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_REFERENCE_TOTAL_BYTES = 64 * 1024 * 1024;
+const WORKSPACE_DIR =
+	process.env.OCTOPUS_WORKSPACE_DIR || join(homedir(), ".octopus", "workspace");
+let vertexTokenCache:
+	| { token: string; expiresAt: number; credentialKey: string }
+	| undefined;
 
 function firstConfigured(...values: Array<string | undefined>): string | undefined {
 	return values.find((value) => Boolean(value?.trim()))?.trim();
-}
-
-function normalizeNanoModel(model: string): string {
-	return model.replace(/-preview$/, "");
 }
 
 function base64Url(value: string | Buffer): string {
@@ -95,7 +101,11 @@ function loadServiceAccount(config: {
 	}
 	const file =
 		config.credentialsFile || process.env.GOOGLE_APPLICATION_CREDENTIALS;
-	if (!file || !existsSync(file)) return undefined;
+	if (!file) return undefined;
+	if (file.trim().startsWith("{")) {
+		return JSON.parse(file) as ServiceAccount;
+	}
+	if (!existsSync(file)) return undefined;
 	return JSON.parse(readFileSync(file, "utf8")) as ServiceAccount;
 }
 
@@ -113,9 +123,6 @@ async function getVertexAccessToken(config: {
 		process.env.GOOGLE_VERTEX_ACCESS_TOKEN,
 	);
 	if (configured) return configured;
-	if (vertexTokenCache && vertexTokenCache.expiresAt > Date.now() + 60_000) {
-		return vertexTokenCache.token;
-	}
 	const credentials = loadServiceAccount(config);
 	if (!credentials) {
 		throw new Error(
@@ -124,6 +131,17 @@ async function getVertexAccessToken(config: {
 	}
 	const tokenUri =
 		credentials.token_uri || "https://oauth2.googleapis.com/token";
+	const credentialKey = createHash("sha256")
+		.update(
+			`${credentials.client_email ?? ""}\0${credentials.private_key ?? ""}\0${tokenUri}`,
+		)
+		.digest("hex");
+	if (
+		vertexTokenCache?.credentialKey === credentialKey &&
+		vertexTokenCache.expiresAt > Date.now() + 60_000
+	) {
+		return vertexTokenCache.token;
+	}
 	const response = await fetch(tokenUri, {
 		method: "POST",
 		headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -147,16 +165,30 @@ async function getVertexAccessToken(config: {
 	vertexTokenCache = {
 		token: payload.access_token,
 		expiresAt: Date.now() + (payload.expires_in ?? 3600) * 1000,
+		credentialKey,
 	};
 	return payload.access_token;
 }
 
-async function loadNanoConnection(): Promise<NanoConnection> {
-	const config = new ConfigLoader().load();
+async function loadNanoConnection(
+	config: OctopusConfig = new ConfigLoader().load(),
+	route?: MediaRoute,
+): Promise<NanoConnection> {
+	if (config.multimedia?.image.enabled === false) {
+		throw new Error("Image generation is disabled in Ajustes > Multimedia.");
+	}
 	const settings = config.tools.imageGeneration.nanoBanana;
-	const configuredModel = settings.model || "gemini-3.1-flash-image";
-	if (settings.provider === "gemini-api") {
-		const model = normalizeNanoModel(configuredModel);
+	if (!route && settings.enabled === false) {
+		throw new Error("The legacy Nano Banana image alias is disabled.");
+	}
+	const configuredModel = route?.model || settings.model || "gemini-3.1-flash-image";
+	const selectedProvider: NanoProvider = route
+		? route.provider === "gemini"
+			? "gemini-api"
+			: "vertex"
+		: settings.provider;
+	if (selectedProvider === "gemini-api") {
+		const model = configuredModel;
 		const gemini = config.ai.providers.gemini;
 		const apiKey = firstConfigured(
 			gemini.apiKey,
@@ -186,7 +218,7 @@ async function loadNanoConnection(): Promise<NanoConnection> {
 	}
 
 	const vertex = config.ai.providers.vertex;
-	const model = normalizeNanoModel(configuredModel);
+	const model = configuredModel;
 	const credentials = loadServiceAccount(vertex);
 	const projectId =
 		vertex.projectId ??
@@ -219,26 +251,29 @@ async function loadNanoConnection(): Promise<NanoConnection> {
 async function resolveReferenceImage(
 	input: string,
 	context: ToolContext,
+	urlSafetyPolicy: UrlSafetyPolicy,
 ): Promise<{ data: string; mimeType: string }> {
 	if (input.startsWith("data:")) {
 		throw new Error("Pass media URLs or file paths, not base64 data URLs.");
 	}
 	if (input.startsWith("/api/media/file/")) {
-		const resolved = await context.media.resolve(input);
+		const resolved = await context.media.resolve(input, {
+			maxBytes: MAX_REFERENCE_IMAGE_BYTES,
+		});
 		return {
 			data: resolved.buffer.toString("base64"),
 			mimeType: resolved.mimeType,
 		};
 	}
 	if (/^https?:\/\//i.test(input)) {
-		const response = await fetch(input, {
-			signal: AbortSignal.timeout(30_000),
+		const fetched = await fetchSafeImage(input, {
+			policy: urlSafetyPolicy,
+			context: "Reference image URL",
+			maxBytes: MAX_REFERENCE_IMAGE_BYTES,
 		});
-		if (!response.ok)
-			throw new Error(`Reference image fetch failed (${response.status}).`);
 		return {
-			data: Buffer.from(await response.arrayBuffer()).toString("base64"),
-			mimeType: response.headers.get("content-type") || "image/jpeg",
+			data: fetched.buffer.toString("base64"),
+			mimeType: fetched.mimeType,
 		};
 	}
 	const absolute = isAbsolute(input) ? input : resolve(WORKSPACE_DIR, input);
@@ -250,6 +285,12 @@ async function resolveReferenceImage(
 	}
 	if (!existsSync(absolute))
 		throw new Error(`Reference image not found: ${input}`);
+	await assertRealPathInside(absolute, [WORKSPACE_DIR]);
+	if (statSync(absolute).size > MAX_REFERENCE_IMAGE_BYTES) {
+		throw new Error(
+			`Reference image exceeds the ${MAX_REFERENCE_IMAGE_BYTES}-byte limit: ${input}`,
+		);
+	}
 	const ext = extname(absolute).toLowerCase();
 	const mimeType =
 		ext === ".png"
@@ -285,7 +326,9 @@ function extractImageParts(
 	return images;
 }
 
-export function createNanoBananaImageTools(): ToolDefinition[] {
+export function createNanoBananaImageTools(options: {
+	getConfig?: () => OctopusConfig;
+} = {}): ToolDefinition[] {
 	return [
 		{
 			name: "nano-banana-generate",
@@ -293,6 +336,10 @@ export function createNanoBananaImageTools(): ToolDefinition[] {
 				"Generate or edit images with Nano Banana using the provider selected in Settings: Gemini API or Vertex AI. Supports 512/1K/2K/4K, aspect ratios, up to 14 references, Google Search grounding, and real transparent PNG output via dynamic chroma key.",
 			uiIcon: "image",
 			longRunning: true,
+			metadata: {
+				hiddenFromModel: true,
+				compatibilityAliasFor: "generate_image",
+			},
 			parameters: {
 				prompt: {
 					type: "string",
@@ -401,8 +448,18 @@ export function createNanoBananaImageTools(): ToolDefinition[] {
 					};
 				}
 
+				let submissionState: "rejected" | "unknown" | "accepted" = "rejected";
+				const urls: string[] = [];
+				const persistenceErrors: string[] = [];
 				try {
-					const connection = await loadNanoConnection();
+					const runtimeConfig = options.getConfig?.() ?? new ConfigLoader().load();
+					const connection = await loadNanoConnection(
+						runtimeConfig,
+						params.__octopus_image_route as MediaRoute | undefined,
+					);
+					const urlSafetyPolicy = new UrlSafetyPolicy(
+						runtimeConfig.security?.urlPolicy,
+					);
 					let fullPrompt = prompt;
 					if (params.style)
 						fullPrompt += `. Visual style: ${String(params.style)}`;
@@ -419,8 +476,19 @@ export function createNanoBananaImageTools(): ToolDefinition[] {
 					if (transparency) fullPrompt = transparency.prompt;
 
 					const parts: Array<Record<string, unknown>> = [{ text: fullPrompt }];
+					let totalReferenceBytes = 0;
 					for (const input of references) {
-						const ref = await resolveReferenceImage(input, context);
+						const ref = await resolveReferenceImage(
+							input,
+							context,
+							urlSafetyPolicy,
+						);
+						totalReferenceBytes += Buffer.byteLength(ref.data, "base64");
+						if (totalReferenceBytes > MAX_REFERENCE_TOTAL_BYTES) {
+							throw new Error(
+								`Reference images exceed the ${MAX_REFERENCE_TOTAL_BYTES}-byte aggregate limit.`,
+							);
+						}
 						parts.push({
 							inlineData: { mimeType: ref.mimeType, data: ref.data },
 						});
@@ -457,6 +525,7 @@ export function createNanoBananaImageTools(): ToolDefinition[] {
 								}
 							: {}),
 					};
+					submissionState = "unknown";
 					const response = await fetch(connection.url, {
 						method: "POST",
 						headers: connection.headers,
@@ -464,52 +533,81 @@ export function createNanoBananaImageTools(): ToolDefinition[] {
 						signal: AbortSignal.timeout(600_000),
 					});
 					if (!response.ok) {
+						submissionState =
+							response.status < 500 && response.status !== 408
+								? "rejected"
+								: "unknown";
 						return {
 							success: false,
 							output: "",
 							error: `${connection.provider} image API error (${response.status}): ${(await response.text()).slice(0, 500)}`,
+							metadata: { submissionState },
 						};
 					}
+					submissionState = "accepted";
 					const images = extractImageParts(await response.json());
 					if (images.length === 0) {
 						return {
 							success: false,
 							output: "",
 							error: `${connection.provider} returned no image data.`,
+							metadata: { submissionState },
 						};
 					}
-					const urls: string[] = [];
 					let alphaPostProcessed = false;
 					for (const image of images) {
-						let buffer = Buffer.from(image.data, "base64");
-						let mimeType = image.mimeType;
-						if (transparencyRequested) {
-							const processed = await ensureTransparentImage(
-								buffer,
-								transparency?.chromaKey as ChromaKey,
+						try {
+							let buffer = Buffer.from(image.data, "base64");
+							let mimeType = image.mimeType;
+							if (transparencyRequested) {
+								const processed = await ensureTransparentImage(
+									buffer,
+									transparency?.chromaKey as ChromaKey,
+								);
+								buffer = Buffer.from(processed.buffer);
+								mimeType = "image/png";
+								alphaPostProcessed ||= processed.alphaPostProcessed;
+							}
+							const saved = await context.media.save(buffer, mimeType, prompt, {
+								provider: connection.provider,
+								model: connection.model,
+								resolution,
+								aspectRatio,
+								background: transparencyRequested ? "transparent" : background,
+								chromaKey: transparency?.chromaKey.hex,
+								alphaPostProcessed,
+								referenceImagesUsed: references.length,
+							});
+							urls.push(saved.url);
+						} catch (error) {
+							persistenceErrors.push(
+								error instanceof Error ? error.message : String(error),
 							);
-							buffer = Buffer.from(processed.buffer);
-							mimeType = "image/png";
-							alphaPostProcessed ||= processed.alphaPostProcessed;
 						}
-						const saved = await context.media.save(buffer, mimeType, prompt, {
-							provider: connection.provider,
-							model: connection.model,
-							resolution,
-							aspectRatio,
-							background: transparencyRequested ? "transparent" : background,
-							chromaKey: transparency?.chromaKey.hex,
-							alphaPostProcessed,
-							referenceImagesUsed: references.length,
-						});
-						urls.push(saved.url);
+					}
+					if (urls.length === 0) {
+						return {
+							success: false,
+							output: "",
+							error:
+								persistenceErrors.at(-1) ??
+								`${connection.provider} outputs could not be saved.`,
+							metadata: { submissionState, persistenceErrors },
+						};
 					}
 					return {
 						success: true,
-						output: urls
-							.map((url, index) => `Image ${index + 1}: ${url}`)
+						output: [
+							urls.map((url, index) => `Image ${index + 1}: ${url}`).join("\n"),
+							persistenceErrors.length > 0
+								? `Warning: ${persistenceErrors.length} paid output(s) could not be saved.`
+								: "",
+						]
+							.filter(Boolean)
 							.join("\n"),
 						metadata: {
+							submissionState,
+							persistenceErrors,
 							urls,
 							provider: connection.provider,
 							model: connection.model,
@@ -525,6 +623,7 @@ export function createNanoBananaImageTools(): ToolDefinition[] {
 						success: false,
 						output: "",
 						error: error instanceof Error ? error.message : String(error),
+						metadata: { submissionState, urls },
 					};
 				}
 			},

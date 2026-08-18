@@ -3,9 +3,10 @@ import {
 	getMascotOptions,
 } from "@octopus-ai/core/mascots/index";
 import type React from "react";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import {
 	ConfigSection,
+	ConfigSectionCategoryContext,
 	Field,
 	SaveButton,
 	Select,
@@ -13,7 +14,8 @@ import {
 	Toggle,
 } from "../components/ConfigSection.js";
 import { UsageSection } from "../components/settings/UsageSection.js";
-import { AppIcon } from "../components/ui/AppIcon.js";
+import { USER_PROFILE_UPDATED_EVENT } from "../components/UserMenu.js";
+import { AppIcon, type AppIconName } from "../components/ui/AppIcon.js";
 import { BrandLogo } from "../components/ui/BrandLogo.js";
 import {
 	apiDelete,
@@ -22,6 +24,29 @@ import {
 	apiPut,
 	apiPutJson,
 } from "../hooks/useApi.js";
+
+const AgentsAdminPanel = lazy(() =>
+	import("./agents.js").then(({ AgentsPage }) => ({ default: AgentsPage })),
+);
+const ChannelsAdminPanel = lazy(() =>
+	import("./channels/Channels.js").then(({ ChannelsPage }) => ({
+		default: ChannelsPage,
+	})),
+);
+const MemoryAdminPanel = lazy(() =>
+	import("./memory.js").then(({ MemoryPage }) => ({ default: MemoryPage })),
+);
+const SkillsAdminPanel = lazy(() =>
+	import("./skills.js").then(({ SkillsPage }) => ({ default: SkillsPage })),
+);
+const ToolsAdminPanel = lazy(() =>
+	import("./tools.js").then(({ ToolsPage }) => ({ default: ToolsPage })),
+);
+const MultimediaPanel = lazy(() =>
+	import("./settings/MultimediaPanel.js").then(({ MultimediaPanel }) => ({
+		default: MultimediaPanel,
+	})),
+);
 
 interface ProviderConfig {
 	apiKey?: string;
@@ -145,18 +170,6 @@ interface ConfigData {
 	};
 	tools?: {
 		disabled?: string[];
-		imageGeneration?: {
-			openai?: {
-				enabled?: boolean;
-				provider?: "openai-api" | "codex";
-				model?: string;
-			};
-			nanoBanana?: {
-				enabled?: boolean;
-				provider?: "gemini-api" | "vertex";
-				model?: string;
-			};
-		};
 		iterationLimit?: {
 			enabled?: boolean;
 			maxIterations?: number;
@@ -184,15 +197,96 @@ interface UserProfileResponse {
 	profile: UserProfile | null;
 }
 
+export type SettingsSectionId =
+	| "overview"
+	| "usage"
+	| "providers"
+	| "multimedia"
+	| "web"
+	| "agents"
+	| "memory"
+	| "skills"
+	| "integrations"
+	| "tools"
+	| "system";
+
+const SETTINGS_SECTIONS: Array<{
+	id: SettingsSectionId;
+	label: string;
+	description: string;
+	icon: AppIconName;
+}> = [
+	{
+		id: "overview",
+		label: "Centro de Control",
+		description: "Resumen de la configuración local",
+		icon: "home",
+	},
+	{
+		id: "usage",
+		label: "Uso",
+		description: "Tokens, multimedia y costes",
+		icon: "activity",
+	},
+	{
+		id: "providers",
+		label: "Proveedores IA",
+		description: "Modelos, credenciales y conexión",
+		icon: "brain",
+	},
+	{
+		id: "multimedia",
+		label: "Multimedia",
+		description: "Generación de imagen y video",
+		icon: "image",
+	},
+	{
+		id: "web",
+		label: "Navegador y búsqueda web",
+		description: "Navegación, proxies y captchas",
+		icon: "globe",
+	},
+	{
+		id: "agents",
+		label: "Agentes",
+		description: "Agentes y orquestación",
+		icon: "agent",
+	},
+	{
+		id: "memory",
+		label: "Memoria",
+		description: "Memoria, aprendizaje y embeddings",
+		icon: "database",
+	},
+	{
+		id: "skills",
+		label: "Habilidades",
+		description: "Skills instaladas y configuración",
+		icon: "spark",
+	},
+	{
+		id: "integrations",
+		label: "Integraciones y MCP",
+		description: "Canales, conexiones y servidores MCP",
+		icon: "plug",
+	},
+	{
+		id: "tools",
+		label: "Herramientas",
+		description: "Ejecución y límites de herramientas",
+		icon: "tools",
+	},
+	{
+		id: "system",
+		label: "Perfil y sistema",
+		description: "Perfil, entorno, servidor y seguridad",
+		icon: "settings",
+	},
+];
+
 interface StatusResponse {
 	availableProviders?: string[];
 	configuredProviders?: string[];
-	imageGenerationProviders?: {
-		openaiApi: boolean;
-		codex: boolean;
-		geminiApi: boolean;
-		vertex: boolean;
-	};
 }
 
 interface VertexSetupResponse {
@@ -439,6 +533,29 @@ const settingsDangerButtonStyle: React.CSSProperties = {
 	background: "rgba(239, 68, 68, 0.1)",
 	color: "#f87171",
 };
+
+const embeddedAdminPanelStyle: React.CSSProperties = {
+	borderRadius: "16px",
+	border: "1px solid #27272a",
+	overflow: "hidden",
+	background: "#050507",
+};
+
+const EmbeddedAdminPanel: React.FC<{ children: React.ReactNode }> = ({
+	children,
+}) => (
+	<div style={embeddedAdminPanelStyle}>
+		<Suspense
+			fallback={
+				<div style={{ padding: 24, color: "#a1a1aa" }}>
+					Cargando módulo...
+				</div>
+			}
+		>
+			{children}
+		</Suspense>
+	</div>
+);
 
 const envInputStyle: React.CSSProperties = {
 	width: "100%",
@@ -1874,7 +1991,18 @@ function VertexSetupSection({
 	);
 }
 
-export const SettingsPage: React.FC = () => {
+interface SettingsPageProps {
+	onBack?: () => void;
+	initialSection?: SettingsSectionId;
+}
+
+export const SettingsPage: React.FC<SettingsPageProps> = ({
+	onBack,
+	initialSection = "overview",
+}) => {
+	const [activeSection, setActiveSection] =
+		useState<SettingsSectionId>(initialSection);
+	const [settingsSearch, setSettingsSearch] = useState("");
 	const [config, setConfig] = useState<ConfigData>({});
 	const [status, setStatus] = useState<StatusResponse | null>(null);
 	const [envVars, setEnvVars] = useState<EnvVarEntry[]>([]);
@@ -1890,6 +2018,7 @@ export const SettingsPage: React.FC = () => {
 		{},
 	);
 	const [loading, setLoading] = useState(true);
+	const [credentialRevision, setCredentialRevision] = useState(0);
 	const [savingKey, setSavingKey] = useState<string | null>(null);
 	const [applyingEmbeddings, setApplyingEmbeddings] = useState(false);
 	const [secretEditors, setSecretEditors] = useState<Record<string, boolean>>(
@@ -1897,8 +2026,8 @@ export const SettingsPage: React.FC = () => {
 	);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
-	const loadConfig = () => {
-		setLoading(true);
+	const loadConfig = (showLoading = false) => {
+		if (showLoading) setLoading(true);
 		Promise.all([
 			apiGet<ConfigData>("/api/config"),
 			apiGet<UserProfileResponse>("/api/memory/profile"),
@@ -1912,6 +2041,7 @@ export const SettingsPage: React.FC = () => {
 				setEmbeddingDraft(c.memory?.embeddings ?? {});
 				setProfile(profileResponse.profile);
 				setProfileDraft(profileResponse.profile);
+				setCredentialRevision((current) => current + 1);
 				setLoading(false);
 			})
 			.catch((e) => {
@@ -1922,8 +2052,12 @@ export const SettingsPage: React.FC = () => {
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: mount-only fetch
 	useEffect(() => {
-		loadConfig();
+		loadConfig(true);
 	}, []);
+
+	useEffect(() => {
+		setActiveSection(initialSection);
+	}, [initialSection]);
 
 	const save = async (key: string, value: unknown): Promise<boolean> => {
 		setMsg(null);
@@ -1935,7 +2069,8 @@ export const SettingsPage: React.FC = () => {
 		});
 		try {
 			await apiPut(`/api/config/${key}`, value);
-			if (key.startsWith("ai.")) {
+			if (key.startsWith("ai.providers.")) {
+				setCredentialRevision((current) => current + 1);
 				apiGet<StatusResponse>("/api/status")
 					.then(setStatus)
 					.catch(() => undefined);
@@ -2016,6 +2151,7 @@ export const SettingsPage: React.FC = () => {
 		try {
 			await apiPost("/api/env", body);
 			await refreshEnvVars();
+			setCredentialRevision((current) => current + 1);
 			if (existing) {
 				setEnvEditingKey(null);
 				setEnvEditDrafts((current) => {
@@ -2044,6 +2180,7 @@ export const SettingsPage: React.FC = () => {
 		try {
 			await apiDelete(`/api/env/${encodeURIComponent(key)}`);
 			await refreshEnvVars();
+			setCredentialRevision((current) => current + 1);
 			setMsg({ text: `${key} eliminado`, ok: true });
 			setTimeout(() => setMsg(null), 3000);
 		} catch (e) {
@@ -2068,7 +2205,6 @@ export const SettingsPage: React.FC = () => {
 			setConfig((current) =>
 				setConfigValue(current, "memory.embeddings", embeddingDraft),
 			);
-			await apiPost("/api/config/apply/embeddings");
 			setMsg({
 				text: "Embeddings guardados y aplicados sin reiniciar Octopus",
 				ok: true,
@@ -2110,7 +2246,15 @@ export const SettingsPage: React.FC = () => {
 			const response = (await apiPutJson("/api/memory/profile", patch)) as {
 				profile?: UserProfile;
 			};
-			if (response.profile) setProfile(response.profile);
+			if (response.profile) {
+				setProfile(response.profile);
+				setProfileDraft(response.profile);
+				window.dispatchEvent(
+					new CustomEvent(USER_PROFILE_UPDATED_EVENT, {
+						detail: response.profile,
+					}),
+				);
+			}
 			setMsg({ text: "Perfil guardado", ok: true });
 			setTimeout(() => setMsg(null), 3000);
 		} catch (e) {
@@ -2235,34 +2379,6 @@ export const SettingsPage: React.FC = () => {
 	// auto-detected from env). This is the "Conectado" signal — the user (or an
 	// app flow) deliberately saved credentials for it.
 	const explicitProviderKeys = new Set(status?.configuredProviders ?? []);
-	const imageGeneration = config.tools?.imageGeneration ?? {};
-	const openAIImage = imageGeneration.openai ?? {};
-	const nanoBananaImage = imageGeneration.nanoBanana ?? {};
-	const imageProviderStatus = status?.imageGenerationProviders;
-	const openaiApiReady = imageProviderStatus?.openaiApi ?? false;
-	const codexReady = imageProviderStatus?.codex ?? false;
-	const geminiApiReady = imageProviderStatus?.geminiApi ?? false;
-	const vertexReady = imageProviderStatus?.vertex ?? false;
-	const selectedOpenAIImageProvider = openAIImage.provider ?? "codex";
-	const selectedNanoProvider = nanoBananaImage.provider ?? "vertex";
-	const openAIImageProviderReady =
-		selectedOpenAIImageProvider === "openai-api" ? openaiApiReady : codexReady;
-	const nanoProviderReady =
-		selectedNanoProvider === "gemini-api" ? geminiApiReady : vertexReady;
-	const openAIImageProviderOptions = Array.from(
-		new Set([
-			selectedOpenAIImageProvider,
-			...(openaiApiReady ? (["openai-api"] as const) : []),
-			...(codexReady ? (["codex"] as const) : []),
-		]),
-	);
-	const nanoProviderOptions = Array.from(
-		new Set([
-			selectedNanoProvider,
-			...(geminiApiReady ? (["gemini-api"] as const) : []),
-			...(vertexReady ? (["vertex"] as const) : []),
-		]),
-	);
 	const configuredModels = buildConfiguredModelOptions(
 		providers,
 		activeProviderKeys,
@@ -2359,22 +2475,64 @@ export const SettingsPage: React.FC = () => {
 			</form>
 		);
 	};
+	const activeSettingsSection =
+		SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
+		SETTINGS_SECTIONS[0];
+	const normalizedSettingsSearch = settingsSearch.trim().toLocaleLowerCase();
+	const visibleSettingsSections = normalizedSettingsSearch
+		? SETTINGS_SECTIONS.filter((section) =>
+				`${section.label} ${section.description}`
+					.toLocaleLowerCase()
+					.includes(normalizedSettingsSearch),
+			)
+		: SETTINGS_SECTIONS;
 
 	return (
-		<div
-			className="settings-page"
-			style={{
-				padding: "34px 34px 48px",
-				maxWidth: "1120px",
-				margin: "0 auto",
-				overflowY: "auto",
-				height: "100%",
-				width: "100%",
-				boxSizing: "border-box",
-				background:
-					"radial-gradient(circle at 20% 0%, rgba(99,102,241,.09), transparent 34%), #030406",
-			}}
-		>
+		<div className="settings-workspace">
+			<aside className="settings-sidebar" aria-label="Navegación de ajustes">
+				<button type="button" className="settings-back" onClick={onBack}>
+					<AppIcon name="chevronRight" size={16} />
+					<span>Volver al chat</span>
+				</button>
+				<label className="settings-search">
+					<AppIcon name="globe" size={16} />
+					<input
+						value={settingsSearch}
+						onChange={(event) => setSettingsSearch(event.target.value)}
+						placeholder="Buscar en Ajustes"
+						aria-label="Buscar en Ajustes"
+					/>
+				</label>
+				<div className="settings-sidebar-brand">
+					<span>Octopus AI</span>
+					<small>Centro de Ajustes</small>
+				</div>
+				<nav className="settings-nav">
+					{visibleSettingsSections.map((section) => (
+						<button
+							key={section.id}
+							type="button"
+							className={activeSection === section.id ? "is-active" : ""}
+							onClick={() => setActiveSection(section.id)}
+							aria-current={activeSection === section.id ? "page" : undefined}
+						>
+							<span className="settings-nav-icon">
+								<AppIcon name={section.icon} size={17} />
+							</span>
+							<span>
+								<strong>{section.label}</strong>
+								<small>{section.description}</small>
+							</span>
+						</button>
+					))}
+					{visibleSettingsSections.length === 0 && (
+						<div className="settings-search-empty">Sin resultados</div>
+					)}
+				</nav>
+			</aside>
+
+			<main className="settings-content-scroll">
+				<div className="settings-page settings-content-inner">
 			<div
 				style={{
 					display: "flex",
@@ -2405,12 +2563,13 @@ export const SettingsPage: React.FC = () => {
 							letterSpacing: "-0.04em",
 						}}
 					>
-						Configuración
+						{activeSettingsSection?.label ?? "Configuración"}
 					</h2>
 					<p
 						style={{ margin: "8px 0 0", color: "#a1a1aa", fontSize: "0.98rem" }}
 					>
-						Perfil, proveedores, herramientas y preferencias del entorno local.
+						{activeSettingsSection?.description ??
+							"Perfil, proveedores, herramientas y preferencias del entorno local."}
 					</p>
 				</div>
 			</div>
@@ -2437,7 +2596,54 @@ export const SettingsPage: React.FC = () => {
 				</div>
 			)}
 
-			<div
+			<ConfigSectionCategoryContext.Provider value={activeSection}>
+			{activeSection === "overview" && (
+				<section className="settings-overview">
+					<div className="settings-overview-hero">
+						<div>
+							<span>Workspace local</span>
+							<h3>Configura Octopus desde un solo lugar</h3>
+							<p>
+								Administra proveedores, agentes, memoria, multimedia e integraciones
+								sin salir del centro de ajustes.
+							</p>
+						</div>
+						<AppIcon name="octopus" size={72} strokeWidth={1.2} />
+					</div>
+					<div className="settings-overview-metrics">
+						<div>
+							<strong>{activeProviderKeys.size}</strong>
+							<span>proveedores disponibles</span>
+						</div>
+						<div>
+							<strong>{envVars.length}</strong>
+							<span>variables gestionadas</span>
+						</div>
+						<div>
+							<strong>{config.memory?.enabled === false ? "Pausada" : "Activa"}</strong>
+							<span>memoria de Octopus</span>
+						</div>
+					</div>
+					<div className="settings-overview-links">
+						{SETTINGS_SECTIONS.filter((section) => section.id !== "overview").map(
+							(section) => (
+								<button
+									key={section.id}
+									type="button"
+									onClick={() => setActiveSection(section.id)}
+								>
+									<span><AppIcon name={section.icon} size={18} /></span>
+									<strong>{section.label}</strong>
+									<small>{section.description}</small>
+									<AppIcon name="chevronRight" size={15} />
+								</button>
+							),
+						)}
+					</div>
+				</section>
+			)}
+
+			{activeSection !== "overview" && <div
 				style={{
 					padding: "10px 14px",
 					borderRadius: "14px",
@@ -2454,19 +2660,95 @@ export const SettingsPage: React.FC = () => {
 				}}
 			>
 				<span>
-					La configuración general se guarda al modificar un campo. En
+					La configuración general se guarda al modificar un campo. En Multimedia y
 					embeddings, los cambios quedan como borrador y solo se guardan al
-					presionar Guardar y aplicar embeddings.
+					presionar su botón Guardar correspondiente.
 				</span>
 				{savingKey && <strong>Guardando {savingKey}...</strong>}
-			</div>
+			</div>}
 
-			<UsageSection />
+			{activeSection === "usage" && <UsageSection />}
+
+			<ConfigSection
+				title="Multimedia"
+				icon={<AppIcon name="spark" size={17} />}
+				category="multimedia"
+				description="Imagen, video, rutas Gemini API/Google Agent Platform, catálogo real y cola persistente de trabajos multimedia."
+				defaultOpen={true}
+			>
+				<Suspense
+					fallback={
+						<div style={settingsMutedPanelStyle}>Cargando multimedia...</div>
+					}
+				>
+					<MultimediaPanel credentialRevision={credentialRevision} />
+				</Suspense>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Agentes"
+				icon={<AppIcon name="agent" size={17} />}
+				category="agents"
+				description="CRUD completo de agentes, modelos, permisos, bandeja interna y knowledge bases."
+				defaultOpen={false}
+			>
+				<EmbeddedAdminPanel>
+					<AgentsAdminPanel />
+				</EmbeddedAdminPanel>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Canales y conexiones"
+				icon={<AppIcon name="message" size={17} />}
+				category="integrations"
+				description="Telegram, WhatsApp, Discord, Slack y Web usando el estado runtime existente."
+				defaultOpen={false}
+			>
+				<EmbeddedAdminPanel>
+					<ChannelsAdminPanel />
+				</EmbeddedAdminPanel>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Herramientas y MCP"
+				icon={<AppIcon name="tools" size={17} />}
+				category="integrations"
+				description="Inventario de herramientas del agente, tools dinámicas, ejecución, catálogo MCP y servidores instalados."
+				defaultOpen={false}
+			>
+				<EmbeddedAdminPanel>
+					<ToolsAdminPanel />
+				</EmbeddedAdminPanel>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Memoria y aprendizaje"
+				icon={<AppIcon name="brain" size={17} />}
+				category="memory"
+				description="Memoria, conocimiento, grafo, operaciones, benchmarks, perfil y learning."
+				defaultOpen={false}
+			>
+				<EmbeddedAdminPanel>
+					<MemoryAdminPanel />
+				</EmbeddedAdminPanel>
+			</ConfigSection>
+
+			<ConfigSection
+				title="Skills"
+				icon={<AppIcon name="spark" size={17} />}
+				category="skills"
+				description="Skills incluidas y generadas, creación, edición, activación y configuración Forge/Improver."
+				defaultOpen={false}
+			>
+				<EmbeddedAdminPanel>
+					<SkillsAdminPanel />
+				</EmbeddedAdminPanel>
+			</ConfigSection>
 
 			<ConfigSection
 				title="Variables de entorno"
 				icon={<AppIcon name="key" size={17} />}
-				category="entorno"
+				category="system"
 				description="Consulta, crea, edita y elimina variables guardadas. Los secretos se muestran enmascarados; para cambiarlos escribe un nuevo valor."
 				defaultOpen={false}
 			>
@@ -2799,151 +3081,9 @@ export const SettingsPage: React.FC = () => {
 			</ConfigSection>
 
 			<ConfigSection
-				title="Generación de Imagen"
-				icon={<AppIcon name="spark" size={17} />}
-				category="inteligencia"
-				description="Activa los generadores integrados y elige qué proveedor configurado utiliza cada uno."
-			>
-				<div className="settings-subpanel-grid">
-					<div className="settings-provider-card">
-						<div className="settings-provider-header">
-							<div>
-								<div className="settings-provider-title">
-									<AppIcon name="image" size={18} />
-									OpenAI Image
-								</div>
-								<div className="settings-provider-meta">
-									<code>codex_generate_image</code>
-									<span>gpt-image-2</span>
-								</div>
-							</div>
-							<StatusBadge
-								ok={(openAIImage.enabled ?? true) && openAIImageProviderReady}
-								text={
-									(openAIImage.enabled ?? true)
-										? openAIImageProviderReady
-											? "Activa"
-											: "Falta proveedor"
-										: "Desactivada"
-								}
-							/>
-						</div>
-						<p className="settings-provider-description">
-							Generación y edición con transparencia nativa mediante OpenAI API o
-							 con recuperación alfa mediante una sesión Codex.
-						</p>
-						<Toggle
-							label="Activar OpenAI Image"
-							description="Los cambios de activación se aplican al reiniciar Octopus."
-							value={openAIImage.enabled ?? true}
-							disabled={!(openAIImage.enabled ?? true) && !openAIImageProviderReady}
-							onChange={(value) =>
-								save("tools.imageGeneration.openai.enabled", value)
-							}
-						/>
-						<Select
-							label="Proveedor"
-							description="Solo se habilitan proveedores con credenciales configuradas."
-							value={selectedOpenAIImageProvider}
-							options={openAIImageProviderOptions}
-							optionLabels={{
-								"openai-api": `OpenAI API${openaiApiReady ? "" : " (no configurado)"}`,
-								codex: `OpenAI Codex${codexReady ? "" : " (no configurado)"}`,
-							}}
-							onChange={(value) =>
-								save("tools.imageGeneration.openai.provider", value)
-							}
-						/>
-						<Select
-							label="Modelo"
-							value={openAIImage.model ?? "gpt-image-2"}
-							options={["gpt-image-2", "gpt-image-1.5", "gpt-image-1"]}
-							onChange={(value) =>
-								save("tools.imageGeneration.openai.model", value)
-							}
-						/>
-						{!openAIImageProviderReady && (
-							<div className="settings-inline-warning">
-								Configura {selectedOpenAIImageProvider === "codex" ? "OpenAI Codex" : "una API key de OpenAI"} en Modelos y Proveedores AI.
-							</div>
-						)}
-					</div>
-
-					<div className="settings-provider-card">
-						<div className="settings-provider-header">
-							<div>
-								<div className="settings-provider-title">
-									<AppIcon name="image" size={18} />
-									Nano Banana
-								</div>
-								<div className="settings-provider-meta">
-									<code>nano-banana-generate</code>
-									<span>512 / 1K / 2K / 4K</span>
-								</div>
-							</div>
-							<StatusBadge
-								ok={(nanoBananaImage.enabled ?? true) && nanoProviderReady}
-								text={
-									(nanoBananaImage.enabled ?? true)
-										? nanoProviderReady
-											? "Activa"
-											: "Falta proveedor"
-										: "Desactivada"
-								}
-							/>
-						</div>
-						<p className="settings-provider-description">
-							Generación, composición y edición con referencias mediante Gemini API
-							 o Vertex AI, incluyendo PNG transparente real.
-						</p>
-						<Toggle
-							label="Activar Nano Banana"
-							description="Los cambios de activación se aplican al reiniciar Octopus."
-							value={nanoBananaImage.enabled ?? true}
-							disabled={!(nanoBananaImage.enabled ?? true) && !nanoProviderReady}
-							onChange={(value) =>
-								save("tools.imageGeneration.nanoBanana.enabled", value)
-							}
-						/>
-						<Select
-							label="Proveedor"
-							description="Gemini API usa API key; Vertex AI usa proyecto y credenciales de Google Cloud."
-							value={selectedNanoProvider}
-							options={nanoProviderOptions}
-							optionLabels={{
-								"gemini-api": `Gemini API${geminiApiReady ? "" : " (no configurado)"}`,
-								vertex: `Vertex AI${vertexReady ? "" : " (no configurado)"}`,
-							}}
-							onChange={(value) =>
-								save("tools.imageGeneration.nanoBanana.provider", value)
-							}
-						/>
-						<Select
-							label="Modelo"
-							value={nanoBananaImage.model ?? "gemini-3.1-flash-image"}
-							options={[
-								"gemini-3.1-flash-image",
-								"gemini-3.1-flash-lite-image",
-								"gemini-3-pro-image",
-								"gemini-2.5-flash-image",
-							]}
-							onChange={(value) =>
-								save("tools.imageGeneration.nanoBanana.model", value)
-							}
-						/>
-						{!nanoProviderReady && (
-							<div className="settings-inline-warning">
-								Configura {selectedNanoProvider === "vertex" ? "Vertex AI" : "una API key de Gemini"} en Modelos y Proveedores AI.
-							</div>
-						)}
-					</div>
-				</div>
-			</ConfigSection>
-
-			<ConfigSection
 				title="Perfil de usuario"
 				icon={<AppIcon name="user" size={17} />}
-				category="personalizacion"
+				category="system"
 				description="Define cómo quieres que Octopus te identifique y adapte sus respuestas. Este nombre también se usa en la pantalla inicial del chat."
 				defaultOpen={true}
 			>
@@ -2988,7 +3128,7 @@ export const SettingsPage: React.FC = () => {
 			<ConfigSection
 				title="Mascota"
 				icon={<AppIcon name="octopus" size={17} />}
-				category="personalizacion"
+				category="system"
 				description="Elige la mascota y personalidad que acompaña a Octopus en CLI, web y escritorio."
 				defaultOpen={true}
 			>
@@ -3048,7 +3188,7 @@ export const SettingsPage: React.FC = () => {
 			<ConfigSection
 				title="Navegador Web"
 				icon={<AppIcon name="globe" size={17} />}
-				category="navegacion"
+				category="web"
 				description="Ajustes del motor de navegación y evasión de bloqueos."
 				defaultOpen={true}
 			>
@@ -3220,7 +3360,7 @@ export const SettingsPage: React.FC = () => {
 			<ConfigSection
 				title="Herramientas e Iteraciones"
 				icon={<AppIcon name="tools" size={17} />}
-				category="inteligencia"
+				category="tools"
 				description="Controla el límite global de ciclos en los que Octopus puede pedir herramientas antes de responder."
 				defaultOpen={false}
 			>
@@ -3251,7 +3391,7 @@ export const SettingsPage: React.FC = () => {
 			<ConfigSection
 				title="Orquestación multi-agente"
 				icon={<AppIcon name="agent" size={17} />}
-				category="inteligencia"
+				category="agents"
 				description="Controla workflows durables, brazos paralelos, reintentos y límites de subagentes. Algunos cambios aplican al reiniciar Octopus."
 				defaultOpen={false}
 			>
@@ -3335,7 +3475,7 @@ export const SettingsPage: React.FC = () => {
 			<ConfigSection
 				title="Modelos y Proveedores AI"
 				icon={<AppIcon name="brain" size={17} />}
-				category="inteligencia"
+				category="providers"
 				description="Configura tus claves API y modelos para que Octopus AI pueda pensar."
 				defaultOpen={true}
 			>
@@ -3595,7 +3735,7 @@ export const SettingsPage: React.FC = () => {
 			<ConfigSection
 				title="Memoria Autónoma"
 				icon={<AppIcon name="database" size={17} />}
-				category="memoria"
+				category="memory"
 				description="Configura cómo Octopus recuerda tus conversaciones."
 			>
 				<div
@@ -3955,7 +4095,7 @@ export const SettingsPage: React.FC = () => {
 			<ConfigSection
 				title="Skills (Habilidades)"
 				icon={<AppIcon name="spark" size={17} />}
-				category="memoria"
+				category="skills"
 				description="Las herramientas y capacidades de Octopus."
 			>
 				<div
@@ -4029,7 +4169,7 @@ export const SettingsPage: React.FC = () => {
 				<ConfigSection
 					title="Servidor Local"
 					icon={<AppIcon name="server" size={17} />}
-					category="sistema"
+					category="system"
 					description="Requiere reiniciar el servidor."
 				>
 					<Field
@@ -4054,7 +4194,7 @@ export const SettingsPage: React.FC = () => {
 				<ConfigSection
 					title="Seguridad"
 					icon={<AppIcon name="lock" size={17} />}
-					category="sistema"
+					category="system"
 				>
 					<Toggle
 						label="Modo Sandbox"
@@ -4097,6 +4237,9 @@ export const SettingsPage: React.FC = () => {
 
 			<br />
 			<br />
+			</ConfigSectionCategoryContext.Provider>
+				</div>
+			</main>
 		</div>
 	);
 };

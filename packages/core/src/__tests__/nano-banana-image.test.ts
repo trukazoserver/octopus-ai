@@ -206,4 +206,27 @@ describe("nano-banana-generate providers", () => {
 			"gemini-env-key",
 		);
 	});
+
+	it("preserves an exact configured preview model", async () => {
+		const { createNanoBananaImageTools } = await import(
+			"../tools/nano-banana-image.js"
+		);
+		const result = await createNanoBananaImageTools()[0].handler(
+			{
+				prompt: "A preview-model image",
+				__octopus_image_route: {
+					provider: "gemini",
+					model: "gemini-image-custom-preview",
+					transport: "generate-content",
+				},
+			},
+			context() as never,
+		);
+
+		expect(result.success).toBe(true);
+		const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+		const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toContain("/models/gemini-image-custom-preview:generateContent");
+		expect(savedMetadata).toMatchObject({ model: "gemini-image-custom-preview" });
+	});
 });

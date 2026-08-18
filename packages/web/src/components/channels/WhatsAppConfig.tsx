@@ -1,104 +1,164 @@
 import type React from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import QRCode from "qrcode";
+import { apiGet, apiPost } from "../../hooks/useApi.js";
 import { showToast } from "../ui/Toast.js";
 
 interface WhatsAppConfigProps {
 	enabled: boolean;
 	config: Record<string, unknown>;
 	onSave: (config: Record<string, unknown>) => Promise<void>;
+	onReload?: () => Promise<void>;
+}
+
+interface WhatsAppStatus {
+	status: "connecting" | "qr" | "connected" | "disconnected" | "logged_out";
+	connected: boolean;
+	qr?: string;
 }
 
 export const WhatsAppConfig: React.FC<WhatsAppConfigProps> = ({
+	enabled,
 	config,
-	onSave,
+	onReload,
 }) => {
-	const [phoneNumber, setPhoneNumber] = useState(
-		(config.phoneNumber as string) ?? "",
-	);
-	const [saving, setSaving] = useState(false);
+	const [status, setStatus] = useState<WhatsAppStatus>({
+		status: "disconnected",
+		connected: false,
+	});
+	const [qrDataUrl, setQrDataUrl] = useState<string>();
+	const [busy, setBusy] = useState(false);
+	const [pollEpoch, setPollEpoch] = useState(0);
+	const pollGeneration = useRef(0);
 
-	const handleSave = async () => {
-		if (!phoneNumber.trim()) return;
-		setSaving(true);
+	useEffect(() => {
+		if (!enabled) {
+			setStatus({ status: "disconnected", connected: false });
+			setQrDataUrl(undefined);
+			return;
+		}
+		let active = true;
+		const currentPollEpoch = pollEpoch;
+		const generation = ++pollGeneration.current;
+		let timer: number | undefined;
+		const refresh = async () => {
+			try {
+				const next = await apiGet<WhatsAppStatus>(
+					"/api/channels/whatsapp/status",
+				);
+				const nextQrDataUrl =
+					next.qr
+						? await QRCode.toDataURL(next.qr, {
+								width: 240,
+								margin: 2,
+								errorCorrectionLevel: "M",
+							})
+						: undefined;
+				if (
+					!active ||
+					currentPollEpoch !== pollEpoch ||
+					generation !== pollGeneration.current
+				)
+					return;
+				setStatus(next);
+				setQrDataUrl(nextQrDataUrl);
+			} catch {
+				if (active && generation === pollGeneration.current) {
+					setStatus({ status: "disconnected", connected: false });
+					setQrDataUrl(undefined);
+				}
+			} finally {
+				if (active && generation === pollGeneration.current) {
+					timer = window.setTimeout(() => void refresh(), 2000);
+				}
+			}
+		};
+		void refresh();
+		return () => {
+			active = false;
+			pollGeneration.current++;
+			if (timer !== undefined) window.clearTimeout(timer);
+		};
+	}, [enabled, pollEpoch]);
+
+	const logout = async () => {
+		pollGeneration.current++;
+		setBusy(true);
 		try {
-			await onSave({ phoneNumber: phoneNumber.trim() });
-			showToast("success", "Número de WhatsApp guardado");
-		} catch (err) {
+			await apiPost("/api/channels/whatsapp/logout");
+			setStatus({ status: "logged_out", connected: false });
+			setQrDataUrl(undefined);
+			await onReload?.();
+			showToast("success", "Sesión de WhatsApp cerrada");
+		} catch (error) {
+			setPollEpoch((value) => value + 1);
 			showToast(
 				"error",
-				err instanceof Error ? err.message : "Error al guardar WhatsApp",
+				error instanceof Error ? error.message : "No se pudo cerrar la sesión",
 			);
 		} finally {
-			setSaving(false);
+			setBusy(false);
 		}
 	};
 
 	return (
-		<form
-			onSubmit={(e) => {
-				e.preventDefault();
-				void handleSave();
-			}}
-			style={{ display: "flex", flexDirection: "column", gap: "12px" }}
-		>
-			<div>
-				<label
-					htmlFor="whatsapp-phone-number"
+		<div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+			<div style={{ color: "#a1a1aa", fontSize: "0.78rem" }}>
+				Estado:{" "}
+				<strong style={{ color: status.connected ? "#4ade80" : "#f4f4f5" }}>
+					{status.status}
+				</strong>
+			</div>
+			{qrDataUrl && (
+				<div
 					style={{
-						display: "block",
-						fontSize: "0.8rem",
-						color: "#a1a1aa",
-						marginBottom: "6px",
-						fontWeight: 500,
+						alignSelf: "flex-start",
+						padding: "10px",
+						borderRadius: "12px",
+						background: "#fff",
 					}}
 				>
-					Número de teléfono
-				</label>
-				<input
-					id="whatsapp-phone-number"
-					name="phoneNumber"
-					type="tel"
-					value={phoneNumber}
-					onChange={(e) => setPhoneNumber(e.target.value)}
-					placeholder="+5215551234567"
-					autoComplete="off"
-					style={{
-						width: "100%",
-						padding: "8px 12px",
-						borderRadius: "8px",
-						border: "1px solid #202020",
-						background: "#000",
-						color: "#f4f4f5",
-						fontSize: "0.85rem",
-						outline: "none",
-						fontFamily:
-							"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-						boxSizing: "border-box",
-					}}
-				/>
-				<div style={{ fontSize: "0.7rem", color: "#71717a", marginTop: "4px" }}>
-					Completa el número en formato internacional. Las credenciales
-					avanzadas de Meta Business se gestionan en Configuración.
+					<img
+						src={qrDataUrl}
+						alt="Código QR para vincular WhatsApp"
+						width={240}
+						height={240}
+					/>
 				</div>
+			)}
+			{enabled && status.status === "connecting" && (
+				<div style={{ color: "#a1a1aa", fontSize: "0.75rem" }}>
+					Iniciando sesión local de WhatsApp...
+				</div>
+			)}
+			{enabled && status.status === "qr" && (
+				<div style={{ color: "#a1a1aa", fontSize: "0.75rem" }}>
+					Escanea el código desde WhatsApp, Dispositivos vinculados. El QR se
+					genera y renderiza localmente.
+				</div>
+			)}
+			<div style={{ color: "#71717a", fontSize: "0.7rem" }}>
+				Credenciales locales:{" "}
+				{String(config.authPath ?? "~/.octopus/channels/whatsapp")}
 			</div>
-			<button
-				type="submit"
-				disabled={!phoneNumber.trim() || saving}
-				style={{
-					padding: "8px 16px",
-					borderRadius: "8px",
-					border: "1px solid #2a2a2a",
-					background: !phoneNumber.trim() || saving ? "#111" : "#f4f4f5",
-					color: !phoneNumber.trim() || saving ? "#52525b" : "#050505",
-					fontSize: "0.8rem",
-					fontWeight: 600,
-					cursor: !phoneNumber.trim() || saving ? "not-allowed" : "pointer",
-					fontFamily: "inherit",
-					alignSelf: "flex-start",
-				}}
-			>
-				{saving ? "Guardando..." : "Guardar número"}
-			</button>
-		</form>
+			{enabled && (
+				<button
+					type="button"
+					disabled={busy}
+					onClick={() => void logout()}
+					style={{
+						alignSelf: "flex-start",
+						padding: "8px 14px",
+						borderRadius: "8px",
+						border: "1px solid #7f1d1d",
+						background: "#1c0b0b",
+						color: "#fca5a5",
+						cursor: busy ? "wait" : "pointer",
+					}}
+				>
+					{busy ? "Cerrando..." : "Cerrar sesión y borrar credenciales"}
+				</button>
+			)}
+		</div>
 	);
 };

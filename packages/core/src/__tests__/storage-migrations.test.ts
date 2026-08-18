@@ -16,9 +16,9 @@ describe("storage migration ledger", () => {
 		const versions = await db.all<{ version: number }>(
 			"SELECT version FROM _migrations ORDER BY version ASC",
 		);
-		expect(versions.map((row) => row.version)).toEqual(
-			Array.from({ length: 33 }, (_, index) => index + 1),
-		);
+			expect(versions.map((row) => row.version)).toEqual(
+				Array.from({ length: 38 }, (_, index) => index + 1),
+			);
 
 		for (const table of ["experiences", "learning_insights"]) {
 			const columns = await db.all<{
@@ -57,15 +57,17 @@ describe("storage migration ledger", () => {
 		const temporalTables = await db.all<{ name: string }>(
 			"SELECT name FROM sqlite_master WHERE type = 'table'",
 		);
-		expect(temporalTables.map((table) => table.name)).toEqual(
-			expect.arrayContaining([
+			expect(temporalTables.map((table) => table.name)).toEqual(
+				expect.arrayContaining([
 				"memory_claims",
 				"learning_insight_evidence",
 				"memory_vector_lsh",
-				"memory_operations",
-				"artifact_annotations",
-			]),
-		);
+					"memory_operations",
+					"artifact_annotations",
+					"media_generation_jobs",
+					"multimedia_usage_events",
+				]),
+			);
 
 		const outboxColumns = await db.all<{ name: string }>(
 			"PRAGMA table_info(memory_vector_outbox)",
@@ -74,7 +76,7 @@ describe("storage migration ledger", () => {
 			"PRAGMA table_info(memory_operations)",
 		);
 		expect(operationColumns.map((column) => column.name)).toEqual(
-			expect.arrayContaining([
+				expect.arrayContaining([
 				"idempotency_key",
 				"attempt_count",
 				"control_action",
@@ -112,8 +114,14 @@ describe("storage migration ledger", () => {
 				"idx_memory_operations_status",
 				"idx_memory_claims_memory_unique",
 				"idx_memory_operations_idempotency",
-				"idx_memory_operations_claimable",
-			]),
-		);
+					"idx_memory_operations_claimable",
+					"idx_media_generation_jobs_status",
+					"idx_media_generation_jobs_provider_model",
+					"idx_media_generation_jobs_lease",
+					"idx_multimedia_usage_created_at",
+					"idx_multimedia_usage_provider",
+					"idx_ai_usage_event_id_unique",
+				]),
+			);
 	});
 });

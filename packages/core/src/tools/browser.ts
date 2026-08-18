@@ -764,6 +764,97 @@ function hostnameFromUrl(url: string): string | null {
 	}
 }
 
+export interface SavedBrowserSession {
+	host: string;
+	provider: string;
+	url: string;
+	title: string;
+	savedAt: string;
+	storageStatePath: string;
+}
+
+/**
+ * Enumera las sesiones de navegador persistidas bajo storageDir con layout
+ * <provider>/<host>/{storageState.json,meta.json}. Opcionalmente filtra por
+ * host (exacto o sufijo de dominio) y descarta las que superaron el TTL.
+ */
+export async function findSavedBrowserSessions(
+	storageDir: string,
+	options: {
+		host?: string;
+		ttlHours?: number;
+		now?: number;
+	} = {},
+): Promise<SavedBrowserSession[]> {
+	const now = options.now ?? Date.now();
+	const ttlMs =
+		Number.isFinite(options.ttlHours) && (options.ttlHours as number) > 0
+			? (options.ttlHours as number) * 60 * 60 * 1000
+			: Number.POSITIVE_INFINITY;
+	let providers: string[] = [];
+	try {
+		providers = (await fs.promises.readdir(storageDir, { withFileTypes: true }))
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name);
+	} catch {
+		return [];
+	}
+	const wanted = options.host?.toLowerCase().trim();
+	const sessions: SavedBrowserSession[] = [];
+	for (const provider of providers) {
+		const providerDir = join(storageDir, provider);
+		let hosts: string[] = [];
+		try {
+			hosts = (
+				await fs.promises.readdir(providerDir, { withFileTypes: true })
+			)
+				.filter((entry) => entry.isDirectory())
+				.map((entry) => entry.name);
+		} catch {
+			continue;
+		}
+		for (const hostDir of hosts) {
+			// El nombre del directorio es un safePathSegment del hostname real;
+			// el canonical vive en meta.json, así que el filtro por host se
+			// aplica tras leerlo.
+			const metaPath = join(providerDir, hostDir, "meta.json");
+			const statePath = join(providerDir, hostDir, "storageState.json");
+			try {
+				const [metaStats, stateStats] = await Promise.all([
+					fs.promises.stat(metaPath),
+					fs.promises.stat(statePath),
+				]);
+				const meta = JSON.parse(
+					await fs.promises.readFile(metaPath, "utf8"),
+				) as { url?: string; title?: string; savedAt?: string; host?: string };
+				if (!meta.url || !/^https?:/i.test(meta.url)) continue;
+				// savedAt es el timestamp lógico; mtime como fallback si falta.
+				const savedAtMs = meta.savedAt ? Date.parse(meta.savedAt) : Number.NaN;
+				const ageMs =
+					Number.isFinite(savedAtMs)
+						? now - savedAtMs
+						: now - Math.max(metaStats.mtimeMs, stateStats.mtimeMs);
+				if (ageMs > ttlMs) continue;
+				const host = meta.host ?? hostnameFromUrl(meta.url) ?? hostDir;
+				if (wanted && host !== wanted && !host.endsWith(`.${wanted}`))
+					continue;
+				sessions.push({
+					host,
+					provider,
+					url: meta.url,
+					title: meta.title ?? "",
+					savedAt: meta.savedAt ?? new Date(metaStats.mtimeMs).toISOString(),
+					storageStatePath: statePath,
+				});
+			} catch {
+				continue;
+			}
+		}
+	}
+	sessions.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+	return sessions;
+}
+
 function getUrlParam(
 	rawUrl: string | undefined,
 	names: string[],
@@ -907,6 +998,12 @@ export interface BrowserConfig {
 	persistCookies?: boolean;
 	sessionStorageDir?: string;
 	sessionTtlHours?: number;
+	/**
+	 * Cierra el navegador automáticamente tras este tiempo sin actividad
+	 * (guardando cookies/localStorage de la página actual) para liberar
+	 * recursos. 0 desactiva el cierre por inactividad.
+	 */
+	idleCloseMs?: number;
 	autoFallbackOnBlock?: boolean;
 	blockFallbackProvider?: BrowserProvider;
 	confirmBlockWithVision?: boolean;
@@ -945,6 +1042,9 @@ export class BrowserTool {
 	private humanSim = new HumanBehavior();
 	private urlSafetyPolicy: UrlSafetyPolicy;
 	private allowedResourceOrigins = new Map<string, Promise<boolean>>();
+	private lastBrowserActivityAt = 0;
+	private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
+	private idleClosing = false;
 	private lastSnapshot: {
 		id: string;
 		url: string;
@@ -1106,6 +1206,56 @@ export class BrowserTool {
 				? Math.max(1, this.config.sessionTtlHours as number)
 				: 168,
 		};
+	}
+
+	/** Timeout de cierre por inactividad; default 2 min, 0 lo desactiva. */
+	private resolveIdleCloseMs(): number {
+		const value = this.config.idleCloseMs;
+		if (value === 0) return 0;
+		if (value === undefined || value === null || !Number.isFinite(value))
+			return 120_000;
+		return Math.max(5_000, value as number);
+	}
+
+	private touchBrowserActivity(): void {
+		this.lastBrowserActivityAt = Date.now();
+		this.ensureIdleCheckTimer();
+	}
+
+	private ensureIdleCheckTimer(): void {
+		if (this.idleCheckTimer) return;
+		const timeoutMs = this.resolveIdleCloseMs();
+		if (!timeoutMs) return;
+		const intervalMs = Math.min(30_000, Math.max(5_000, Math.round(timeoutMs / 2)));
+		this.idleCheckTimer = setInterval(() => {
+			void this.closeBrowserIfIdle(timeoutMs);
+		}, intervalMs);
+		// No mantener vivo el proceso solo por el reaper.
+		this.idleCheckTimer.unref?.();
+	}
+
+	private stopIdleCheckTimer(): void {
+		if (!this.idleCheckTimer) return;
+		clearInterval(this.idleCheckTimer);
+		this.idleCheckTimer = null;
+	}
+
+	/**
+	 * Cierra el navegador si llevaba demasiado tiempo sin uso. Antes de cerrar
+	 * persiste cookies/localStorage de la página actual para que
+	 * browser_restore (o una navegación futura al mismo host) retome la sesión.
+	 */
+	private async closeBrowserIfIdle(timeoutMs: number): Promise<void> {
+		if (this.idleClosing || !this.browser) return;
+		if (Date.now() - this.lastBrowserActivityAt < timeoutMs) return;
+		this.idleClosing = true;
+		try {
+			await this.saveSessionForCurrentPage();
+		} catch {}
+		try {
+			await this.close();
+		} catch {}
+		this.idleClosing = false;
 	}
 
 	private getSessionStatePath(url: string): string | null {
@@ -1392,6 +1542,23 @@ export class BrowserTool {
 		try {
 			await fs.promises.mkdir(dirname(path), { recursive: true });
 			await this.context.storageState({ path });
+			// meta.json permite a browser_restore volver directamente a la
+			// página donde quedó la sesión (url + título + fecha).
+			let title = "";
+			try {
+				title = (await this.page.title()) ?? "";
+			} catch {}
+			const meta = {
+				host: hostnameFromUrl(url) ?? undefined,
+				url,
+				title,
+				savedAt: new Date().toISOString(),
+			};
+			await fs.promises.writeFile(
+				join(dirname(path), "meta.json"),
+				JSON.stringify(meta),
+				"utf8",
+			);
 			return true;
 		} catch {
 			return false;
@@ -1549,8 +1716,16 @@ export class BrowserTool {
 			process.env.TWO_CAPTCHA_PROXY_ADDRESS;
 		const proxyPort =
 			process.env.TWOCAPTCHA_PROXY_PORT || process.env.TWO_CAPTCHA_PROXY_PORT;
-		if (!proxyAddress || !proxyPort)
-			return this.getDecodoTwoCaptchaProxyConfig();
+		if (!proxyAddress || !proxyPort) {
+			// El proxy de Decodo solo tiene sentido para 2captcha si el
+			// navegador realmente sale por él (mismo exit IP). Con el navegador
+			// embedded directo hay que usar tareas Proxyless, o 2captcha las
+			// rechaza y además resolvería con una IP distinta a la del visitante.
+			const decodoActive =
+				this.activeProvider === "decodo" ||
+				this.config.provider === "decodo";
+			return decodoActive ? this.getDecodoTwoCaptchaProxyConfig() : null;
+		}
 		const port = Number(proxyPort);
 		if (!Number.isInteger(port) || port < 1 || port > 65535) {
 			throw new Error(
@@ -1577,7 +1752,11 @@ export class BrowserTool {
 
 	private async createTwoCaptchaTask(
 		task: Record<string, unknown>,
-	): Promise<Record<string, unknown>> {
+	): Promise<{
+		solution: Record<string, unknown>;
+		taskId: unknown;
+		elapsedMs: number;
+	}> {
 		const clientKey = this.resolveCaptchaApiKey();
 		if (!clientKey) {
 			throw new Error(
@@ -1592,10 +1771,13 @@ export class BrowserTool {
 		});
 		const createJson = await createResponse.json().catch(() => ({}));
 		if (!createResponse.ok || createJson.errorId) {
-			throw new Error(
+			const message =
 				createJson.errorDescription ||
-					`2captcha createTask failed with HTTP ${createResponse.status}`,
+				`2captcha createTask failed with HTTP ${createResponse.status}`;
+			console.warn(
+				`[BrowserTool] 2captcha createTask ${String(task.type)} failed: ${message}`,
 			);
+			throw new Error(message);
 		}
 		const taskId = createJson.taskId;
 		if (!taskId) throw new Error("2captcha createTask did not return taskId");
@@ -1613,12 +1795,24 @@ export class BrowserTool {
 			});
 			const resultJson = await resultResponse.json().catch(() => ({}));
 			if (!resultResponse.ok || resultJson.errorId) {
-				throw new Error(
+				const message =
 					resultJson.errorDescription ||
-						`2captcha getTaskResult failed with HTTP ${resultResponse.status}`,
+					`2captcha getTaskResult failed with HTTP ${resultResponse.status}`;
+				console.warn(
+					`[BrowserTool] 2captcha getTaskResult ${String(task.type)} failed: ${message}`,
 				);
+				throw new Error(message);
 			}
-			if (resultJson.status === "ready") return resultJson.solution || {};
+			if (resultJson.status === "ready") {
+				console.log(
+					`[BrowserTool] 2captcha solved ${String(task.type)} in ${Date.now() - started}ms (taskId ${taskId})`,
+				);
+				return {
+					solution: resultJson.solution || {},
+					taskId,
+					elapsedMs: Date.now() - started,
+				};
+			}
 			if (resultJson.status !== "processing") {
 				throw new Error(
 					`2captcha returned unexpected status: ${resultJson.status || "unknown"}`,
@@ -1843,23 +2037,32 @@ export class BrowserTool {
 				});
 			}
 			const bodyText = document.documentElement.innerHTML.slice(0, 250000);
+			// Los ids de captcha reales no contienen espacios ni son prosa;
+			// sin este guard, la DOCUMENTACIÓN de un sitio (p. ej. la página
+			// demo de 2captcha) disparaba retos fantasma geetest/awswaf.
+			const looksLikeRealId = (value) =>
+				typeof value === "string" && value.length >= 8 && !/\s/.test(value);
 			const geetestV3 = bodyText.match(
 				/gt["']?\s*[:=]\s*["']([^"']+)["'][\s\S]{0,500}?challenge["']?\s*[:=]\s*["']([^"']+)["']/i,
 			);
-			if (geetestV3)
+			if (geetestV3 && looksLikeRealId(geetestV3[1]))
 				add({ kind: "geetest-v3", gt: geetestV3[1], challenge: geetestV3[2] });
 			const geetestV4 = bodyText.match(
 				/captcha_id["']?\s*[:=]\s*["']([^"']+)["']/i,
 			);
-			if (geetestV4) add({ kind: "geetest-v4", captchaId: geetestV4[1] });
+			if (geetestV4 && looksLikeRealId(geetestV4[1]))
+				add({ kind: "geetest-v4", captchaId: geetestV4[1] });
 			const cyber = bodyText.match(
 				/SlideMasterUrlId["']?\s*[:=]\s*["']([^"']+)["']/i,
 			);
-			if (cyber) add({ kind: "cybersiara", slideMasterUrlId: cyber[1] });
-			const amazon = bodyText.match(
-				/(?:challengeScript|captchaScript|jsapiScript|awswaf|AwsWaf|amazon-waf)/i,
-			);
-			if (amazon) {
+			if (cyber && looksLikeRealId(cyber[1]))
+				add({ kind: "cybersiara", slideMasterUrlId: cyber[1] });
+			// Solo hay reto AWS WAF real si la página carga su script (awswaf);
+			// mencionar "captchaScript" en texto/documentación no cuenta.
+			const amazonScript = Array.from(document.scripts)
+				.map((s) => s.src)
+				.find((src) => /awswaf/i.test(src));
+			if (amazonScript) {
 				add({
 					kind: "amazon-waf",
 					websiteKey: bodyText.match(
@@ -1869,9 +2072,7 @@ export class BrowserTool {
 					context: bodyText.match(
 						/context["']?\s*[:=]\s*["']([^"']+)["']/i,
 					)?.[1],
-					jsapiScript: Array.from(document.scripts)
-						.map((s) => s.src)
-						.find((src) => /awswaf|captcha|challenge/i.test(src)),
+					jsapiScript: amazonScript,
 				});
 			}
 			const captchaImage = Array.from(
@@ -1882,7 +2083,10 @@ export class BrowserTool {
 				return (
 					rect.width > 20 &&
 					rect.height > 20 &&
-					/captcha|verification|security code/i.test(text)
+					/captcha|verification|security code/i.test(text) &&
+					// Los logos ("Logo of «reCAPTCHA v2»") no son retos aunque
+					// mencionen captcha en el alt.
+					!/logo/i.test(text)
 				);
 			});
 			if (captchaImage) {
@@ -1890,14 +2094,26 @@ export class BrowserTool {
 					document.querySelectorAll('input:not([type="hidden"]), textarea'),
 				).find((el) => {
 					const text = `${el.getAttribute("name") || ""} ${el.getAttribute("placeholder") || ""} ${el.getAttribute("aria-label") || ""}`;
+					// Los campos de respuesta de otros retos (g-recaptcha-response,
+					// h-captcha-response, cf-turnstile-response) matchean por nombre
+					// pero NO son inputs de image-to-text: escribirles encima
+					// destruye el token real ya aplicado.
+					if (
+						/g-recaptcha-response|h-captcha-response|cf-turnstile-response|fc-token/i.test(
+							text,
+						)
+					)
+						return false;
 					return /captcha|code|verification|security/i.test(text);
 				});
-				add({
-					kind: "image-to-text",
-					selector: selectorFor(captchaImage),
-					inputSelector: selectorFor(input),
-					comment: "Solve the visual captcha shown in the image.",
-				});
+				if (input) {
+					add({
+						kind: "image-to-text",
+						selector: selectorFor(captchaImage),
+						inputSelector: selectorFor(input),
+						comment: "Solve the visual captcha shown in the image.",
+					});
+				}
 			}
 			return challenges.filter((challenge) => {
 				if (
@@ -1913,6 +2129,8 @@ export class BrowserTool {
 				if (challenge.kind === "funcaptcha")
 					return Boolean(challenge.publicKey);
 				if (challenge.kind === "datadome") return Boolean(challenge.captchaUrl);
+				if (challenge.kind === "image-to-text")
+					return Boolean(challenge.inputSelector);
 				return true;
 			});
 		});
@@ -2053,14 +2271,19 @@ export class BrowserTool {
 
 	private async solveImageToTextCaptcha(
 		challenge: Record<string, unknown>,
-	): Promise<{ applied: boolean; solution: Record<string, unknown> }> {
+	): Promise<{
+		applied: boolean;
+		solution: Record<string, unknown>;
+		taskId: unknown;
+		elapsedMs: number;
+	}> {
 		if (!challenge.selector)
 			throw new Error("Image captcha selector was not detected");
 		const image = await this.page
 			.locator(String(challenge.selector))
 			.first()
 			.screenshot({ type: "png" });
-		const solution = await this.createTwoCaptchaTask({
+		const { solution, taskId, elapsedMs } = await this.createTwoCaptchaTask({
 			type: "ImageToTextTask",
 			body: image.toString("base64"),
 			comment: challenge.comment || "Solve the captcha text in the image.",
@@ -2084,9 +2307,9 @@ export class BrowserTool {
 						{ selector: String(challenge.inputSelector), value: text },
 					);
 				});
-			return { applied: true, solution };
+			return { applied: true, solution, taskId, elapsedMs };
 		}
-		return { applied: false, solution };
+		return { applied: false, solution, taskId, elapsedMs };
 	}
 
 	private async applyCaptchaSolution(
@@ -2313,7 +2536,30 @@ export class BrowserTool {
 	private async solveCaptchasOnCurrentPage(
 		options: { includeDataDome?: boolean } = {},
 	): Promise<Record<string, unknown>> {
-		const challenges = await this.detectCaptchaChallenges();
+		const detected = await this.detectCaptchaChallenges();
+		// Dedup: el mismo captcha se detecta por varias vías (div con
+		// data-sitekey, iframe anchor, iframe bframe) y sin esto pagaríamos
+		// una tarea de 2captcha por cada duplicado del mismo challenge.
+		const seenChallenges = new Set<string>();
+		const unique = detected.filter((challenge) => {
+			const key = `${challenge.kind}:${
+				challenge.websiteKey ??
+				challenge.publicKey ??
+				challenge.captchaId ??
+				challenge.selector ??
+				""
+			}`;
+			if (seenChallenges.has(key)) return false;
+			seenChallenges.add(key);
+			return true;
+		});
+		// Los image-to-text escriben texto en inputs propios; van primero para
+		// que el apply de tokens (recaptcha/hcaptcha/turnstile) tenga la última
+		// palabra si algún campo coincidiera.
+		const challenges = [
+			...unique.filter((challenge) => challenge.kind === "image-to-text"),
+			...unique.filter((challenge) => challenge.kind !== "image-to-text"),
+		];
 		const result: {
 			detected: number;
 			solved: number;
@@ -2345,11 +2591,13 @@ export class BrowserTool {
 			}
 			try {
 				let applied = false;
-				let solution: Record<string, unknown>;
+				let taskId: unknown;
+				let elapsedMs: number | undefined;
 				if (challenge.kind === "image-to-text") {
 					const imageResult = await this.solveImageToTextCaptcha(challenge);
 					applied = imageResult.applied;
-					solution = imageResult.solution;
+					taskId = imageResult.taskId;
+					elapsedMs = imageResult.elapsedMs;
 				} else {
 					const task = this.buildTwoCaptchaTask(challenge);
 					if (!task) {
@@ -2360,16 +2608,30 @@ export class BrowserTool {
 						});
 						continue;
 					}
-					solution = await this.createTwoCaptchaTask(task);
-					applied = await this.applyCaptchaSolution(challenge, solution);
+					const solved = await this.createTwoCaptchaTask(task);
+					taskId = solved.taskId;
+					elapsedMs = solved.elapsedMs;
+					applied = await this.applyCaptchaSolution(challenge, solved.solution);
 				}
 				result.solved += 1;
 				if (applied) result.applied += 1;
-				result.details.push({ kind: challenge.kind, applied });
+				result.details.push({
+					kind: challenge.kind,
+					applied,
+					taskId,
+					elapsedMs,
+				});
 			} catch (error) {
+				const reason =
+					error instanceof Error
+						? `${error.name}: ${error.message}`
+						: String(error);
+				console.warn(
+					`[BrowserTool] 2captcha skipped ${String(challenge.kind)}: ${reason}`,
+				);
 				result.skipped.push({
 					kind: challenge.kind,
-					reason: error instanceof Error ? error.message : String(error),
+					reason,
 				});
 			}
 		}
@@ -3614,6 +3876,7 @@ export class BrowserTool {
 	}
 
 	async init(): Promise<void> {
+		this.touchBrowserActivity();
 		if (this.browser && this.page) {
 			try {
 				if (this.browser.isConnected() && !this.page.isClosed()) {
@@ -3879,7 +4142,21 @@ export class BrowserTool {
 		return this.detectBlockAndFallback(context);
 	}
 
+	/**
+	 * Cierra el navegador ya (p. ej. al terminar la ejecución del agente),
+	 * guardando antes cookies/localStorage de la página actual para que la
+	 * sesión pueda restaurarse con browser_restore.
+	 */
+	async shutdown(): Promise<void> {
+		if (!this.browser) return;
+		try {
+			await this.saveSessionForCurrentPage();
+		} catch {}
+		await this.close();
+	}
+
 	async close(): Promise<void> {
+		this.stopIdleCheckTimer();
 		try {
 			if (this.context) await this.context.close().catch(() => {});
 			if (this.browser) await this.browser.close().catch(() => {});
@@ -3897,6 +4174,86 @@ export class BrowserTool {
 
 	createTools(): ToolDefinition[] {
 		return [
+			{
+				name: "browser_restore",
+				description:
+					"Reopen a previously saved browsing session with its cookies/localStorage and navigate straight back to the last page visited on that site. Without a host, restores the most recently used session; if nothing matches, lists the saved sessions (host, title, URL, age) so you can pick one. Use this to continue research or fetch more information from a site you (or a previous run) already visited and logged into, instead of starting from a blank session.",
+				uiIcon: BROWSER_SVG,
+				parameters: {
+					host: {
+						type: "string",
+						description:
+							"Optional site hostname to restore (e.g. 'github.com'). Omit to restore the most recent session.",
+					},
+				},
+				handler: async (
+					params: Record<string, unknown>,
+				): Promise<ToolResult> => {
+					try {
+						const session = this.getSessionConfig();
+						const host =
+							typeof params.host === "string" && params.host.trim()
+								? params.host.trim().toLowerCase()
+								: undefined;
+						const sessions = await findSavedBrowserSessions(
+							session.storageDir,
+							{ host, ttlHours: session.ttlHours },
+						);
+						if (sessions.length === 0) {
+							const available = host
+								? await findSavedBrowserSessions(session.storageDir, {
+										ttlHours: session.ttlHours,
+									})
+								: [];
+							const listing = available.length
+								? available
+										.slice(0, 15)
+										.map(
+											(item, index) =>
+												`${index + 1}. ${item.host} — ${item.title || item.url} (saved ${item.savedAt})`,
+										)
+										.join("\n")
+								: "No saved browser sessions yet.";
+							return {
+								success: false,
+								output: host
+									? `No saved session for '${host}'. Saved sessions:\n${listing}`
+									: listing,
+								error: host
+									? `No saved session for host '${host}'`
+									: "No saved browser sessions to restore",
+							};
+						}
+						const target = sessions[0];
+						await this.init();
+						await this.gotoWithSession(target.url, {
+							waitUntil: "domcontentloaded",
+							timeout: 45_000,
+						});
+						let title = "";
+						try {
+							title = (await this.page.title()) ?? "";
+						} catch {}
+						const restoredUrl = this.page?.url?.() ?? target.url;
+						await this.saveSessionForCurrentPage().catch(() => {});
+						return {
+							success: true,
+							output: `Restored session for ${target.host} (provider: ${target.provider}, saved ${target.savedAt}).\nPage: ${title || "(untitled)"}\nURL: ${restoredUrl}\nCookies and localStorage from the previous visit were applied; continue browsing from here.`,
+							metadata: {
+								restoredHost: target.host,
+								restoredUrl,
+								savedAt: target.savedAt,
+							},
+						};
+					} catch (error) {
+						return {
+							success: false,
+							output: "",
+							error: error instanceof Error ? error.message : String(error),
+						};
+					}
+				},
+			},
 			{
 				name: "browser_restart",
 				description:

@@ -1,5 +1,9 @@
 import React from "react";
 
+export const ConfigSectionCategoryContext = React.createContext<
+	string | undefined
+>(undefined);
+
 export const ConfigSection: React.FC<{
 	title: string;
 	icon: React.ReactNode;
@@ -17,11 +21,22 @@ export const ConfigSection: React.FC<{
 	activeCategory,
 	children,
 }) => {
-	// Category filtering: when both are provided and differ, hide the section so
-	// the sidebar can show one category at a time.
-	if (category && activeCategory && category !== activeCategory) return null;
-
 	const [open, setOpen] = React.useState(defaultOpen);
+	const [hasOpened, setHasOpened] = React.useState(defaultOpen);
+	const contextCategory = React.useContext(ConfigSectionCategoryContext);
+	const effectiveCategory = activeCategory ?? contextCategory;
+	const visible = !category || !effectiveCategory || category === effectiveCategory;
+	React.useEffect(() => {
+		if (!category || category !== effectiveCategory) return;
+		setOpen(true);
+		setHasOpened(true);
+	}, [category, effectiveCategory]);
+	const toggleOpen = () => {
+		const nextOpen = !open;
+		setOpen(nextOpen);
+		if (nextOpen) setHasOpened(true);
+	};
+	if (!visible) return null;
 	return (
 		<div
 			data-category={category}
@@ -37,7 +52,7 @@ export const ConfigSection: React.FC<{
 		>
 			<button
 				type="button"
-				onClick={() => setOpen(!open)}
+				onClick={toggleOpen}
 				style={{
 					width: "100%",
 					padding: "16px 18px",
@@ -86,8 +101,15 @@ export const ConfigSection: React.FC<{
 					›
 				</span>
 			</button>
-			{open && (
-				<div style={{ padding: "20px", background: "#0b0b0e" }}>
+			{hasOpened && (
+				<div
+					aria-hidden={!open}
+					style={{
+						padding: "20px",
+						background: "#0b0b0e",
+						display: open ? "block" : "none",
+					}}
+				>
 					{description && (
 						<p
 							style={{
@@ -143,6 +165,7 @@ export const Toggle: React.FC<{
 		</div>
 		<button
 			type="button"
+			aria-label={label}
 			aria-pressed={value}
 			disabled={disabled}
 			onClick={() => onChange(!value)}

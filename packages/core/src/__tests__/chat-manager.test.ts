@@ -221,7 +221,11 @@ describe("ChatManager", () => {
 			argumentsJson: '{"prompt":"retry me"}',
 			argumentsHash: "hash-failed",
 		});
-		await manager.failToolAction(action.id, "temporary provider error");
+		await manager.failToolAction(
+			action.id,
+			"temporary provider error",
+			'{"success":false,"metadata":{"usageReceipt":{"status":"failed"}}}',
+		);
 
 		const reusable = await manager.findReusableToolAction({
 			conversationId: conversation.id,
@@ -231,6 +235,39 @@ describe("ChatManager", () => {
 			includePreviousExecutions: true,
 		});
 		expect(reusable).toBeNull();
+		expect((await manager.listToolActions(conversation.id))[0]?.result_json).toContain(
+			"usageReceipt",
+		);
+	});
+
+	it("preserves uncertain result receipts and blocks duplicate execution", async () => {
+		const conversation = await manager.createConversation({ title: "Uncertain" });
+		const execution = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		const action = await manager.createToolAction({
+			conversationId: conversation.id,
+			executionId: execution.id,
+			toolName: "generate_image",
+			argumentsJson: '{"prompt":"ambiguous"}',
+			argumentsHash: "hash-ambiguous",
+		});
+		await manager.markToolActionUncertain(
+			action.id,
+			"provider response was lost",
+			'{"success":false,"metadata":{"submissionState":"unknown","usageReceipt":{"status":"unknown"}}}',
+		);
+
+		const reusable = await manager.findReusableToolAction({
+			conversationId: conversation.id,
+			executionId: "next-execution",
+			toolName: "generate_image",
+			argumentsHash: "hash-ambiguous",
+			includePreviousExecutions: true,
+		});
+
+		expect(reusable?.status).toBe("uncertain");
+		expect(reusable?.result_json).toContain("usageReceipt");
 	});
 
 	it("round-trips semantic execution outcomes", async () => {
@@ -282,5 +319,40 @@ describe("ChatManager", () => {
 			],
 		);
 		expect(await env.get("LEGACY_API_KEY")).toBe("legacy-value");
+	});
+
+	it("notifies execution-settled handlers on terminal transitions only", async () => {
+		const conversation = await manager.createConversation({ title: "Hook" });
+		const execution = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		const settled: Array<{ id: string; status: string }> = [];
+		const unsubscribe = manager.onExecutionSettled((id, status) => {
+			settled.push({ id, status });
+		});
+
+		await manager.updateExecution(execution.id, {
+			status: "running",
+			currentStatus: "working",
+		});
+		expect(settled).toEqual([]);
+
+		await manager.updateExecution(execution.id, {
+			status: "completed",
+			completionReason: "finished",
+		});
+		expect(settled).toEqual([{ id: execution.id, status: "completed" }]);
+
+		// Una segunda transición al mismo estado terminal no re-dispara (la
+		// ejecución ya no está activa y la fila no cambia).
+		await manager.updateExecution(execution.id, { status: "completed" });
+		expect(settled).toHaveLength(1);
+
+		unsubscribe();
+		const other = await manager.createExecution({
+			conversationId: conversation.id,
+		});
+		await manager.updateExecution(other.id, { status: "failed" });
+		expect(settled).toHaveLength(1);
 	});
 });

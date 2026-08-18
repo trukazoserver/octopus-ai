@@ -539,7 +539,7 @@ export function createOfficeTools(
 	const pptxCreate: ToolDefinition = {
 		name: "pptx_create",
 		description:
-			"Create a .pptx using fixed semantic layouts (cover, content, chart, table, etc). USE THIS ONLY for data-heavy decks with charts/tables, or quick simple presentations. For visually rich or designed presentations, DO NOT USE THIS TOOL — instead write slides as HTML/CSS and use the html_to_pptx tool, which gives complete design control (gradients, Google Fonts, custom layouts, precise image placement) and produces PPTX files that will not show as 'damaged' in PowerPoint. If you do use pptx_create, you MUST generate images first with codex_generate_image or nano-banana-generate.",
+			"Create a .pptx using fixed semantic layouts (cover, content, chart, table, etc). USE THIS ONLY for data-heavy decks with charts/tables, or quick simple presentations. For visually rich or designed presentations, DO NOT USE THIS TOOL — instead write slides as HTML/CSS and use the html_to_pptx tool, which gives complete design control (gradients, Google Fonts, custom layouts, precise image placement) and produces PPTX files that will not show as 'damaged' in PowerPoint. If you do use pptx_create, you MUST generate images first with generate_image.",
 		uiIcon: OFFICE_SVG,
 		managesOwnPathPolicy: true,
 		longRunning: true,

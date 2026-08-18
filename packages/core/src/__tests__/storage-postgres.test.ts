@@ -64,17 +64,19 @@ describe("PostgresDatabase", () => {
 			connectionString: "postgresql://user:pass@localhost/octopus",
 			application_name: "octopus-test",
 		});
-		expect(client?.connect).not.toHaveBeenCalled();
+		expect(client?.connect).toHaveBeenCalled();
 		expect(
 			client?.query.mock.calls.some((call) =>
 				String(call[0]).includes("CREATE TABLE IF NOT EXISTS _migrations"),
 			),
 		).toBe(true);
 		expect(
-			client?.query.mock.calls.some((call) =>
+			client?.transactionQuery.mock.calls.some((call) =>
 				String(call[0]).includes("embedding BYTEA"),
 			),
 		).toBe(true);
+		expect(client?.transactionQuery).toHaveBeenCalledWith("BEGIN");
+		expect(client?.transactionQuery).toHaveBeenCalledWith("COMMIT");
 		client?.query.mockClear();
 
 		await db.run("INSERT INTO demo (a, b) VALUES (?, ?)", ["a", "b"]);
@@ -109,6 +111,12 @@ describe("PostgresDatabase", () => {
 		).toBe(
 			"INSERT INTO memory_items (id, content, embedding) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding",
 		);
+		expect(
+			utils.preparePostgresSql(
+				"CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)",
+				[],
+			).sql,
+		).toContain("id BIGSERIAL PRIMARY KEY");
 		expect(
 			utils.preparePostgresSql(
 				"SELECT rowid, * FROM memory_audit_logs ORDER BY rowid ASC",

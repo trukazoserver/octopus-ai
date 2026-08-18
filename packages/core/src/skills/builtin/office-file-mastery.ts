@@ -128,7 +128,7 @@ ${COMMON_RULES}
    c. **Choose the right aspect ratio per image** based on where it will be placed in the HTML layout: full-width hero (16:9), side-by-side (4:3 or 1:1), small icons (1:1), decorative background (16:9 with negative space for text overlay).
    d. **Decide background transparency per image**: transparent (PNG alpha) for icons, illustrations, decorative shapes that sit on a colored background; opaque for full-bleed photographs and hero composites.
    e. **Decide whether each image needs embedded text or not**: WITHOUT text when you will overlay titles/labels in HTML/CSS (DEFAULT); WITH text only when the text is intrinsic to the visual (infographic, labeled diagram, poster).
-   f. Call \`codex_generate_image\` or \`nano-banana-generate\` with the chosen prompt, aspect ratio, transparency, and text decision for EACH slide that needs a generated visual.
+   f. Call \`generate_image\` with the chosen prompt, aspect ratio, transparency, and text decision for EACH slide that needs a generated visual.
    g. For data slides, build the chart as an HTML/CSS/SVG element inside the slide instead of generating it as an image — you control the styling precisely.
    h. Save each generated image with \`save-image\` to a local path.
 8. **Build the slides as a single HTML file.** Write one HTML file containing all slides:

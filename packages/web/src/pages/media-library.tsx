@@ -109,6 +109,7 @@ export const MediaLibraryPage: React.FC = () => {
 	};
 
 	const selected = artifacts.find((artifact) => artifact.key === selectedKey);
+	const selectedVersion = selected ? currentVersion(selected) : undefined;
 	const filtered = artifacts.filter((artifact) => {
 		if (filter === "all") return true;
 		if (filter === "document") return !["image", "video", "audio"].includes(artifact.kind);
@@ -177,11 +178,20 @@ export const MediaLibraryPage: React.FC = () => {
 			)}
 
 			{selected && createPortal(
-				<dialog ref={dialogRef} aria-modal="true" aria-label="Visor de artifact" onCancel={(event) => { event.preventDefault(); setSelectedKey(null); }} onKeyDown={(event) => { if (event.key === "Escape") setSelectedKey(null); }} onClick={(event) => { if (event.target === event.currentTarget) setSelectedKey(null); }} style={{ position: "fixed", inset: 0, width: "100vw", height: "100dvh", maxWidth: "none", maxHeight: "none", boxSizing: "border-box", margin: 0, padding: 16, border: 0, background: "rgba(0,0,0,.82)", backdropFilter: "blur(5px)", display: "grid", placeItems: "center", zIndex: 10000 }}>
-					<div className="artifact-viewer-shell" style={{ position: "relative" }}>
-						<ArtifactViewer artifact={selected} onClose={() => setSelectedKey(null)} />
-						<button type="button" className="artifact-delete-button" onClick={() => void removeCurrentVersion(selected)} style={{ position: "absolute", bottom: 14, left: 14, padding: "7px 10px", border: "1px solid rgba(239,68,68,.35)", borderRadius: 8, background: "rgba(127,29,29,.25)", color: "#fca5a5", cursor: "pointer", zIndex: 2 }}>{deleteConfirm === currentVersion(selected)?.id ? "Confirmar eliminación" : "Eliminar versión actual"}</button>
-					</div>
+				<dialog ref={dialogRef} aria-modal="true" aria-label={selected.kind === "image" ? "Vista previa de imagen" : "Visor de artifact"} onCancel={(event) => { event.preventDefault(); setSelectedKey(null); }} onKeyDown={(event) => { if (event.key === "Escape") setSelectedKey(null); }} onClick={(event) => { if (event.target === event.currentTarget) setSelectedKey(null); }} style={{ position: "fixed", inset: 0, width: "100vw", height: "100dvh", maxWidth: "none", maxHeight: "none", boxSizing: "border-box", margin: 0, padding: selected.kind === "image" ? 0 : 16, border: 0, background: "rgba(0,0,0,.82)", backdropFilter: "blur(5px)", display: "grid", placeItems: "center", zIndex: 10000 }}>
+					{selected.kind === "image" ? (
+						<div onClick={(event) => { if (event.target === event.currentTarget) setSelectedKey(null); }} style={{ position: "relative", width: "100%", height: "100%", display: "grid", placeItems: "center" }}>
+							{selectedVersion && <img src={absoluteUrl(selectedVersion.url)} alt={selected.title} style={{ display: "block", maxWidth: "calc(100vw - 32px)", maxHeight: "calc(100dvh - 32px)", width: "auto", height: "auto", objectFit: "contain" }} />}
+							{selectedVersion && <a href={absoluteUrl(selectedVersion.url)} download={selectedVersion.filename} style={{ position: "absolute", top: 20, right: 70, padding: "8px 12px", border: "1px solid rgba(255,255,255,.25)", borderRadius: 8, background: "rgba(9,9,11,.72)", color: "#c7d2fe", textDecoration: "none", whiteSpace: "nowrap" }}>Descargar</a>}
+							<button type="button" onClick={() => setSelectedKey(null)} aria-label="Cerrar visor" style={{ position: "absolute", top: 20, right: 20, width: 34, height: 34, display: "grid", placeItems: "center", border: 0, borderRadius: 8, background: "rgba(39,39,42,.86)", color: "#d4d4d8", cursor: "pointer", fontSize: 20 }}>×</button>
+							{selectedVersion && <button type="button" onClick={() => void removeCurrentVersion(selected)} style={{ position: "absolute", right: 20, bottom: 20, padding: "8px 10px", border: "1px solid rgba(239,68,68,.45)", borderRadius: 8, background: "rgba(127,29,29,.72)", color: "#fca5a5", cursor: "pointer", whiteSpace: "nowrap" }}>{deleteConfirm === selectedVersion.id ? "Confirmar eliminación" : "Eliminar versión actual"}</button>}
+						</div>
+					) : (
+						<div className="artifact-viewer-shell" style={{ position: "relative" }}>
+							<ArtifactViewer artifact={selected} onClose={() => setSelectedKey(null)} />
+							<button type="button" className="artifact-delete-button" onClick={() => void removeCurrentVersion(selected)} style={{ position: "absolute", bottom: 14, left: 14, padding: "7px 10px", border: "1px solid rgba(239,68,68,.35)", borderRadius: 8, background: "rgba(127,29,29,.25)", color: "#fca5a5", cursor: "pointer", zIndex: 2 }}>{deleteConfirm === currentVersion(selected)?.id ? "Confirmar eliminación" : "Eliminar versión actual"}</button>
+						</div>
+					)}
 				</dialog>,
 				document.body,
 			)}

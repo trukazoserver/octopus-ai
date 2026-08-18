@@ -21,6 +21,12 @@
  */
 
 type Rate = { input: number; output: number };
+export type CostSource = "catalog-estimate" | "free" | "unknown";
+
+export interface CostEstimate {
+	cost: number;
+	source: CostSource;
+}
 
 const FREE: Rate = { input: 0, output: 0 };
 
@@ -168,4 +174,31 @@ export function estimateCost(
 		(promptTokens / 1_000_000) * rate.input +
 		(completionTokens / 1_000_000) * rate.output;
 	return Number.isFinite(cost) && cost > 0 ? cost : 0;
+}
+
+export function estimateCostWithSource(
+	provider: string,
+	model: string | undefined,
+	promptTokens: number,
+	completionTokens: number,
+): CostEstimate {
+	const modelId = normalize(model ?? "");
+	const matched = MODEL_RATES.find((entry) => modelId.includes(entry.match));
+	if (matched) {
+		const cost =
+			(promptTokens / 1_000_000) * matched.rate.input +
+			(completionTokens / 1_000_000) * matched.rate.output;
+		return {
+			cost: Number.isFinite(cost) && cost > 0 ? cost : 0,
+			source:
+				matched.rate.input === 0 && matched.rate.output === 0
+					? "free"
+					: "catalog-estimate",
+		};
+	}
+	const providerName = normalize(provider);
+	if (providerName === "local" || providerName === "ollama") {
+		return { cost: 0, source: "free" };
+	}
+	return { cost: 0, source: "unknown" };
 }

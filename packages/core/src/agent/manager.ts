@@ -498,6 +498,15 @@ export class AgentManager {
 		return scope;
 	}
 
+	setMemoryEnabled(enabled: boolean): void {
+		for (const runtime of this.runtimes.values()) {
+			runtime.setMemoryEnabled(enabled);
+		}
+		for (const scopes of this.conversationRuntimes.values()) {
+			for (const runtime of scopes.values()) runtime.setMemoryEnabled(enabled);
+		}
+	}
+
 	releaseConversation(conversationId: string): void {
 		for (const scopes of this.conversationRuntimes.values()) {
 			scopes.delete(conversationId);

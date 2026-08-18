@@ -1,3 +1,6 @@
+import { lstat, realpath, rm } from "node:fs/promises";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import {
 	DisconnectReason,
 	makeWASocket,
@@ -13,6 +16,11 @@ export class WhatsAppChannel implements Channel {
 	private isConnected = false;
 	private desiredConnected = false;
 	private generation = 0;
+	private qr?: string;
+	private status: "connecting" | "qr" | "connected" | "disconnected" | "logged_out" =
+		"disconnected";
+	private credentialWrite = Promise.resolve();
+	private credsUpdateHandler?: () => void;
 
 	constructor(
 		public readonly id: string,
@@ -22,19 +30,37 @@ export class WhatsAppChannel implements Channel {
 	public async connect(reconnecting = false): Promise<void> {
 		if (!reconnecting) this.desiredConnected = true;
 		if (!this.desiredConnected) return;
+		this.status = "connecting";
 		const generation = ++this.generation;
 		const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
 
 		this.sock = makeWASocket({
 			auth: state,
-			printQRInTerminal: true,
+			printQRInTerminal: false,
 		});
 
-		this.sock.ev.on("creds.update", saveCreds);
+		const socket = this.sock;
+		const credsUpdateHandler = () => {
+			if (generation !== this.generation) return;
+			this.credentialWrite = this.credentialWrite
+				.catch(() => undefined)
+				.then(async () => {
+					if (generation === this.generation) await saveCreds();
+				})
+				.catch((error) => {
+					console.error("Failed to persist WhatsApp credentials:", error);
+				});
+		};
+		this.credsUpdateHandler = credsUpdateHandler;
+		socket.ev.on("creds.update", credsUpdateHandler);
 
 		this.sock.ev.on("connection.update", (update) => {
 			if (generation !== this.generation) return;
-			const { connection, lastDisconnect } = update;
+			const { connection, lastDisconnect, qr } = update;
+			if (qr) {
+				this.qr = qr;
+				this.status = "qr";
+			}
 			if (connection === "close") {
 				this.isConnected = false;
 				const shouldReconnect =
@@ -43,11 +69,14 @@ export class WhatsAppChannel implements Channel {
 							output?: { statusCode?: number };
 						}
 					)?.output?.statusCode !== DisconnectReason.loggedOut;
+				this.status = shouldReconnect ? "disconnected" : "logged_out";
 				if (shouldReconnect && this.desiredConnected) {
 					this.connect(true).catch(console.error);
 				}
 			} else if (connection === "open") {
 				this.isConnected = true;
+				this.qr = undefined;
+				this.status = "connected";
 			}
 		});
 
@@ -98,11 +127,79 @@ export class WhatsAppChannel implements Channel {
 	public async disconnect(): Promise<void> {
 		this.desiredConnected = false;
 		this.generation++;
-		if (this.sock) {
-			this.sock.end(undefined);
+		const socket = this.sock;
+		if (socket) {
+			if (this.credsUpdateHandler) {
+				socket.ev.off("creds.update", this.credsUpdateHandler);
+			}
+			await this.credentialWrite.catch(() => undefined);
+			socket.end(undefined);
 			this.sock = null;
 		}
+		this.credsUpdateHandler = undefined;
 		this.isConnected = false;
+		this.qr = undefined;
+		this.status = "disconnected";
+	}
+
+	public getStatus(): {
+		status: "connecting" | "qr" | "connected" | "disconnected" | "logged_out";
+		connected: boolean;
+		qr?: string;
+	} {
+		return {
+			status: this.status,
+			connected: this.isConnected,
+			qr: this.qr,
+		};
+	}
+
+	public async logout(): Promise<void> {
+		const authDirectory = await this.safeAuthDirectoryForDeletion();
+		this.desiredConnected = false;
+		this.generation++;
+		const socket = this.sock;
+		this.sock = null;
+		if (socket && this.credsUpdateHandler) {
+			socket.ev.off("creds.update", this.credsUpdateHandler);
+		}
+		this.credsUpdateHandler = undefined;
+		await this.credentialWrite.catch(() => undefined);
+		try {
+			await socket?.logout();
+		} catch {
+			// Local credential removal still completes when remote logout is unavailable.
+		} finally {
+			socket?.end(undefined);
+			this.isConnected = false;
+			this.qr = undefined;
+			this.status = "logged_out";
+		}
+		await rm(authDirectory, { recursive: true, force: true });
+	}
+
+	private async safeAuthDirectoryForDeletion(): Promise<string> {
+		const octopusRoot = resolve(homedir(), ".octopus");
+		const channelsRoot = resolve(octopusRoot, "channels");
+		const canonical = resolve(channelsRoot, "whatsapp");
+		if (resolve(this.authPath) !== canonical) {
+			throw new Error(
+				"WhatsApp logout can only delete the canonical ~/.octopus/channels/whatsapp auth directory",
+			);
+		}
+		for (const path of [octopusRoot, channelsRoot, canonical]) {
+			try {
+				const stat = await lstat(path);
+				if (stat.isSymbolicLink() || (await realpath(path)) !== path) {
+					throw new Error(
+						`Refusing to delete WhatsApp credentials through a redirected path: ${path}`,
+					);
+				}
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
+		return canonical;
 	}
 
 	public async send(

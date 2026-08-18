@@ -36,6 +36,33 @@ describe("WorkflowManager recovery", () => {
 		expect((await manager.getTask(task.id))?.status).toBe("ready");
 	});
 
+	it("fails orphaned running tasks under runs that already reached a terminal status", async () => {
+		const run = await manager.createRun({ goal: "partial workflow" });
+		const task = await manager.createTask({ runId: run.id, title: "step" });
+		await manager.updateTaskStatus(task.id, "running");
+		await manager.updateRunStatus(run.id, "partial");
+		await db.run(
+			"UPDATE agent_workflow_tasks SET updated_at = ? WHERE id = ?",
+			["2020-01-01T00:00:00.000Z", task.id],
+		);
+
+		const result = await manager.markStaleRunsInterrupted({ staleAfterMs: 1 });
+
+		expect(result).toEqual({ runs: 0, tasks: 1 });
+		expect((await manager.getTask(task.id))?.status).toBe("failed");
+		expect(
+			await db.get(
+				"SELECT claim_token FROM agent_workflow_tasks WHERE id = ?",
+				[task.id],
+			),
+		).toEqual({ claim_token: null });
+		const events = await db.all(
+			"SELECT event_type FROM agent_workflow_events WHERE task_id = ?",
+			[task.id],
+		);
+		expect(events.map((event) => event.event_type)).toContain("task_failed");
+	});
+
 	it("lists resumable runs and excludes terminal successful runs", async () => {
 		const ready = await manager.createRun({ goal: "ready" });
 		const done = await manager.createRun({ goal: "done" });
