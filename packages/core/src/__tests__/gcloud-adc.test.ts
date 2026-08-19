@@ -28,6 +28,7 @@ import {
 	getAdcFilePath,
 	getGcloudLoginStatus,
 	readAdcCredentials,
+	resetGcloudBinaryCacheForTests,
 	resetGcloudLoginSession,
 	spawnGcloudLogin,
 } from "../auth/gcloud-adc.js";
@@ -60,6 +61,7 @@ describe("gcloud-adc", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		resetGcloudLoginSession();
+		resetGcloudBinaryCacheForTests();
 		mocks.fs.existsSync.mockReset();
 		mocks.fs.readFileSync.mockReset();
 		mocks.cp.spawnSync.mockReset();
@@ -325,7 +327,7 @@ describe("gcloud-adc", () => {
 			expect(getGcloudLoginStatus()).toMatchObject({ status: "ready" });
 		});
 
-		it("transitions to error on exit(0) without ADC (user cancelled)", () => {
+		it("transitions to error on exit(0) without ADC (user cancelled)", async () => {
 			setPlatform("linux");
 			mocks.cp.spawnSync.mockImplementation((cmd: string) =>
 				cmd.includes("command -v")
@@ -343,6 +345,15 @@ describe("gcloud-adc", () => {
 
 			spawnGcloudLogin();
 			child.emit("exit", 0, null);
+			// Sin ADC la confirmación de cuenta es asíncrona (spawn, no spawnSync).
+			expect(getGcloudLoginStatus().status).toBe("running");
+			const queryChild = mocks.cp.spawn.mock.results[
+				mocks.cp.spawn.mock.results.length - 1
+			]?.value as unknown as { emit(event: string, ...a: unknown[]): boolean };
+			queryChild.emit("close", 1, null);
+			await Promise.resolve()
+				.then(() => Promise.resolve())
+				.then(() => Promise.resolve());
 			expect(getGcloudLoginStatus().status).toBe("error");
 		});
 

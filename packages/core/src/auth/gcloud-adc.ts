@@ -12,7 +12,7 @@
  * written, the vertex provider authenticates via SA JWT (see
  * ai/providers/google.ts) and gcloud is never needed again.
  */
-import { type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
@@ -62,7 +62,25 @@ let active: GcloudLoginSession | null = null;
  * uses `command -v`. The Windows binary is `gcloud.cmd` (a batch wrapper), so
  * callers MUST spawn it with `shell: true`.
  */
+let cachedGcloudBinary: string | undefined | null = null;
+
+/**
+ * Localiza el binario de gcloud. Memoizado: en Windows la detección lanza
+ * shells (`for %I in ...`) por candidato, y findGcloudBinary se consulta en
+ * cada runGcloud — sin cache eran varios spawns síncronos por llamada.
+ */
 export function findGcloudBinary(): string | undefined {
+	if (cachedGcloudBinary !== null) return cachedGcloudBinary;
+	cachedGcloudBinary = detectGcloudBinary() ?? undefined;
+	return cachedGcloudBinary;
+}
+
+/** Solo para tests: permite re-detectar tras cambiar los mocks del entorno. */
+export function resetGcloudBinaryCacheForTests(): void {
+	cachedGcloudBinary = null;
+}
+
+function detectGcloudBinary(): string | undefined {
 	const envPath = process.env.GCLOUD_PATH;
 	if (envPath && existsSync(envPath)) return envPath;
 
@@ -234,26 +252,25 @@ export async function exchangeAdcForAccessToken(
  * Run a gcloud subcommand synchronously and return its output. Uses shell:true
  * on Windows so the `gcloud.cmd` batch wrapper is invoked correctly.
  */
-function runGcloud(args: string[]): {
+function runGcloud(args: string[]): Promise<{
 	ok: boolean;
 	stdout: string;
 	stderr: string;
-} {
+}> {
 	const binary = findGcloudBinary();
 	if (!binary) {
-		return { ok: false, stdout: "", stderr: "gcloud binary not found" };
+		return Promise.resolve({
+			ok: false,
+			stdout: "",
+			stderr: "gcloud binary not found",
+		});
 	}
-	const res = runGcloudSync(binary, args);
-	return {
-		ok: res.status === 0 && !!res.stdout,
-		stdout: (res.stdout ?? "").trim(),
-		stderr: (res.stderr ?? "").trim(),
-	};
+	return runGcloudAsync(binary, args);
 }
 
 /** The currently-active gcloud account (the one print-access-token uses). */
-export function getActiveGcloudAccount(): string | undefined {
-	return runGcloud(["config", "get-value", "account"]).stdout || undefined;
+export async function getActiveGcloudAccount(): Promise<string | undefined> {
+	return (await runGcloud(["config", "get-value", "account"])).stdout || undefined;
 }
 
 /**
@@ -262,30 +279,56 @@ export function getActiveGcloudAccount(): string | undefined {
  * path passed as the command, so on Windows we prepend the bin dir to PATH and
  * run the bare "gcloud.cmd" — cmd resolves it via PATH and the .bat handles its
  * own spaced %~dp0 internally.
+ *
+ * Asíncrono a propósito: las llamadas a gcloud tardan 1-10s y con spawnSync
+ * congelaban todo el event loop del servidor (HTTP, WS, cron).
  */
-function runGcloudSync(
+function runGcloudAsync(
 	binary: string,
 	args: string[],
-): SpawnSyncReturns<string> {
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
 	const isWin = process.platform === "win32";
 	const prevPath = process.env.PATH;
+	let child: ReturnType<typeof spawn>;
 	try {
 		if (isWin) {
 			const binDir = win32.dirname(binary);
 			process.env.PATH = `${binDir};${prevPath ?? ""}`;
-			return spawnSync("gcloud.cmd", args, {
+			child = spawn("gcloud.cmd", args, {
 				shell: true,
-				encoding: "utf-8",
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+		} else {
+			child = spawn(binary, args, {
 				stdio: ["pipe", "pipe", "pipe"],
 			});
 		}
-		return spawnSync(binary, args, {
-			encoding: "utf-8",
-			stdio: ["pipe", "pipe", "pipe"],
-		});
 	} finally {
+		// spawn captura el entorno al crear el proceso; restaurar ya es seguro.
 		process.env.PATH = prevPath;
 	}
+	return new Promise((resolve) => {
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.setEncoding("utf-8");
+		child.stderr?.setEncoding("utf-8");
+		child.stdout?.on("data", (chunk: string) => {
+			stdout += chunk;
+		});
+		child.stderr?.on("data", (chunk: string) => {
+			stderr += chunk;
+		});
+		child.on("error", (err: Error) => {
+			resolve({ ok: false, stdout: "", stderr: err.message });
+		});
+		child.on("close", (code: number | null) => {
+			resolve({
+				ok: code === 0 && Boolean(stdout.trim()),
+				stdout: stdout.trim(),
+				stderr: stderr.trim(),
+			});
+		});
+	});
 }
 
 /**
@@ -295,8 +338,8 @@ function runGcloudSync(
  * but gcloud refreshes its own account credentials internally and Google
  * permits that. Requires gcloud + an active account (`gcloud auth login`).
  */
-export function getGcloudAccessTokenViaCli(): string {
-	const res = runGcloud(["auth", "print-access-token"]);
+export async function getGcloudAccessTokenViaCli(): Promise<string> {
+	const res = await runGcloud(["auth", "print-access-token"]);
 	if (!res.ok || !res.stdout) {
 		throw new Error(
 			`gcloud auth print-access-token falló${res.stderr ? `: ${res.stderr}` : ""}`,
@@ -316,7 +359,7 @@ export async function resolveGcloudAccessToken(): Promise<{
 }> {
 	if (findGcloudBinary()) {
 		try {
-			const token = getGcloudAccessTokenViaCli();
+			const token = await getGcloudAccessTokenViaCli();
 			if (token) return { accessToken: token, source: "gcloud-cli" };
 		} catch {
 			// Fall through to ADC refresh.
@@ -410,16 +453,40 @@ export function spawnGcloudLogin(): { ok: boolean; error?: string } {
 		if (active !== session || active.status !== "running") return;
 		if (session.staleTimer) clearTimeout(session.staleTimer);
 		if (code === 0) {
-			// `gcloud auth login` updates the ACTIVE account, not (necessarily) the
-			// ADC file. Read the active account to confirm + surface it in the UI.
-			const account = runGcloud(["config", "get-value", "account"]).stdout;
-			if (account) {
+			// `gcloud auth login` actualiza la cuenta ACTIVA, no (necesariamente)
+			// el archivo ADC. Si el ADC ya trae cuenta, confirmar ya; en paralelo
+			// se consulta la cuenta activa real (async, fuera del event loop).
+			const adcAccount = readAdcCredentials()?.account;
+			const confirmAccount = async (account: string | undefined) => {
+				if (active !== session || active.status !== "running") return;
+				if (account) {
+					active.status = "ready";
+					active.account = account;
+				} else {
+					active.status = "error";
+					active.error =
+						"Login no completado (sin cuenta activa). ¿Cancelaste en el navegador?";
+				}
+			};
+			if (adcAccount) {
 				active.status = "ready";
-				active.account = account;
+				active.account = adcAccount;
+				void runGcloud(["config", "get-value", "account"])
+					.then((res) => {
+						// Refresca la cuenta activa real si difiere del ADC.
+						if (
+							active === session &&
+							active.status === "ready" &&
+							res.stdout
+						) {
+							active.account = res.stdout;
+						}
+					})
+					.catch(() => {});
 			} else {
-				active.status = "error";
-				active.error =
-					"Login no completado (sin cuenta activa). ¿Cancelaste en el navegador?";
+				void runGcloud(["config", "get-value", "account"])
+					.then((res) => confirmAccount(res.stdout || undefined))
+					.catch(() => confirmAccount(undefined));
 			}
 		} else {
 			active.status = "error";

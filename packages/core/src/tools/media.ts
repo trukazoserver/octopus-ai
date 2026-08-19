@@ -1,35 +1,28 @@
 import { randomUUID } from "node:crypto";
 import {
 	closeSync,
-	copyFileSync,
 	existsSync,
 	mkdirSync,
 	openSync,
-	readFileSync,
 	readSync,
 	statSync,
-	writeFileSync,
 } from "node:fs";
+import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { PathSafetyPolicy } from "../security/path-safety-policy.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
+import {
+	MEDIA_DIR,
+	type MediaMetaItem,
+	findMediaMetaByNameOrId,
+	loadMediaMeta,
+	saveMediaMeta,
+} from "./media-meta-store.js";
 import { validateMediaBytes } from "./media-validation.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
-const MEDIA_DIR = join(homedir(), ".octopus", "media");
-const MEDIA_META_PATH = join(MEDIA_DIR, "meta.json");
 const MAX_SAVE_MEDIA_BASE64_BYTES = 8 * 1024 * 1024;
-
-interface MediaMetaItem {
-	id: string;
-	filename: string;
-	mimetype: string;
-	size: number;
-	createdAt: string;
-	description?: string;
-	metadata?: Record<string, unknown>;
-}
 
 const MIME_EXTENSIONS: Record<string, string> = {
 	"image/png": ".png",
@@ -86,27 +79,6 @@ function guessMime(filename: string): string {
 
 function ensureMediaDir(): void {
 	if (!existsSync(MEDIA_DIR)) mkdirSync(MEDIA_DIR, { recursive: true });
-}
-
-let mediaMetaIndex = new Map<string, MediaMetaItem>();
-
-function loadMediaMeta(): MediaMetaItem[] {
-	ensureMediaDir();
-	let items: MediaMetaItem[];
-	try {
-		const parsed = JSON.parse(readFileSync(MEDIA_META_PATH, "utf-8"));
-		items = Array.isArray(parsed) ? (parsed as MediaMetaItem[]) : [];
-	} catch {
-		items = [];
-	}
-	mediaMetaIndex = new Map(items.flatMap((item) => [[item.id, item], [item.filename, item]]));
-	return items;
-}
-
-function saveMediaMeta(items: MediaMetaItem[]): void {
-	ensureMediaDir();
-	mediaMetaIndex = new Map(items.flatMap((item) => [[item.id, item], [item.filename, item]]));
-	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
 }
 
 function normalizeBase64Data(data: string): string {
@@ -181,7 +153,7 @@ export const mediaContext = {
 			throw new Error(check.reason ?? "Contenido de media no válido");
 		}
 
-		writeFileSync(filePath, buffer);
+		await fs.writeFile(filePath, buffer);
 
 		const items = loadMediaMeta();
 		const item: MediaMetaItem = {
@@ -194,7 +166,7 @@ export const mediaContext = {
 			metadata,
 		};
 		items.push(item);
-		saveMediaMeta(items);
+		await saveMediaMeta(items);
 
 		return {
 			...item,
@@ -221,10 +193,9 @@ export const mediaContext = {
 				`Media file exceeds the ${options.maxBytes}-byte input limit: ${urlStr}`,
 			);
 		}
-		const buffer = readFileSync(filePath);
+		const buffer = await fs.readFile(filePath);
 
-		loadMediaMeta();
-		const item = mediaMetaIndex.get(filename) ?? mediaMetaIndex.get(filename.split(".")[0] ?? "");
+		const item = findMediaMetaByNameOrId(filename);
 
 		return {
 			buffer,
@@ -319,7 +290,7 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 							error: check.reason ?? "Contenido de media no válido",
 						};
 					}
-					writeFileSync(filePath, fileData);
+					await fs.writeFile(filePath, fileData);
 
 					const items = loadMediaMeta();
 					const item = {
@@ -332,7 +303,7 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 						metadata,
 					};
 					items.push(item);
-					saveMediaMeta(items);
+					await saveMediaMeta(items);
 
 					const mediaUrl = `/api/media/file/${id}${ext}`;
 
@@ -454,7 +425,7 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 					const storedName = id + ext;
 					const filePath = join(MEDIA_DIR, storedName);
 					ensureMediaDir();
-					copyFileSync(sourcePath, filePath);
+					await fs.copyFile(sourcePath, filePath);
 
 					const items = loadMediaMeta();
 					const item: MediaMetaItem = {
@@ -469,7 +440,7 @@ export function createMediaTools(allowedPaths?: string[]): ToolDefinition[] {
 						metadata: parseMetadata(params.metadata),
 					};
 					items.push(item);
-					saveMediaMeta(items);
+					await saveMediaMeta(items);
 
 					const mediaUrl = `/api/media/file/${storedName}`;
 					return {

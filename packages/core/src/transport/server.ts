@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import * as crypto from "node:crypto";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import {
 	createReadStream,
 	existsSync,
@@ -93,6 +94,11 @@ import { SettingsService } from "../settings/service.js";
 import type { SettingsSectionId } from "../settings/types.js";
 import type { Skill } from "../skills/types.js";
 import { validateMediaBytes } from "../tools/media-validation.js";
+import {
+	type MediaMetaItem,
+	loadMediaMeta as loadSharedMediaMeta,
+	saveMediaMeta as saveSharedMediaMeta,
+} from "../tools/media-meta-store.js";
 import { convertOfficeFileToPdf } from "../tools/office-preview.js";
 import { resolveRelativePathInside } from "../utils/path-safety.js";
 import { MCP_CATALOG } from "./mcp-catalog.js";
@@ -252,20 +258,19 @@ interface ArtifactProjection {
 }
 
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
-const MEDIA_META_PATH = join(MEDIA_DIR, "meta.json");
 const MEDIA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-let cachedMediaMeta: MediaItem[] | null = null;
-let cachedMediaMetaMtime: number | null = null;
-let cachedMediaIndex: Map<string, MediaItem> | null = null;
+let mediaIndexRef: MediaItem[] | null = null;
+let mediaIndexCache: Map<string, MediaItem> | null = null;
 
 function getMediaIndex(): Map<string, MediaItem> {
 	const items = loadMediaMeta();
-	if (cachedMediaIndex && cachedMediaMeta) {
-		return cachedMediaIndex;
+	if (mediaIndexCache && mediaIndexRef === items) {
+		return mediaIndexCache;
 	}
-	cachedMediaIndex = new Map(items.map((item) => [item.id, item]));
-	return cachedMediaIndex;
+	mediaIndexRef = items;
+	mediaIndexCache = new Map(items.map((item) => [item.id, item]));
+	return mediaIndexCache;
 }
 
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -324,32 +329,11 @@ function ensureMediaDir(): void {
 }
 
 function loadMediaMeta(): MediaItem[] {
-	ensureMediaDir();
-	try {
-		const stat = statSync(MEDIA_META_PATH);
-		if (
-			cachedMediaMeta &&
-			cachedMediaMetaMtime &&
-			stat.mtimeMs === cachedMediaMetaMtime
-		) {
-			return cachedMediaMeta;
-		}
-		const data = readFileSync(MEDIA_META_PATH, "utf-8");
-		cachedMediaMeta = JSON.parse(data) as MediaItem[];
-		cachedMediaMetaMtime = stat.mtimeMs;
-		cachedMediaIndex = null;
-		return cachedMediaMeta;
-	} catch {
-		return [];
-	}
+	return loadSharedMediaMeta();
 }
 
-function saveMediaMeta(items: MediaItem[]): void {
-	ensureMediaDir();
-	writeFileSync(MEDIA_META_PATH, JSON.stringify(items, null, 2), "utf-8");
-	cachedMediaMeta = items;
-	cachedMediaMetaMtime = statSync(MEDIA_META_PATH).mtimeMs;
-	cachedMediaIndex = null;
+async function saveMediaMeta(items: MediaItem[]): Promise<void> {
+	await saveSharedMediaMeta(items);
 }
 
 // Run a child process without blocking the event loop (unlike spawnSync, which
@@ -2233,11 +2217,15 @@ export class TransportServer {
 				if (fp.startsWith(webDist)) {
 					try {
 						const ext = staticPath.split(".").pop()?.toLowerCase() ?? "";
-						const data = readFileSync(fp);
+						// Streaming en vez de readFileSync: los bundles del web dist
+						// pesan MBs y leerlos sincrónicos congelaba el event loop en
+						// cada carga de página.
+						const fileStat = statSync(fp);
 						res.writeHead(200, {
 							"Content-Type": mimeTypes[ext] ?? "application/octet-stream",
+							"Content-Length": fileStat.size,
 						});
-						res.end(data);
+						createReadStream(fp).pipe(res);
 						return;
 					} catch {}
 				}
@@ -3075,7 +3063,7 @@ export class TransportServer {
 				ok: true,
 				...safeResult,
 				credentialsFile: credentialsFilePath,
-				account: getActiveGcloudAccount() ?? creds?.account,
+				account: (await getActiveGcloudAccount()) ?? creds?.account,
 				billingLinked,
 				code: billingLinked ? undefined : "billing-warning",
 			});
@@ -9076,7 +9064,7 @@ export class TransportServer {
 				const storedName = id + ext;
 				const filePath = join(MEDIA_DIR, storedName);
 				ensureMediaDir();
-				writeFileSync(filePath, part.data);
+				await fs.promises.writeFile(filePath, part.data);
 				const item: MediaItem = {
 					id,
 					filename: part.filename,
@@ -9087,7 +9075,7 @@ export class TransportServer {
 				items.push(item);
 				saved.push(item);
 			}
-			saveMediaMeta(items);
+			await saveMediaMeta(items);
 			if (saved.length === 1) {
 				const item = saved[0];
 				if (!item) {
@@ -9153,7 +9141,7 @@ export class TransportServer {
 				});
 				return;
 			}
-			writeFileSync(filePath, fileData);
+			await fs.promises.writeFile(filePath, fileData);
 			const items = loadMediaMeta();
 			const item: MediaItem = {
 				id,
@@ -9165,7 +9153,7 @@ export class TransportServer {
 				metadata: parsed.metadata,
 			};
 			items.push(item);
-			saveMediaMeta(items);
+			await saveMediaMeta(items);
 			jsonRes(res, 201, { ...item, url: `/api/media/file/${id}${ext}` });
 		} catch (err) {
 			jsonRes(res, 500, {
@@ -9361,7 +9349,7 @@ export class TransportServer {
 				/* file may already be gone */
 			}
 			items.splice(idx, 1);
-			saveMediaMeta(items);
+			await saveMediaMeta(items);
 			jsonRes(res, 200, { ok: true });
 		} catch (err) {
 			jsonRes(res, 500, {

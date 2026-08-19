@@ -7,8 +7,9 @@ import type { ToolDefinition, ToolResult } from "../tools/registry.js";
 // A real 1x1 PNG (valid magic bytes). The media library now rejects payloads
 // whose bytes don't match their declared media type, so image-generator tests
 // must use actual image bytes instead of arbitrary buffers.
+// PNG real de 16x16 (los de <8x8 son placeholders que el sanitizador ya no archiva).
 const VALID_PNG_BASE64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+	"iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVR4nGM4ISdHEmIY1SA3GkonhmvSAADkYgQQVT0dBgAAAABJRU5ErkJggg==";
 
 function createTestTool(overrides?: Partial<ToolDefinition>): ToolDefinition {
 	return {

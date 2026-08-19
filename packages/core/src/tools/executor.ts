@@ -307,6 +307,60 @@ export class ToolExecutor {
 		}
 	}
 
+	/**
+	 * Detecta imágenes degeneradas (dimensiones menores a 8x8) leyendo solo
+	 * las cabeceras: PNG IHDR / JPEG SOF. Algunas tools dinámicas devuelven un
+	 * placeholder de 1x1 al fallar en lugar de success:false, y sin este
+	 * guard el sanitizador los archivaba en la biblioteca como "cuadros"
+	 * diminutos sin valor.
+	 */
+	isDegenerateImage(buffer: Buffer, mimeType: string): boolean {
+		if (!mimeType.startsWith("image/") || mimeType === "image/svg+xml") {
+			return false;
+		}
+		try {
+			if (mimeType === "image/png" && buffer.length >= 24) {
+				if (buffer.readUInt32BE(0) !== 0x89504e47) return false;
+				// IHDR: width @16, height @20.
+				return buffer.readUInt32BE(16) < 8 || buffer.readUInt32BE(20) < 8;
+			}
+			if (mimeType === "image/gif" && buffer.length > 10) {
+				return buffer.readUInt16LE(6) < 8 || buffer.readUInt16LE(8) < 8;
+			}
+			if (
+				(mimeType === "image/jpeg" || mimeType === "image/jpg") &&
+				buffer.length > 4
+			) {
+				let offset = 2;
+				while (offset + 9 < buffer.length) {
+					if (buffer[offset] !== 0xff) {
+						offset++;
+						continue;
+					}
+					const marker = buffer[offset + 1];
+					const length = buffer.readUInt16BE(offset + 2);
+					// SOF0..SOF15 (excepto DHT/JPG/DAC).
+					if (
+						marker >= 0xc0 &&
+						marker <= 0xcf &&
+						marker !== 0xc4 &&
+						marker !== 0xc8 &&
+						marker !== 0xcc
+					) {
+						return (
+							buffer.readUInt16BE(offset + 7) < 8 ||
+							buffer.readUInt16BE(offset + 5) < 8
+						);
+					}
+					offset += 2 + length;
+				}
+			}
+		} catch {
+			return false;
+		}
+		return false;
+	}
+
 	private async saveToolMediaPayload(
 		base64: string,
 		mimeType: string,
@@ -315,6 +369,14 @@ export class ToolExecutor {
 		savedMedia: SavedToolMedia[],
 	): Promise<Record<string, unknown>> {
 		const buffer = Buffer.from(base64.replace(/\s+/g, ""), "base64");
+		if (this.isDegenerateImage(buffer, mimeType)) {
+			return {
+				savedToMediaLibrary: false,
+				reason:
+					"Degenerate image (<8x8 px) not archived — likely a placeholder from a failed tool.",
+				sizeBytes: buffer.length,
+			};
+		}
 		const media = await mediaContext.save(buffer, mimeType, description, {
 			source,
 		});
