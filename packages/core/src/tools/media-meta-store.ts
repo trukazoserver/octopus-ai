@@ -70,6 +70,20 @@ let cachedMtime = 0;
 let cachedIndex = new Map<string, MediaMetaItem>();
 let everLoaded = false;
 let reconciled = false;
+/**
+ * Se incrementa en CADA mutación del cache (save, reload, reconcile). Los
+ * consumidores que cachean derivados (p. ej. el índice por id del server)
+ * deben invalidar por esta versión: invalidar por referencia del array no
+ * sirve porque los saves mutan el mismo array en sitio (items.push) y la
+ * referencia no cambia — así las imágenes nuevas daban 404 hasta que un
+ * cambio de mtime externo forzaba un reload completo.
+ */
+let cacheVersion = 1;
+const knownIds = new Set<string>();
+
+export function getMediaMetaVersion(): number {
+	return cacheVersion;
+}
 
 function rebuildIndex(items: MediaMetaItem[]): void {
 	cachedIndex = new Map(
@@ -107,6 +121,8 @@ export function loadMediaMeta(): MediaMetaItem[] {
 		cachedItems = Array.isArray(parsed) ? (parsed as MediaMetaItem[]) : [];
 		cachedMtime = stat.mtimeMs;
 		everLoaded = true;
+		cacheVersion++;
+		for (const item of cachedItems) knownIds.add(item.id);
 		rebuildIndex(cachedItems);
 	} catch {
 		if (!everLoaded) {
@@ -158,6 +174,8 @@ export async function saveMediaMeta(items: MediaMetaItem[]): Promise<void> {
 	cachedItems = items;
 	rebuildIndex(items);
 	everLoaded = true;
+	cacheVersion++;
+	for (const item of items) knownIds.add(item.id);
 	dirty = true;
 	if (pendingFlushTimer) clearTimeout(pendingFlushTimer);
 	pendingFlushTimer = setTimeout(() => {
@@ -171,6 +189,7 @@ async function flushMediaMetaToDisk(): Promise<void> {
 	if (!dirty) return;
 	dirty = false;
 	try {
+		mergeExternalEntriesBeforeFlush();
 		const serialized = JSON.stringify(cachedItems, null, 2);
 		await fs.writeFile(mediaMetaTmpPath, serialized, "utf-8");
 		renameSync(mediaMetaTmpPath, mediaMetaPath());
@@ -178,6 +197,39 @@ async function flushMediaMetaToDisk(): Promise<void> {
 	} catch {
 		// Reintentar en el próximo save/exit.
 		dirty = true;
+	}
+}
+
+/**
+ * Antes de escribir a disco: si otro proceso modificó el meta (mtime
+ * distinto al de nuestro cache), re-leer y ANEXAR las entradas que no
+ * conocemos. Sin esto, un flush nuestro podía sobrescribir y perder entradas
+ * que un escritor concurrente había añadido (p. ej. purgas de mantenimiento
+ * corriendo contra el server vivo). Las entradas que nosotros eliminamos a
+ * propósito (purge) no vuelven porque sus ids están en knownIds.
+ */
+function mergeExternalEntriesBeforeFlush(): void {
+	try {
+		const metaPath = mediaMetaPath();
+		const stat = statSync(metaPath);
+		if (stat.mtimeMs === cachedMtime) return;
+		const parsed = JSON.parse(readFileSync(metaPath, "utf-8")) as MediaMetaItem[];
+		if (!Array.isArray(parsed)) return;
+		const external = parsed.filter((item) => !knownIds.has(item.id));
+		if (external.length === 0) {
+			cachedMtime = stat.mtimeMs;
+			return;
+		}
+		cachedItems = [...cachedItems, ...external];
+		rebuildIndex(cachedItems);
+		cacheVersion++;
+		for (const item of external) knownIds.add(item.id);
+		cachedMtime = stat.mtimeMs;
+		console.log(
+			`[media-meta-store] Merge de ${external.length} entrada(s) externa(s) antes del flush.`,
+		);
+	} catch {
+		/* sin disco legible se escribe nuestro estado */
 	}
 }
 
@@ -190,6 +242,7 @@ export function flushPendingMediaMetaSync(): void {
 	if (!dirty) return;
 	dirty = false;
 	try {
+		mergeExternalEntriesBeforeFlush();
 		writeFileSync(mediaMetaTmpPath, JSON.stringify(cachedItems, null, 2), "utf-8");
 		renameSync(mediaMetaTmpPath, mediaMetaPath());
 		cachedMtime = statSync(mediaMetaPath()).mtimeMs;

@@ -96,6 +96,7 @@ import type { Skill } from "../skills/types.js";
 import { validateMediaBytes } from "../tools/media-validation.js";
 import {
 	type MediaMetaItem,
+	getMediaMetaVersion,
 	loadMediaMeta as loadSharedMediaMeta,
 	saveMediaMeta as saveSharedMediaMeta,
 } from "../tools/media-meta-store.js";
@@ -260,15 +261,16 @@ interface ArtifactProjection {
 const MEDIA_DIR = join(homedir(), ".octopus", "media");
 const MEDIA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-let mediaIndexRef: MediaItem[] | null = null;
+let mediaIndexVersion = 0;
 let mediaIndexCache: Map<string, MediaItem> | null = null;
 
 function getMediaIndex(): Map<string, MediaItem> {
 	const items = loadMediaMeta();
-	if (mediaIndexCache && mediaIndexRef === items) {
+	const version = getMediaMetaVersion();
+	if (mediaIndexCache && mediaIndexVersion === version) {
 		return mediaIndexCache;
 	}
-	mediaIndexRef = items;
+	mediaIndexVersion = version;
 	mediaIndexCache = new Map(items.map((item) => [item.id, item]));
 	return mediaIndexCache;
 }

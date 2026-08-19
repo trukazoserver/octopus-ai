@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type MediaMetaItem,
 	flushPendingMediaMetaSync,
+	getMediaMetaIndex,
 	loadMediaMeta,
 	purgeDegeneratePlaceholderImages,
 	saveMediaMeta,
@@ -64,6 +65,25 @@ describe("media-meta-store", () => {
 		expect(afterCorruption[0]?.id).toBe(
 			"aaaaaaaa-1111-2222-3333-444444444444",
 		);
+	});
+
+	it("un save in-place (push sobre el array cacheado) refresca el índice por versión", async () => {
+		// Regresión del bug de las imágenes rotas: media.ts hace
+		// items = loadMediaMeta(); items.push(nuevo); saveMediaMeta(items) —
+		// el push muta el MISMO array, así que invalidar derivados por
+		// referencia nunca detectaba el cambio y /api/media/file/<nuevo> daba
+		// 404 hasta que un escritor externo cambiaba el mtime del disco.
+		const first = item("aaaaaaaa-1111-2222-3333-444444444444");
+		await saveMediaMeta([first]);
+		const indexAfterFirst = getMediaMetaIndex();
+		expect(indexAfterFirst.get(first.id)).toBeDefined();
+
+		const items = loadMediaMeta();
+		const second = item("bbbbbbbb-1111-2222-3333-444444444444");
+		items.push(second);
+		await saveMediaMeta(items);
+
+		expect(getMediaMetaIndex().get(second.id)).toBeDefined();
 	});
 
 	it("reconcilia archivos huérfanos (>=1KB) al cargar, ignorando basura diminuta", async () => {
