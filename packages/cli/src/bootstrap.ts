@@ -1536,7 +1536,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	registerSystemTool({
 		name: "recall_conversation",
 		description:
-			"Search raw saved conversation messages in the database. Use this before saying you do not remember when the user asks if you remember/recall something, refers to another conversation, or needs exact prior wording, file paths, URLs, media IDs, command output, errors, or tool results. It can search the current conversation and automatically fall back to all saved conversations. Long messages are shown with '...[truncated]...' — when you need their COMPLETE text (e.g. full descriptions or listings), call get_message with the block's messageId.",
+			"Search raw saved conversation messages in the database. Use this before saying you do not remember when the user asks if you remember/recall something, refers to another conversation, or needs exact prior wording, file paths, URLs, media IDs, command output, errors, or tool results. It can search the current conversation and automatically fall back to all saved conversations. Long messages are shown with '...[truncated]...' — when you need their COMPLETE text (e.g. full descriptions or listings), call get_message with the block's messageId. get_message returns very long messages in parts; follow the offset in its footer until complete.",
 		parameters: {
 			query: {
 				type: "string",
@@ -1810,13 +1810,23 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	registerSystemTool({
 		name: "get_message",
 		description:
-			"Fetch ONE saved conversation message VERBATIM (complete, untruncated) by its messageId. Use it whenever recall_conversation shows a block containing '...[truncated]...' and you need the full text — long descriptions, listings, code, logs, reports — instead of guessing or re-searching.",
+			"Fetch ONE saved conversation message VERBATIM by its messageId. Use it whenever recall_conversation shows a block containing '...[truncated]...' and you need the full text — long descriptions, listings, code, logs, reports — instead of guessing or re-searching. Messages larger than the window are returned in parts: keep calling it with the offset shown in the footer until it says no more chars remain.",
 		parameters: {
 			messageId: {
 				type: "string",
 				description:
 					"The messageId=... value shown in a recall_conversation block.",
 				required: true,
+			},
+			offset: {
+				type: "number",
+				description:
+					"Character offset to start reading from (0-based). Defaults to 0. Use the offset from the footer of a previous call to read the next part of very long messages.",
+			},
+			chars: {
+				type: "number",
+				description:
+					"Maximum characters to return in this window (500-11000). Defaults to 9000.",
 			},
 		},
 		handler: async (params) => {
@@ -1829,6 +1839,11 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 					error: "messageId is required",
 				};
 			}
+			const clampInt = (value: unknown, fallback: number, min: number, max: number) => {
+				const parsed = Number(value);
+				if (!Number.isFinite(parsed)) return fallback;
+				return Math.min(max, Math.max(min, Math.floor(parsed)));
+			};
 			const message = await chatManager.getMessage(messageId);
 			if (!message) {
 				return {
@@ -1837,13 +1852,34 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 					error: `Message not found: ${messageId}`,
 				};
 			}
+			const total = message.content.length;
+			const offset = clampInt(params.offset, 0, 0, Math.max(0, total - 1));
+			const windowChars = clampInt(params.chars, 9000, 500, 11000);
+			const end = Math.min(total, offset + windowChars);
+			const remaining = total - end;
+			const parts: string[] = [
+				`[conversationId=${message.conversation_id} role=${message.role} timestamp=${message.timestamp} messageId=${message.id} — verbatim, chars ${offset}–${end} of ${total}]`,
+				"",
+				message.content.slice(offset, end),
+			];
+			if (remaining > 0) {
+				parts.push(
+					"",
+					`[...${remaining} more chars — call get_message with messageId=${message.id} offset=${end} for the next part]`,
+				);
+			} else if (offset > 0 || end < total) {
+				parts.push("", "[end of message — no more chars]");
+			}
 			return {
 				success: true,
-				output: `[conversationId=${message.conversation_id} role=${message.role} timestamp=${message.timestamp} messageId=${message.id} — verbatim, complete]\n\n${message.content}`,
+				output: parts.join("\n"),
 				metadata: {
 					messageId: message.id,
 					conversationId: message.conversation_id,
-					chars: message.content.length,
+					totalChars: total,
+					offset,
+					end,
+					hasMore: remaining > 0,
 				},
 			};
 		},
