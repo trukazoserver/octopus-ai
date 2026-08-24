@@ -1536,7 +1536,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 	registerSystemTool({
 		name: "recall_conversation",
 		description:
-			"Search raw saved conversation messages in the database. Use this before saying you do not remember when the user asks if you remember/recall something, refers to another conversation, or needs exact prior wording, file paths, URLs, media IDs, command output, errors, or tool results. It can search the current conversation and automatically fall back to all saved conversations.",
+			"Search raw saved conversation messages in the database. Use this before saying you do not remember when the user asks if you remember/recall something, refers to another conversation, or needs exact prior wording, file paths, URLs, media IDs, command output, errors, or tool results. It can search the current conversation and automatically fall back to all saved conversations. Long messages are shown with '...[truncated]...' — when you need their COMPLETE text (e.g. full descriptions or listings), call get_message with the block's messageId.",
 		parameters: {
 			query: {
 				type: "string",
@@ -1596,7 +1596,7 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 			const conversationId =
 				requestedConversationId ||
 				(scope === "current" ? activeConversationId : undefined);
-			const truncate = (text: string, max = 700) =>
+			const truncate = (text: string, max = 1800) =>
 				text.length > max
 					? `${text.slice(0, Math.floor(max / 2))}\n...[truncated]...\n${text.slice(-Math.floor(max / 2))}`
 					: text;
@@ -1803,6 +1803,48 @@ Keep each item concise (1 sentence max). Return empty arrays if nothing relevant
 				success: true,
 				output: `${conversationId ? "No raw matches were found in the current conversation, so I searched all saved conversations.\n\n" : ""}Found ${matches.length} raw match(es) for "${query}" across saved conversations.\nSearch terms used: ${terms.join(", ") || "exact phrase only"}.\n\n${blocks.join("\n\n---\n\n")}`,
 				metadata: { matches: matches.length, scope: "all", terms },
+			};
+		},
+	});
+
+	registerSystemTool({
+		name: "get_message",
+		description:
+			"Fetch ONE saved conversation message VERBATIM (complete, untruncated) by its messageId. Use it whenever recall_conversation shows a block containing '...[truncated]...' and you need the full text — long descriptions, listings, code, logs, reports — instead of guessing or re-searching.",
+		parameters: {
+			messageId: {
+				type: "string",
+				description:
+					"The messageId=... value shown in a recall_conversation block.",
+				required: true,
+			},
+		},
+		handler: async (params) => {
+			const messageId =
+				typeof params.messageId === "string" ? params.messageId.trim() : "";
+			if (!messageId) {
+				return {
+					success: false,
+					output: "",
+					error: "messageId is required",
+				};
+			}
+			const message = await chatManager.getMessage(messageId);
+			if (!message) {
+				return {
+					success: false,
+					output: "",
+					error: `Message not found: ${messageId}`,
+				};
+			}
+			return {
+				success: true,
+				output: `[conversationId=${message.conversation_id} role=${message.role} timestamp=${message.timestamp} messageId=${message.id} — verbatim, complete]\n\n${message.content}`,
+				metadata: {
+					messageId: message.id,
+					conversationId: message.conversation_id,
+					chars: message.content.length,
+				},
 			};
 		},
 	});
